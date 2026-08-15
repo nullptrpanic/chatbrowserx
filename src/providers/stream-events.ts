@@ -1,0 +1,30 @@
+export interface ModelUsage {
+  readonly inputTokens: number;
+  readonly outputTokens: number;
+  readonly totalTokens: number;
+}
+
+export type ModelStreamEvent =
+  | { readonly type: 'response.started'; readonly responseId: string }
+  | { readonly type: 'text.delta'; readonly delta: string }
+  | {
+      readonly type: 'tool.started';
+      readonly callId: string;
+      readonly name: string;
+    }
+  | {
+      readonly type: 'tool.arguments.delta';
+      readonly callId: string;
+      readonly delta: string;
+    }
+  | {
+      readonly type: 'tool.completed';
+      readonly callId: string;
+      readonly name: string;
+      readonly argumentsJson: string;
+    }
+  | {
+      readonly type: 'response.completed';
+      readonly responseId: string;
+      readonly usage: ModelUsage | null;
+    };

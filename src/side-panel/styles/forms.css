@@ -1,0 +1,165 @@
+.history-view,
+.settings-view {
+  height: 100%;
+  padding: 18px 14px;
+  overflow-y: auto;
+}
+
+.history-list {
+  display: grid;
+  gap: 6px;
+}
+
+.history-item {
+  display: grid;
+  min-width: 0;
+  gap: 3px;
+  padding: 10px 11px;
+  border: 1px solid transparent;
+  border-radius: 10px;
+  background: transparent;
+  cursor: pointer;
+  text-align: left;
+}
+
+.history-item:hover {
+  background: var(--cbx-hover);
+}
+.history-item.is-active {
+  border-color: var(--cbx-divider);
+  background: var(--cbx-raised);
+}
+.history-item-title {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.history-item-meta {
+  color: var(--cbx-muted);
+  font-size: 10px;
+}
+
+.view-empty {
+  display: grid;
+  min-height: 180px;
+  place-content: center;
+  justify-items: center;
+  gap: 8px;
+  color: var(--cbx-muted);
+  text-align: center;
+}
+
+.clear-conversation-button {
+  display: inline-flex;
+  min-height: 32px;
+  align-items: center;
+  gap: 6px;
+  margin-top: 20px;
+  padding: 0 8px;
+  border-radius: 7px;
+  color: var(--cbx-danger);
+  background: transparent;
+  cursor: pointer;
+  font-size: 11px;
+}
+
+.settings-form {
+  display: grid;
+  gap: 15px;
+}
+
+.form-field {
+  display: grid;
+  gap: 6px;
+}
+
+.form-field > span {
+  font-weight: 500;
+}
+.form-field small {
+  color: var(--cbx-muted);
+  font-size: 10px;
+}
+
+.form-field input,
+.form-field select,
+.form-field textarea {
+  width: 100%;
+  min-width: 0;
+  padding: 8px 9px;
+  border: 1px solid var(--cbx-divider);
+  border-radius: 8px;
+  outline: none;
+  background: var(--cbx-raised);
+}
+
+.form-field input,
+.form-field select {
+  min-height: 36px;
+}
+.form-field textarea {
+  resize: vertical;
+  line-height: 1.5;
+}
+.form-field input:focus,
+.form-field select:focus,
+.form-field textarea:focus {
+  border-color: var(--cbx-accent);
+}
+.form-field input[readonly] {
+  color: var(--cbx-muted);
+  background: var(--cbx-subtle);
+}
+
+.secret-input-wrap {
+  position: relative;
+}
+.secret-input-wrap input {
+  padding-right: 38px;
+}
+.secret-input-wrap button {
+  position: absolute;
+  top: 3px;
+  right: 3px;
+  display: grid;
+  width: 30px;
+  height: 30px;
+  place-items: center;
+  border-radius: 6px;
+  color: var(--cbx-muted);
+  background: transparent;
+  cursor: pointer;
+}
+
+.settings-actions {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 10px;
+  padding-top: 4px;
+}
+
+.settings-save-status {
+  margin-right: auto;
+  color: var(--cbx-muted);
+  font-size: 10px;
+}
+.settings-save-status.is-error {
+  color: var(--cbx-danger);
+}
+.settings-save-status.is-saved {
+  color: var(--cbx-success);
+}
+
+@media (max-width: 350px) {
+  .history-view,
+  .settings-view {
+    padding-inline: 10px;
+  }
+  .composer {
+    padding-inline: 8px;
+  }
+  .composer-tool {
+    padding-inline: 7px;
+  }
+}

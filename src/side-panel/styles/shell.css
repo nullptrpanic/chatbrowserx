@@ -1,0 +1,244 @@
+.app-shell {
+  display: grid;
+  width: 100%;
+  height: 100vh;
+  min-width: 0;
+  grid-template-rows: 48px auto minmax(0, 1fr);
+  background: var(--cbx-panel);
+}
+
+.top-bar {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 0 10px 0 12px;
+  border-bottom: 1px solid var(--cbx-divider);
+  background: var(--cbx-panel);
+}
+
+.brand-lockup,
+.top-bar-actions {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  gap: 5px;
+}
+
+.brand-mark {
+  display: grid;
+  width: 26px;
+  height: 26px;
+  place-items: center;
+  border-radius: 9px;
+  color: #fff;
+  background: var(--cbx-accent);
+}
+
+.brand-name {
+  overflow: hidden;
+  font-size: 13px;
+  font-weight: 500;
+  letter-spacing: -0.01em;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.icon-button {
+  display: grid;
+  width: 30px;
+  height: 30px;
+  place-items: center;
+  border-radius: 8px;
+  color: var(--cbx-muted);
+  background: transparent;
+  cursor: pointer;
+}
+
+.icon-button:hover {
+  color: var(--cbx-text);
+  background: var(--cbx-hover);
+}
+
+.connection-dot {
+  width: 8px;
+  height: 8px;
+  margin: 0 4px 0 3px;
+  border-radius: 50%;
+  background: var(--cbx-faint);
+}
+
+.connection-dot.is-ready {
+  background: var(--cbx-success);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--cbx-success) 14%, transparent);
+}
+
+.connection-dot.is-error {
+  background: var(--cbx-danger);
+}
+
+.page-context {
+  display: flex;
+  min-width: 0;
+  min-height: 42px;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 12px;
+  border-bottom: 1px solid var(--cbx-divider);
+  color: var(--cbx-muted);
+  background: var(--cbx-raised);
+}
+
+.page-context-copy {
+  display: flex;
+  min-width: 0;
+  flex: 1;
+  flex-direction: column;
+  line-height: 1.2;
+}
+
+.page-title,
+.page-origin {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.page-title {
+  color: var(--cbx-text);
+  font-size: 12px;
+}
+
+.page-origin {
+  margin-top: 2px;
+  font-size: 10px;
+}
+
+.permission-indicator,
+.debugger-indicator {
+  display: grid;
+  flex: 0 0 auto;
+  place-items: center;
+  color: var(--cbx-faint);
+}
+
+.permission-indicator.is-ready,
+.debugger-indicator.is-attached {
+  color: var(--cbx-success);
+}
+
+.permission-indicator.is-needed {
+  color: var(--cbx-warning);
+}
+
+.panel-view {
+  min-width: 0;
+  min-height: 0;
+  overflow: hidden;
+}
+
+.panel-loading,
+.connection-error {
+  display: grid;
+  height: 100%;
+  place-content: center;
+  justify-items: center;
+  gap: 12px;
+  padding: 24px;
+  color: var(--cbx-muted);
+  text-align: center;
+}
+
+.connection-error h1 {
+  margin: 0;
+  color: var(--cbx-text);
+  font-size: 16px;
+  font-weight: 500;
+}
+
+.loading-spinner {
+  width: 18px;
+  height: 18px;
+  border: 2px solid var(--cbx-divider);
+  border-top-color: var(--cbx-accent);
+  border-radius: 50%;
+  animation: cbx-spin 0.8s linear infinite;
+}
+
+@keyframes cbx-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+.unsupported-card,
+.auth-card,
+.permission-card {
+  display: flex;
+  gap: 10px;
+  margin: 10px 12px 0;
+  padding: 11px 12px;
+  border: 1px solid var(--cbx-divider);
+  border-radius: var(--cbx-radius-md);
+  background: var(--cbx-raised);
+}
+
+.unsupported-card p,
+.auth-card p,
+.permission-card p {
+  margin: 0;
+}
+
+.auth-card > svg,
+.permission-card > svg {
+  flex: 0 0 auto;
+  margin-top: 2px;
+  color: var(--cbx-warning);
+}
+
+.auth-card button {
+  margin-top: 5px;
+  padding: 0;
+  color: var(--cbx-accent);
+  background: transparent;
+  cursor: pointer;
+}
+
+.permission-card h2 {
+  margin: 0 0 3px;
+  font-size: 13px;
+  font-weight: 500;
+}
+
+.permission-card code {
+  display: block;
+  max-width: 100%;
+  margin: 7px 0;
+  overflow: hidden;
+  color: var(--cbx-muted);
+  font-size: 11px;
+  text-overflow: ellipsis;
+}
+
+.view-heading {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 18px;
+}
+
+.view-heading h1 {
+  margin: 2px 0 0;
+  font-size: 20px;
+  font-weight: 500;
+  letter-spacing: -0.02em;
+}
+
+.eyebrow {
+  color: var(--cbx-muted);
+  font-size: 10px;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}

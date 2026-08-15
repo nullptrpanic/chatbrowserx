@@ -1,0 +1,11 @@
+.*
+!.gitignore
+node_modules/
+dist/
+coverage/
+artifacts/
+playwright-report/
+test-results/
+blob-report/
+.DS_Store
+*.log
