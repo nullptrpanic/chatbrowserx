@@ -11,8 +11,6 @@ function environmentCredentialStore(token: string): CredentialStore {
     initialize: async () => undefined,
     getCodexAccessToken: async () => token,
     setCodexAccessToken: async () => undefined,
-    getTavilyKey: async () => undefined,
-    setTavilyKey: async () => undefined,
   };
 }
 

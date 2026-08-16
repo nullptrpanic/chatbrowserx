@@ -1,5 +1,6 @@
 import type { ModelInputItem, ModelMessageContent, ModelRequest } from '../provider-types';
 import { CODEX_MODEL, CODEX_RESPONSES_URL } from './codex-constants';
+import { toCodexToolName } from './codex-tool-name';
 
 export interface BuildCodexRequestInput {
   readonly accessToken: string;
@@ -41,7 +42,7 @@ function mapInputItem(item: ModelInputItem): Readonly<Record<string, unknown>> {
       return {
         type: 'function_call',
         call_id: item.callId,
-        name: item.name,
+        name: toCodexToolName(item.name),
         arguments: item.argumentsJson,
       };
     case 'function_call_output':
@@ -55,6 +56,18 @@ function mapInputItem(item: ModelInputItem): Readonly<Record<string, unknown>> {
 
 /** Builds the only supported Codex URL, headers, and request body. */
 export function buildCodexRequest(input: BuildCodexRequestInput): CodexHttpRequest {
+  const toolContract =
+    input.request.tools.length === 0
+      ? {}
+      : {
+          tools: input.request.tools.map((tool) => ({
+            ...tool,
+            name: toCodexToolName(tool.name),
+          })),
+          tool_choice: 'auto',
+          parallel_tool_calls: false,
+        };
+
   return {
     url: CODEX_RESPONSES_URL,
     headers: {
@@ -67,9 +80,7 @@ export function buildCodexRequest(input: BuildCodexRequestInput): CodexHttpReque
       model: CODEX_MODEL,
       instructions: input.request.systemPrompt,
       input: input.request.input.map(mapInputItem),
-      tools: input.request.tools,
-      tool_choice: 'auto',
-      parallel_tool_calls: false,
+      ...toolContract,
       store: false,
       stream: true,
       reasoning: { effort: input.request.reasoningEffort, summary: 'auto' },

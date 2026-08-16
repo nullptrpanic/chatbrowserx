@@ -11,7 +11,7 @@ export interface SecretFieldProps {
   readonly t: Translator;
 }
 
-/** Renders a revealable trusted-context secret input without loading its persisted value. */
+/** Renders a trusted-context secret value masked until the user explicitly reveals it. */
 export function SecretField({ id, label, hint, value, onChange, t }: SecretFieldProps) {
   const [visible, setVisible] = useState(false);
   return (

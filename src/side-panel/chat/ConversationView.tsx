@@ -5,7 +5,6 @@ import type { PanelMessage, PanelTask } from '../../shared/protocol/panel-types'
 import type { AttachmentDraftClient } from './use-image-draft';
 import { MessageItem } from './MessageItem';
 import { TaskProgressCard } from '../tasks/TaskProgressCard';
-import { ConfirmationCard } from '../recovery/ConfirmationCard';
 
 export interface ConversationViewProps {
   readonly messages: readonly PanelMessage[];
@@ -16,7 +15,6 @@ export interface ConversationViewProps {
   readonly onPause: () => void;
   readonly onResume: () => void;
   readonly onCancel: () => void;
-  readonly onConfirm: () => void;
 }
 
 /** Renders conversation messages, embedded durable task state, and stable near-bottom following. */
@@ -29,7 +27,6 @@ export function ConversationView({
   onPause,
   onResume,
   onCancel,
-  onConfirm,
 }: ConversationViewProps) {
   const scroller = useRef<HTMLDivElement>(null);
   const [following, setFollowing] = useState(true);
@@ -79,14 +76,6 @@ export function ConversationView({
               t={t}
               onPause={onPause}
               onResume={onResume}
-              onCancel={onCancel}
-            />
-          )}
-          {task?.pendingConfirmation === null || task?.pendingConfirmation === undefined ? null : (
-            <ConfirmationCard
-              confirmation={task.pendingConfirmation}
-              t={t}
-              onConfirm={onConfirm}
               onCancel={onCancel}
             />
           )}

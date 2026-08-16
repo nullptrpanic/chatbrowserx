@@ -1,8 +1,6 @@
 import { describe, expect, it, vi } from 'vitest';
 import { buildAgentContext } from '../../../src/agent/context/agent-context';
-import { MAX_OBSERVATION_CHARACTERS } from '../../../src/agent/context/context-budget';
 import { IMAGE_POLICY } from '../../../src/attachments/attachment-policy';
-import type { PageObservation } from '../../../src/browser/contracts/observation';
 import type { AttachmentRepository } from '../../../src/persistence/attachment-repository';
 import type { ConversationRepository } from '../../../src/persistence/conversation-repository';
 import type { Checkpoint } from '../../../src/tasks/checkpoint-types';
@@ -19,14 +17,6 @@ const TASK: TaskRun = {
   updatedAt: 200,
   checkpointId: 'checkpoint_1',
   lease: null,
-  budget: {
-    browserActionsLimit: 50,
-    browserActionsUsed: 2,
-    actionAttemptsLimit: 3,
-    replansLimit: 2,
-    replansUsed: 1,
-    wallClockLimitMs: 1_200_000,
-  },
   lastError: null,
 };
 
@@ -38,54 +28,13 @@ const CHECKPOINT: Checkpoint = {
   completedToolResults: [
     {
       callId: 'call_done',
-      toolName: 'browser.act',
+      toolName: 'lookup_record',
       argumentsJson: '{"type":"click"}',
       output: '{"verified":true,"url":"https://shop.test/checkout"}',
       resultRef: 'evidence_1',
     },
   ],
-  observationRef: 'observation_current',
-  pendingAction: null,
   createdAt: 200,
-};
-
-const OBSERVATION: PageObservation = {
-  id: 'observation_current',
-  capturedAt: 200,
-  tabId: 7,
-  url: 'https://shop.test/checkout',
-  title: 'Checkout',
-  viewport: { width: 1200, height: 800, scrollX: 0, scrollY: 0 },
-  textRegions: [
-    {
-      kind: 'main',
-      text: `CURRENT OBSERVATION ${'x'.repeat(MAX_OBSERVATION_CHARACTERS)}`,
-      framePath: [],
-      rect: { x: 0, y: 0, width: 800, height: 600 },
-    },
-  ],
-  elements: [
-    {
-      observationRef: 'element_1',
-      framePath: [],
-      shadowPath: [],
-      role: 'button',
-      name: 'Place order',
-      label: null,
-      text: 'Place order',
-      value: null,
-      stableAttributes: { 'data-testid': 'place-order' },
-      ancestorHint: 'Order summary',
-      state: { disabled: false, checked: null, selected: null, expanded: null },
-      rect: { x: 20, y: 30, width: 120, height: 32 },
-      visible: true,
-      obscured: false,
-      backendNodeId: 10,
-      cdpSessionId: null,
-    },
-  ],
-  frames: [],
-  truncated: true,
 };
 
 /** Creates a complete message fixture. */
@@ -119,18 +68,31 @@ function conversationRepository(messages: MessageRecord[]): ConversationReposito
 }
 
 describe('buildAgentContext', () => {
-  it('keeps task evidence, the current bounded observation, recent chat, and referenced images', async () => {
+  it('sends only the current user input, explicit attachments, and completed tool results', async () => {
     const messages = [
-      message({ id: 'old', role: 'user', text: `OLD OBSERVATION ${'o'.repeat(33_000)}` }),
+      message({
+        id: 'old',
+        taskId: 'task_old',
+        role: 'user',
+        text: `OLD USER INPUT ${'o'.repeat(33_000)}`,
+      }),
       message({
         id: 'interrupted',
+        taskId: 'task_1',
         role: 'assistant',
         text: 'PARTIAL COMPETING ANSWER',
         status: 'interrupted',
       }),
-      message({ id: 'recent', role: 'assistant', text: 'The cart is ready.', createdAt: 150 }),
+      message({
+        id: 'recent',
+        taskId: 'task_1',
+        role: 'assistant',
+        text: 'The cart is ready.',
+        createdAt: 150,
+      }),
       message({
         id: 'current',
+        taskId: 'task_1',
         role: 'user',
         text: 'Use this screenshot.',
         attachmentIds: ['attachment_1'],
@@ -163,52 +125,83 @@ describe('buildAgentContext', () => {
       {
         task: TASK,
         checkpoint: CHECKPOINT,
-        observation: OBSERVATION,
         customSystemPrompt: 'Prefer primary sources.',
-        visualImageUrl: 'data:image/png;base64,AQID',
       },
       { conversations: conversationRepository(messages), attachments },
     );
 
-    expect(context.systemPrompt).toContain('untrusted');
-    expect(context.systemPrompt).toContain('Prefer primary sources.');
+    expect(context.systemPrompt).toBe('Prefer primary sources.');
+    expect(context.input).toEqual([
+      {
+        type: 'message',
+        role: 'user',
+        content: [
+          { type: 'input_text', text: 'Use this screenshot.' },
+          { type: 'input_image', imageUrl: 'data:image/png;base64,AAEC', detail: 'high' },
+        ],
+      },
+      {
+        type: 'function_call',
+        callId: 'call_done',
+        name: 'lookup_record',
+        argumentsJson: '{"type":"click"}',
+      },
+      {
+        type: 'function_call_output',
+        callId: 'call_done',
+        output: '{"verified":true,"url":"https://shop.test/checkout"}',
+      },
+    ]);
     const serialized = JSON.stringify(context.input);
-    expect(serialized).toContain('Find the safest checkout option');
-    expect(serialized).toContain('CURRENT OBSERVATION');
-    expect(serialized).toContain('The cart is ready.');
-    expect(serialized).toContain('Use this screenshot.');
-    expect(serialized).not.toContain('OLD OBSERVATION');
-    expect(serialized).not.toContain('PARTIAL COMPETING ANSWER');
-    expect(context.input).toContainEqual({
-      type: 'function_call',
-      callId: 'call_done',
-      name: 'browser.act',
-      argumentsJson: '{"type":"click"}',
-    });
-    expect(context.input).toContainEqual({
-      type: 'message',
-      role: 'user',
-      content: [
-        { type: 'input_text', text: 'Visual fallback for the current viewport:' },
-        { type: 'input_image', imageUrl: 'data:image/png;base64,AQID', detail: 'high' },
-      ],
-    });
-    expect(context.input).toContainEqual({
-      type: 'function_call_output',
-      callId: 'call_done',
-      output: '{"verified":true,"url":"https://shop.test/checkout"}',
-    });
-    expect(serialized).toContain('data:image/png;base64,AAEC');
+    expect(serialized).not.toMatch(
+      /CURRENT OBSERVATION|Find the safest checkout option|Risk and recovery|Remaining budget|The cart is ready|OLD USER INPUT|PARTIAL COMPETING ANSWER|AQID/,
+    );
     expect(attachmentGet).toHaveBeenCalledTimes(1);
     expect(attachmentGet).toHaveBeenCalledWith('attachment_1');
+  });
 
-    const contextText = context.input[0];
-    expect(contextText).toMatchObject({ type: 'message', role: 'user' });
-    if (contextText?.type !== 'message') throw new Error('Expected context message.');
-    const firstPart = contextText.content[0];
-    if (firstPart?.type !== 'input_text') throw new Error('Expected context text.');
-    const observationSection = firstPart.text.split('## Current page')[1]?.split('## Recent')[0];
-    expect(observationSection?.length).toBeLessThanOrEqual(MAX_OBSERVATION_CHARACTERS + 200);
+  it('sends one exact text item and reads no attachment when the user added none', async () => {
+    const attachmentGet = vi.fn(async () => undefined);
+    const context = await buildAgentContext(
+      {
+        task: TASK,
+        checkpoint: { ...CHECKPOINT, completedToolResults: [] },
+        customSystemPrompt: '',
+      },
+      {
+        conversations: conversationRepository([
+          message({ id: 'current', taskId: 'task_1', role: 'user', text: 'Hello model.' }),
+        ]),
+        attachments: { get: attachmentGet },
+      },
+    );
+
+    expect(context.input).toEqual([
+      {
+        type: 'message',
+        role: 'user',
+        content: [{ type: 'input_text', text: 'Hello model.' }],
+      },
+    ]);
+    expect(attachmentGet).not.toHaveBeenCalled();
+  });
+
+  it('rejects recovery context when no real user message belongs to the current task', async () => {
+    await expect(
+      buildAgentContext(
+        {
+          task: TASK,
+          checkpoint: { ...CHECKPOINT, completedToolResults: [] },
+          customSystemPrompt: '',
+        },
+        {
+          conversations: conversationRepository([
+            message({ id: 'old', taskId: 'task_old', role: 'user', text: 'Old task input' }),
+          ]),
+          attachments: { get: vi.fn(async () => undefined) },
+        },
+      ),
+    ).rejects.toThrow('Current task user message is missing.');
   });
 
   it('rejects referenced attachments whose stored type or size is no longer approved', async () => {
@@ -231,6 +224,7 @@ describe('buildAgentContext', () => {
     const messages = [
       message({
         id: 'bad',
+        taskId: 'task_1',
         role: 'user',
         text: 'unsafe image',
         attachmentIds: ['attachment_bad'],
@@ -242,7 +236,6 @@ describe('buildAgentContext', () => {
         {
           task: TASK,
           checkpoint: CHECKPOINT,
-          observation: OBSERVATION,
           customSystemPrompt: '',
         },
         { conversations: conversationRepository(messages), attachments },
@@ -279,6 +272,7 @@ describe('buildAgentContext', () => {
     const messages = [
       message({
         id: 'full-batch',
+        taskId: 'task_1',
         role: 'user',
         text: 'Use every attached image.',
         attachmentIds,
@@ -289,7 +283,6 @@ describe('buildAgentContext', () => {
       {
         task: TASK,
         checkpoint: CHECKPOINT,
-        observation: OBSERVATION,
         customSystemPrompt: '',
       },
       { conversations: conversationRepository(messages), attachments },
@@ -298,6 +291,7 @@ describe('buildAgentContext', () => {
       item.type === 'message' ? item.content.filter((part) => part.type === 'input_image') : [],
     );
 
+    expect(context.systemPrompt).toBe('');
     expect(imageParts).toHaveLength(IMAGE_POLICY.maxCount);
     expect(imageParts.at(-1)).toMatchObject({ imageUrl: 'data:image/gif;base64,CA==' });
   });

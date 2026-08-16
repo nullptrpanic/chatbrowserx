@@ -2,31 +2,24 @@
 
 ## Security boundaries
 
-ChatBrowserX treats every webpage, model response, Tavily result, runtime message, stored record, and browser target as untrusted until validated at its boundary.
+- Page scripts never receive the Codex credential, task repository, or attachment bytes.
+- The trusted Settings screen can explicitly load the stored Access Token; page/content-script senders are rejected by the settings message boundary.
+- The Codex endpoint and model are fixed. Arbitrary Provider URLs are unsupported.
+- The production Planner registers no concrete tools, and the page command boundary accepts only screenshot/selection support commands.
+- There is no JavaScript evaluation, remote script execution, browser action executor, search/crawl provider, network recorder, or desktop-control path.
+- Persisted leases prevent two workers from running the same model task concurrently.
+- Model input is built only from the current task's user message and its explicit image references.
 
-- Page scripts never receive Codex or Tavily credentials, full task records, or attachment bytes.
-- Credentials live only in trusted extension storage and are projected to UI as presence booleans.
-- Codex and Tavily endpoints are fixed in code; arbitrary Provider URLs are unsupported.
-- Browser tools accept only strict structured actions. There is no JavaScript evaluation, remote script, network recorder, desktop control, or plugin execution path.
-- A browser command is not successful until its declared effect is independently verified.
-- High-risk actions require a digest-bound user confirmation. Unknown high-risk outcomes are not automatically replayed.
-- Persisted leases and checkpoints prevent two workers from deliberately executing the same safe task concurrently.
-- Page text and tool output are explicitly marked untrusted in model context and cannot override system policy, permissions, budgets, or confirmation rules.
+Generic Provider tool types remain as an extension interface. They do not register a tool or authorize execution. Any future concrete tool requires a separate reviewed implementation and production audit update.
 
 ## Credentials and diagnostics
 
-Do not put real Access Tokens, Tavily keys, cookies, request headers, screenshots, page text, or Playwright profiles in issues, tests, traces, benchmark reports, or commits. Provider HTTP errors discard bounded bodies and expose only normalized codes. Production bundle audit rejects embedded credential shapes and source maps.
+Never put real Access Tokens, cookies, request headers, screenshots, selected text, or private page content in issues, tests, traces, benchmark reports, or commits. Provider HTTP errors discard bounded bodies and expose only normalized codes. The production bundle audit rejects embedded credential shapes, source maps, concrete-tool residue, debugger calls, and excluded media features.
 
 ## Permissions
 
-The fixed required permissions are `activeTab`, `alarms`, `debugger`, `scripting`, `sidePanel`, `storage`, and `tabs`. Web access is optional and requested per HTTP(S) origin. Required host permissions are limited to fixed Codex and Tavily services.
-
-`debugger` is used only for page observation, real input, iframe sessions, navigation verification, and target resolution. It is not used for general traffic capture.
-
-## Unsupported guarantees
-
-ChatBrowserX cannot guarantee safe automation on adversarial pages, CAPTCHA/2FA challenges, browser-protected pages, or every website. Model output is nondeterministic. Users must review confirmation cards and retain responsibility for consequential actions.
+The fixed permissions are `activeTab`, `alarms`, `scripting`, `sidePanel`, `storage`, and `tabs`; required host access is `<all_urls>`. Page access is used for explicit screenshots and selection UI. The extension neither declares nor invokes `chrome.debugger`.
 
 ## Reporting a vulnerability
 
-Report vulnerabilities privately through the GitHub repository's security-advisory channel. Include the affected version, a minimal reproduction, and sanitized standard error codes. Never include live credentials or private page content. Do not open a public issue before a credential or high-risk-action vulnerability has been triaged.
+Report vulnerabilities privately through the GitHub repository's security-advisory channel. Include the affected version, a minimal reproduction, and sanitized error codes. Never include live credentials or private page content.

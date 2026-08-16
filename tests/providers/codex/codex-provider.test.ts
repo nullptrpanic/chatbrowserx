@@ -18,8 +18,6 @@ function credentialStore(token?: string): CredentialStore {
     initialize: vi.fn(async () => undefined),
     getCodexAccessToken: vi.fn(async () => token),
     setCodexAccessToken: vi.fn(async () => undefined),
-    getTavilyKey: vi.fn(async () => undefined),
-    setTavilyKey: vi.fn(async () => undefined),
   };
 }
 
@@ -33,12 +31,17 @@ async function collect(iterable: AsyncIterable<ModelStreamEvent>): Promise<Model
 }
 
 /** Returns an SSE response using standard event names and JSON payloads. */
+function sseBody(events: readonly { readonly event: string; readonly data: unknown }[]): string {
+  return `${events
+    .map(({ event, data }) => `event: ${event}\ndata: ${JSON.stringify(data)}\n\n`)
+    .join('')}data: [DONE]\n\n`;
+}
+
+/** Returns an SSE response using standard event names and JSON payloads. */
 function sseResponse(
   events: readonly { readonly event: string; readonly data: unknown }[],
 ): Response {
-  const body = `${events
-    .map(({ event, data }) => `event: ${event}\ndata: ${JSON.stringify(data)}\n\n`)
-    .join('')}data: [DONE]\n\n`;
+  const body = sseBody(events);
   return new Response(body, {
     status: 200,
     headers: { 'Content-Type': 'text/event-stream' },
@@ -64,6 +67,90 @@ const ACCESS_TOKEN = jwt({
 });
 
 describe('CodexProvider', () => {
+  it('streams valid SSE when the fixed endpoint omits Content-Type', async () => {
+    const events = [
+      {
+        event: 'response.created',
+        data: { type: 'response.created', response: { id: 'resp_without_content_type' } },
+      },
+      {
+        event: 'response.output_text.delta',
+        data: { type: 'response.output_text.delta', delta: 'Ready' },
+      },
+      {
+        event: 'response.completed',
+        data: { type: 'response.completed', response: { id: 'resp_without_content_type' } },
+      },
+    ];
+    const response = new Response(new TextEncoder().encode(sseBody(events)), { status: 200 });
+    expect(response.headers.get('Content-Type')).toBeNull();
+    const provider = new CodexProvider(
+      credentialStore(ACCESS_TOKEN),
+      vi.fn<typeof fetch>(async () => response),
+    );
+
+    await expect(collect(provider.stream(REQUEST, new AbortController().signal))).resolves.toEqual([
+      { type: 'response.started', responseId: 'resp_without_content_type' },
+      { type: 'text.delta', delta: 'Ready' },
+      { type: 'response.completed', responseId: 'resp_without_content_type', usage: null },
+    ]);
+  });
+
+  it('rejects an explicitly non-SSE successful response', async () => {
+    const provider = new CodexProvider(
+      credentialStore(ACCESS_TOKEN),
+      vi.fn<typeof fetch>(
+        async () =>
+          new Response(new TextEncoder().encode('{}'), {
+            status: 200,
+            headers: { 'Content-Type': 'application/json' },
+          }),
+      ),
+    );
+
+    await expect(
+      collect(provider.stream(REQUEST, new AbortController().signal)),
+    ).rejects.toMatchObject({ code: 'INVALID_RESPONSE' });
+  });
+
+  it('calls the fetch port without rebinding its receiver', async () => {
+    let calledWithoutReceiver = false;
+    const receiverSensitiveFetch = function (
+      this: unknown,
+      _input: RequestInfo | URL,
+      _init?: RequestInit,
+    ): Promise<Response> {
+      void _input;
+      void _init;
+      calledWithoutReceiver = this === undefined;
+      if (!calledWithoutReceiver) {
+        return Promise.reject(new TypeError('Illegal invocation'));
+      }
+      return Promise.resolve(
+        sseResponse([
+          {
+            event: 'response.created',
+            data: { type: 'response.created', response: { id: 'resp_receiver' } },
+          },
+          {
+            event: 'response.output_text.delta',
+            data: { type: 'response.output_text.delta', delta: 'Ready' },
+          },
+          {
+            event: 'response.completed',
+            data: { type: 'response.completed', response: { id: 'resp_receiver' } },
+          },
+        ]),
+      );
+    };
+    const provider = new CodexProvider(credentialStore(ACCESS_TOKEN), receiverSensitiveFetch);
+
+    await expect(collect(provider.stream(REQUEST, new AbortController().signal))).resolves.toEqual(
+      expect.arrayContaining([{ type: 'text.delta', delta: 'Ready' }]),
+    );
+    expect(calledWithoutReceiver).toBe(true);
+  });
+
   it('streams text and one complete function call using current Responses events', async () => {
     const fetchMock = vi.fn<typeof fetch>(async () =>
       sseResponse([
@@ -83,7 +170,7 @@ describe('CodexProvider', () => {
               id: 'item_1',
               type: 'function_call',
               call_id: 'call_1',
-              name: 'browser.act',
+              name: 'lookup_record',
               arguments: '',
             },
           },
@@ -112,7 +199,7 @@ describe('CodexProvider', () => {
               id: 'item_1',
               type: 'function_call',
               call_id: 'call_1',
-              name: 'browser.act',
+              name: 'lookup_record',
               arguments: '{"type":"click"}',
             },
           },
@@ -135,12 +222,12 @@ describe('CodexProvider', () => {
     await expect(collect(provider.stream(REQUEST, controller.signal))).resolves.toEqual([
       { type: 'response.started', responseId: 'resp_123' },
       { type: 'text.delta', delta: 'Working' },
-      { type: 'tool.started', callId: 'call_1', name: 'browser.act' },
+      { type: 'tool.started', callId: 'call_1', name: 'lookup_record' },
       { type: 'tool.arguments.delta', callId: 'call_1', delta: '{"type":"click"}' },
       {
         type: 'tool.completed',
         callId: 'call_1',
-        name: 'browser.act',
+        name: 'lookup_record',
         argumentsJson: '{"type":"click"}',
       },
       {
@@ -163,6 +250,56 @@ describe('CodexProvider', () => {
       }),
     );
   });
+
+  it.each(['lookup', 'lookup_record', 'lookup-record'] as const)(
+    'preserves valid generic wire tool name %s',
+    async (wireName) => {
+      const fetchMock = vi.fn<typeof fetch>(async () =>
+        sseResponse([
+          {
+            event: 'response.created',
+            data: { type: 'response.created', response: { id: 'resp_tool_name' } },
+          },
+          {
+            event: 'response.output_item.done',
+            data: {
+              type: 'response.output_item.done',
+              item: {
+                id: 'item_tool_name',
+                type: 'function_call',
+                call_id: 'call_tool_name',
+                name: wireName,
+                arguments: '{}',
+              },
+            },
+          },
+          {
+            event: 'response.completed',
+            data: { type: 'response.completed', response: { id: 'resp_tool_name' } },
+          },
+        ]),
+      );
+
+      await expect(
+        collect(
+          new CodexProvider(credentialStore(ACCESS_TOKEN), fetchMock).stream(
+            REQUEST,
+            new AbortController().signal,
+          ),
+        ),
+      ).resolves.toEqual([
+        { type: 'response.started', responseId: 'resp_tool_name' },
+        { type: 'tool.started', callId: 'call_tool_name', name: wireName },
+        {
+          type: 'tool.completed',
+          callId: 'call_tool_name',
+          name: wireName,
+          argumentsJson: '{}',
+        },
+        { type: 'response.completed', responseId: 'resp_tool_name', usage: null },
+      ]);
+    },
+  );
 
   it.each([
     [401, 'AUTH', false],

@@ -1,7 +1,6 @@
 import type { ConversationId } from '../shared/ids';
 import type { IdGenerator } from '../shared/ids';
 import type { Clock } from '../shared/time';
-import { DEFAULT_TASK_BUDGET } from './task-budget';
 import type { TaskRun } from './task-types';
 
 export interface CreateTaskInput {
@@ -51,7 +50,6 @@ export function createTask(input: CreateTaskInput, dependencies: TaskFactoryDepe
     updatedAt: now,
     checkpointId: null,
     lease: null,
-    budget: { ...DEFAULT_TASK_BUDGET },
     lastError: null,
   };
 }

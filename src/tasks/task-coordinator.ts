@@ -7,9 +7,8 @@ export interface CoordinatedTaskExecutor {
 
 export interface CoordinatedTaskCommands {
   pause(taskId: TaskId): Promise<TaskSnapshot>;
-  resume(taskId: TaskId, boundTabId?: number): Promise<TaskSnapshot>;
+  resume(taskId: TaskId): Promise<TaskSnapshot>;
   cancel(taskId: TaskId): Promise<TaskSnapshot>;
-  confirm(taskId: TaskId, actionDigest: string): Promise<TaskSnapshot>;
 }
 
 export interface TaskCoordinatorDependencies {
@@ -55,9 +54,9 @@ export class TaskCoordinator {
   }
 
   /** Persists a resume boundary, schedules fresh work, and returns without awaiting the run. */
-  async resume(taskId: TaskId, boundTabId?: number): Promise<TaskSnapshot> {
+  async resume(taskId: TaskId): Promise<TaskSnapshot> {
     await this.#stop(taskId);
-    const snapshot = await this.#dependencies.commands.resume(taskId, boundTabId);
+    const snapshot = await this.#dependencies.commands.resume(taskId);
     this.#schedule(taskId);
     return snapshot;
   }
@@ -66,14 +65,6 @@ export class TaskCoordinator {
   async cancel(taskId: TaskId): Promise<TaskSnapshot> {
     this.#abort(taskId);
     return this.#dependencies.commands.cancel(taskId);
-  }
-
-  /** Persists confirmation, schedules fresh work, and returns without awaiting the run. */
-  async confirm(taskId: TaskId, actionDigest: string): Promise<TaskSnapshot> {
-    await this.#stop(taskId);
-    const snapshot = await this.#dependencies.commands.confirm(taskId, actionDigest);
-    this.#schedule(taskId);
-    return snapshot;
   }
 
   /** Aborts and joins one active runner while treating its abort rejection as already handled. */

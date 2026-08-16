@@ -151,8 +151,6 @@ describe('IndexedDbConversationRepository', () => {
         sequence: 1,
         taskStatus: 'completed',
         completedToolResults: [],
-        observationRef: null,
-        pendingAction: null,
         createdAt: 3,
       },
     });

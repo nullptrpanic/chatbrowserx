@@ -1,5 +1,5 @@
 import { AlertCircle, KeyRound, RotateCcw } from 'lucide-react';
-import { useMemo, useState } from 'react';
+import { useCallback, useMemo, useState } from 'react';
 import { ChromeRuntimePort, type RuntimePort } from '../platform/chrome/runtime-port';
 import { createTranslator, resolveLanguage } from '../shared/i18n/i18n';
 import { ChatComposer } from './chat/ChatComposer';
@@ -11,7 +11,6 @@ import {
 import { AppShell } from './components/AppShell';
 import type { PanelView } from './components/TopBar';
 import { HistoryView } from './history/HistoryView';
-import { OriginPermissionCard } from './permissions/OriginPermissionCard';
 import { SettingsView } from './settings/SettingsView';
 import {
   createChromePanelEnvironment,
@@ -27,14 +26,7 @@ export interface AppProps {
   readonly attachmentClient?: AttachmentDraftClient;
 }
 
-const runningStatuses = new Set([
-  'queued',
-  'observing',
-  'planning',
-  'acting',
-  'verifying',
-  'checkpointed',
-]);
+const runningStatuses = new Set(['queued', 'planning']);
 const terminalStatuses = new Set(['completed', 'failed', 'cancelled']);
 
 /** Renders the complete conversation-first Side Panel over one durable background client. */
@@ -66,6 +58,7 @@ export function App({ runtimePort, environment, panelClient, attachmentClient }:
     snapshot?.task !== null &&
     snapshot?.task !== undefined &&
     !terminalStatuses.has(snapshot.task.status);
+  const loadSettings = useCallback(() => client.getSettings(), [client]);
 
   /** Starts a clean local conversation draft and returns to the main conversation view. */
   function newTask(): void {
@@ -109,13 +102,6 @@ export function App({ runtimePort, environment, panelClient, attachmentClient }:
                 <p>{t('pageUnsupported')}</p>
               </section>
             ) : null}
-            {snapshot.tab.supported && !snapshot.tab.hasPermission ? (
-              <OriginPermissionCard
-                origin={snapshot.tab.origin}
-                t={t}
-                onGrant={() => client.requestPagePermission()}
-              />
-            ) : null}
             {!snapshot.settings.hasCodexToken ? (
               <section className="auth-card">
                 <KeyRound size={18} />
@@ -136,7 +122,6 @@ export function App({ runtimePort, environment, panelClient, attachmentClient }:
               onPause={() => void client.pauseTask()}
               onResume={() => void client.resumeTask()}
               onCancel={() => void client.cancelTask()}
-              onConfirm={() => void client.confirmTask()}
             />
           </div>
           <ChatComposer
@@ -146,7 +131,6 @@ export function App({ runtimePort, environment, panelClient, attachmentClient }:
             running={running}
             taskLocked={taskLocked}
             hasToken={snapshot.settings.hasCodexToken}
-            hasPagePermission={snapshot.tab.hasPermission}
             t={t}
             onTextChange={setDraftText}
             onOpenSettings={() => setView('settings')}
@@ -173,6 +157,7 @@ export function App({ runtimePort, environment, panelClient, attachmentClient }:
         <SettingsView
           settings={snapshot.settings}
           t={t}
+          onLoad={loadSettings}
           onSave={(input) => client.saveSettings(input)}
         />
       ) : null}

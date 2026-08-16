@@ -1,8 +1,12 @@
 import type { RuntimePort } from '../../platform/chrome/runtime-port';
-import type { PanelSnapshot, PanelSettingsSnapshot } from '../../shared/protocol/panel-types';
+import type {
+  PanelEditableSettings,
+  PanelSnapshot,
+  PanelSettingsSnapshot,
+} from '../../shared/protocol/panel-types';
 import { PROTOCOL_VERSION, type ExtensionMessage } from '../../shared/protocol/message-types';
 import type { SavePanelSettingsInput } from '../../tasks/panel-service';
-import { parsePanelSettings, parsePanelSnapshot } from './panel-state';
+import { parsePanelEditableSettings, parsePanelSettings, parsePanelSnapshot } from './panel-state';
 
 export type PanelConnectionStatus = 'idle' | 'loading' | 'ready' | 'error';
 
@@ -15,7 +19,6 @@ export interface PanelClientState {
 
 export interface PanelEnvironment {
   getActiveTab(): Promise<{ readonly id: number } | null>;
-  requestOriginPermission(origin: string): Promise<boolean>;
 }
 
 export interface PanelClientOptions {
@@ -29,15 +32,12 @@ function requestId(): string {
   return `panel_${crypto.randomUUID()}`;
 }
 
-/** Creates the production Chrome tab and permission boundary for the Side Panel. */
+/** Creates the production Chrome tab boundary for the Side Panel. */
 export function createChromePanelEnvironment(): PanelEnvironment {
   return {
     async getActiveTab() {
       const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
       return tab?.id === undefined ? null : { id: tab.id };
-    },
-    async requestOriginPermission(origin) {
-      return chrome.permissions.request({ origins: [`${origin}/*`] });
     },
   };
 }
@@ -203,20 +203,6 @@ export class PanelClient {
     return data.id;
   }
 
-  /** Requests optional host access directly from the current user gesture and refreshes state. */
-  async requestPagePermission(): Promise<boolean> {
-    const origin = this.#state.snapshot?.tab.origin ?? '';
-    if (origin.length === 0) return false;
-    const granted = await this.#environment.requestOriginPermission(origin);
-    if (granted) {
-      const tabId = this.#requireTabId();
-      await this.#ensurePageFeatures(tabId);
-      this.#featuresEnsuredKey = `${String(tabId)}:${origin}`;
-    }
-    await this.refresh();
-    return granted;
-  }
-
   /** Ensures screenshot and selected-text listeners are installed on one already-authorized tab. */
   async #ensurePageFeatures(tabId: number): Promise<void> {
     await this.#send({
@@ -225,6 +211,17 @@ export class PanelClient {
       type: 'page.features.ensure',
       payload: { tabId },
     });
+  }
+
+  /** Loads credential-bearing settings only when the trusted settings screen requests them. */
+  async getSettings(): Promise<PanelEditableSettings> {
+    const data = await this.#send({
+      version: PROTOCOL_VERSION,
+      requestId: requestId(),
+      type: 'settings.get',
+      payload: {},
+    });
+    return parsePanelEditableSettings(data);
   }
 
   /** Persists trusted settings fields and refreshes the sanitized settings projection. */
@@ -258,32 +255,14 @@ export class PanelClient {
     return this.#runTaskCommand('task.pause');
   }
 
-  /** Resumes the active task and binds the current tab only when the task lost its original tab. */
+  /** Resumes the active task from its durable model boundary. */
   resumeTask(): Promise<void> {
-    const task = this.#state.snapshot?.task;
-    return this.#runTaskCommand(
-      'task.resume',
-      task?.status === 'waiting_for_tab' ? { tabId: this.#requireTabId() } : {},
-    );
+    return this.#runTaskCommand('task.resume');
   }
 
   /** Cancels the active task without deleting its conversation history. */
   cancelTask(): Promise<void> {
     return this.#runTaskCommand('task.cancel');
-  }
-
-  /** Confirms exactly the digest displayed by the current high-risk confirmation card. */
-  async confirmTask(): Promise<void> {
-    const task = this.#state.snapshot?.task;
-    const digest = task?.pendingConfirmation?.digest;
-    if (task == null || digest === undefined) throw new Error('No action awaits confirmation.');
-    await this.#send({
-      version: PROTOCOL_VERSION,
-      requestId: requestId(),
-      type: 'task.confirm',
-      payload: { taskId: task.id, actionDigest: digest },
-    });
-    await this.refresh();
   }
 
   /** Stops polling and invalidates every in-flight response. */
@@ -296,26 +275,15 @@ export class PanelClient {
   }
 
   /** Sends one task command for the current snapshot and reloads its resulting boundary. */
-  async #runTaskCommand(
-    type: 'task.pause' | 'task.resume' | 'task.cancel',
-    extra: { readonly tabId?: number } = {},
-  ): Promise<void> {
+  async #runTaskCommand(type: 'task.pause' | 'task.resume' | 'task.cancel'): Promise<void> {
     const taskId = this.#state.snapshot?.task?.id;
     if (taskId === undefined) return;
-    const message: ExtensionMessage =
-      type === 'task.resume'
-        ? {
-            version: PROTOCOL_VERSION,
-            requestId: requestId(),
-            type,
-            payload: { taskId, ...extra },
-          }
-        : {
-            version: PROTOCOL_VERSION,
-            requestId: requestId(),
-            type,
-            payload: { taskId },
-          };
+    const message: ExtensionMessage = {
+      version: PROTOCOL_VERSION,
+      requestId: requestId(),
+      type,
+      payload: { taskId },
+    };
     await this.#send(message);
     await this.refresh();
   }

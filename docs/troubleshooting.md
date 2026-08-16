@@ -1,49 +1,33 @@
 # 故障排查
 
-- 文档类型：用户与维护者排障说明
-- 适用范围：当前实现
-- 日期：2026-08-15
+## 没有看到网络请求
 
-## Side Panel 显示后台不可用
+确认使用的是 Chrome 已加载扩展的 Side Panel，而不是 `npm run dev` 打开的普通 Vite 页面。普通 `http://127.0.0.1` 页面没有扩展 Service Worker，不能发起真实任务。
 
-点击“重新连接”。如果仍失败，在 `chrome://extensions` 查看扩展 Service Worker 错误，然后重新加载扩展。对话和任务保存在 IndexedDB，普通 Worker 重启不会清空。
+在 `chrome://extensions` 重新加载扩展后，再打开扩展的 Service Worker DevTools 和 Network。请求目标固定为 Codex Responses endpoint。
 
 ## Access Token 失效
 
-任务会进入 `waiting_for_auth`。在设置中填写新的 Codex Access Token，保存后返回任务继续。Token 必须包含可解析的 ChatGPT account claim；错误只显示标准认证类别，不回显 Token。
+任务会进入 `waiting_for_auth`。在设置里保存新的 Codex Access Token，返回对话后点击继续。设置页会加载并展示已保存值；错误不会回显 Token。
 
-## 网站无法授权或操作
+## 任务暂停或输出中断
 
-- 确认当前页面是 `http://` 或 `https://`。
-- 在授权卡片点击“授权此网站”；拒绝后 Chrome 不会让后台静默重试请求。
-- 导航到另一个 origin 后需要重新授权。
-- `chrome://`、扩展商店、浏览器内部页面和受保护页面不支持。
+- `queued` / `planning`：Worker 重启后会自动恢复。
+- `waiting_for_auth`：更新 Token 后继续。
+- `paused`：临时 Provider 错误重试耗尽，点击继续重新请求。
+- `failed`：Provider 返回无效流或其他不可恢复响应。
 
-## Debugger 冲突或断开
+当前版本没有浏览器动作、50 次预算、页面读取或工具调用。界面若仍显示这些旧文案，说明 Chrome 加载的还是旧 `dist/`；重新构建并在扩展页刷新。
 
-打开 DevTools 或其他调试扩展可能占用同一标签页的调试连接。关闭冲突工具后继续任务。ChatBrowserX 会尝试重新观察；任务完成、暂停/取消的 runner 退出时会释放所有持有的调试会话。
+## 截图或划词失败
 
-## 任务中断、停住或原标签页消失
+保持目标标签页为活动页，并确认扩展拥有网站访问权限。区域截图按 Escape 会取消。Chrome 内部页面、扩展商店、密码框和可编辑区域不支持页面功能。
 
-- `queued/observing/planning/acting/verifying/checkpointed`：等待自动恢复扫描；也可重新打开 Side Panel 触发扫描。
-- `waiting_for_tab`：切到替代网页并点击继续，系统不会自行选择一个无关标签页。
-- `waiting_for_confirmation`：检查展示的动作和目标，再确认或取消。
-- `paused`：Provider 重试或预算耗尽时需要手动继续。
-- `failed`：展开事件查看标准失败类别；聊天内容仍保留。
+## 本地检查失败
 
-## 截图失败
+- Node 必须满足 `>=24.18.0 <25`。
+- `test:e2e` 需要 `npx playwright install chromium`。
+- 品牌版 Chrome 可能忽略 `--load-extension`；真实壳测试使用 Playwright Chromium。
+- `check:codex` 未设置环境变量时退出码 2 是预期行为。
 
-保持目标标签页为当前窗口的活动标签页，并确认当前 origin 已授权。区域截图时按 Escape 会取消，不会创建空附件。自动视觉兜底捕获失败只会回退语义观察，不会中断任务。
-
-## 选中文本气泡不出现
-
-先在 Side Panel 授权当前网站。选区不能位于密码框、`contenteditable` 区域或扩展 overlay 中，且不能超过 8,000 字符。授权后若页面很早已打开，可刷新页面或重新打开 Side Panel 触发注入。
-
-## 本地开发检查失败
-
-- Node 必须是 24.18.x；系统 Node 25 可能与当前工具链不兼容。
-- `test:e2e` 需要先执行 `npx playwright install chromium`。
-- 品牌版 Google Chrome 可能忽略 `--load-extension`；使用 Playwright Chromium。
-- `check:codex` 缺少环境变量时退出码 2 是预期行为。
-
-日志和错误不得粘贴真实 Token、Key、Cookie、完整网页内容或图片。当前版本没有“导出诊断包”；可分享测试命令、标准错误码、Chrome 版本和不含敏感信息的事件类型。
+不要在日志、Issue 或截图中公开真实 Token、Cookie、请求头、网页内容或附件。

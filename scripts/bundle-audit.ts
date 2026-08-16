@@ -4,14 +4,12 @@ import { extname, join, relative } from 'node:path';
 const APPROVED_PERMISSIONS = [
   'activeTab',
   'alarms',
-  'debugger',
   'scripting',
   'sidePanel',
   'storage',
   'tabs',
 ] as const;
-const APPROVED_OPTIONAL_HOSTS = ['http://*/*', 'https://*/*'] as const;
-const APPROVED_REQUIRED_HOSTS = ['https://api.tavily.com/*', 'https://chatgpt.com/*'] as const;
+const APPROVED_REQUIRED_HOSTS = ['<all_urls>'] as const;
 const TEXT_EXTENSIONS = new Set(['.css', '.html', '.js', '.json', '.mjs']);
 
 export interface BundleAuditFinding {
@@ -69,7 +67,7 @@ export async function auditProductionBundle(root: string): Promise<BundleAuditRe
   if (!matchesSet(manifest.permissions, APPROVED_PERMISSIONS)) {
     findings.push({ code: 'REQUIRED_PERMISSION_DRIFT', asset: 'manifest.json' });
   }
-  if (!matchesSet(manifest.optional_host_permissions, APPROVED_OPTIONAL_HOSTS)) {
+  if (manifest.optional_host_permissions !== undefined) {
     findings.push({ code: 'OPTIONAL_HOST_DRIFT', asset: 'manifest.json' });
   }
   if (!matchesSet(manifest.host_permissions, APPROVED_REQUIRED_HOSTS)) {
@@ -78,13 +76,36 @@ export async function auditProductionBundle(root: string): Promise<BundleAuditRe
 
   const markers: readonly { readonly code: string; readonly pattern: RegExp }[] = [
     {
+      code: 'DEBUGGER_RUNTIME_RESIDUE',
+      pattern: /chrome\.debugger\b/i,
+    },
+    {
+      code: 'RUNTIME_HOST_REQUEST_RESIDUE',
+      pattern: /chrome\.permissions\.request\b/i,
+    },
+    {
+      code: 'MODEL_CONTEXT_INJECTION_RESIDUE',
+      pattern:
+        /## (?:User goal|Current page|Risk and recovery policy|Checkpoint|Remaining budget)|Visual fallback for the current viewport|Referenced images from the recent/i,
+    },
+    {
       code: 'EXCLUDED_PROVIDER_OR_MEDIA_FEATURE',
       pattern:
         /openai[-_ ]?compatible|volcengine|chrome\.(?:tabCapture|offscreen|desktopCapture)|getUserMedia|MediaRecorder|webkitSpeechRecognition|window\.print\s*\(/i,
     },
     {
+      code: 'CONCRETE_TOOL_RUNTIME_RESIDUE',
+      pattern:
+        /browser[._](?:observe|act)\b|page\.(?:observe|domAction)\b|\btavily\b|browserActions(?:Used|Limit)|waiting_for_confirmation/i,
+    },
+    {
       code: 'E2E_CONTROL_RESIDUE',
       pattern: /CHATBROWSERX_E2E|test\.(?:fault|plan|storage|reset)/,
+    },
+    {
+      code: 'DEVELOPMENT_FIXTURE_RESIDUE',
+      pattern:
+        /conversation_preview|task_preview|previewSnapshot|createDevPreviewProps|示例 · 活动报名表/,
     },
     { code: 'NODE_ENV_RESIDUE', pattern: /process\.env\.NODE_ENV|jsxDEV/ },
     { code: 'DYNAMIC_CODE_EVALUATION', pattern: /\beval\s*\(|new Function\s*\(/ },

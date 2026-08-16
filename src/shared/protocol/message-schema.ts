@@ -73,7 +73,6 @@ const settingsSaveSchema = z
         systemPrompt: z.string().max(20_000),
         language: z.enum(['system', 'zh-CN', 'en', 'ja']),
         codexAccessToken: z.string().trim().min(1).max(20_000).optional(),
-        tavilyKey: z.string().trim().min(1).max(4_096).optional(),
       })
       .strict(),
   })
@@ -117,23 +116,7 @@ const taskResumeSchema = z
     version: z.literal(PROTOCOL_VERSION),
     requestId: requestIdSchema,
     type: z.literal('task.resume'),
-    payload: z
-      .object({ taskId: identifierSchema, tabId: z.number().int().nonnegative().optional() })
-      .strict(),
-  })
-  .strict();
-
-const taskConfirmSchema = z
-  .object({
-    version: z.literal(PROTOCOL_VERSION),
-    requestId: requestIdSchema,
-    type: z.literal('task.confirm'),
-    payload: z
-      .object({
-        taskId: identifierSchema,
-        actionDigest: z.string().regex(/^sha256:[0-9a-f]{64}$/),
-      })
-      .strict(),
+    payload: z.object({ taskId: identifierSchema }).strict(),
   })
   .strict();
 
@@ -206,7 +189,6 @@ export const extensionMessageSchema: z.ZodType<ExtensionMessage> = z.discriminat
   taskSnapshotSchema,
   taskPauseSchema,
   taskResumeSchema,
-  taskConfirmSchema,
   taskCancelSchema,
   screenshotCaptureSchema,
   pageFeaturesEnsureSchema,
@@ -220,21 +202,6 @@ const pagePingSchema = z
     requestId: requestIdSchema,
     type: z.literal('page.ping'),
     payload: z.object({}).strict(),
-  })
-  .strict();
-
-const pageObserveSchema = z
-  .object({
-    version: z.literal(PROTOCOL_VERSION),
-    requestId: requestIdSchema,
-    type: z.literal('page.observe'),
-    payload: z
-      .object({
-        observationId: identifierSchema,
-        tabId: z.number().int().nonnegative(),
-        capturedAt: z.number().finite().nonnegative(),
-      })
-      .strict(),
   })
   .strict();
 
@@ -258,7 +225,6 @@ const pageOverlaysSetHiddenSchema = z
 
 export const pageCommandSchema: z.ZodType<PageCommand> = z.discriminatedUnion('type', [
   pagePingSchema,
-  pageObserveSchema,
   pageScreenshotSelectSchema,
   pageOverlaysSetHiddenSchema,
 ]);

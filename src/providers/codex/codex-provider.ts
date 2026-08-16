@@ -83,7 +83,7 @@ export class CodexProvider implements ModelProvider {
   /** Creates the fixed Codex adapter around trusted credentials and an injectable fetch boundary. */
   constructor(credentials: CredentialStore, fetchPort: FetchPort = globalThis.fetch) {
     this.#credentials = credentials;
-    this.#fetch = fetchPort;
+    this.#fetch = (input, init) => fetchPort(input, init);
   }
 
   /** Streams one fixed-endpoint Codex response as normalized provider events. */
@@ -126,8 +126,11 @@ export class CodexProvider implements ModelProvider {
       await response.body?.cancel().catch(() => undefined);
       throw providerErrorFromCode('ABORTED');
     }
-    const contentType = response.headers.get('Content-Type');
-    if (response.body === null || !contentType?.toLowerCase().includes('text/event-stream')) {
+    const contentType = response.headers.get('Content-Type')?.trim().toLowerCase() ?? '';
+    if (
+      response.body === null ||
+      (contentType.length > 0 && !contentType.includes('text/event-stream'))
+    ) {
       await response.body?.cancel().catch(() => undefined);
       throw providerErrorFromCode('INVALID_RESPONSE', { status: response.status });
     }

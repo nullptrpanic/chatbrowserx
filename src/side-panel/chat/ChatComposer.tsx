@@ -12,7 +12,6 @@ export interface ChatComposerProps {
   readonly running: boolean;
   readonly taskLocked: boolean;
   readonly hasToken: boolean;
-  readonly hasPagePermission: boolean;
   readonly t: Translator;
   readonly onTextChange: (value: string) => void;
   readonly onOpenSettings: () => void;
@@ -26,7 +25,6 @@ export function ChatComposer({
   running,
   taskLocked,
   hasToken,
-  hasPagePermission,
   t,
   onTextChange,
   onOpenSettings,
@@ -64,7 +62,6 @@ export function ChatComposer({
     setBusy(true);
     setError(null);
     try {
-      if (!hasPagePermission && !(await client.requestPagePermission())) return;
       const id = await client.captureScreenshot(mode);
       if (id !== null) await draft.addExisting(id);
     } catch {

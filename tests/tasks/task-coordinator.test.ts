@@ -17,7 +17,6 @@ function buildFixture() {
     pause: vi.fn(async () => snapshot),
     resume: vi.fn(async () => snapshot),
     cancel: vi.fn(async () => snapshot),
-    confirm: vi.fn(async () => snapshot),
   };
   const coordinator = new TaskCoordinator({ executor: { run }, commands });
   return { coordinator, commands, run, snapshot, resolve: () => resolveRun?.() };
@@ -50,21 +49,13 @@ describe('TaskCoordinator', () => {
     expect(fixture.commands.cancel).toHaveBeenCalledWith('task_2');
   });
 
-  it('returns resume or confirmation after durable command while fresh work runs in background', async () => {
+  it('returns resume after the durable command while fresh work runs in background', async () => {
     const fixture = buildFixture();
 
     await expect(fixture.coordinator.resume('task_1')).resolves.toEqual(fixture.snapshot);
     await vi.waitFor(() => expect(fixture.run).toHaveBeenCalledTimes(1));
-    expect(fixture.commands.resume).toHaveBeenCalledWith('task_1', undefined);
+    expect(fixture.commands.resume).toHaveBeenCalledWith('task_1');
     fixture.resolve();
-
-    await expect(fixture.coordinator.confirm('task_2', 'sha256:action')).resolves.toEqual(
-      fixture.snapshot,
-    );
-    await vi.waitFor(() => expect(fixture.run).toHaveBeenCalledTimes(2));
-    fixture.resolve();
-
-    expect(fixture.commands.confirm).toHaveBeenCalledWith('task_2', 'sha256:action');
   });
 
   it('persists pause without waiting for an executor that ignores abort', async () => {
@@ -79,7 +70,6 @@ describe('TaskCoordinator', () => {
       pause: vi.fn(async () => ({ task: { id: 'task_1' } }) as TaskSnapshot),
       resume: vi.fn(),
       cancel: vi.fn(),
-      confirm: vi.fn(),
     };
     const coordinator = new TaskCoordinator({ executor: { run }, commands });
     const running = coordinator.start('task_1');

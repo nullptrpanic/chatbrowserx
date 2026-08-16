@@ -5,6 +5,7 @@ export interface StorageAreaPort {
 
 export interface TrustedStorageAreaPort extends StorageAreaPort {
   setAccessLevel(options: { accessLevel: 'TRUSTED_CONTEXTS' }): Promise<void>;
+  remove(keys: string | readonly string[]): Promise<void>;
 }
 
 export class ChromeLocalStorageArea implements TrustedStorageAreaPort {
@@ -22,6 +23,11 @@ export class ChromeLocalStorageArea implements TrustedStorageAreaPort {
    */
   async set(items: Record<string, unknown>): Promise<void> {
     await chrome.storage.local.set(items);
+  }
+
+  /** Removes retired trusted values during explicit storage migrations. */
+  async remove(keys: string | readonly string[]): Promise<void> {
+    await chrome.storage.local.remove(typeof keys === 'string' ? keys : [...keys]);
   }
 
   /**

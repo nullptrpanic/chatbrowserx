@@ -18,16 +18,8 @@ export interface TaskCommandPort {
   create(input: CreateTaskInput): Promise<TaskSnapshot>;
   getSnapshot(taskId: TaskId): Promise<TaskSnapshot>;
   pause(taskId: TaskId): Promise<TaskSnapshot>;
-  resume(taskId: TaskId, boundTabId?: number): Promise<TaskSnapshot>;
-  confirm(taskId: TaskId, actionDigest: string): Promise<TaskSnapshot>;
+  resume(taskId: TaskId): Promise<TaskSnapshot>;
   cancel(taskId: TaskId): Promise<TaskSnapshot>;
-}
-
-interface CommandTransitionOptions {
-  readonly boundTabId?: number;
-  readonly actionId?: string;
-  readonly actionDigest?: string;
-  readonly updateCheckpoint?: (checkpoint: Checkpoint, at: number) => Partial<Checkpoint>;
 }
 
 export class TaskCommandError extends Error {
@@ -70,8 +62,6 @@ export class TaskCommandService implements TaskCommandPort {
       sequence: 0,
       taskStatus: 'queued',
       completedToolResults: [],
-      observationRef: null,
-      pendingAction: null,
       createdAt: task.createdAt,
     };
 
@@ -116,64 +106,12 @@ export class TaskCommandService implements TaskCommandPort {
   /**
    * Returns a paused or waiting task to the queued scheduler boundary.
    */
-  async resume(taskId: TaskId, boundTabId?: number): Promise<TaskSnapshot> {
+  async resume(taskId: TaskId): Promise<TaskSnapshot> {
     const snapshot = await this.getSnapshot(taskId);
-    if (snapshot.task.status === 'waiting_for_confirmation') {
-      throw new TaskCommandError(
-        'TASK_STATE_INVALID',
-        'High-risk actions require an explicit digest-bound confirmation.',
-      );
-    }
-    if (snapshot.task.status === 'waiting_for_tab' && boundTabId === undefined) {
-      throw new TaskCommandError('TASK_STATE_INVALID', 'A replacement tab is required.');
-    }
-    if (snapshot.task.status !== 'waiting_for_tab' && boundTabId !== undefined) {
-      throw new TaskCommandError(
-        'TASK_STATE_INVALID',
-        'A replacement tab can only be bound to a task waiting for its tab.',
-      );
-    }
     if (snapshot.task.status === 'queued') {
       return snapshot;
     }
-    return this.#saveTransition(
-      snapshot,
-      'task.resumed',
-      'user_resume',
-      boundTabId === undefined ? undefined : { boundTabId },
-    );
-  }
-
-  /** Persists consent for exactly the next attempt of one matching high-risk action digest. */
-  async confirm(taskId: TaskId, actionDigest: string): Promise<TaskSnapshot> {
-    const snapshot = await this.getSnapshot(taskId);
-    const pending = snapshot.checkpoint.pendingAction;
-    if (
-      snapshot.task.status !== 'waiting_for_confirmation' ||
-      pending === null ||
-      pending.risk !== 'high' ||
-      pending.outcome !== 'pending' ||
-      actionDigest.trim() !== pending.digest
-    ) {
-      throw new TaskCommandError(
-        'TASK_STATE_INVALID',
-        'Action confirmation does not match the pending high-risk action.',
-      );
-    }
-    return this.#saveTransition(snapshot, 'task.resumed', 'high_risk_action_confirmed', {
-      actionId: pending.actionId,
-      actionDigest: pending.digest,
-      updateCheckpoint: (_checkpoint, at) => ({
-        pendingAction: {
-          ...pending,
-          confirmation: {
-            digest: pending.digest,
-            forAttempt: pending.attemptCount + 1,
-            confirmedAt: at,
-          },
-        },
-      }),
-    });
+    return this.#saveTransition(snapshot, 'task.resumed', 'user_resume');
   }
 
   /**
@@ -194,7 +132,6 @@ export class TaskCommandService implements TaskCommandPort {
     snapshot: TaskSnapshot,
     type: TaskEventType,
     reason: string,
-    options?: CommandTransitionOptions,
   ): Promise<TaskSnapshot> {
     const latestEventSequence = snapshot.events.at(-1)?.sequence ?? 0;
     if (latestEventSequence !== snapshot.checkpoint.sequence) {
@@ -210,7 +147,6 @@ export class TaskCommandService implements TaskCommandPort {
       type,
       at,
       reason,
-      ...(options?.boundTabId === undefined ? {} : { boundTabId: options.boundTabId }),
     });
     const task: TaskRun = { ...transitioned, checkpointId, lease: null };
     const sequence = latestEventSequence + 1;
@@ -222,14 +158,9 @@ export class TaskCommandService implements TaskCommandPort {
       reason,
       at,
       error: null,
-      ...(options?.actionId === undefined ? {} : { actionId: options.actionId }),
-      ...(options?.actionDigest === undefined ? {} : { actionDigest: options.actionDigest }),
-      ...(options?.boundTabId === undefined ? {} : { boundTabId: options.boundTabId }),
     };
-    const checkpointUpdate = options?.updateCheckpoint?.(snapshot.checkpoint, at) ?? {};
     const checkpoint: Checkpoint = {
       ...snapshot.checkpoint,
-      ...checkpointUpdate,
       id: checkpointId,
       sequence,
       taskStatus: task.status,

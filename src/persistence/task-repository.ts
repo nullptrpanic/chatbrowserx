@@ -32,14 +32,52 @@ export interface TaskRepository {
 }
 
 const terminalStatuses = new Set<TaskStatus>(['completed', 'failed', 'cancelled']);
-const automaticallyRecoverableStatuses = new Set<TaskStatus>([
+const automaticallyRecoverableStatuses = new Set<TaskStatus>(['queued', 'planning']);
+const currentStatuses = new Set<string>([
   'queued',
-  'observing',
   'planning',
-  'acting',
-  'verifying',
-  'checkpointed',
+  'waiting_for_auth',
+  'paused',
+  'completed',
+  'failed',
+  'cancelled',
 ]);
+
+/** Maps removed concrete-tool states to a safe user-resumable boundary. */
+function normalizedStatus(value: string): TaskStatus {
+  return currentStatuses.has(value) ? (value as TaskStatus) : 'paused';
+}
+
+/** Projects possibly legacy IndexedDB values onto the current tool-free task record. */
+function normalizeTask(task: TaskRun): TaskRun {
+  const status = normalizedStatus(task.status);
+  return {
+    id: task.id,
+    conversationId: task.conversationId,
+    tabId: task.tabId,
+    goal: task.goal,
+    status,
+    createdAt: task.createdAt,
+    updatedAt: task.updatedAt,
+    checkpointId: task.checkpointId,
+    lease: status === task.status ? task.lease : null,
+    lastError: task.lastError,
+  };
+}
+
+/** Drops removed page observations and pending actions from a legacy checkpoint. */
+function normalizeCheckpoint(checkpoint: Checkpoint): Checkpoint {
+  return {
+    id: checkpoint.id,
+    taskId: checkpoint.taskId,
+    sequence: checkpoint.sequence,
+    taskStatus: normalizedStatus(checkpoint.taskStatus),
+    completedToolResults: checkpoint.completedToolResults.filter((result) =>
+      /^[a-zA-Z0-9_-]+$/.test(result.toolName),
+    ),
+    createdAt: checkpoint.createdAt,
+  };
+}
 
 /**
  * Builds the bounded compound-key range for all sequence values belonging to one task.
@@ -93,7 +131,8 @@ export class IndexedDbTaskRepository implements TaskRepository {
    * Retrieves one durable task by its stable identifier.
    */
   async get(taskId: TaskId): Promise<TaskRun | undefined> {
-    return this.#database.get('tasks', taskId);
+    const task = await this.#database.get('tasks', taskId);
+    return task === undefined ? undefined : normalizeTask(task);
   }
 
   /**
@@ -101,7 +140,7 @@ export class IndexedDbTaskRepository implements TaskRepository {
    */
   async listByConversation(conversationId: ConversationId): Promise<TaskRun[]> {
     const tasks = await this.#database.getAllFromIndex('tasks', 'by-conversation', conversationId);
-    return tasks.sort((left, right) => left.updatedAt - right.updatedAt);
+    return tasks.map(normalizeTask).sort((left, right) => left.updatedAt - right.updatedAt);
   }
 
   /**
@@ -119,7 +158,8 @@ export class IndexedDbTaskRepository implements TaskRepository {
    * Retrieves one durable checkpoint by its stable identifier.
    */
   async getCheckpoint(checkpointId: string): Promise<Checkpoint | undefined> {
-    return this.#database.get('checkpoints', checkpointId);
+    const checkpoint = await this.#database.get('checkpoints', checkpointId);
+    return checkpoint === undefined ? undefined : normalizeCheckpoint(checkpoint);
   }
 
   /** Atomically saves a task transition, append-only event, and immutable checkpoint. */
@@ -168,6 +208,7 @@ export class IndexedDbTaskRepository implements TaskRepository {
   async listUnfinished(): Promise<TaskRun[]> {
     const tasks = await this.#database.getAll('tasks');
     return tasks
+      .map(normalizeTask)
       .filter((task) => !terminalStatuses.has(task.status))
       .sort((left, right) => left.updatedAt - right.updatedAt);
   }
@@ -178,6 +219,7 @@ export class IndexedDbTaskRepository implements TaskRepository {
   async listRecoverable(now: number): Promise<TaskRun[]> {
     const tasks = await this.#database.getAll('tasks');
     return tasks
+      .map(normalizeTask)
       .filter(
         (task) =>
           automaticallyRecoverableStatuses.has(task.status) &&

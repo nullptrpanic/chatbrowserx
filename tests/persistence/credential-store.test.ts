@@ -5,22 +5,21 @@ import { MemoryStorageArea } from './test-helpers';
 describe('ChromeCredentialStore', () => {
   it('restricts storage to trusted contexts and round-trips trimmed credentials', async () => {
     const storage = new MemoryStorageArea();
+    storage.values['credentials.tavilyKey'] = 'legacy-key';
     const store = new ChromeCredentialStore(storage);
 
     await store.initialize();
     await store.setCodexAccessToken('  codex-token  ');
-    await store.setTavilyKey('  tavily-key  ');
 
     expect(storage.accessLevel).toBe('TRUSTED_CONTEXTS');
+    expect(storage.values).not.toHaveProperty('credentials.tavilyKey');
     await expect(store.getCodexAccessToken()).resolves.toBe('codex-token');
-    await expect(store.getTavilyKey()).resolves.toBe('tavily-key');
   });
 
   it('rejects blank credentials', async () => {
     const store = new ChromeCredentialStore(new MemoryStorageArea());
 
     await expect(store.setCodexAccessToken('   ')).rejects.toThrow(/codex access token/i);
-    await expect(store.setTavilyKey('')).rejects.toThrow(/tavily key/i);
   });
 
   it('redacts credential values from lower-level storage errors', async () => {

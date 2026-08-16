@@ -1,4 +1,4 @@
-import { render, screen } from '@testing-library/react';
+import { render, screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { describe, expect, it, vi } from 'vitest';
 import type { RuntimePort } from '../../src/platform/chrome/runtime-port';
@@ -16,7 +16,6 @@ function buildSnapshot(): PanelSnapshot {
       origin: 'https://example.com',
       supported: true,
       hasPermission: true,
-      debuggerAttached: false,
     },
     conversation: null,
     conversations: [],
@@ -29,14 +28,12 @@ function buildSnapshot(): PanelSnapshot {
       systemPrompt: '',
       language: 'zh-CN',
       hasCodexToken: true,
-      hasTavilyKey: false,
     },
   };
 }
 
 const environment = {
   getActiveTab: vi.fn(async () => ({ id: 7 })),
-  requestOriginPermission: vi.fn(async () => true),
 };
 const attachments = {
   addFiles: vi.fn(async () => []),
@@ -44,6 +41,117 @@ const attachments = {
 };
 
 describe('App background connection', () => {
+  it('loads persisted credentials into masked settings fields and reveals them on request', async () => {
+    const send = vi.fn<RuntimePort['send']>(async (message) => ({
+      version: 1,
+      requestId: message.requestId,
+      ok: true,
+      data:
+        message.type === 'panel.getSnapshot'
+          ? buildSnapshot()
+          : message.type === 'settings.get'
+            ? {
+                model: 'gpt-5.6-terra',
+                reasoningEffort: 'medium',
+                systemPrompt: '',
+                language: 'zh-CN',
+                codexAccessToken: 'saved-token',
+              }
+            : { connected: true },
+    }));
+    const user = userEvent.setup();
+
+    render(<App runtimePort={{ send }} environment={environment} attachmentClient={attachments} />);
+    await user.click(await screen.findByRole('button', { name: '设置' }));
+
+    const tokenInput = await screen.findByDisplayValue('saved-token');
+    expect(tokenInput).toHaveAttribute('type', 'password');
+
+    const showTokenButton = screen.getAllByRole('button', { name: '显示密钥' })[0];
+    if (showTokenButton === undefined) throw new Error('Token reveal button is missing.');
+    await user.click(showTokenButton);
+    expect(tokenInput).toHaveAttribute('type', 'text');
+    expect(send).toHaveBeenCalledWith(
+      expect.objectContaining({ type: 'settings.get', payload: {} }),
+    );
+  });
+
+  it('keeps newly saved credentials visible in the settings fields', async () => {
+    let saved = false;
+    const send = vi.fn<RuntimePort['send']>(async (message) => {
+      let data: unknown = { connected: true };
+      if (message.type === 'panel.getSnapshot') {
+        const current = buildSnapshot();
+        data = {
+          ...current,
+          settings: {
+            ...current.settings,
+            hasCodexToken: saved,
+          },
+        };
+      } else if (message.type === 'settings.get') {
+        data = {
+          model: 'gpt-5.6-terra',
+          reasoningEffort: 'medium',
+          systemPrompt: '',
+          language: 'zh-CN',
+          codexAccessToken: '',
+        };
+      } else if (message.type === 'settings.save') {
+        saved = true;
+        data = {
+          ...buildSnapshot().settings,
+          hasCodexToken: true,
+        };
+      }
+      return { version: 1, requestId: message.requestId, ok: true, data };
+    });
+    const user = userEvent.setup();
+
+    render(<App runtimePort={{ send }} environment={environment} attachmentClient={attachments} />);
+    await user.click(await screen.findByRole('button', { name: '设置' }));
+    const tokenInput = screen.getByLabelText(/Codex Access Token/);
+    await user.type(tokenInput, 'new-token');
+
+    await user.click(screen.getByRole('button', { name: '保存设置' }));
+
+    expect(await screen.findByText('设置已保存')).toBeVisible();
+    expect(tokenInput).toHaveValue('new-token');
+    expect(send).toHaveBeenCalledWith(
+      expect.objectContaining({
+        type: 'settings.save',
+        payload: expect.objectContaining({
+          codexAccessToken: 'new-token',
+        }),
+      }),
+    );
+  });
+
+  it('reports a credential load failure separately from save failures', async () => {
+    const send = vi.fn<RuntimePort['send']>(async (message) =>
+      message.type === 'settings.get'
+        ? {
+            version: 1,
+            requestId: message.requestId,
+            ok: false,
+            error: { code: 'COMMAND_FAILED', message: 'Settings could not be loaded.' },
+          }
+        : {
+            version: 1,
+            requestId: message.requestId,
+            ok: true,
+            data: message.type === 'panel.getSnapshot' ? buildSnapshot() : { connected: true },
+          },
+    );
+    const user = userEvent.setup();
+
+    render(<App runtimePort={{ send }} environment={environment} attachmentClient={attachments} />);
+    await user.click(await screen.findByRole('button', { name: '设置' }));
+
+    expect(await screen.findByText('密钥读取失败，请重新打开设置重试。')).toBeVisible();
+    expect(screen.queryByText('设置保存失败，请检查输入。')).not.toBeInTheDocument();
+  });
+
   it('renders the connected page context and conversation-first empty state', async () => {
     const send = vi.fn<RuntimePort['send']>(async (message) => ({
       version: 1,
@@ -54,12 +162,54 @@ describe('App background connection', () => {
 
     render(<App runtimePort={{ send }} environment={environment} attachmentClient={attachments} />);
 
-    expect(await screen.findByText('今天要在这个页面完成什么？')).toBeVisible();
+    expect(await screen.findByText('今天想聊什么？')).toBeVisible();
     expect(screen.getByText('Example form')).toBeVisible();
     expect(screen.getByLabelText('已连接')).toBeVisible();
+    expect(screen.queryByTitle('Debugger 按需连接')).not.toBeInTheDocument();
     expect(send).toHaveBeenCalledWith(
       expect.objectContaining({ version: 1, type: 'system.ping', payload: {} }),
     );
+  });
+
+  it('submits directly without requesting current-site access', async () => {
+    const events: string[] = [];
+    const snapshot = buildSnapshot();
+    const guardedEnvironment = {
+      getActiveTab: vi.fn(async () => ({ id: 7 })),
+      requestOriginPermission: vi.fn(async () => {
+        events.push('permission.granted');
+        return true;
+      }),
+    };
+    const send = vi.fn<RuntimePort['send']>(async (message) => {
+      events.push(message.type);
+      return {
+        version: 1,
+        requestId: message.requestId,
+        ok: true,
+        data:
+          message.type === 'panel.getSnapshot'
+            ? { ...snapshot, tab: { ...snapshot.tab, hasPermission: false } }
+            : { connected: true },
+      };
+    });
+    const user = userEvent.setup();
+
+    render(
+      <App
+        runtimePort={{ send }}
+        environment={guardedEnvironment}
+        attachmentClient={attachments}
+      />,
+    );
+    await user.type(await screen.findByRole('textbox'), 'Summarize this page');
+    await user.click(screen.getByRole('button', { name: '发送' }));
+
+    await waitFor(() =>
+      expect(send).toHaveBeenCalledWith(expect.objectContaining({ type: 'chat.submit' })),
+    );
+    expect(guardedEnvironment.requestOriginPermission).not.toHaveBeenCalled();
+    expect(events).not.toContain('permission.granted');
   });
 
   it('shows an unavailable recovery action when the background cannot answer', async () => {
@@ -92,10 +242,7 @@ describe('App background connection', () => {
         createdAt: 900,
         updatedAt: 1_000,
         sequence: 1,
-        browserActionsUsed: 1,
-        browserActionsLimit: 50,
         lastError: null,
-        pendingConfirmation: null,
         events: [{ sequence: 1, type: 'task.paused', reason: 'user_pause', at: 1_000 }],
       },
     };
@@ -112,6 +259,8 @@ describe('App background connection', () => {
 
     expect(screen.getByRole('button', { name: '发送' })).toBeDisabled();
     expect(screen.getAllByText('任务已暂停').length).toBeGreaterThan(0);
+    expect(screen.queryByText(/浏览器动作/)).not.toBeInTheDocument();
+    expect(screen.queryByText(/1\/50/)).not.toBeInTheDocument();
     expect(screen.queryByText('user_pause')).not.toBeInTheDocument();
     expect(send).not.toHaveBeenCalledWith(expect.objectContaining({ type: 'chat.submit' }));
   });

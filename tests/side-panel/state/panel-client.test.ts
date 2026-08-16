@@ -14,7 +14,6 @@ function snapshot(sequence = 1): PanelSnapshot {
       origin: 'https://example.com',
       supported: true,
       hasPermission: true,
-      debuggerAttached: false,
     },
     conversation: {
       id: 'conversation_1',
@@ -35,10 +34,7 @@ function snapshot(sequence = 1): PanelSnapshot {
       createdAt: 1_000,
       updatedAt: 1_000,
       sequence,
-      browserActionsUsed: 0,
-      browserActionsLimit: 50,
       lastError: null,
-      pendingConfirmation: null,
       events: [],
     },
     settings: {
@@ -47,12 +43,40 @@ function snapshot(sequence = 1): PanelSnapshot {
       systemPrompt: '',
       language: 'system',
       hasCodexToken: true,
-      hasTavilyKey: false,
     },
   };
 }
 
 describe('PanelClient', () => {
+  it('loads persisted credentials through the explicit settings query', async () => {
+    const editableSettings = {
+      model: 'gpt-5.6-terra',
+      reasoningEffort: 'high' as const,
+      systemPrompt: 'Be precise',
+      language: 'zh-CN' as const,
+      codexAccessToken: 'saved-token',
+    };
+    const send = vi.fn<RuntimePort['send']>(async (message) => ({
+      version: 1,
+      requestId: message.requestId,
+      ok: true,
+      data: message.type === 'settings.get' ? editableSettings : {},
+    }));
+    const client = new PanelClient(
+      { send },
+      {
+        getActiveTab: vi.fn(async () => ({ id: 7 })),
+      },
+      { pollIntervalMs: 60_000 },
+    );
+
+    await expect(client.getSettings()).resolves.toEqual(editableSettings);
+    expect(send).toHaveBeenCalledWith(
+      expect.objectContaining({ type: 'settings.get', payload: {} }),
+    );
+    client.dispose();
+  });
+
   it('connects through a full snapshot and can start a clean conversation draft', async () => {
     const runtime: RuntimePort = {
       send: vi.fn(async (message) => ({
@@ -66,7 +90,6 @@ describe('PanelClient', () => {
       runtime,
       {
         getActiveTab: vi.fn(async () => ({ id: 7 })),
-        requestOriginPermission: vi.fn(async () => true),
       },
       { pollIntervalMs: 60_000 },
     );
@@ -113,7 +136,6 @@ describe('PanelClient', () => {
       runtime,
       {
         getActiveTab: vi.fn(async () => ({ id: 7 })),
-        requestOriginPermission: vi.fn(async () => true),
       },
       { pollIntervalMs: 60_000 },
     );
@@ -153,7 +175,6 @@ describe('PanelClient', () => {
       { send },
       {
         getActiveTab: vi.fn(async () => ({ id: 7 })),
-        requestOriginPermission: vi.fn(async () => true),
       },
       { pollIntervalMs: 60_000 },
     );
@@ -177,6 +198,47 @@ describe('PanelClient', () => {
         send.mock.calls.filter(([message]) => message.type === 'page.features.ensure'),
       ).toHaveLength(firstEnsureCount + 1),
     );
+    client.dispose();
+  });
+
+  it('resumes a paused task without requesting current-site access', async () => {
+    const events: string[] = [];
+    const current = snapshot();
+    if (current.conversation === null || current.task === null) {
+      throw new Error('Task fixture is incomplete.');
+    }
+    const pausedSnapshot: PanelSnapshot = {
+      ...current,
+      tab: { ...current.tab, hasPermission: false },
+      conversation: { ...current.conversation, taskStatus: 'paused' },
+      task: { ...current.task, status: 'paused' },
+    };
+    const send = vi.fn<RuntimePort['send']>(async (message) => {
+      events.push(message.type);
+      return {
+        version: 1,
+        requestId: message.requestId,
+        ok: true,
+        data: message.type === 'panel.getSnapshot' ? pausedSnapshot : {},
+      };
+    });
+    const requestOriginPermission = vi.fn(async () => {
+      events.push('permission.granted');
+      return true;
+    });
+    const environmentWithLegacyRequest = {
+      getActiveTab: vi.fn(async () => ({ id: 7 })),
+      requestOriginPermission,
+    };
+    const client = new PanelClient({ send }, environmentWithLegacyRequest, {
+      pollIntervalMs: 60_000,
+    });
+    await client.connect();
+
+    await client.resumeTask();
+
+    expect(requestOriginPermission).not.toHaveBeenCalled();
+    expect(events).not.toContain('permission.granted');
     client.dispose();
   });
 });

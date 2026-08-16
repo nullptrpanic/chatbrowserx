@@ -6,6 +6,7 @@ import type { TaskRepository } from '../persistence/task-repository';
 import type {
   PanelAttachment,
   PanelConversationSummary,
+  PanelEditableSettings,
   PanelSettingsSnapshot,
   PanelSnapshot,
   PanelTask,
@@ -35,10 +36,7 @@ export interface PanelServiceDependencies {
   readonly tasks: Pick<TaskRepository, 'listByConversation' | 'listEvents' | 'getCheckpoint'>;
   readonly attachments: Pick<AttachmentRepository, 'get' | 'deleteUnreferenced'>;
   readonly settings: Pick<SettingsStore, 'get' | 'save'>;
-  readonly credentials: Pick<
-    CredentialStore,
-    'getCodexAccessToken' | 'getTavilyKey' | 'setCodexAccessToken' | 'setTavilyKey'
-  >;
+  readonly credentials: Pick<CredentialStore, 'getCodexAccessToken' | 'setCodexAccessToken'>;
   readonly commands: Pick<TaskCommandPort, 'create'>;
   readonly tabs: {
     get(tabId: number): Promise<{
@@ -50,7 +48,6 @@ export interface PanelServiceDependencies {
   readonly permissions: {
     contains(permissions: { readonly origins: readonly string[] }): Promise<boolean>;
   };
-  readonly debugger: { isAttached(tabId: number): boolean };
   readonly clock: Clock;
   readonly ids: IdGenerator;
   readonly scheduleTask: (taskId: string) => Promise<void>;
@@ -68,7 +65,6 @@ export interface SavePanelSettingsInput {
   readonly systemPrompt: string;
   readonly language: AppLanguage;
   readonly codexAccessToken?: string | undefined;
-  readonly tavilyKey?: string | undefined;
 }
 
 /** Returns a supported origin and permission pattern without accepting internal browser pages. */
@@ -95,20 +91,6 @@ function conversationTitle(text: string, hasAttachments: boolean): string {
 function taskGoal(text: string): string {
   const normalized = text.trim();
   return normalized.length > 0 ? normalized : '请根据所附图片完成当前页面任务。';
-}
-
-/** Produces a bounded user-facing label for a pending semantic action target. */
-function pendingTargetLabel(
-  task: TaskRun,
-  checkpoint: Awaited<ReturnType<TaskRepository['getCheckpoint']>>,
-): string | null {
-  const pending = checkpoint?.pendingAction;
-  if (pending === null || pending === undefined || task.status !== 'waiting_for_confirmation') {
-    return null;
-  }
-  const action = pending.action;
-  if (!('target' in action) || action.target === null) return null;
-  return action.target.name ?? action.target.label ?? action.target.text?.slice(0, 120) ?? null;
 }
 
 export class PanelService {
@@ -178,7 +160,6 @@ export class PanelService {
         origin: webOrigin?.origin ?? '',
         supported: webOrigin !== null,
         hasPermission,
-        debuggerAttached: this.#dependencies.debugger.isAttached(tabId),
       },
       conversation: selectedSummary,
       conversations: summaries,
@@ -285,15 +266,19 @@ export class PanelService {
     if (input.codexAccessToken !== undefined) {
       await this.#dependencies.credentials.setCodexAccessToken(input.codexAccessToken);
     }
-    if (input.tavilyKey !== undefined) {
-      await this.#dependencies.credentials.setTavilyKey(input.tavilyKey);
-    }
     return this.#readSettings();
   }
 
-  /** Reads the non-secret settings projection and credential-presence booleans. */
-  async getSettings(): Promise<PanelSettingsSnapshot> {
-    return this.#readSettings();
+  /** Reads editable settings, including credentials, only for the explicit trusted UI query. */
+  async getSettings(): Promise<PanelEditableSettings> {
+    const [settings, codexAccessToken] = await Promise.all([
+      this.#dependencies.settings.get(),
+      this.#dependencies.credentials.getCodexAccessToken(),
+    ]);
+    return {
+      ...settings,
+      codexAccessToken: codexAccessToken ?? '',
+    };
   }
 
   /** Reads a bounded task projection with its current checkpoint and latest audit events. */
@@ -304,7 +289,6 @@ export class PanelService {
         : this.#dependencies.tasks.getCheckpoint(task.checkpointId),
       this.#dependencies.tasks.listEvents(task.id),
     ]);
-    const targetLabel = pendingTargetLabel(task, checkpoint);
     return {
       id: task.id,
       status: task.status,
@@ -313,8 +297,6 @@ export class PanelService {
       createdAt: task.createdAt,
       updatedAt: task.updatedAt,
       sequence: checkpoint?.sequence ?? events.at(-1)?.sequence ?? 0,
-      browserActionsUsed: task.budget.browserActionsUsed,
-      browserActionsLimit: task.budget.browserActionsLimit,
       lastError:
         task.lastError === null
           ? null
@@ -322,14 +304,6 @@ export class PanelService {
               code: task.lastError.code,
               retryable: task.lastError.retryable,
               userMessage: task.lastError.userMessage,
-            },
-      pendingConfirmation:
-        task.status !== 'waiting_for_confirmation' || checkpoint?.pendingAction == null
-          ? null
-          : {
-              digest: checkpoint.pendingAction.digest,
-              actionKind: checkpoint.pendingAction.kind,
-              targetLabel,
             },
       events: events.slice(-MAX_PANEL_EVENTS).map((event) => ({
         sequence: event.sequence,
@@ -363,15 +337,13 @@ export class PanelService {
 
   /** Reads persisted app settings plus credential-presence booleans without exposing their values. */
   async #readSettings(): Promise<PanelSettingsSnapshot> {
-    const [settings, codexToken, tavilyKey] = await Promise.all([
+    const [settings, codexToken] = await Promise.all([
       this.#dependencies.settings.get(),
       this.#dependencies.credentials.getCodexAccessToken().catch(() => undefined),
-      this.#dependencies.credentials.getTavilyKey().catch(() => undefined),
     ]);
     return {
       ...settings,
       hasCodexToken: codexToken !== undefined,
-      hasTavilyKey: tavilyKey !== undefined,
     };
   }
 

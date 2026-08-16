@@ -103,8 +103,14 @@ async function routeMessage(
         await dependencies.panel.clearConversation(message.payload.conversationId),
       );
     case 'settings.get':
+      if (context.senderTabId !== null) {
+        return errorResponse(message.requestId, 'INVALID_CONTEXT', 'Settings context is invalid.');
+      }
       return successResponse(message.requestId, await dependencies.panel.getSettings());
     case 'settings.save':
+      if (context.senderTabId !== null) {
+        return errorResponse(message.requestId, 'INVALID_CONTEXT', 'Settings context is invalid.');
+      }
       return successResponse(
         message.requestId,
         await dependencies.panel.saveSettings(message.payload),
@@ -125,18 +131,7 @@ async function routeMessage(
         await dependencies.commands.pause(message.payload.taskId),
       );
     case 'task.resume': {
-      const snapshot =
-        message.payload.tabId === undefined
-          ? await dependencies.commands.resume(message.payload.taskId)
-          : await dependencies.commands.resume(message.payload.taskId, message.payload.tabId);
-      await dependencies.scheduleTask(snapshot.task.id);
-      return successResponse(message.requestId, snapshot);
-    }
-    case 'task.confirm': {
-      const snapshot = await dependencies.commands.confirm(
-        message.payload.taskId,
-        message.payload.actionDigest,
-      );
+      const snapshot = await dependencies.commands.resume(message.payload.taskId);
       await dependencies.scheduleTask(snapshot.task.id);
       return successResponse(message.requestId, snapshot);
     }

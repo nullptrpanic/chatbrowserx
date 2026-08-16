@@ -8,7 +8,6 @@ import {
 export interface ContentScriptInstallerDependencies {
   readonly permissions: {
     contains(permissions: { readonly origins: readonly string[] }): Promise<boolean>;
-    request(permissions: { readonly origins: readonly string[] }): Promise<boolean>;
   };
   readonly tabs: {
     sendMessage(tabId: number, message: PageCommand): Promise<unknown>;
@@ -30,7 +29,7 @@ export type ContentScriptInstallation =
   | { readonly status: 'unsupported_origin'; readonly originPattern: null };
 
 /**
- * Normalizes a web URL to the optional-host permission pattern accepted by Chrome.
+ * Normalizes a web URL to the host-permission pattern accepted by Chrome.
  */
 function toOriginPattern(value: string): string | null {
   try {
@@ -81,7 +80,7 @@ export class ContentScriptInstaller {
   }
 
   /**
-   * Reuses or injects the isolated page bundle only after optional origin access already exists.
+   * Reuses or injects the isolated page bundle only after required host access is available.
    */
   async ensureInstalled(tabId: number, origin: string): Promise<ContentScriptInstallation> {
     const originPattern = toOriginPattern(origin);
@@ -116,14 +115,5 @@ export class ContentScriptInstaller {
       files: [this.#dependencies.scriptFile],
     });
     return { status: 'installed', originPattern };
-  }
-
-  /**
-   * Requests one optional web origin and must be called directly from a user-gesture workflow.
-   */
-  async requestOriginPermission(origin: string): Promise<boolean> {
-    const originPattern = toOriginPattern(origin);
-    if (originPattern === null) return false;
-    return this.#dependencies.permissions.request({ origins: [originPattern] });
   }
 }

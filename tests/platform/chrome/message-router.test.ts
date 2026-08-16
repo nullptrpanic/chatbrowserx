@@ -9,11 +9,10 @@ import { createMessageRouter } from '../../../src/platform/chrome/message-router
 import { createTask } from '../../../src/tasks/task-factory';
 import type { Checkpoint } from '../../../src/tasks/checkpoint-types';
 import type {
+  PanelEditableSettings,
   PanelSettingsSnapshot,
   PanelSnapshot,
 } from '../../../src/shared/protocol/panel-types';
-
-const actionDigest = `sha256:${'a'.repeat(64)}`;
 
 /**
  * Builds a complete queued snapshot returned by command doubles.
@@ -32,8 +31,6 @@ function buildSnapshot(): TaskSnapshot {
     sequence: 0,
     taskStatus: 'queued',
     completedToolResults: [],
-    observationRef: null,
-    pendingAction: null,
     createdAt: task.createdAt,
   };
   return { task, checkpoint, events: [] };
@@ -48,7 +45,6 @@ function buildCommands(snapshot: TaskSnapshot): TaskCommandPort {
     getSnapshot: vi.fn(async () => snapshot),
     pause: vi.fn(async () => snapshot),
     resume: vi.fn(async () => snapshot),
-    confirm: vi.fn(async () => snapshot),
     cancel: vi.fn(async () => snapshot),
   };
 }
@@ -69,7 +65,13 @@ function buildPanel() {
     systemPrompt: '',
     language: 'system',
     hasCodexToken: false,
-    hasTavilyKey: false,
+  };
+  const editableSettings: PanelEditableSettings = {
+    model: settings.model,
+    reasoningEffort: settings.reasoningEffort,
+    systemPrompt: settings.systemPrompt,
+    language: settings.language,
+    codexAccessToken: 'saved-token',
   };
   const snapshot: PanelSnapshot = {
     generatedAt: 1_000,
@@ -80,7 +82,6 @@ function buildPanel() {
       origin: 'https://example.com',
       supported: true,
       hasPermission: true,
-      debuggerAttached: false,
     },
     conversation: null,
     conversations: [],
@@ -93,7 +94,7 @@ function buildPanel() {
     getSnapshot: vi.fn(async () => snapshot),
     submit: vi.fn(async () => buildSnapshot()),
     clearConversation: vi.fn(async () => ({ deletedAttachments: 0 })),
-    getSettings: vi.fn(async () => settings),
+    getSettings: vi.fn(async () => editableSettings),
     saveSettings: vi.fn(async () => ({ ...settings, hasCodexToken: true })),
   };
 }
@@ -213,7 +214,48 @@ describe('createMessageRouter', () => {
     expect(pageFeatures.ensure).toHaveBeenCalledWith(9);
   });
 
-  it('delegates task commands and schedules create, resume, and confirmation', async () => {
+  it('rejects credential settings commands sent from a page context', async () => {
+    const panel = buildPanel();
+    const router = createMessageRouter({
+      commands: buildCommands(buildSnapshot()),
+      panel,
+      screenshots: buildScreenshots(),
+      requestRecoveryScan: vi.fn(async () => undefined),
+      scheduleTask: vi.fn(async () => undefined),
+    });
+
+    const readResponse = await router(
+      {
+        version: PROTOCOL_VERSION,
+        requestId: 'req_settings_read',
+        type: 'settings.get',
+        payload: {},
+      },
+      { senderTabId: 7 },
+    );
+    const saveResponse = await router(
+      {
+        version: PROTOCOL_VERSION,
+        requestId: 'req_settings_save',
+        type: 'settings.save',
+        payload: {
+          reasoningEffort: 'medium',
+          systemPrompt: '',
+          language: 'zh-CN',
+          codexAccessToken: 'must-not-be-stored',
+        },
+      },
+      { senderTabId: 7 },
+    );
+
+    expect(readResponse).toMatchObject({ ok: false, error: { code: 'INVALID_CONTEXT' } });
+    expect(saveResponse).toMatchObject({ ok: false, error: { code: 'INVALID_CONTEXT' } });
+    expect(JSON.stringify([readResponse, saveResponse])).not.toContain('must-not-be-stored');
+    expect(panel.getSettings).not.toHaveBeenCalled();
+    expect(panel.saveSettings).not.toHaveBeenCalled();
+  });
+
+  it('delegates task commands and schedules create and resume', async () => {
     const snapshot = buildSnapshot();
     const commands = buildCommands(snapshot);
     const scheduleTask = vi.fn(async () => undefined);
@@ -247,13 +289,7 @@ describe('createMessageRouter', () => {
       version: PROTOCOL_VERSION,
       requestId: 'req_resume',
       type: 'task.resume',
-      payload: { taskId: snapshot.task.id, tabId: 9 },
-    });
-    await router({
-      version: PROTOCOL_VERSION,
-      requestId: 'req_confirm',
-      type: 'task.confirm',
-      payload: { taskId: snapshot.task.id, actionDigest },
+      payload: { taskId: snapshot.task.id },
     });
     await router({
       version: PROTOCOL_VERSION,
@@ -269,12 +305,10 @@ describe('createMessageRouter', () => {
     });
     expect(commands.pause).toHaveBeenCalledWith(snapshot.task.id);
     expect(commands.getSnapshot).toHaveBeenCalledWith(snapshot.task.id);
-    expect(commands.resume).toHaveBeenCalledWith(snapshot.task.id, 9);
-    expect(commands.confirm).toHaveBeenCalledWith(snapshot.task.id, actionDigest);
+    expect(commands.resume).toHaveBeenCalledWith(snapshot.task.id);
     expect(commands.cancel).toHaveBeenCalledWith(snapshot.task.id);
     expect(scheduleTask).toHaveBeenNthCalledWith(1, snapshot.task.id);
     expect(scheduleTask).toHaveBeenNthCalledWith(2, snapshot.task.id);
-    expect(scheduleTask).toHaveBeenNthCalledWith(3, snapshot.task.id);
   });
 
   it('maps known and unexpected command failures to stable public errors', async () => {

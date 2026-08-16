@@ -38,6 +38,13 @@ export class MemoryStorageArea {
     Object.assign(this.values, items);
   }
 
+  /** Removes one or more keys like the trusted Chrome local storage adapter. */
+  async remove(keys: string | readonly string[]): Promise<void> {
+    for (const key of typeof keys === 'string' ? [keys] : keys) {
+      Reflect.deleteProperty(this.values, key);
+    }
+  }
+
   /**
    * Records the access level requested by the trusted credential repository.
    */

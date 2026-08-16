@@ -9,14 +9,7 @@ export interface RecoveryScannerDependencies {
   readonly startTask: (taskId: TaskId) => Promise<void>;
 }
 
-const automaticTaskStatuses = new Set<TaskStatus>([
-  'queued',
-  'observing',
-  'planning',
-  'acting',
-  'verifying',
-  'checkpointed',
-]);
+const automaticTaskStatuses = new Set<TaskStatus>(['queued', 'planning']);
 
 export class RecoveryScanner {
   readonly #dependencies: RecoveryScannerDependencies;

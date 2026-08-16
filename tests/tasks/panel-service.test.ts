@@ -21,14 +21,6 @@ function buildFixture() {
     updatedAt: 1_190,
     checkpointId: 'checkpoint_1',
     lease: null,
-    budget: {
-      browserActionsLimit: 50,
-      browserActionsUsed: 2,
-      actionAttemptsLimit: 3,
-      replansLimit: 2,
-      replansUsed: 0,
-      wallClockLimitMs: 1_200_000,
-    },
     lastError: null,
   };
   const checkpoint = {
@@ -37,8 +29,6 @@ function buildFixture() {
     sequence: 1,
     taskStatus: task.status,
     completedToolResults: [],
-    observationRef: null,
-    pendingAction: null,
     createdAt: 1_190,
   };
   const dependencies = {
@@ -106,9 +96,7 @@ function buildFixture() {
     },
     credentials: {
       getCodexAccessToken: vi.fn(async () => 'secret-token'),
-      getTavilyKey: vi.fn(async () => 'secret-key'),
       setCodexAccessToken: vi.fn(async () => undefined),
-      setTavilyKey: vi.fn(async () => undefined),
     },
     commands: {
       create: vi.fn(async () => ({ task, checkpoint, events: [] })),
@@ -117,7 +105,6 @@ function buildFixture() {
       get: vi.fn(async () => ({ id: 7, title: 'Example', url: 'https://example.com/form' })),
     },
     permissions: { contains: vi.fn(async () => true) },
-    debugger: { isAttached: vi.fn(() => false) },
     clock: { now: () => 2_000 },
     ids: { create: (prefix: string) => `${prefix}_new` },
     scheduleTask: vi.fn(async (...arguments_: [string]) => {
@@ -137,13 +124,26 @@ describe('PanelService', () => {
     expect(snapshot).toMatchObject({
       tab: { id: 7, origin: 'https://example.com', supported: true, hasPermission: true },
       conversation: { id: fixture.conversation.id, taskStatus: 'completed' },
-      task: { id: fixture.task.id, sequence: 1, browserActionsUsed: 2 },
-      settings: { hasCodexToken: true, hasTavilyKey: true },
+      task: { id: fixture.task.id, sequence: 1 },
+      settings: { hasCodexToken: true },
       attachments: [{ id: 'attachment_1', fileName: 'photo.png' }],
     });
     expect(JSON.stringify(snapshot)).not.toContain('secret-token');
-    expect(JSON.stringify(snapshot)).not.toContain('secret-key');
     expect(JSON.stringify(snapshot)).not.toContain('blob');
+    expect(snapshot.tab).not.toHaveProperty('debuggerAttached');
+  });
+
+  it('returns persisted credentials only from the explicit settings query', async () => {
+    const fixture = buildFixture();
+    const service = new PanelService(fixture.dependencies);
+
+    await expect(service.getSettings()).resolves.toEqual({
+      model: 'gpt-5.6-terra',
+      reasoningEffort: 'medium',
+      systemPrompt: '',
+      language: 'zh-CN',
+      codexAccessToken: 'secret-token',
+    });
   });
 
   it('creates a conversation, durable user message, task, and scheduler handoff in order', async () => {
@@ -210,7 +210,6 @@ describe('PanelService', () => {
     await service.clearConversation(fixture.conversation.id);
 
     expect(fixture.dependencies.credentials.setCodexAccessToken).toHaveBeenCalledWith('new-token');
-    expect(fixture.dependencies.credentials.setTavilyKey).not.toHaveBeenCalled();
     expect(fixture.dependencies.conversations.clearConversation).toHaveBeenCalledWith(
       fixture.conversation.id,
     );

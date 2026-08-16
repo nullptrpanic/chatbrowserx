@@ -16,31 +16,18 @@ describe('handlePageCommand', () => {
     });
   });
 
-  it('returns a bounded semantic observation for a valid page command', async () => {
-    document.title = 'Observed page';
-    document.body.innerHTML = '<button aria-label="Continue">Ignored without a box</button>';
-
-    const response = await handlePageCommand(
-      {
-        version: 1,
-        requestId: 'req_observe',
-        type: 'page.observe',
-        payload: { observationId: 'observation_1', tabId: 7, capturedAt: 1_000 },
-      },
-      { document, window },
-    );
-
-    expect(response).toMatchObject({
-      version: 1,
-      requestId: 'req_observe',
-      ok: true,
-      data: {
-        id: 'observation_1',
-        tabId: 7,
-        capturedAt: 1_000,
-        title: 'Observed page',
-      },
-    });
+  it('rejects removed page observation commands', async () => {
+    await expect(
+      handlePageCommand(
+        {
+          version: 1,
+          requestId: 'req_observe',
+          type: 'page.observe',
+          payload: { observationId: 'observation_1', tabId: 7, capturedAt: 1_000 },
+        },
+        { document, window },
+      ),
+    ).resolves.toMatchObject({ ok: false, error: { code: 'INVALID_PAGE_COMMAND' } });
   });
 
   it('rejects task commands at the page boundary', async () => {
@@ -71,9 +58,7 @@ describe('handlePageCommand', () => {
     ).resolves.toMatchObject({ ok: false, error: { code: 'INVALID_PAGE_COMMAND' } });
   });
 
-  it('correlates a valid action failure without replacing its stable error code', async () => {
-    document.body.innerHTML = '';
-
+  it('rejects previously valid structured page actions', async () => {
     await expect(
       handlePageCommand(
         {
@@ -103,10 +88,6 @@ describe('handlePageCommand', () => {
         },
         { document, window },
       ),
-    ).resolves.toMatchObject({
-      requestId: 'req_missing_target',
-      ok: false,
-      error: { code: 'TARGET_NOT_FOUND' },
-    });
+    ).resolves.toMatchObject({ ok: false, error: { code: 'INVALID_PAGE_COMMAND' } });
   });
 });

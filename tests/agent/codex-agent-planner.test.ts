@@ -1,8 +1,6 @@
 import { describe, expect, it, vi } from 'vitest';
 import { CodexAgentPlanner } from '../../src/agent/codex-agent-planner';
-import { serializeModelTarget } from '../../src/agent/tools/browser-tool-schema';
 import type { AgentPlanInput } from '../../src/agent/execution-types';
-import type { ElementTarget } from '../../src/browser/contracts/target';
 import type { AttachmentRepository } from '../../src/persistence/attachment-repository';
 import type { ConversationRepository } from '../../src/persistence/conversation-repository';
 import type { SettingsStore } from '../../src/persistence/settings-store';
@@ -12,18 +10,6 @@ import type { ModelStreamEvent } from '../../src/providers/stream-events';
 import type { Checkpoint } from '../../src/tasks/checkpoint-types';
 import type { MessageRecord } from '../../src/tasks/message-types';
 import type { TaskRun } from '../../src/tasks/task-types';
-
-const TARGET: ElementTarget = {
-  framePath: [],
-  shadowPath: [],
-  role: 'button',
-  name: 'Continue',
-  label: null,
-  text: 'Continue',
-  stableAttributes: { 'data-testid': 'continue' },
-  ancestorHint: 'Checkout',
-  lastKnownRect: { x: 10, y: 20, width: 100, height: 30 },
-};
 
 const TASK: TaskRun = {
   id: 'task_1',
@@ -35,14 +21,6 @@ const TASK: TaskRun = {
   updatedAt: 200,
   checkpointId: 'checkpoint_1',
   lease: null,
-  budget: {
-    browserActionsLimit: 50,
-    browserActionsUsed: 0,
-    actionAttemptsLimit: 3,
-    replansLimit: 2,
-    replansUsed: 0,
-    wallClockLimitMs: 1_200_000,
-  },
   lastError: null,
 };
 
@@ -52,26 +30,24 @@ const CHECKPOINT: Checkpoint = {
   sequence: 1,
   taskStatus: 'planning',
   completedToolResults: [],
-  observationRef: 'observation_1',
-  pendingAction: null,
   createdAt: 200,
 };
 
 const PLAN_INPUT: AgentPlanInput = {
   task: TASK,
   checkpoint: CHECKPOINT,
-  observation: {
-    id: 'observation_1',
-    capturedAt: 200,
-    tabId: 7,
-    url: 'https://shop.test',
-    title: 'Shop',
-    viewport: { width: 1200, height: 800, scrollX: 0, scrollY: 0 },
-    textRegions: [],
-    elements: [],
-    frames: [],
-    truncated: false,
-  },
+};
+
+const USER_MESSAGE: MessageRecord = {
+  id: 'message_user',
+  conversationId: 'conversation_1',
+  taskId: 'task_1',
+  role: 'user',
+  status: 'complete',
+  text: 'Continue checkout',
+  attachmentIds: [],
+  createdAt: 100,
+  updatedAt: 100,
 };
 
 /** Creates an injected Provider stream and captures its normalized request. */
@@ -107,7 +83,7 @@ function repositories(existingMessages: readonly MessageRecord[] = []): {
       create: vi.fn(async () => undefined),
       get: vi.fn(async () => undefined),
       listByTab: vi.fn(async () => []),
-      listMessages: vi.fn(async () => [...existingMessages]),
+      listMessages: vi.fn(async () => [USER_MESSAGE, ...existingMessages]),
       appendMessage,
       updateMessage,
       clearConversation: vi.fn(async () => undefined),
@@ -179,92 +155,19 @@ describe('CodexAgentPlanner', () => {
     expect(model.requests[0]).toMatchObject({
       model: 'gpt-5.6-terra',
       reasoningEffort: 'medium',
-    });
-    expect(model.requests[0]?.tools.map((tool) => tool.name)).toEqual([
-      'browser.act',
-      'tavily.search',
-      'tavily.extract',
-      'tavily.crawl',
-    ]);
-  });
-
-  it('binds a strict browser tool call to a fresh action ID and current tab', async () => {
-    const argumentsJson = JSON.stringify({
-      action: {
-        type: 'click',
-        target: serializeModelTarget(TARGET),
-        riskHint: 'high',
-        expected: { type: 'tab.opened' },
-      },
-    });
-    const model = provider(async function* () {
-      yield { type: 'response.started', responseId: 'resp_2' };
-      yield { type: 'tool.started', callId: 'call_1', name: 'browser.act' };
-      yield { type: 'tool.completed', callId: 'call_1', name: 'browser.act', argumentsJson };
-      yield { type: 'response.completed', responseId: 'resp_2', usage: null };
-    });
-    const storage = repositories();
-    const planner = new CodexAgentPlanner({
-      provider: model.instance,
-      settings: settings(),
-      conversations: storage.conversations,
-      attachments: storage.attachments,
-      ids: { create: (prefix) => `${prefix}_new` },
-      clock: { now: () => 500 },
-    });
-
-    await expect(collect(planner)).resolves.toEqual([
-      {
-        type: 'browser.action',
-        callId: 'call_1',
-        argumentsJson,
-        action: {
-          actionId: 'action_new',
-          tabId: 7,
-          type: 'click',
-          target: TARGET,
-          risk: 'high',
-          expected: { type: 'tab.opened', openerTabId: 7 },
+      systemPrompt: 'Custom safe preference.',
+      input: [
+        {
+          type: 'message',
+          role: 'user',
+          content: [{ type: 'input_text', text: 'Continue checkout' }],
         },
-      },
-    ]);
+      ],
+    });
+    expect(model.requests[0]?.tools).toEqual([]);
   });
 
-  it('yields a validated bounded Tavily call', async () => {
-    const argumentsJson = '{"query":"reliable browser agents","maxResults":4}';
-    const model = provider(async function* () {
-      yield { type: 'response.started', responseId: 'resp_3' };
-      yield { type: 'tool.started', callId: 'call_search', name: 'tavily.search' };
-      yield {
-        type: 'tool.completed',
-        callId: 'call_search',
-        name: 'tavily.search',
-        argumentsJson,
-      };
-      yield { type: 'response.completed', responseId: 'resp_3', usage: null };
-    });
-    const storage = repositories();
-    const planner = new CodexAgentPlanner({
-      provider: model.instance,
-      settings: settings(),
-      conversations: storage.conversations,
-      attachments: storage.attachments,
-      ids: { create: (prefix) => `${prefix}_1` },
-      clock: { now: () => 500 },
-    });
-
-    await expect(collect(planner)).resolves.toEqual([
-      {
-        type: 'tavily.call',
-        callId: 'call_search',
-        argumentsJson,
-        operation: 'search',
-        arguments: { query: 'reliable browser agents', maxResults: 4 },
-      },
-    ]);
-  });
-
-  it('marks the message as error for invalid tools and interrupted for aborts', async () => {
+  it('rejects unsolicited tool output because this runtime registers no concrete tools', async () => {
     const invalidModel = provider(async function* () {
       yield { type: 'response.started', responseId: 'resp_invalid' };
       yield { type: 'tool.started', callId: 'call_bad', name: 'browser.eval' };
@@ -286,11 +189,13 @@ describe('CodexAgentPlanner', () => {
       clock: { now: () => 500 },
     });
 
-    await expect(collect(invalidPlanner)).rejects.toMatchObject({ code: 'UNSUPPORTED_TOOL' });
+    await expect(collect(invalidPlanner)).rejects.toMatchObject({ code: 'INVALID_RESPONSE' });
     expect(invalidStorage.updateMessage).toHaveBeenLastCalledWith(
       expect.objectContaining({ status: 'error' }),
     );
+  });
 
+  it('marks aborted output interrupted', async () => {
     const abortedModel = provider(async function* () {
       yield { type: 'text.delta', delta: 'partial' };
       throw providerErrorFromCode('ABORTED');

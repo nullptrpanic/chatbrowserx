@@ -2,29 +2,31 @@
 
 ## Data stored locally
 
-ChatBrowserX stores the following in the Chrome profile:
+ChatBrowserX stores conversations, messages, task recovery state, events, and attachment references in IndexedDB. User-added images and user-triggered screenshots are stored as IndexedDB Blob records. Interface settings and the Codex Access Token are stored in `chrome.storage.local`, restricted to trusted extension contexts.
 
-- conversations, messages, task state, checkpoints, events, and attachment references in IndexedDB;
-- user-added images and manual screenshots as IndexedDB Blob records;
-- interface settings, fixed-model preferences, Codex Access Token, and optional Tavily Key in `chrome.storage.local`;
-- adaptive DOM/CDP routing outcomes without page payloads.
+Data is not stored with `chrome.storage.sync`. Clearing a completed conversation removes its conversation and task records; unreferenced attachments are collected after the cleanup grace period.
 
-Data is not stored with `chrome.storage.sync`. Clearing a terminal conversation deletes its conversation/task records; attachments that are no longer referenced are collected after a 24-hour grace period during cleanup.
+## Data sent to Codex
 
-## Data sent to services
+For an ordinary chat task, Codex receives only:
 
-Codex receives the user goal, bounded recent complete conversation, bounded semantic page observation, completed tool results, user-referenced images, and—only when semantic signal is very low—a transient current-viewport image. The Codex Access Token is sent only to the fixed Codex endpoint.
+- the user message that created that task;
+- images explicitly attached to that message;
+- the system prompt exactly as saved in Settings.
 
-Tavily receives only explicit bounded search, extract, or crawl arguments and its API key. Tavily results are truncated before entering model context.
+The production runtime currently registers no concrete tools. Requests with an empty tool list omit the complete tool contract. ChatBrowserX does not automatically send page text, DOM, iframe data, page snapshots, old conversation messages, budgets, checkpoints, risk policies, or screenshots.
 
-Website content may be sensitive. Only use ChatBrowserX on pages whose content you are permitted to send to the configured services.
+The Codex Access Token is sent only to the fixed Codex endpoint. Explicit attachments may contain sensitive data; attach only data you are allowed to send.
 
 ## Page access and captures
 
-Web access is requested per HTTP(S) origin. Manual viewport/region screenshots are stored until their references are cleared and garbage-collected. Automatic low-signal visual fallback is not added to attachment storage or task history.
+All-site access supports user-triggered region screenshots and page-selection features. It does not cause background page reading.
 
-The page selection feature sends only the selected text plus bounded page URL/title for translation or Ask AI. It excludes password and editable surfaces.
+- Viewport or region screenshots enter a model request only after the user captures and keeps them in the draft, then sends that draft.
+- Translation sends the selected text plus bounded page URL and title.
+- Ask AI turns the selected text and question into an explicit chat message.
+- Password and editable surfaces do not trigger the selection feature.
 
-## Data not collected by this version
+## Data not collected
 
-This version contains no voice input, speech recognition, speech synthesis, recording, subtitles, microphone/tab audio capture, Volcengine integration, printing, PDF generation/reading, full-page scroll stitching, generic network recording, desktop capture, cloud task sync, telemetry pipeline, or advertising tracker.
+This version contains no browser observation/action tools, web-search provider, voice input, speech recognition, recording, subtitles, microphone/tab audio capture, printing, PDF generation/reading, full-page stitching, generic network recording, desktop capture, cloud task sync, telemetry pipeline, or advertising tracker.

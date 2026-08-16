@@ -15,13 +15,11 @@ describe('interface translations', () => {
     }
   });
 
-  it('resolves system languages and interpolates named values without evaluation', () => {
+  it('resolves system languages and reads the matching catalog', () => {
     expect(resolveLanguage('system', 'zh-Hans-CN')).toBe('zh-CN');
     expect(resolveLanguage('system', 'ja-JP')).toBe('ja');
     expect(resolveLanguage('system', 'fr-FR')).toBe('en');
-    expect(createTranslator('en')('actionsProgress', { used: 2, limit: 50 })).toBe(
-      '2/50 browser actions verified',
-    );
+    expect(createTranslator('en')('taskPlanning')).toBe('Generating a response');
   });
 
   it('localizes page selection controls from the browser locale only', () => {

@@ -1,16 +1,14 @@
 import { z } from 'zod';
-import type { PanelSettingsSnapshot, PanelSnapshot } from '../../shared/protocol/panel-types';
+import type {
+  PanelEditableSettings,
+  PanelSettingsSnapshot,
+  PanelSnapshot,
+} from '../../shared/protocol/panel-types';
 
 const taskStatusSchema = z.enum([
   'queued',
-  'observing',
   'planning',
-  'acting',
-  'verifying',
-  'checkpointed',
-  'waiting_for_tab',
   'waiting_for_auth',
-  'waiting_for_confirmation',
   'paused',
   'completed',
   'failed',
@@ -35,7 +33,15 @@ const settingsSchema = z
     systemPrompt: z.string().max(20_000),
     language: z.enum(['system', 'zh-CN', 'en', 'ja']),
     hasCodexToken: z.boolean(),
-    hasTavilyKey: z.boolean(),
+  })
+  .strict();
+const editableSettingsSchema = z
+  .object({
+    model: z.string().min(1).max(256),
+    reasoningEffort: z.enum(['low', 'medium', 'high', 'xhigh']),
+    systemPrompt: z.string().max(20_000),
+    language: z.enum(['system', 'zh-CN', 'en', 'ja']),
+    codexAccessToken: z.string().max(20_000),
   })
   .strict();
 
@@ -50,7 +56,6 @@ export const panelSnapshotSchema: z.ZodType<PanelSnapshot> = z
         origin: z.string().max(4_096),
         supported: z.boolean(),
         hasPermission: z.boolean(),
-        debuggerAttached: z.boolean(),
       })
       .strict(),
     conversation: conversationSchema.nullable(),
@@ -94,21 +99,11 @@ export const panelSnapshotSchema: z.ZodType<PanelSnapshot> = z
         createdAt: timestampSchema,
         updatedAt: timestampSchema,
         sequence: z.number().int().nonnegative(),
-        browserActionsUsed: z.number().int().nonnegative(),
-        browserActionsLimit: z.number().int().positive(),
         lastError: z
           .object({
             code: z.string().max(128),
             retryable: z.boolean(),
             userMessage: z.string().max(2_000),
-          })
-          .strict()
-          .nullable(),
-        pendingConfirmation: z
-          .object({
-            digest: z.string().regex(/^sha256:[0-9a-f]{64}$/),
-            actionKind: z.string().max(64),
-            targetLabel: z.string().max(500).nullable(),
           })
           .strict()
           .nullable(),
@@ -142,5 +137,12 @@ export function parsePanelSnapshot(value: unknown): PanelSnapshot {
 export function parsePanelSettings(value: unknown): PanelSettingsSnapshot {
   const parsed = settingsSchema.safeParse(value);
   if (!parsed.success) throw new Error('Panel settings are invalid.');
+  return parsed.data;
+}
+
+/** Parses the credential-bearing response requested only by the trusted settings screen. */
+export function parsePanelEditableSettings(value: unknown): PanelEditableSettings {
+  const parsed = editableSettingsSchema.safeParse(value);
+  if (!parsed.success) throw new Error('Editable panel settings are invalid.');
   return parsed.data;
 }

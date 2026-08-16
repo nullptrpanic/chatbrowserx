@@ -11,9 +11,6 @@ import type { MessageRecord } from '../tasks/message-types';
 import { buildAgentContext } from './context/agent-context';
 import type { AgentEvent, AgentPlanInput, AgentPlanner } from './execution-types';
 import { StreamPersistenceBuffer } from './stream-persistence-buffer';
-import { bindBrowserToolAction, BROWSER_TOOL_DEFINITION } from './tools/browser-tool-schema';
-import { TAVILY_TOOL_DEFINITIONS } from './tools/tavily-tool-schema';
-import { parseToolCall, ToolCallError, type ParsedToolCall } from './tools/tool-parser';
 
 export interface CodexAgentPlannerDependencies {
   readonly provider: ModelProvider;
@@ -27,19 +24,12 @@ export interface CodexAgentPlannerDependencies {
   readonly clock: Clock;
 }
 
-interface CompletedCall {
-  readonly callId: string;
-  readonly name: string;
-  readonly argumentsJson: string;
-}
-
 /** Requires a complete and internally consistent normalized Provider response. */
 function inspectStreamEvent(
   event: ModelStreamEvent,
   state: {
     responseId: string | null;
     completed: boolean;
-    call: CompletedCall | null;
   },
 ): void {
   if (event.type === 'response.started') {
@@ -47,15 +37,12 @@ function inspectStreamEvent(
       throw providerErrorFromCode('INVALID_RESPONSE');
     }
     state.responseId = event.responseId;
-  } else if (event.type === 'tool.completed') {
-    if (state.call !== null || state.completed) {
-      throw new ToolCallError('INVALID_ARGUMENTS');
-    }
-    state.call = {
-      callId: event.callId,
-      name: event.name,
-      argumentsJson: event.argumentsJson,
-    };
+  } else if (
+    event.type === 'tool.started' ||
+    event.type === 'tool.arguments.delta' ||
+    event.type === 'tool.completed'
+  ) {
+    throw providerErrorFromCode('INVALID_RESPONSE');
   } else if (event.type === 'response.completed') {
     if (state.responseId === null || state.completed || event.responseId !== state.responseId) {
       throw providerErrorFromCode('INVALID_RESPONSE');
@@ -69,12 +56,12 @@ function inspectStreamEvent(
 export class CodexAgentPlanner implements AgentPlanner {
   readonly #dependencies: CodexAgentPlannerDependencies;
 
-  /** Creates one model-turn planner around bounded context, tools, and message persistence. */
+  /** Creates one text/image model-turn planner around bounded context and message persistence. */
   constructor(dependencies: CodexAgentPlannerDependencies) {
     this.#dependencies = dependencies;
   }
 
-  /** Runs one model turn and yields exactly one browser/Tavily call or final completion. */
+  /** Runs one model turn with no registered concrete tools and yields final completion. */
   async *plan(input: AgentPlanInput, signal: AbortSignal): AsyncGenerator<AgentEvent> {
     await this.#interruptStaleMessages(input);
     const settings = await this.#dependencies.settings.get();
@@ -82,9 +69,7 @@ export class CodexAgentPlanner implements AgentPlanner {
       {
         task: input.task,
         checkpoint: input.checkpoint,
-        observation: input.observation,
         customSystemPrompt: settings.systemPrompt,
-        visualImageUrl: input.visualImageUrl ?? null,
       },
       {
         conversations: this.#dependencies.conversations,
@@ -112,8 +97,7 @@ export class CodexAgentPlanner implements AgentPlanner {
     const state: {
       responseId: string | null;
       completed: boolean;
-      call: CompletedCall | null;
-    } = { responseId: null, completed: false, call: null };
+    } = { responseId: null, completed: false };
     let hasText = false;
 
     try {
@@ -123,7 +107,7 @@ export class CodexAgentPlanner implements AgentPlanner {
           reasoningEffort: settings.reasoningEffort,
           systemPrompt: context.systemPrompt,
           input: context.input,
-          tools: [BROWSER_TOOL_DEFINITION, ...TAVILY_TOOL_DEFINITIONS],
+          tools: [],
         },
         signal,
       )) {
@@ -137,13 +121,11 @@ export class CodexAgentPlanner implements AgentPlanner {
         throw providerErrorFromCode('INVALID_RESPONSE');
       }
 
-      const parsed = state.call === null ? null : parseToolCall(state.call);
-      if (parsed === null && !hasText) {
+      if (!hasText) {
         throw providerErrorFromCode('INVALID_RESPONSE');
       }
-      const result = this.#toAgentEvent(parsed, state.call, input);
       await buffer.complete();
-      yield result;
+      yield { type: 'task.completed', reason: 'model_response_completed' };
     } catch (error) {
       if (
         signal.aborted ||
@@ -177,55 +159,5 @@ export class CodexAgentPlanner implements AgentPlanner {
           }),
         ),
     );
-  }
-
-  /** Converts one validated model tool into the stable planner event union. */
-  #toAgentEvent(
-    parsed: ParsedToolCall | null,
-    completed: CompletedCall | null,
-    input: AgentPlanInput,
-  ): AgentEvent {
-    if (parsed === null || completed === null) {
-      return { type: 'task.completed', reason: 'model_response_completed' };
-    }
-    if (parsed.name === 'browser.act') {
-      if (input.task.tabId === null) {
-        throw new ToolCallError('INVALID_ARGUMENTS');
-      }
-      return {
-        type: 'browser.action',
-        callId: completed.callId,
-        argumentsJson: completed.argumentsJson,
-        action: bindBrowserToolAction(parsed.arguments, {
-          actionId: this.#dependencies.ids.create('action'),
-          tabId: input.task.tabId,
-        }),
-      };
-    }
-    if (parsed.name === 'tavily.search') {
-      return {
-        type: 'tavily.call',
-        callId: completed.callId,
-        argumentsJson: completed.argumentsJson,
-        operation: 'search',
-        arguments: parsed.arguments,
-      };
-    }
-    if (parsed.name === 'tavily.extract') {
-      return {
-        type: 'tavily.call',
-        callId: completed.callId,
-        argumentsJson: completed.argumentsJson,
-        operation: 'extract',
-        arguments: parsed.arguments,
-      };
-    }
-    return {
-      type: 'tavily.call',
-      callId: completed.callId,
-      argumentsJson: completed.argumentsJson,
-      operation: 'crawl',
-      arguments: parsed.arguments,
-    };
   }
 }

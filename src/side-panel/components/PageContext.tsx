@@ -1,4 +1,4 @@
-import { Bug, Globe2, ShieldCheck, ShieldQuestion } from 'lucide-react';
+import { Globe2, ShieldCheck, ShieldQuestion } from 'lucide-react';
 import type { Translator } from '../../shared/i18n/i18n';
 import type { PanelTabContext } from '../../shared/protocol/panel-types';
 
@@ -7,7 +7,7 @@ export interface PageContextProps {
   readonly t: Translator;
 }
 
-/** Renders a quiet one-row page identity, permission, and Debugger connection summary. */
+/** Renders a quiet one-row page identity and permission summary. */
 export function PageContext({ tab, t }: PageContextProps) {
   const host = (() => {
     try {
@@ -32,12 +32,6 @@ export function PageContext({ tab, t }: PageContextProps) {
         title={tab.hasPermission ? t('pageAccessReady') : t('pageAccessNeeded')}
       >
         {tab.hasPermission ? <ShieldCheck size={14} /> : <ShieldQuestion size={14} />}
-      </span>
-      <span
-        className={`debugger-indicator ${tab.debuggerAttached ? 'is-attached' : ''}`}
-        title={tab.debuggerAttached ? t('debuggerConnected') : t('debuggerIdle')}
-      >
-        <Bug size={14} />
       </span>
     </section>
   );

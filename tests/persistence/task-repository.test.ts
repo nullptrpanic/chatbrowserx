@@ -21,8 +21,6 @@ function createCheckpoint(task: TaskRun, id = 'checkpoint_1'): Checkpoint {
     sequence: 1,
     taskStatus: task.status,
     completedToolResults: [],
-    observationRef: 'observation_1',
-    pendingAction: null,
     createdAt: task.updatedAt,
   };
 }
@@ -35,14 +33,57 @@ function createEvent(task: TaskRun, sequence = 1): TaskEvent {
     id: `event_${sequence}`,
     taskId: task.id,
     sequence,
-    type: 'observation.started',
-    reason: 'Observation started.',
+    type: 'planning.started',
+    reason: 'Model request started.',
     at: task.updatedAt,
     error: null,
   };
 }
 
 describe('IndexedDbTaskRepository', () => {
+  it('normalizes legacy concrete-tool records without reviving their actions', async () => {
+    const database = await openChatBrowserDatabase(createTestDatabaseName('legacy-tool-state'));
+    const repository = new IndexedDbTaskRepository(database);
+    const current = createTask(
+      { conversationId: 'conv_1', tabId: 7, goal: 'Legacy task' },
+      { clock, ids },
+    );
+    await database.add('tasks', {
+      ...current,
+      status: 'acting',
+      checkpointId: 'checkpoint_legacy',
+      budget: { browserActionsUsed: 12, browserActionsLimit: 50 },
+    } as never);
+    await database.add('checkpoints', {
+      id: 'checkpoint_legacy',
+      taskId: current.id,
+      sequence: 4,
+      taskStatus: 'acting',
+      completedToolResults: [
+        {
+          callId: 'call_legacy',
+          toolName: 'browser.act',
+          argumentsJson: '{}',
+          output: '{}',
+          resultRef: 'result_legacy',
+        },
+      ],
+      pendingAction: { actionId: 'action_legacy' },
+      observationRef: 'observation_legacy',
+      createdAt: current.createdAt,
+    } as never);
+
+    const task = await repository.get(current.id);
+    const checkpoint = await repository.getCheckpoint('checkpoint_legacy');
+
+    expect(task).toMatchObject({ status: 'paused', lease: null });
+    expect(task).not.toHaveProperty('budget');
+    expect(checkpoint).toMatchObject({ taskStatus: 'paused', completedToolResults: [] });
+    expect(checkpoint).not.toHaveProperty('pendingAction');
+    expect(checkpoint).not.toHaveProperty('observationRef');
+    database.close();
+  });
+
   it('creates only the durable stores used by the current task and conversation model', async () => {
     const database = await openChatBrowserDatabase(createTestDatabaseName('schema-stores'));
 
@@ -71,8 +112,6 @@ describe('IndexedDbTaskRepository', () => {
       sequence: 0,
       taskStatus: 'queued',
       completedToolResults: [],
-      observationRef: null,
-      pendingAction: null,
       createdAt: queued.createdAt,
     };
 
@@ -93,15 +132,15 @@ describe('IndexedDbTaskRepository', () => {
     );
     await repository.create(queued);
 
-    const observing = transitionTask(queued, {
-      type: 'observation.started',
+    const planning = transitionTask(queued, {
+      type: 'planning.started',
       at: 1_001,
-      reason: 'Observation started.',
+      reason: 'Model request started.',
     });
-    const checkpoint = createCheckpoint(observing);
+    const checkpoint = createCheckpoint(planning);
     await repository.saveTransition({
-      task: { ...observing, checkpointId: checkpoint.id },
-      event: createEvent(observing),
+      task: { ...planning, checkpointId: checkpoint.id },
+      event: createEvent(planning),
       checkpoint,
     });
     database.close();
@@ -110,7 +149,7 @@ describe('IndexedDbTaskRepository', () => {
     const reopenedRepository = new IndexedDbTaskRepository(reopened);
 
     await expect(reopenedRepository.get(queued.id)).resolves.toMatchObject({
-      status: 'observing',
+      status: 'planning',
       checkpointId: checkpoint.id,
     });
     await expect(reopenedRepository.listEvents(queued.id)).resolves.toHaveLength(1);
@@ -126,33 +165,33 @@ describe('IndexedDbTaskRepository', () => {
       { clock, ids },
     );
     await repository.create(queued);
-    const observing = transitionTask(queued, {
-      type: 'observation.started',
+    const planning = transitionTask(queued, {
+      type: 'planning.started',
       at: 1_001,
-      reason: 'Observation started.',
+      reason: 'Model request started.',
     });
-    const firstCheckpoint = createCheckpoint(observing);
+    const firstCheckpoint = createCheckpoint(planning);
     await repository.saveTransition({
-      task: { ...observing, checkpointId: firstCheckpoint.id },
-      event: createEvent(observing),
+      task: { ...planning, checkpointId: firstCheckpoint.id },
+      event: createEvent(planning),
       checkpoint: firstCheckpoint,
     });
 
-    const planning = transitionTask(observing, {
-      type: 'planning.started',
+    const completed = transitionTask(planning, {
+      type: 'task.completed',
       at: 1_002,
-      reason: 'Planning started.',
+      reason: 'Response completed.',
     });
-    const duplicateCheckpoint = createCheckpoint(planning, 'checkpoint_2');
+    const duplicateCheckpoint = createCheckpoint(completed, 'checkpoint_2');
 
     await expect(
       repository.saveTransition({
-        task: { ...planning, checkpointId: duplicateCheckpoint.id },
-        event: { ...createEvent(planning), type: 'planning.started' },
+        task: { ...completed, checkpointId: duplicateCheckpoint.id },
+        event: { ...createEvent(completed), type: 'task.completed' },
         checkpoint: duplicateCheckpoint,
       }),
     ).rejects.toThrow(/event sequence/i);
-    await expect(repository.get(queued.id)).resolves.toMatchObject({ status: 'observing' });
+    await expect(repository.get(queued.id)).resolves.toMatchObject({ status: 'planning' });
     await expect(repository.getCheckpoint(duplicateCheckpoint.id)).resolves.toBeUndefined();
     database.close();
   });

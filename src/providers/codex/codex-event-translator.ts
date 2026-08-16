@@ -2,6 +2,7 @@ import { z } from 'zod';
 import { providerErrorFromCode } from '../provider-errors';
 import type { DecodedSseEvent } from '../sse-decoder';
 import type { ModelStreamEvent, ModelUsage } from '../stream-events';
+import { fromCodexToolName } from './codex-tool-name';
 
 const objectSchema = z.object({ type: z.string().optional() }).passthrough();
 const responseSchema = z.object({ id: z.string().min(1) }).passthrough();
@@ -163,8 +164,9 @@ export class CodexEventTranslator {
     if (this.#calls.has(item.id)) {
       throw providerErrorFromCode('INVALID_RESPONSE');
     }
-    this.#calls.set(item.id, { callId: item.call_id, name: item.name, completed: false });
-    return [{ type: 'tool.started', callId: item.call_id, name: item.name }];
+    const name = fromCodexToolName(item.name);
+    this.#calls.set(item.id, { callId: item.call_id, name, completed: false });
+    return [{ type: 'tool.started', callId: item.call_id, name }];
   }
 
   /** Resolves an argument delta through the previously announced output item. */
@@ -204,9 +206,10 @@ export class CodexEventTranslator {
       return [];
     }
     const item = parsePayload(functionCallItemSchema, output.item);
+    const name = fromCodexToolName(item.name);
     const existing = this.#calls.get(item.id);
     if (existing) {
-      if (existing.callId !== item.call_id || existing.name !== item.name) {
+      if (existing.callId !== item.call_id || existing.name !== name) {
         throw providerErrorFromCode('INVALID_RESPONSE');
       }
       if (existing.completed) {
@@ -223,13 +226,13 @@ export class CodexEventTranslator {
       ];
     }
 
-    this.#calls.set(item.id, { callId: item.call_id, name: item.name, completed: true });
+    this.#calls.set(item.id, { callId: item.call_id, name, completed: true });
     return [
-      { type: 'tool.started', callId: item.call_id, name: item.name },
+      { type: 'tool.started', callId: item.call_id, name },
       {
         type: 'tool.completed',
         callId: item.call_id,
-        name: item.name,
+        name,
         argumentsJson: item.arguments,
       },
     ];

@@ -3,6 +3,8 @@ import { CODEX_MODEL, CODEX_RESPONSES_URL } from '../../../src/providers/codex/c
 import { buildCodexRequest } from '../../../src/providers/codex/codex-request';
 import type { ModelRequest } from '../../../src/providers/provider-types';
 
+const GENERIC_TOOL_NAMES = ['lookup', 'lookup_record', 'lookup-record'] as const;
+
 const MODEL_REQUEST: ModelRequest = {
   model: 'caller-supplied-model-is-ignored',
   reasoningEffort: 'medium',
@@ -24,8 +26,8 @@ const MODEL_REQUEST: ModelRequest = {
     {
       type: 'function_call',
       callId: 'call_1',
-      name: 'browser.act',
-      argumentsJson: '{"type":"click"}',
+      name: 'lookup_record',
+      argumentsJson: '{"id":"record_1"}',
     },
     {
       type: 'function_call_output',
@@ -36,8 +38,8 @@ const MODEL_REQUEST: ModelRequest = {
   tools: [
     {
       type: 'function',
-      name: 'browser.act',
-      description: 'Executes one bounded browser action.',
+      name: 'lookup_record',
+      description: 'Looks up one record.',
       parameters: {
         type: 'object',
         properties: { type: { type: 'string' } },
@@ -50,6 +52,29 @@ const MODEL_REQUEST: ModelRequest = {
 };
 
 describe('buildCodexRequest', () => {
+  it('omits the tool contract entirely when no tools are registered', () => {
+    const request = buildCodexRequest({
+      accessToken: 'synthetic-token-value',
+      accountId: 'acct_123',
+      request: {
+        ...MODEL_REQUEST,
+        input: [
+          {
+            type: 'message',
+            role: 'user',
+            content: [{ type: 'input_text', text: 'Hello.' }],
+          },
+        ],
+        tools: [],
+      },
+    });
+
+    expect(request.body).not.toHaveProperty('tools');
+    expect(request.body).not.toHaveProperty('tool_choice');
+    expect(request.body).not.toHaveProperty('parallel_tool_calls');
+    expect(JSON.stringify(request.body).length).toBeLessThan(1_024);
+  });
+
   it('builds the single fixed Codex HTTP contract and maps normalized input', () => {
     const request = buildCodexRequest({
       accessToken: 'synthetic-token-value',
@@ -85,8 +110,8 @@ describe('buildCodexRequest', () => {
         {
           type: 'function_call',
           call_id: 'call_1',
-          name: 'browser.act',
-          arguments: '{"type":"click"}',
+          name: 'lookup_record',
+          arguments: '{"id":"record_1"}',
         },
         {
           type: 'function_call_output',
@@ -94,12 +119,57 @@ describe('buildCodexRequest', () => {
           output: '{"verified":true}',
         },
       ],
-      tools: MODEL_REQUEST.tools,
+      tools: [
+        {
+          type: 'function',
+          name: 'lookup_record',
+          description: 'Looks up one record.',
+          parameters: {
+            type: 'object',
+            properties: { type: { type: 'string' } },
+            required: ['type'],
+            additionalProperties: false,
+          },
+          strict: true,
+        },
+      ],
       tool_choice: 'auto',
       parallel_tool_calls: false,
       store: false,
       stream: true,
       reasoning: { effort: 'medium', summary: 'auto' },
     });
+  });
+
+  it('preserves generic tool names that satisfy the provider wire grammar', () => {
+    const definitions = GENERIC_TOOL_NAMES.map((name) => ({
+      type: 'function' as const,
+      name,
+      description: `${name} description`,
+      parameters: { type: 'object', properties: {}, additionalProperties: false },
+      strict: true as const,
+    }));
+    const request = buildCodexRequest({
+      accessToken: 'synthetic-token-value',
+      accountId: 'acct_123',
+      request: {
+        ...MODEL_REQUEST,
+        tools: definitions,
+        input: GENERIC_TOOL_NAMES.map((name, index) => ({
+          type: 'function_call' as const,
+          callId: `call_${String(index)}`,
+          name,
+          argumentsJson: '{}',
+        })),
+      },
+    });
+    const body = request.body as {
+      readonly tools: readonly { readonly name: string }[];
+      readonly input: readonly { readonly name: string }[];
+    };
+
+    expect(body.tools.map((tool) => tool.name)).toEqual(GENERIC_TOOL_NAMES);
+    expect(body.input.map((item) => item.name)).toEqual(GENERIC_TOOL_NAMES);
+    expect(body.tools.every((tool) => /^[a-zA-Z0-9_-]+$/.test(tool.name))).toBe(true);
   });
 });

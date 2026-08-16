@@ -4,14 +4,8 @@ import type { PanelTaskStatus } from '../../shared/protocol/panel-types';
 
 const statusKeys: Readonly<Record<PanelTaskStatus, MessageKey>> = {
   queued: 'taskQueued',
-  observing: 'taskObserving',
   planning: 'taskPlanning',
-  acting: 'taskActing',
-  verifying: 'taskVerifying',
-  checkpointed: 'taskCheckpointed',
-  waiting_for_tab: 'taskWaitingTab',
   waiting_for_auth: 'taskWaitingAuth',
-  waiting_for_confirmation: 'taskWaitingConfirmation',
   paused: 'taskPaused',
   completed: 'taskCompleted',
   failed: 'taskFailed',
@@ -19,19 +13,9 @@ const statusKeys: Readonly<Record<PanelTaskStatus, MessageKey>> = {
 };
 
 const eventKeys: Readonly<Record<string, MessageKey>> = {
-  'observation.started': 'taskObserving',
   'planning.started': 'taskPlanning',
-  'planning.rejected': 'taskPlanAdjusted',
-  'tool.result-recorded': 'taskToolResultSaved',
-  'action.intent-recorded': 'taskActing',
-  'action.evidence-recorded': 'taskVerifying',
-  'action.verified': 'taskActionVerified',
-  'action.verification-failed': 'taskActionNotVerified',
-  'task.tab-missing': 'taskWaitingTab',
   'task.auth-required': 'taskWaitingAuth',
-  'task.confirmation-required': 'taskWaitingConfirmation',
   'task.paused': 'taskPaused',
-  'task.budget-exhausted': 'taskBudgetExhausted',
   'task.resumed': 'taskQueued',
   'task.completed': 'taskCompleted',
   'task.failed': 'taskFailed',

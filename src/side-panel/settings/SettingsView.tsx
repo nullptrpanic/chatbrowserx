@@ -1,24 +1,28 @@
 import { Save } from 'lucide-react';
 import { useEffect, useState } from 'react';
 import type { Translator } from '../../shared/i18n/i18n';
-import type { PanelSettingsSnapshot } from '../../shared/protocol/panel-types';
+import type {
+  PanelEditableSettings,
+  PanelSettingsSnapshot,
+} from '../../shared/protocol/panel-types';
 import type { SavePanelSettingsInput } from '../../tasks/panel-service';
 import { SecretField } from './SecretField';
 
 export interface SettingsViewProps {
   readonly settings: PanelSettingsSnapshot;
   readonly t: Translator;
+  readonly onLoad: () => Promise<PanelEditableSettings>;
   readonly onSave: (input: SavePanelSettingsInput) => Promise<unknown>;
 }
 
-/** Renders the fixed Codex/Tavily settings surface without generic Provider or Base URL fields. */
-export function SettingsView({ settings, t, onSave }: SettingsViewProps) {
+/** Renders the fixed Codex settings surface without generic Provider or Base URL fields. */
+export function SettingsView({ settings, t, onLoad, onSave }: SettingsViewProps) {
   const [reasoningEffort, setReasoningEffort] = useState(settings.reasoningEffort);
   const [systemPrompt, setSystemPrompt] = useState(settings.systemPrompt);
   const [language, setLanguage] = useState(settings.language);
   const [codexAccessToken, setCodexAccessToken] = useState('');
-  const [tavilyKey, setTavilyKey] = useState('');
   const [status, setStatus] = useState<'idle' | 'saving' | 'saved' | 'error'>('idle');
+  const [loadFailed, setLoadFailed] = useState(false);
 
   useEffect(() => {
     setReasoningEffort(settings.reasoningEffort);
@@ -26,8 +30,28 @@ export function SettingsView({ settings, t, onSave }: SettingsViewProps) {
     setLanguage(settings.language);
   }, [settings.language, settings.reasoningEffort, settings.systemPrompt]);
 
-  /** Saves the visible settings while omitting untouched credential fields. */
+  useEffect(() => {
+    let active = true;
+    void onLoad()
+      .then((loaded) => {
+        if (!active) return;
+        setLoadFailed(false);
+        setReasoningEffort(loaded.reasoningEffort);
+        setSystemPrompt(loaded.systemPrompt);
+        setLanguage(loaded.language);
+        setCodexAccessToken(loaded.codexAccessToken);
+      })
+      .catch(() => {
+        if (active) setLoadFailed(true);
+      });
+    return () => {
+      active = false;
+    };
+  }, [onLoad]);
+
+  /** Saves the visible settings while omitting credential fields the user leaves blank. */
   async function save(): Promise<void> {
+    setLoadFailed(false);
     setStatus('saving');
     const input: SavePanelSettingsInput = {
       reasoningEffort,
@@ -36,12 +60,9 @@ export function SettingsView({ settings, t, onSave }: SettingsViewProps) {
       ...(codexAccessToken.trim().length === 0
         ? {}
         : { codexAccessToken: codexAccessToken.trim() }),
-      ...(tavilyKey.trim().length === 0 ? {} : { tavilyKey: tavilyKey.trim() }),
     };
     try {
       await onSave(input);
-      setCodexAccessToken('');
-      setTavilyKey('');
       setStatus('saved');
     } catch {
       setStatus('error');
@@ -69,14 +90,6 @@ export function SettingsView({ settings, t, onSave }: SettingsViewProps) {
           hint={settings.hasCodexToken ? t('tokenStored') : t('codexToken')}
           value={codexAccessToken}
           onChange={setCodexAccessToken}
-          t={t}
-        />
-        <SecretField
-          id="tavily-key"
-          label={t('tavilyKey')}
-          hint={settings.hasTavilyKey ? t('tavilyStored') : t('tavilyKey')}
-          value={tavilyKey}
-          onChange={setTavilyKey}
           t={t}
         />
         <label className="form-field" htmlFor="model">
@@ -124,12 +137,17 @@ export function SettingsView({ settings, t, onSave }: SettingsViewProps) {
           </select>
         </label>
         <div className="settings-actions">
-          <span className={`settings-save-status is-${status}`} role="status">
-            {status === 'saved'
-              ? t('settingsSaved')
-              : status === 'error'
-                ? t('settingsSaveFailed')
-                : ''}
+          <span
+            className={`settings-save-status is-${loadFailed ? 'error' : status}`}
+            role="status"
+          >
+            {loadFailed
+              ? t('settingsLoadFailed')
+              : status === 'saved'
+                ? t('settingsSaved')
+                : status === 'error'
+                  ? t('settingsSaveFailed')
+                  : ''}
           </span>
           <button type="submit" className="primary-button" disabled={status === 'saving'}>
             <Save size={15} /> {t('saveSettings')}

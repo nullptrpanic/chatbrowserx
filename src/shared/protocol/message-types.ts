@@ -28,14 +28,12 @@ export type ExtensionMessage =
         systemPrompt: string;
         language: 'system' | 'zh-CN' | 'en' | 'ja';
         codexAccessToken?: string | undefined;
-        tavilyKey?: string | undefined;
       }
     >
   | Message<'task.create', { tabId: number; conversationId: string; goal: string }>
   | Message<'task.getSnapshot', { taskId: string }>
   | Message<'task.pause', { taskId: string }>
-  | Message<'task.resume', { taskId: string; tabId?: number | undefined }>
-  | Message<'task.confirm', { taskId: string; actionDigest: string }>
+  | Message<'task.resume', { taskId: string }>
   | Message<'task.cancel', { taskId: string }>
   | Message<'screenshot.capture', { tabId: number; mode: 'viewport' | 'region' }>
   | Message<'page.features.ensure', { tabId: number }>
@@ -47,7 +45,6 @@ export type ExtensionMessage =
 
 export type PageCommand =
   | Message<'page.ping', Record<string, never>>
-  | Message<'page.observe', { observationId: string; tabId: number; capturedAt: number }>
   | Message<'page.screenshot.select', Record<string, never>>
   | Message<'page.overlays.setHidden', { hidden: boolean }>;
 

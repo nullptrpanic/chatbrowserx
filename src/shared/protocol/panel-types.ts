@@ -1,17 +1,5 @@
 export type PanelTaskStatus =
-  | 'queued'
-  | 'observing'
-  | 'planning'
-  | 'acting'
-  | 'verifying'
-  | 'checkpointed'
-  | 'waiting_for_tab'
-  | 'waiting_for_auth'
-  | 'waiting_for_confirmation'
-  | 'paused'
-  | 'completed'
-  | 'failed'
-  | 'cancelled';
+  'queued' | 'planning' | 'waiting_for_auth' | 'paused' | 'completed' | 'failed' | 'cancelled';
 
 export interface PanelTabContext {
   readonly id: number;
@@ -20,7 +8,6 @@ export interface PanelTabContext {
   readonly origin: string;
   readonly supported: boolean;
   readonly hasPermission: boolean;
-  readonly debuggerAttached: boolean;
 }
 
 export interface PanelConversationSummary {
@@ -59,12 +46,6 @@ export interface PanelTaskEvent {
   readonly at: number;
 }
 
-export interface PanelPendingConfirmation {
-  readonly digest: string;
-  readonly actionKind: string;
-  readonly targetLabel: string | null;
-}
-
 export interface PanelTask {
   readonly id: string;
   readonly status: PanelTaskStatus;
@@ -73,14 +54,11 @@ export interface PanelTask {
   readonly createdAt: number;
   readonly updatedAt: number;
   readonly sequence: number;
-  readonly browserActionsUsed: number;
-  readonly browserActionsLimit: number;
   readonly lastError: {
     readonly code: string;
     readonly retryable: boolean;
     readonly userMessage: string;
   } | null;
-  readonly pendingConfirmation: PanelPendingConfirmation | null;
   readonly events: readonly PanelTaskEvent[];
 }
 
@@ -90,7 +68,15 @@ export interface PanelSettingsSnapshot {
   readonly systemPrompt: string;
   readonly language: 'system' | 'zh-CN' | 'en' | 'ja';
   readonly hasCodexToken: boolean;
-  readonly hasTavilyKey: boolean;
+}
+
+/** Settings returned only to the trusted settings screen after an explicit request. */
+export interface PanelEditableSettings {
+  readonly model: string;
+  readonly reasoningEffort: 'low' | 'medium' | 'high' | 'xhigh';
+  readonly systemPrompt: string;
+  readonly language: 'system' | 'zh-CN' | 'en' | 'ja';
+  readonly codexAccessToken: string;
 }
 
 export interface PanelSnapshot {

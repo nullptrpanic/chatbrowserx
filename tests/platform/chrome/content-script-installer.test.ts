@@ -16,7 +16,6 @@ function buildDependencies(): ContentScriptInstallerDependencies {
   return {
     permissions: {
       contains: vi.fn(async () => true),
-      request: vi.fn(async () => true),
     },
     tabs: {
       sendMessage: vi.fn(async (_tabId, message) => ({
@@ -76,19 +75,14 @@ describe('ContentScriptInstaller', () => {
     });
   });
 
-  it('requests optional origin access only through the explicit user-gesture method', async () => {
+  it('rejects unsupported browser origins without checking permissions', async () => {
     const dependencies = buildDependencies();
     const installer = new ContentScriptInstaller(dependencies);
 
-    await expect(installer.requestOriginPermission('https://example.test/path')).resolves.toBe(
-      true,
-    );
-    expect(dependencies.permissions.request).toHaveBeenCalledWith({
-      origins: ['https://example.test/*'],
-    });
     await expect(installer.ensureInstalled(7, 'chrome://settings')).resolves.toEqual({
       status: 'unsupported_origin',
       originPattern: null,
     });
+    expect(dependencies.permissions.contains).not.toHaveBeenCalled();
   });
 });

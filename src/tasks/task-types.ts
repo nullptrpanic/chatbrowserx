@@ -2,40 +2,7 @@ import type { ConversationId, TaskId } from '../shared/ids';
 import type { TaskError } from './task-errors';
 
 export type TaskStatus =
-  | 'queued'
-  | 'observing'
-  | 'planning'
-  | 'acting'
-  | 'verifying'
-  | 'checkpointed'
-  | 'waiting_for_tab'
-  | 'waiting_for_auth'
-  | 'waiting_for_confirmation'
-  | 'paused'
-  | 'completed'
-  | 'failed'
-  | 'cancelled';
-
-export type BrowserActionKind =
-  | 'click'
-  | 'type'
-  | 'clear'
-  | 'select'
-  | 'check'
-  | 'hover'
-  | 'pressKey'
-  | 'scroll'
-  | 'drag'
-  | 'waitFor';
-
-export interface TaskBudget {
-  readonly browserActionsLimit: number;
-  readonly browserActionsUsed: number;
-  readonly actionAttemptsLimit: number;
-  readonly replansLimit: number;
-  readonly replansUsed: number;
-  readonly wallClockLimitMs: number;
-}
+  'queued' | 'planning' | 'waiting_for_auth' | 'paused' | 'completed' | 'failed' | 'cancelled';
 
 export interface TaskLease {
   readonly ownerId: string;
@@ -54,24 +21,13 @@ export interface TaskRun {
   readonly updatedAt: number;
   readonly checkpointId: string | null;
   readonly lease: TaskLease | null;
-  readonly budget: TaskBudget;
   readonly lastError: TaskError | null;
 }
 
 export type TaskEventType =
-  | 'observation.started'
   | 'planning.started'
-  | 'planning.rejected'
-  | 'tool.result-recorded'
-  | 'action.intent-recorded'
-  | 'action.evidence-recorded'
-  | 'action.verified'
-  | 'action.verification-failed'
-  | 'task.tab-missing'
   | 'task.auth-required'
-  | 'task.confirmation-required'
   | 'task.paused'
-  | 'task.budget-exhausted'
   | 'task.resumed'
   | 'task.completed'
   | 'task.failed'
@@ -82,7 +38,6 @@ export interface TaskTransitionEvent {
   readonly at: number;
   readonly reason: string;
   readonly error?: TaskError;
-  readonly boundTabId?: number;
 }
 
 export interface TaskEvent {
@@ -93,10 +48,6 @@ export interface TaskEvent {
   readonly reason: string;
   readonly at: number;
   readonly error: TaskError | null;
-  readonly actionId?: string;
-  readonly actionDigest?: string;
-  readonly evidenceRef?: string;
-  readonly boundTabId?: number;
 }
 
 /**

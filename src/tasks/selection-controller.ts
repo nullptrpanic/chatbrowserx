@@ -88,7 +88,7 @@ export class SelectionController {
     this.#dependencies = dependencies;
   }
 
-  /** Runs one bounded text-only translation request with no browser or Tavily tools. */
+  /** Runs one bounded text-only translation request with no registered tools. */
   async translate(
     input: SelectionTextInput,
     signal: AbortSignal = AbortSignal.timeout(TRANSLATION_TIMEOUT_MS),

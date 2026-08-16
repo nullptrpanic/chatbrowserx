@@ -119,7 +119,7 @@ describe('SelectionController', () => {
     const dependencies = buildDependencies(provider.provider);
     dependencies.panel.getSnapshot.mockResolvedValueOnce({
       conversation: { id: 'conversation_1' },
-      task: { status: 'waiting_for_confirmation' },
+      task: { status: 'paused' },
     });
     const controller = new SelectionController(dependencies);
 

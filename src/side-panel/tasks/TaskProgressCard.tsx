@@ -4,19 +4,8 @@ import type { Translator } from '../../shared/i18n/i18n';
 import type { PanelTask } from '../../shared/protocol/panel-types';
 import { TaskStatusLabel, taskEventLabel, taskStatusLabel } from './TaskStatusLabel';
 
-const runningStatuses = new Set<PanelTask['status']>([
-  'queued',
-  'observing',
-  'planning',
-  'acting',
-  'verifying',
-  'checkpointed',
-]);
-const resumableStatuses = new Set<PanelTask['status']>([
-  'paused',
-  'waiting_for_tab',
-  'waiting_for_auth',
-]);
+const runningStatuses = new Set<PanelTask['status']>(['queued', 'planning']);
+const resumableStatuses = new Set<PanelTask['status']>(['paused', 'waiting_for_auth']);
 
 export interface TaskProgressCardProps {
   readonly task: PanelTask;
@@ -46,12 +35,6 @@ export function TaskProgressCard({ task, t, onPause, onResume, onCancel }: TaskP
         {latestEvent === undefined ? task.goal : taskEventLabel(latestEvent.type, t)}
       </p>
       <div className="task-progress-row">
-        <span>
-          {t('actionsProgress', {
-            used: task.browserActionsUsed,
-            limit: task.browserActionsLimit,
-          })}
-        </span>
         <button
           type="button"
           className="task-details-toggle"
@@ -84,7 +67,7 @@ export function TaskProgressCard({ task, t, onPause, onResume, onCancel }: TaskP
           ))}
         </ol>
       ) : null}
-      {terminal || task.status === 'waiting_for_confirmation' ? null : (
+      {terminal ? null : (
         <div className="task-controls">
           {runningStatuses.has(task.status) ? (
             <button type="button" className="secondary-button" onClick={onPause}>

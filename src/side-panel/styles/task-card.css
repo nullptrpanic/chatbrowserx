@@ -43,9 +43,7 @@
   background: var(--cbx-danger);
 }
 .task-status-paused .task-status-dot,
-.task-status-waiting_for_auth .task-status-dot,
-.task-status-waiting_for_tab .task-status-dot,
-.task-status-waiting_for_confirmation .task-status-dot {
+.task-status-waiting_for_auth .task-status-dot {
   background: var(--cbx-warning);
 }
 
@@ -123,38 +121,5 @@
 .task-controls button {
   min-height: 30px;
   padding: 0 9px;
-  font-size: 11px;
-}
-
-.confirmation-card {
-  display: grid;
-  padding: 12px;
-  border: 1px solid color-mix(in srgb, var(--cbx-warning) 38%, var(--cbx-divider));
-  border-radius: var(--cbx-radius-md);
-  grid-template-columns: auto minmax(0, 1fr);
-  gap: 9px;
-  background: color-mix(in srgb, var(--cbx-warning) 8%, var(--cbx-raised));
-}
-
-.confirmation-icon {
-  color: var(--cbx-warning);
-}
-.confirmation-card h2 {
-  margin: 0;
-  font-size: 13px;
-  font-weight: 500;
-}
-.confirmation-card p {
-  margin: 4px 0 9px;
-  color: var(--cbx-muted);
-  font-size: 11px;
-}
-.confirmation-actions {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 6px;
-}
-.confirmation-actions button {
-  min-height: 30px;
   font-size: 11px;
 }

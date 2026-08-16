@@ -115,16 +115,14 @@
   font-size: 10px;
 }
 
-.permission-indicator,
-.debugger-indicator {
+.permission-indicator {
   display: grid;
   flex: 0 0 auto;
   place-items: center;
   color: var(--cbx-faint);
 }
 
-.permission-indicator.is-ready,
-.debugger-indicator.is-attached {
+.permission-indicator.is-ready {
   color: var(--cbx-success);
 }
 
@@ -173,8 +171,7 @@
 }
 
 .unsupported-card,
-.auth-card,
-.permission-card {
+.auth-card {
   display: flex;
   gap: 10px;
   margin: 10px 12px 0;
@@ -185,13 +182,11 @@
 }
 
 .unsupported-card p,
-.auth-card p,
-.permission-card p {
+.auth-card p {
   margin: 0;
 }
 
-.auth-card > svg,
-.permission-card > svg {
+.auth-card > svg {
   flex: 0 0 auto;
   margin-top: 2px;
   color: var(--cbx-warning);
@@ -203,22 +198,6 @@
   color: var(--cbx-accent);
   background: transparent;
   cursor: pointer;
-}
-
-.permission-card h2 {
-  margin: 0 0 3px;
-  font-size: 13px;
-  font-weight: 500;
-}
-
-.permission-card code {
-  display: block;
-  max-width: 100%;
-  margin: 7px 0;
-  overflow: hidden;
-  color: var(--cbx-muted);
-  font-size: 11px;
-  text-overflow: ellipsis;
 }
 
 .view-heading {

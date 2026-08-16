@@ -18,10 +18,10 @@ function buildTask(id: string, status: TaskRun['status']): TaskRun {
 
 describe('RecoveryScanner', () => {
   it('starts each safe recoverable task once and ignores paused records defensively', async () => {
-    const observing = buildTask('task_observing', 'observing');
+    const planning = buildTask('task_planning', 'planning');
     const paused = buildTask('task_paused', 'paused');
     const repository = {
-      listRecoverable: vi.fn(async () => [observing, observing, paused]),
+      listRecoverable: vi.fn(async () => [planning, planning, paused]),
     };
     const startTask = vi.fn(async () => undefined);
     const scanner = new RecoveryScanner({
@@ -33,7 +33,7 @@ describe('RecoveryScanner', () => {
     await scanner.requestRecoveryScan();
 
     expect(startTask).toHaveBeenCalledTimes(1);
-    expect(startTask).toHaveBeenCalledWith(observing.id);
+    expect(startTask).toHaveBeenCalledWith(planning.id);
   });
 
   it('coalesces concurrent scans so one task cannot be scheduled twice', async () => {

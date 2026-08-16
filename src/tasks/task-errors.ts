@@ -3,16 +3,8 @@ export type TaskErrorCode =
   | 'RateLimitError'
   | 'TransientProviderError'
   | 'InvalidProviderResponse'
-  | 'PermissionDenied'
-  | 'TabUnavailable'
-  | 'UnsupportedPage'
-  | 'TargetNotFound'
-  | 'TargetAmbiguous'
-  | 'ActionBlocked'
-  | 'ActionNoEffect'
-  | 'NavigationInterrupted'
-  | 'BudgetExceeded'
-  | 'PolicyConfirmationRequired';
+  | 'TaskInputError'
+  | 'TaskInterrupted';
 
 export interface TaskError {
   readonly code: TaskErrorCode;

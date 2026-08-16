@@ -1,13 +1,9 @@
-import { observeDocument } from '../browser/observe/dom-observer';
-import { ActionExecutionError } from '../browser/act/action-errors';
-import { parsePageActionCommand, type PageActionCommand } from '../browser/act/page-action-message';
 import {
   PROTOCOL_VERSION,
   type ExtensionResponse,
   type PageCommand,
 } from '../shared/protocol/message-types';
 import { parsePageCommand } from '../shared/protocol/parse-message';
-import { executeDomAction } from './dom-action-handler';
 import { setPageOverlaysHidden } from './page-overlay-registry';
 import { selectScreenshotRegion } from './screenshot/mount-screenshot-overlay';
 
@@ -51,27 +47,6 @@ export async function handlePageCommand(
     };
   }
 
-  if (command?.type === 'page.observe') {
-    const view = environment.window;
-    return {
-      version: PROTOCOL_VERSION,
-      requestId: command.requestId,
-      ok: true,
-      data: observeDocument(environment.document, {
-        id: command.payload.observationId,
-        tabId: command.payload.tabId,
-        capturedAt: command.payload.capturedAt,
-        url: view.location.href,
-        viewport: {
-          width: view.innerWidth,
-          height: view.innerHeight,
-          scrollX: view.scrollX,
-          scrollY: view.scrollY,
-        },
-      }),
-    };
-  }
-
   if (command?.type === 'page.screenshot.select') {
     return {
       version: PROTOCOL_VERSION,
@@ -91,31 +66,5 @@ export async function handlePageCommand(
     };
   }
 
-  let actionCommand: PageActionCommand;
-  try {
-    actionCommand = parsePageActionCommand(value);
-  } catch {
-    return invalidPageCommandResponse();
-  }
-  try {
-    return {
-      version: PROTOCOL_VERSION,
-      requestId: actionCommand.requestId,
-      ok: true,
-      data: await executeDomAction(environment.document, actionCommand.payload.action, {
-        clock: { now: () => Date.now() },
-        window: environment.window,
-      }),
-    };
-  } catch (error) {
-    if (error instanceof ActionExecutionError) {
-      return {
-        version: PROTOCOL_VERSION,
-        requestId: actionCommand.requestId,
-        ok: false,
-        error: { code: error.code, message: error.message },
-      };
-    }
-    return invalidPageCommandResponse(actionCommand.requestId);
-  }
+  return invalidPageCommandResponse();
 }
