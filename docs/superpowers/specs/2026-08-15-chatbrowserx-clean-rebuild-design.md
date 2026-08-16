@@ -112,8 +112,9 @@ ChatBrowserX 将在无历史内容的 orphan 分支上从零实现。旧仓库�
 
 - 选中文本气泡及其结果浮层。
 - 区域截图选择层和截图控制条。
+- Agent 指针动作的瞬态虚拟光标、点击水波纹和拖拽反馈。
 
-这些界面不得承担聊天、设置、历史或任务编排，也不得永久改变宿主页面布局。
+这些界面不得承担聊天、设置、历史或任务编排，也不得永久改变宿主页面布局。Agent 操作反馈必须保持 `pointer-events: none`，只表达动作位置，不参与目标定位、执行或验证，并由统一 overlay registry 在用户截图和模型视觉捕获前隐藏。
 
 ### 4.3 恢复体验
 
@@ -349,7 +350,7 @@ Browser Driver 提供统一动作接口，下层由 DOM Adapter 和 CDP Adapter 
 
 Side Panel、Service Worker 和 content script 之间使用带 `version`、`requestId`、`taskId` 与可判别 `type` 的消息联合类型。所有外部边界都必须进行运行时校验。
 
-当前协议按信任边界拆分：`ExtensionMessage` 包含连接与完整面板快照、聊天提交、终止会话清理、设置读写、任务 create/snapshot/pause/resume/confirm/cancel、截图、页面功能安装和选中文本 Translate/Ask AI。`task.resume` 只在任务处于 `waiting_for_tab` 时接受可选替代 `tabId`；`task.confirm` 必须携带与待执行动作完全匹配的 `sha256:` 摘要。`selection.ask` 的标签页只使用 Chrome runtime sender，而不信任页面 payload。基础 `PageCommand` 只包含无凭据的 `page.ping`、`page.observe`、`page.screenshot.select` 与 `page.overlays.setHidden`；browser 层另有严格校验的 `PageActionCommand`，只承载批准的十类结构化动作。content script 不接受任务仓库、设置、凭据或任意 JavaScript 命令，Service Worker 的任务路由也不接受页面命令。
+当前协议按信任边界拆分：`ExtensionMessage` 包含连接与完整面板快照、聊天提交、终止会话清理、设置读写、任务 create/snapshot/pause/resume/confirm/cancel、截图、页面功能安装和选中文本 Translate/Ask AI。`task.resume` 只在任务处于 `waiting_for_tab` 时接受可选替代 `tabId`；`task.confirm` 必须携带与待执行动作完全匹配的 `sha256:` 摘要。`selection.ask` 的标签页只使用 Chrome runtime sender，而不信任页面 payload。基础 `PageCommand` 只包含无凭据的 `page.ping`、`page.observe`、`page.screenshot.select`、`page.overlays.setHidden` 与有限坐标的 `page.actionFeedback`；browser 层另有严格校验的 `PageActionCommand`，只承载批准的十类结构化动作。content script 不接受任务仓库、设置、凭据或任意 JavaScript 命令，Service Worker 的任务路由也不接受页面命令。
 
 长任务状态通过每 750 ms 查询一次经过校验的完整快照同步，并使用 generation 丢弃过期响应。该取舍不依赖会随 MV3 Worker 消失的长连接；UI 断开后不影响 Runner。
 

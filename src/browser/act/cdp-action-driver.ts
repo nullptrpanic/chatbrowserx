@@ -1,4 +1,5 @@
 import type { Clock } from '../../shared/time';
+import type { PageActionFeedback } from '../../shared/protocol/message-types';
 import type { BrowserActionRequest } from '../contracts/action';
 import type { BrowserActionEvidence } from '../contracts/evidence';
 import type { ObservedElement } from '../contracts/observation';
@@ -16,6 +17,9 @@ export interface CdpActionCommandPort {
 
 export interface CdpActionDependencies {
   readonly clock: Clock;
+  readonly feedback?: {
+    notify(tabId: number, feedback: PageActionFeedback): void;
+  };
   readonly tabs: { getUrl(tabId: number): Promise<string> };
 }
 
@@ -100,6 +104,14 @@ export class CdpActionDriver implements ActionDriver {
       commandCount += 1;
       return this.#transport.send<TResult>(request.tabId, method, params, sessionId);
     };
+    const notifyFeedback = (feedback: PageActionFeedback): void => {
+      if (sessionId !== undefined) return;
+      try {
+        this.#dependencies.feedback?.notify(request.tabId, feedback);
+      } catch {
+        // Visual feedback is best-effort and must not affect CDP input.
+      }
+    };
     const center = async (element: ObservedElement | null): Promise<Point> => {
       const response = await send<{ readonly model?: { readonly border?: readonly number[] } }>(
         'DOM.getBoxModel',
@@ -125,6 +137,7 @@ export class CdpActionDriver implements ActionDriver {
     };
     const click = async (element: ObservedElement | null): Promise<void> => {
       const point = await center(element);
+      notifyFeedback({ kind: 'click', ...point });
       await send('Input.dispatchMouseEvent', { type: 'mouseMoved', ...point });
       await send('Input.dispatchMouseEvent', {
         type: 'mousePressed',
@@ -189,6 +202,7 @@ export class CdpActionDriver implements ActionDriver {
         break;
       case 'hover': {
         const point = await center(context.target);
+        notifyFeedback({ kind: 'move', ...point });
         await send('Input.dispatchMouseEvent', { type: 'mouseMoved', ...point });
         break;
       }
@@ -209,6 +223,13 @@ export class CdpActionDriver implements ActionDriver {
       case 'drag': {
         const source = await center(context.target);
         const destination = await center(context.destination);
+        notifyFeedback({
+          kind: 'drag',
+          fromX: source.x,
+          fromY: source.y,
+          toX: destination.x,
+          toY: destination.y,
+        });
         const midpoint = {
           x: (source.x + destination.x) / 2,
           y: (source.y + destination.y) / 2,

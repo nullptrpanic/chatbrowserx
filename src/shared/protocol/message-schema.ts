@@ -256,9 +256,44 @@ const pageOverlaysSetHiddenSchema = z
   })
   .strict();
 
+const pageActionFeedbackSchema = z
+  .object({
+    version: z.literal(PROTOCOL_VERSION),
+    requestId: requestIdSchema,
+    type: z.literal('page.actionFeedback'),
+    payload: z.discriminatedUnion('kind', [
+      z
+        .object({
+          kind: z.literal('move'),
+          x: z.number().finite(),
+          y: z.number().finite(),
+        })
+        .strict(),
+      z
+        .object({
+          kind: z.literal('click'),
+          x: z.number().finite(),
+          y: z.number().finite(),
+        })
+        .strict(),
+      z
+        .object({
+          kind: z.literal('drag'),
+          fromX: z.number().finite(),
+          fromY: z.number().finite(),
+          toX: z.number().finite(),
+          toY: z.number().finite(),
+        })
+        .strict(),
+      z.object({ kind: z.literal('hide') }).strict(),
+    ]),
+  })
+  .strict();
+
 export const pageCommandSchema: z.ZodType<PageCommand> = z.discriminatedUnion('type', [
   pagePingSchema,
   pageObserveSchema,
   pageScreenshotSelectSchema,
   pageOverlaysSetHiddenSchema,
+  pageActionFeedbackSchema,
 ]);

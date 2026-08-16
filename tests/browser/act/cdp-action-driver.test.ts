@@ -6,6 +6,7 @@ import {
 import type { ActionDriverContext } from '../../../src/browser/act/action-driver';
 import type { ObservedElement } from '../../../src/browser/contracts/observation';
 import { createElementTarget } from '../../../src/browser/contracts/target';
+import type { PageActionFeedback } from '../../../src/shared/protocol/message-types';
 
 class StubActionTransport implements CdpActionCommandPort {
   readonly calls: Array<{
@@ -69,6 +70,153 @@ function buildContext(
 }
 
 describe('CdpActionDriver', () => {
+  it('shows click feedback at the exact root-session CDP input point', async () => {
+    const transport = new StubActionTransport();
+    const feedback: Array<{
+      readonly tabId: number;
+      readonly value: PageActionFeedback;
+    }> = [];
+    const driver = new CdpActionDriver(transport, {
+      clock: { now: () => 1_000 },
+      tabs: { getUrl: async () => 'https://example.test/form' },
+      feedback: { notify: (tabId, value) => feedback.push({ tabId, value }) },
+    });
+    const element = buildElement({
+      role: 'button',
+      name: 'Save',
+      text: 'Save',
+      cdpSessionId: null,
+    });
+
+    await driver.execute(
+      {
+        actionId: 'click_feedback',
+        tabId: 7,
+        type: 'click',
+        target: createElementTarget(element),
+        risk: 'low',
+        expected: { type: 'page.stable', quietMs: 300 },
+      },
+      buildContext(element),
+    );
+
+    expect(feedback).toEqual([{ tabId: 7, value: { kind: 'click', x: 50, y: 20 } }]);
+  });
+
+  it('shows move and drag feedback for root-session pointer actions', async () => {
+    const transport = new StubActionTransport();
+    const feedback: PageActionFeedback[] = [];
+    const driver = new CdpActionDriver(transport, {
+      clock: { now: () => 1_000 },
+      tabs: { getUrl: async () => 'https://example.test/form' },
+      feedback: { notify: (_tabId, value) => feedback.push(value) },
+    });
+    const source = buildElement({
+      backendNodeId: 101,
+      role: 'button',
+      name: 'Source',
+      cdpSessionId: null,
+    });
+    const destination = buildElement({
+      backendNodeId: 202,
+      role: 'button',
+      name: 'Destination',
+      cdpSessionId: null,
+    });
+
+    await driver.execute(
+      {
+        actionId: 'hover_feedback',
+        tabId: 7,
+        type: 'hover',
+        target: createElementTarget(source),
+        risk: 'low',
+        expected: { type: 'page.stable', quietMs: 300 },
+      },
+      buildContext(source),
+    );
+    await driver.execute(
+      {
+        actionId: 'drag_feedback',
+        tabId: 7,
+        type: 'drag',
+        target: createElementTarget(source),
+        destination: createElementTarget(destination),
+        risk: 'low',
+        expected: { type: 'page.stable', quietMs: 300 },
+      },
+      buildContext(source, destination),
+    );
+
+    expect(feedback).toEqual([
+      { kind: 'move', x: 50, y: 20 },
+      { kind: 'drag', fromX: 50, fromY: 20, toX: 50, toY: 20 },
+    ]);
+  });
+
+  it('skips unprojected child-session feedback while keeping real input enabled', async () => {
+    const transport = new StubActionTransport();
+    const feedback: PageActionFeedback[] = [];
+    const driver = new CdpActionDriver(transport, {
+      clock: { now: () => 1_000 },
+      tabs: { getUrl: async () => 'https://example.test/frame' },
+      feedback: { notify: (_tabId, value) => feedback.push(value) },
+    });
+    const childElement = buildElement({ cdpSessionId: 'child_session' });
+
+    const evidence = await driver.execute(
+      {
+        actionId: 'child_click',
+        tabId: 7,
+        type: 'click',
+        target: createElementTarget(childElement),
+        risk: 'low',
+        expected: { type: 'page.stable', quietMs: 300 },
+      },
+      buildContext(childElement),
+    );
+
+    expect(feedback).toEqual([]);
+    expect(
+      transport.calls.filter((call) => call.method === 'Input.dispatchMouseEvent'),
+    ).toHaveLength(3);
+    expect(evidence.status).toBe('executed');
+  });
+
+  it('keeps CDP input and evidence successful when visual feedback throws', async () => {
+    const transport = new StubActionTransport();
+    const driver = new CdpActionDriver(transport, {
+      clock: { now: () => 1_000 },
+      tabs: { getUrl: async () => 'https://example.test/form' },
+      feedback: {
+        notify: () => {
+          throw new Error('Content script unavailable');
+        },
+      },
+    });
+    const element = buildElement({ cdpSessionId: null });
+
+    const evidence = await driver.execute(
+      {
+        actionId: 'feedback_failure',
+        tabId: 7,
+        type: 'click',
+        target: createElementTarget(element),
+        risk: 'low',
+        expected: { type: 'page.stable', quietMs: 300 },
+      },
+      buildContext(element),
+    );
+
+    expect(
+      transport.calls.filter((call) => call.method === 'Input.dispatchMouseEvent'),
+    ).toHaveLength(3);
+    expect(evidence).toMatchObject({
+      actionId: 'feedback_failure',
+      status: 'executed',
+    });
+  });
+
   it('uses a live box center and paired real mouse commands for click', async () => {
     const transport = new StubActionTransport();
     let now = 1_000;
@@ -76,7 +224,11 @@ describe('CdpActionDriver', () => {
       clock: { now: () => ++now },
       tabs: { getUrl: async () => 'https://example.test/form' },
     });
-    const element = buildElement({ role: 'button', name: 'Save', text: 'Save' });
+    const element = buildElement({
+      role: 'button',
+      name: 'Save',
+      text: 'Save',
+    });
 
     const evidence = await driver.execute(
       {
@@ -103,16 +255,32 @@ describe('CdpActionDriver', () => {
       },
       {
         method: 'Input.dispatchMouseEvent',
-        params: { type: 'mousePressed', x: 50, y: 20, button: 'left', clickCount: 1 },
+        params: {
+          type: 'mousePressed',
+          x: 50,
+          y: 20,
+          button: 'left',
+          clickCount: 1,
+        },
         sessionId: 'session_1',
       },
       {
         method: 'Input.dispatchMouseEvent',
-        params: { type: 'mouseReleased', x: 50, y: 20, button: 'left', clickCount: 1 },
+        params: {
+          type: 'mouseReleased',
+          x: 50,
+          y: 20,
+          button: 'left',
+          clickCount: 1,
+        },
         sessionId: 'session_1',
       },
     ]);
-    expect(evidence).toMatchObject({ driver: 'cdp', status: 'executed', actionId: 'click_1' });
+    expect(evidence).toMatchObject({
+      driver: 'cdp',
+      status: 'executed',
+      actionId: 'click_1',
+    });
   });
 
   it('focuses and replaces text with real keyboard selection plus Input.insertText', async () => {
@@ -162,8 +330,16 @@ describe('CdpActionDriver', () => {
       clock: { now: () => 1_000 },
       tabs: { getUrl: async () => 'https://example.test/form' },
     });
-    const source = buildElement({ backendNodeId: 101, role: 'button', name: 'Source' });
-    const destination = buildElement({ backendNodeId: 202, role: 'button', name: 'Destination' });
+    const source = buildElement({
+      backendNodeId: 101,
+      role: 'button',
+      name: 'Source',
+    });
+    const destination = buildElement({
+      backendNodeId: 202,
+      role: 'button',
+      name: 'Destination',
+    });
 
     await driver.execute(
       {
@@ -235,7 +411,11 @@ describe('CdpActionDriver', () => {
         target: createElementTarget(select),
         value: 'cn',
         risk: 'low',
-        expected: { type: 'element.value', target: createElementTarget(select), equals: 'cn' },
+        expected: {
+          type: 'element.value',
+          target: createElementTarget(select),
+          equals: 'cn',
+        },
       },
       buildContext(select),
     );
@@ -263,8 +443,14 @@ describe('CdpActionDriver', () => {
       clock: { now: () => 1_000 },
       tabs: { getUrl: async () => 'https://example.test/form' },
     });
-    const source = buildElement({ backendNodeId: 101, cdpSessionId: 'session_1' });
-    const destination = buildElement({ backendNodeId: 202, cdpSessionId: 'session_2' });
+    const source = buildElement({
+      backendNodeId: 101,
+      cdpSessionId: 'session_1',
+    });
+    const destination = buildElement({
+      backendNodeId: 202,
+      cdpSessionId: 'session_2',
+    });
 
     await expect(
       driver.execute(

@@ -1,4 +1,5 @@
 import { handlePageCommand } from '../page/browser-command-handler';
+import { mountActionFeedbackOverlay } from '../page/action-feedback/action-feedback-overlay';
 import { mountSelectionFeature } from '../page/selection/mount-selection-feature';
 
 interface PageContentGlobal {
@@ -13,5 +14,6 @@ if (pageGlobal.__chatBrowserXPageCommandsV1__ !== true) {
     void handlePageCommand(message).then(sendResponse);
     return true;
   });
+  mountActionFeedbackOverlay();
   mountSelectionFeature();
 }

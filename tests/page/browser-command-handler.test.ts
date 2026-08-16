@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import { handlePageCommand } from '../../src/page/browser-command-handler';
 
 describe('handlePageCommand', () => {
@@ -25,7 +25,11 @@ describe('handlePageCommand', () => {
         version: 1,
         requestId: 'req_observe',
         type: 'page.observe',
-        payload: { observationId: 'observation_1', tabId: 7, capturedAt: 1_000 },
+        payload: {
+          observationId: 'observation_1',
+          tabId: 7,
+          capturedAt: 1_000,
+        },
       },
       { document, window },
     );
@@ -54,7 +58,32 @@ describe('handlePageCommand', () => {
         },
         { document, window },
       ),
-    ).resolves.toMatchObject({ ok: false, error: { code: 'INVALID_PAGE_COMMAND' } });
+    ).resolves.toMatchObject({
+      ok: false,
+      error: { code: 'INVALID_PAGE_COMMAND' },
+    });
+  });
+
+  it('routes validated action feedback to the page overlay sink', async () => {
+    const show = vi.fn();
+
+    const response = await handlePageCommand(
+      {
+        version: 1,
+        requestId: 'feedback_click',
+        type: 'page.actionFeedback',
+        payload: { kind: 'click', x: 30, y: 40 },
+      },
+      { document, window, feedback: { show } },
+    );
+
+    expect(show).toHaveBeenCalledWith({ kind: 'click', x: 30, y: 40 });
+    expect(response).toMatchObject({
+      version: 1,
+      requestId: 'feedback_click',
+      ok: true,
+      data: { displayed: true },
+    });
   });
 
   it('rejects arbitrary script fields in the structured page action boundary', async () => {
@@ -64,11 +93,16 @@ describe('handlePageCommand', () => {
           version: 1,
           requestId: 'req_action',
           type: 'page.domAction',
-          payload: { action: { type: 'click', javascript: 'document.body.remove()' } },
+          payload: {
+            action: { type: 'click', javascript: 'document.body.remove()' },
+          },
         },
         { document, window },
       ),
-    ).resolves.toMatchObject({ ok: false, error: { code: 'INVALID_PAGE_COMMAND' } });
+    ).resolves.toMatchObject({
+      ok: false,
+      error: { code: 'INVALID_PAGE_COMMAND' },
+    });
   });
 
   it('correlates a valid action failure without replacing its stable error code', async () => {

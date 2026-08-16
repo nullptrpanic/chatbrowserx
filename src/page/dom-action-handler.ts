@@ -5,16 +5,52 @@ import type { ElementTarget } from '../browser/contracts/target';
 import { ActionExecutionError } from '../browser/act/action-errors';
 import { resolveTarget } from '../browser/locate/target-resolver';
 import { observeDocumentWithBindings } from '../browser/observe/dom-observer';
+import type { PageActionFeedback } from '../shared/protocol/message-types';
 import type { Clock } from '../shared/time';
 
 export interface DomActionEnvironment {
   readonly clock: Clock;
+  readonly feedback?: { show(feedback: PageActionFeedback): void };
   readonly window: Window;
 }
 
 interface LiveTarget {
   readonly observed: ObservedElement;
   readonly element: Element;
+}
+
+/** Projects an element's live center through accessible frames into the overlay viewport. */
+function elementCenter(
+  element: Element,
+  topView: Window,
+): { readonly x: number; readonly y: number } | null {
+  try {
+    const rect = element.getBoundingClientRect();
+    let point = { x: rect.left + rect.width / 2, y: rect.top + rect.height / 2 };
+    let currentView = element.ownerDocument.defaultView;
+    while (currentView !== null && currentView !== topView) {
+      const frame = currentView.frameElement;
+      if (frame === null) return null;
+      const frameRect = frame.getBoundingClientRect();
+      point = {
+        x: point.x + frameRect.left + frame.clientLeft,
+        y: point.y + frameRect.top + frame.clientTop,
+      };
+      currentView = frame.ownerDocument.defaultView;
+    }
+    return currentView === topView ? point : null;
+  } catch {
+    return null;
+  }
+}
+
+/** Reports optional visual feedback without allowing UI failures to alter action execution. */
+function notifyFeedback(environment: DomActionEnvironment, feedback: PageActionFeedback): void {
+  try {
+    environment.feedback?.show(feedback);
+  } catch {
+    // Visual feedback is best-effort and must not affect browser execution.
+  }
 }
 
 /** Resolves a durable target against a fresh DOM snapshot and returns its private live binding. */
@@ -137,10 +173,13 @@ export async function executeDomAction(
 
   switch (request.type) {
     case 'click': {
-      const clickable = target?.element as { click?: () => void } | undefined;
+      if (target === null) throw new ActionExecutionError('TARGET_NOT_FOUND', 'Target is missing.');
+      const clickable = target.element as { click?: () => void };
       if (clickable?.click === undefined) {
         throw new ActionExecutionError('ACTION_UNSUPPORTED', 'Target does not support click.');
       }
+      const point = elementCenter(target.element, environment.window);
+      if (point !== null) notifyFeedback(environment, { kind: 'click', x: point.x, y: point.y });
       clickable.click();
       break;
     }
@@ -178,12 +217,18 @@ export async function executeDomAction(
         throw new ActionExecutionError('ACTION_UNSUPPORTED', 'Target is not checkable.');
       }
       if ((target.element as HTMLInputElement).checked !== request.checked) {
+        const point = elementCenter(target.element, environment.window);
+        if (point !== null) notifyFeedback(environment, { kind: 'click', x: point.x, y: point.y });
         setNativeProperty(target.element, 'checked', request.checked);
         dispatchFormEvents(target.element, null);
       }
       break;
     case 'hover':
       if (target === null) throw new ActionExecutionError('TARGET_NOT_FOUND', 'Target is missing.');
+      {
+        const point = elementCenter(target.element, environment.window);
+        if (point !== null) notifyFeedback(environment, { kind: 'move', x: point.x, y: point.y });
+      }
       for (const type of ['mouseover', 'mouseenter', 'mousemove']) {
         target.element.dispatchEvent(mouseEvent(target.element, type));
       }
@@ -226,6 +271,17 @@ export async function executeDomAction(
     case 'drag': {
       if (target === null) throw new ActionExecutionError('TARGET_NOT_FOUND', 'Source is missing.');
       const destination = resolveLiveTarget(request.destination, snapshot);
+      const sourcePoint = elementCenter(target.element, environment.window);
+      const destinationPoint = elementCenter(destination.element, environment.window);
+      if (sourcePoint !== null && destinationPoint !== null) {
+        notifyFeedback(environment, {
+          kind: 'drag',
+          fromX: sourcePoint.x,
+          fromY: sourcePoint.y,
+          toX: destinationPoint.x,
+          toY: destinationPoint.y,
+        });
+      }
       target.element.dispatchEvent(dragEvent(target.element, 'dragstart'));
       destination.element.dispatchEvent(dragEvent(destination.element, 'dragenter'));
       const accepted = !destination.element.dispatchEvent(

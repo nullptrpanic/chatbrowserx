@@ -11,7 +11,7 @@
 | --------------------- | --------------------------------------------------- |
 | `src/entries`         | Manifest 入口、Service Worker 和依赖装配            |
 | `src/side-panel`      | 原生 Side Panel 的 React UI、轮询客户端和交互状态   |
-| `src/page`            | 隔离的截图选择层、选中文本气泡与页面命令            |
+| `src/page`            | 隔离的截图选择层、选中文本气泡、操作反馈与页面命令  |
 | `src/tasks`           | 任务状态、命令、协调、恢复、面板查询和截图/选区控制 |
 | `src/agent`           | 上下文、工具 schema、规划、重试、风险与可恢复执行器 |
 | `src/browser`         | 语义观察、目标解析、DOM/CDP 驱动、路由和验证        |
@@ -72,8 +72,10 @@ Side Panel 每 750 ms 请求一个经过 Zod 校验的完整快照。轮询避�
 
 每个对话最多存在一个未终止任务，后台在写入新消息前再次验证该约束，UI 同时锁定发送入口。选中文本 Ask AI 遇到忙碌会话时创建同标签页的新对话，避免覆盖暂停、待授权或待确认任务的恢复入口。
 
-选中文本与截图 overlay 使用 closed Shadow Root，统一登记到 overlay registry。浏览器截图前临时隐藏所有扩展 overlay，并在失败路径中恢复。
+选中文本、截图与 Agent 操作反馈 overlay 使用 closed Shadow Root，统一登记到 overlay registry。浏览器截图前临时隐藏所有扩展 overlay，并在失败路径中恢复。操作反馈层保持 `pointer-events: none`，只显示瞬态虚拟光标、点击水波纹和拖拽过程。
+
+DOM 点击、勾选、悬停和拖拽使用当前元素矩形，并将同源 frame 坐标逐层投影到顶层视口后通知页面反馈层；根 CDP session 复用实际 `dispatchMouseEvent` 坐标，经 `page.actionFeedback` 消息通知顶层页面。反馈发送或渲染失败不会改变动作 evidence 和验证。尚无确定顶层坐标投影的 CDP 子 session 跳过反馈，真实输入仍正常执行。
 
 ## 协议
 
-所有消息包含 `version`、`requestId`、可判别 `type` 和严格 payload。当前扩展协议覆盖连接/面板快照、聊天、会话清理、设置、任务命令、截图、页面功能安装和选中文本；页面命令只覆盖 ping、观察、截图选择、overlay 显隐和严格的结构化 DOM 动作。额外字段会被拒绝。
+所有消息包含 `version`、`requestId`、可判别 `type` 和严格 payload。当前扩展协议覆盖连接/面板快照、聊天、会话清理、设置、任务命令、截图、页面功能安装和选中文本；页面命令只覆盖 ping、观察、截图选择、overlay 显隐、有限坐标的 `page.actionFeedback` 和严格的结构化 DOM 动作。额外字段会被拒绝。

@@ -7,6 +7,18 @@ export interface Message<TType extends string, TPayload> {
   payload: TPayload;
 }
 
+export type PageActionFeedback =
+  | { readonly kind: 'move'; readonly x: number; readonly y: number }
+  | { readonly kind: 'click'; readonly x: number; readonly y: number }
+  | {
+      readonly kind: 'drag';
+      readonly fromX: number;
+      readonly fromY: number;
+      readonly toX: number;
+      readonly toY: number;
+    }
+  | { readonly kind: 'hide' };
+
 export type ExtensionMessage =
   | Message<'system.ping', Record<string, never>>
   | Message<'panel.getSnapshot', { tabId: number; conversationId?: string | undefined }>
@@ -49,7 +61,8 @@ export type PageCommand =
   | Message<'page.ping', Record<string, never>>
   | Message<'page.observe', { observationId: string; tabId: number; capturedAt: number }>
   | Message<'page.screenshot.select', Record<string, never>>
-  | Message<'page.overlays.setHidden', { hidden: boolean }>;
+  | Message<'page.overlays.setHidden', { hidden: boolean }>
+  | Message<'page.actionFeedback', PageActionFeedback>;
 
 export interface ExtensionError {
   code: string;

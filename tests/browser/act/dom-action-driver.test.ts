@@ -5,6 +5,7 @@ import { createElementTarget } from '../../../src/browser/contracts/target';
 import { ChromeDomActionPort, DomActionDriver } from '../../../src/browser/act/dom-action-driver';
 import { observeDocument } from '../../../src/browser/observe/dom-observer';
 import { executeDomAction } from '../../../src/page/dom-action-handler';
+import type { PageActionFeedback } from '../../../src/shared/protocol/message-types';
 
 /** Gives an element a deterministic visible box in jsdom. */
 function setRect(element: Element, x: number, y: number, width = 120, height = 32): void {
@@ -56,6 +57,188 @@ function createDriver(): DomActionDriver {
 }
 
 describe('DomActionDriver', () => {
+  it('shows click feedback at the live target center', async () => {
+    document.body.innerHTML = '<button>Save</button>';
+    const button = document.querySelector<HTMLButtonElement>('button');
+    if (button === null) throw new Error('Click fixture failed to initialize.');
+    setRect(button, 20, 40, 120, 32);
+    Object.defineProperty(document, 'elementFromPoint', {
+      configurable: true,
+      value: vi.fn(() => null),
+    });
+    const feedback: PageActionFeedback[] = [];
+
+    await executeDomAction(
+      document,
+      {
+        actionId: 'click_feedback',
+        tabId: 7,
+        type: 'click',
+        target: targetFor('Save'),
+        risk: 'low',
+        expected: { type: 'page.stable', quietMs: 300 },
+      },
+      {
+        clock: { now: () => 1_000 },
+        window,
+        feedback: { show: (value) => feedback.push(value) },
+      },
+    );
+
+    expect(feedback).toEqual([{ kind: 'click', x: 80, y: 56 }]);
+  });
+
+  it('shows move feedback for hover without adding feedback to keyboard actions', async () => {
+    document.body.innerHTML = '<button>Hover me</button><input aria-label="Keyboard" />';
+    const button = document.querySelector<HTMLButtonElement>('button');
+    const input = document.querySelector<HTMLInputElement>('input');
+    if (button === null || input === null) throw new Error('Hover fixture failed to initialize.');
+    setRect(button, 10, 20, 80, 40);
+    setRect(input, 10, 80, 80, 40);
+    Object.defineProperty(document, 'elementFromPoint', {
+      configurable: true,
+      value: vi.fn(() => null),
+    });
+    const feedback: PageActionFeedback[] = [];
+    const environment = {
+      clock: { now: () => 1_000 },
+      window,
+      feedback: { show: (value: PageActionFeedback) => feedback.push(value) },
+    };
+
+    await executeDomAction(
+      document,
+      {
+        actionId: 'hover_feedback',
+        tabId: 7,
+        type: 'hover',
+        target: targetFor('Hover me'),
+        risk: 'low',
+        expected: { type: 'page.stable', quietMs: 300 },
+      },
+      environment,
+    );
+    await executeDomAction(
+      document,
+      {
+        actionId: 'key_no_feedback',
+        tabId: 7,
+        type: 'pressKey',
+        target: targetFor('Keyboard'),
+        key: 'Enter',
+        risk: 'low',
+        expected: { type: 'page.stable', quietMs: 300 },
+      },
+      environment,
+    );
+
+    expect(feedback).toEqual([{ kind: 'move', x: 50, y: 40 }]);
+  });
+
+  it('shows click feedback only when a check action changes state', async () => {
+    document.body.innerHTML = '<label><input type="checkbox" />Accept</label>';
+    const checkbox = document.querySelector<HTMLInputElement>('input');
+    if (checkbox === null) throw new Error('Check fixture failed to initialize.');
+    setRect(checkbox, 20, 30, 20, 20);
+    Object.defineProperty(document, 'elementFromPoint', {
+      configurable: true,
+      value: vi.fn(() => null),
+    });
+    const feedback: PageActionFeedback[] = [];
+    const environment = {
+      clock: { now: () => 1_000 },
+      window,
+      feedback: { show: (value: PageActionFeedback) => feedback.push(value) },
+    };
+    const action: BrowserActionRequest = {
+      actionId: 'check_feedback',
+      tabId: 7,
+      type: 'check',
+      target: targetFor('Accept'),
+      checked: true,
+      risk: 'low',
+      expected: { type: 'page.stable', quietMs: 300 },
+    };
+
+    await executeDomAction(document, action, environment);
+    await executeDomAction(document, { ...action, actionId: 'check_unchanged' }, environment);
+
+    expect(feedback).toEqual([{ kind: 'click', x: 30, y: 40 }]);
+  });
+
+  it('shows drag feedback using the live source and destination centers', async () => {
+    document.body.innerHTML = '<button>Source</button><button>Destination</button>';
+    const [source, destination] = [...document.querySelectorAll('button')];
+    if (source === undefined || destination === undefined) {
+      throw new Error('Drag fixture failed to initialize.');
+    }
+    setRect(source, 10, 20, 40, 20);
+    setRect(destination, 200, 300, 80, 40);
+    destination.addEventListener('dragover', (event) => event.preventDefault());
+    Object.defineProperty(document, 'elementFromPoint', {
+      configurable: true,
+      value: vi.fn(() => null),
+    });
+    const feedback: PageActionFeedback[] = [];
+
+    await executeDomAction(
+      document,
+      {
+        actionId: 'drag_feedback',
+        tabId: 7,
+        type: 'drag',
+        target: targetFor('Source'),
+        destination: targetFor('Destination'),
+        risk: 'low',
+        expected: { type: 'page.stable', quietMs: 300 },
+      },
+      {
+        clock: { now: () => 1_000 },
+        window,
+        feedback: { show: (value) => feedback.push(value) },
+      },
+    );
+
+    expect(feedback).toEqual([{ kind: 'drag', fromX: 30, fromY: 30, toX: 240, toY: 320 }]);
+  });
+
+  it('keeps action evidence successful when visual feedback throws', async () => {
+    document.body.innerHTML = '<button>Save</button>';
+    const button = document.querySelector<HTMLButtonElement>('button');
+    if (button === null) throw new Error('Feedback failure fixture failed to initialize.');
+    setRect(button, 20, 40);
+    Object.defineProperty(document, 'elementFromPoint', {
+      configurable: true,
+      value: vi.fn(() => null),
+    });
+
+    const evidence = await executeDomAction(
+      document,
+      {
+        actionId: 'feedback_failure',
+        tabId: 7,
+        type: 'click',
+        target: targetFor('Save'),
+        risk: 'low',
+        expected: { type: 'page.stable', quietMs: 300 },
+      },
+      {
+        clock: { now: () => 1_000 },
+        window,
+        feedback: {
+          show: () => {
+            throw new Error('Overlay unavailable');
+          },
+        },
+      },
+    );
+
+    expect(evidence).toMatchObject({
+      actionId: 'feedback_failure',
+      status: 'executed',
+    });
+  });
+
   it('clicks, types, clears, selects, and checks through native DOM behavior', async () => {
     document.body.innerHTML = `
       <label for="message">Message</label><input id="message" />
@@ -172,7 +355,10 @@ describe('DomActionDriver', () => {
     keyboard.addEventListener('keydown', (event) => keyEvents.push(`down:${event.key}`));
     keyboard.addEventListener('keyup', (event) => keyEvents.push(`up:${event.key}`));
     const scrollBy = vi.fn();
-    Object.defineProperty(scroll, 'scrollBy', { configurable: true, value: scrollBy });
+    Object.defineProperty(scroll, 'scrollBy', {
+      configurable: true,
+      value: scrollBy,
+    });
     const dragEvents: string[] = [];
     source.addEventListener('dragstart', () => dragEvents.push('dragstart'));
     destination.addEventListener('dragenter', () => dragEvents.push('dragenter'));
@@ -223,7 +409,11 @@ describe('DomActionDriver', () => {
 
     expect(hoverEvents).toEqual(['mouseover']);
     expect(keyEvents).toEqual(['down:Enter', 'up:Enter']);
-    expect(scrollBy).toHaveBeenCalledWith({ left: 0, top: 300, behavior: 'auto' });
+    expect(scrollBy).toHaveBeenCalledWith({
+      left: 0,
+      top: 300,
+      behavior: 'auto',
+    });
     expect(dragEvents).toEqual(['dragstart', 'dragenter', 'dragover', 'drop', 'dragend']);
     expect(dragEvidence.status).toBe('executed');
   });
@@ -246,7 +436,9 @@ describe('DomActionDriver', () => {
       risk: 'low',
       expected: { type: 'page.stable', quietMs: 300 },
     };
-    await expect(driver.execute(wait)).resolves.toMatchObject({ status: 'unsupported' });
+    await expect(driver.execute(wait)).resolves.toMatchObject({
+      status: 'unsupported',
+    });
     await expect(
       driver.execute({
         actionId: 'drag_ignored',
@@ -304,7 +496,10 @@ describe('DomActionDriver', () => {
         version: 1,
         requestId: message.requestId,
         ok: false,
-        error: { code: 'TARGET_NOT_FOUND', message: 'Browser target could not be found.' },
+        error: {
+          code: 'TARGET_NOT_FOUND',
+          message: 'Browser target could not be found.',
+        },
       }),
     });
     const action: BrowserActionRequest = {
@@ -326,7 +521,9 @@ describe('DomActionDriver', () => {
       expected: { type: 'page.stable', quietMs: 300 },
     };
 
-    await expect(port.execute(action)).rejects.toMatchObject({ code: 'TARGET_NOT_FOUND' });
+    await expect(port.execute(action)).rejects.toMatchObject({
+      code: 'TARGET_NOT_FOUND',
+    });
   });
 
   it('updates a same-origin frame control without depending on top-window constructors', async () => {
@@ -362,11 +559,57 @@ describe('DomActionDriver', () => {
         target: targetFor('Frame Choice'),
         value: 'b',
         risk: 'low',
-        expected: { type: 'element.value', target: targetFor('Frame Choice'), equals: 'b' },
+        expected: {
+          type: 'element.value',
+          target: targetFor('Frame Choice'),
+          equals: 'b',
+        },
       },
       { clock: { now: () => 1_000 }, window },
     );
 
     expect(select).toHaveValue('b');
+  });
+
+  it('projects same-origin frame feedback into the top-level viewport', async () => {
+    document.body.innerHTML = '<iframe title="Embedded controls"></iframe>';
+    const frame = document.querySelector('iframe');
+    const frameDocument = frame?.contentDocument;
+    if (frame === null || frameDocument === null || frameDocument === undefined) {
+      throw new Error('Frame feedback fixture failed to initialize.');
+    }
+    setRect(frame, 100, 200, 400, 220);
+    frameDocument.body.innerHTML = '<button>Frame Save</button>';
+    const button = frameDocument.querySelector<HTMLButtonElement>('button');
+    if (button === null) throw new Error('Frame feedback button failed to initialize.');
+    setRect(button, 10, 20, 100, 40);
+    Object.defineProperty(document, 'elementFromPoint', {
+      configurable: true,
+      value: vi.fn(() => null),
+    });
+    Object.defineProperty(frameDocument, 'elementFromPoint', {
+      configurable: true,
+      value: vi.fn(() => null),
+    });
+    const feedback: PageActionFeedback[] = [];
+
+    await executeDomAction(
+      document,
+      {
+        actionId: 'frame_click_feedback',
+        tabId: 7,
+        type: 'click',
+        target: targetFor('Frame Save'),
+        risk: 'low',
+        expected: { type: 'page.stable', quietMs: 300 },
+      },
+      {
+        clock: { now: () => 1_000 },
+        window,
+        feedback: { show: (value) => feedback.push(value) },
+      },
+    );
+
+    expect(feedback).toEqual([{ kind: 'click', x: 160, y: 240 }]);
   });
 });

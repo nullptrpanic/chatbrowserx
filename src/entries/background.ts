@@ -20,6 +20,7 @@ import { ChromeSettingsStore } from '../persistence/settings-store';
 import { IndexedDbTaskRepository } from '../persistence/task-repository';
 import { ContentScriptInstaller } from '../platform/chrome/content-script-installer';
 import { captureVisibleTab } from '../platform/chrome/capture-visible-tab';
+import { ChromeActionFeedbackPort } from '../platform/chrome/action-feedback-port';
 import { ChromeDebuggerTransport } from '../platform/chrome/debugger-transport';
 import { createMessageRouter, type MessageRouter } from '../platform/chrome/message-router';
 import { ChromePageObservationSource } from '../platform/chrome/page-observation-source';
@@ -153,7 +154,13 @@ async function createBackgroundServices(
     debugger: debuggerTransport,
     drivers: {
       dom: new DomActionDriver(),
-      cdp: new CdpActionDriver(debuggerTransport),
+      cdp: new CdpActionDriver(debuggerTransport, {
+        clock: systemClock,
+        feedback: new ChromeActionFeedbackPort(),
+        tabs: {
+          getUrl: async (tabId) => (await chrome.tabs.get(tabId)).url ?? '',
+        },
+      }),
     },
     router: new DriverRouter(outcomes),
     outcomes,

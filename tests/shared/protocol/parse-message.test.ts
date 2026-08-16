@@ -32,7 +32,12 @@ describe('parseExtensionMessage', () => {
     ['task.cancel', { taskId: 'task_1' }],
   ])('accepts the supported %s command', (type, payload) => {
     expect(
-      parseExtensionMessage({ version: 1, requestId: 'req_supported', type, payload }),
+      parseExtensionMessage({
+        version: 1,
+        requestId: 'req_supported',
+        type,
+        payload,
+      }),
     ).toMatchObject({ type, payload });
   });
 
@@ -95,14 +100,23 @@ describe('parseExtensionMessage', () => {
 describe('parsePageCommand', () => {
   it('accepts only the page ping and bounded observation commands', () => {
     expect(
-      parsePageCommand({ version: 1, requestId: 'req_ping', type: 'page.ping', payload: {} }),
+      parsePageCommand({
+        version: 1,
+        requestId: 'req_ping',
+        type: 'page.ping',
+        payload: {},
+      }),
     ).toMatchObject({ type: 'page.ping' });
     expect(
       parsePageCommand({
         version: 1,
         requestId: 'req_observe',
         type: 'page.observe',
-        payload: { observationId: 'observation_1', tabId: 7, capturedAt: 1_000 },
+        payload: {
+          observationId: 'observation_1',
+          tabId: 7,
+          capturedAt: 1_000,
+        },
       }),
     ).toMatchObject({ type: 'page.observe' });
   });
@@ -122,6 +136,45 @@ describe('parsePageCommand', () => {
         requestId: 'req_page',
         type: 'page.ping',
         payload: { accessToken: 'must-not-be-accepted' },
+      }),
+    ).toThrow(/invalid page command/i);
+  });
+
+  it.each([
+    ['move', { kind: 'move', x: 30, y: 40 }],
+    ['click', { kind: 'click', x: 30, y: 40 }],
+    ['drag', { kind: 'drag', fromX: 10, fromY: 20, toX: 30, toY: 40 }],
+    ['hide', { kind: 'hide' }],
+  ])('accepts the %s action-feedback variant', (_kind, payload) => {
+    expect(
+      parsePageCommand({
+        version: 1,
+        requestId: 'feedback_valid',
+        type: 'page.actionFeedback',
+        payload,
+      }),
+    ).toMatchObject({ type: 'page.actionFeedback', payload });
+  });
+
+  it.each([
+    { kind: 'move', x: Number.NaN, y: 10 },
+    { kind: 'click', x: 10, y: Number.POSITIVE_INFINITY },
+    {
+      kind: 'drag',
+      fromX: 10,
+      fromY: 20,
+      toX: Number.NEGATIVE_INFINITY,
+      toY: 40,
+    },
+    { kind: 'unknown', x: 10, y: 20 },
+    { kind: 'hide', unexpected: true },
+  ])('rejects malformed action feedback %#', (payload) => {
+    expect(() =>
+      parsePageCommand({
+        version: 1,
+        requestId: 'feedback_invalid',
+        type: 'page.actionFeedback',
+        payload,
       }),
     ).toThrow(/invalid page command/i);
   });
