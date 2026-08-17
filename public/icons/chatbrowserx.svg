@@ -1,0 +1,17 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" role="img" aria-label="ChatBrowserX">
+  <defs>
+    <linearGradient id="background" x1="92" y1="56" x2="424" y2="456" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#4D7FF0"/>
+      <stop offset="1" stop-color="#2859CC"/>
+    </linearGradient>
+    <radialGradient id="glow" cx="0" cy="0" r="1" gradientTransform="translate(170 126) rotate(48) scale(362)" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#FFFFFF" stop-opacity="0.18"/>
+      <stop offset="1" stop-color="#FFFFFF" stop-opacity="0"/>
+    </radialGradient>
+  </defs>
+  <rect x="20" y="20" width="472" height="472" rx="116" fill="url(#background)"/>
+  <rect x="20" y="20" width="472" height="472" rx="116" fill="url(#glow)"/>
+  <path d="M236 93C248 170 278 200 357 212C278 224 248 254 236 331C224 254 194 224 115 212C194 200 224 170 236 93Z" fill="#FFFFFF"/>
+  <path d="M366 98C370 126 381 137 409 141C381 145 370 156 366 184C362 156 351 145 323 141C351 137 362 126 366 98Z" fill="#FFFFFF" fill-opacity="0.92"/>
+  <circle cx="363" cy="353" r="24" fill="#FFFFFF" fill-opacity="0.92"/>
+</svg>
