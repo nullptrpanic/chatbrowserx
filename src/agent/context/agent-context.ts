@@ -1,18 +1,21 @@
 import type { AttachmentRecord } from '../../attachments/attachment-types';
 import type { AttachmentRepository } from '../../persistence/attachment-repository';
 import type { ConversationRepository } from '../../persistence/conversation-repository';
+import type { TaskRepository } from '../../persistence/task-repository';
 import type { ModelInputItem, ModelMessageContent } from '../../providers/provider-types';
-import type { Checkpoint, CompletedToolResult } from '../../tasks/checkpoint-types';
+import type { Checkpoint } from '../../tasks/checkpoint-types';
+import type { ContinuationItem } from '../../tasks/continuation-types';
 import type { MessageRecord } from '../../tasks/message-types';
 import type { TaskRun } from '../../tasks/task-types';
 import {
-  MAX_COMPLETED_TOOL_OUTPUT_CHARACTERS,
   MAX_MODEL_IMAGE_BYTES,
   MAX_MODEL_IMAGE_COUNT,
   MAX_MODEL_IMAGE_TOTAL_BYTES,
 } from './context-budget';
 
 const APPROVED_IMAGE_TYPES = new Set(['image/gif', 'image/jpeg', 'image/png', 'image/webp']);
+export const RUNTIME_SUPPLEMENT_PREFIX =
+  'Additional information supplied while the task was running:';
 
 export interface AgentContextInput {
   readonly task: TaskRun;
@@ -23,6 +26,7 @@ export interface AgentContextInput {
 
 export interface AgentContextDependencies {
   readonly conversations: Pick<ConversationRepository, 'listMessages'>;
+  readonly tasks: Pick<TaskRepository, 'listByConversation'>;
   readonly attachments: Pick<AttachmentRepository, 'get'>;
 }
 
@@ -31,36 +35,53 @@ export interface AgentContext {
   readonly input: readonly ModelInputItem[];
 }
 
-/** Selects the persisted user message that created the current task. */
+/** Selects the persisted ordinary user message that created one task. */
 function currentUserMessage(
   messages: readonly MessageRecord[],
   taskId: string,
 ): MessageRecord | undefined {
   return messages.findLast(
     (message) =>
-      message.taskId === taskId && message.role === 'user' && message.status === 'complete',
+      message.kind === 'conversation' &&
+      message.taskId === taskId &&
+      message.role === 'user' &&
+      message.status === 'complete',
   );
 }
 
-/** Selects the newest completed conversational turns without replaying the current task. */
+/** Selects complete visible messages only from successful historical WorkSessions. */
 function selectedHistoryMessages(
   messages: readonly MessageRecord[],
-  taskId: string,
+  tasks: readonly TaskRun[],
+  activeWorkSessionId: string,
   limit: number,
 ): readonly MessageRecord[] {
-  if (!Number.isInteger(limit) || limit < 1 || limit > 200) {
+  if (!Number.isInteger(limit) || limit < 1 || limit > 50) {
     throw new Error('History message limit is invalid.');
   }
+  const tasksById = new Map(tasks.map((task) => [task.id, task]));
+  const completedWorkSessions = new Set(
+    tasks.filter((task) => task.status === 'completed').map((task) => task.workSessionId),
+  );
   const selected = messages
-    .filter(
-      (message) =>
-        message.taskId !== taskId &&
-        message.status === 'complete' &&
-        (message.role === 'user' || message.role === 'assistant'),
-    )
+    .filter((message) => {
+      if (
+        message.kind !== 'conversation' ||
+        message.taskId === null ||
+        message.status !== 'complete' ||
+        (message.role !== 'user' && message.role !== 'assistant')
+      ) {
+        return false;
+      }
+      const owner = tasksById.get(message.taskId);
+      return (
+        owner !== undefined &&
+        owner.workSessionId !== activeWorkSessionId &&
+        completedWorkSessions.has(owner.workSessionId)
+      );
+    })
     .slice(-limit);
 
-  // Avoid starting Provider context with an assistant reply whose user turn was trimmed away.
   return selected[0]?.role === 'assistant' ? selected.slice(1) : selected;
 }
 
@@ -121,54 +142,50 @@ async function loadImageBatch(
   return { records, bytes: totalBytes };
 }
 
-/** Materializes current images first, then complete historical batches from newest to oldest. */
+/** Materializes active image batches first, then successful history from newest to oldest. */
 async function resolveConversationImages(
-  current: MessageRecord,
+  active: readonly MessageRecord[],
   history: readonly MessageRecord[],
   attachments: Pick<AttachmentRepository, 'get'>,
-): Promise<{
-  readonly current: readonly string[];
-  readonly history: ReadonlyMap<string, readonly string[]>;
-}> {
-  const currentIds = [...new Set(current.attachmentIds)];
-  if (currentIds.length > MAX_MODEL_IMAGE_COUNT) {
-    throw new Error('Referenced image attachment is invalid.');
-  }
-  const currentBatch = await loadImageBatch(currentIds, attachments);
-  if (currentBatch.bytes > MAX_MODEL_IMAGE_TOTAL_BYTES) {
-    throw new Error('Referenced image attachment is invalid.');
-  }
-  const currentImages = await Promise.all(currentBatch.records.map(attachmentDataUrl));
+): Promise<ReadonlyMap<string, readonly string[]>> {
+  let remainingCount = MAX_MODEL_IMAGE_COUNT;
+  let remainingBytes = MAX_MODEL_IMAGE_TOTAL_BYTES;
+  const images = new Map<string, readonly string[]>();
 
-  let remainingCount = MAX_MODEL_IMAGE_COUNT - currentBatch.records.length;
-  let remainingBytes = MAX_MODEL_IMAGE_TOTAL_BYTES - currentBatch.bytes;
-  const historicalImages = new Map<string, readonly string[]>();
-  for (let index = history.length - 1; index >= 0 && remainingCount > 0; index -= 1) {
-    const message = history[index];
-    if (!message || message.role !== 'user' || message.attachmentIds.length === 0) continue;
-    const ids = [...new Set(message.attachmentIds)];
-    if (ids.length > remainingCount) continue;
+  for (const group of [active, history] as const) {
+    for (let index = group.length - 1; index >= 0 && remainingCount > 0; index -= 1) {
+      const message = group[index];
+      if (!message || message.role !== 'user' || message.attachmentIds.length === 0) continue;
+      const ids = [...new Set(message.attachmentIds)];
+      if (ids.length > MAX_MODEL_IMAGE_COUNT) {
+        throw new Error('Referenced image attachment is invalid.');
+      }
+      if (ids.length > remainingCount) continue;
 
-    const batch = await loadImageBatch(ids, attachments);
-    if (batch.bytes > remainingBytes) continue;
-    historicalImages.set(message.id, await Promise.all(batch.records.map(attachmentDataUrl)));
-    remainingCount -= batch.records.length;
-    remainingBytes -= batch.bytes;
+      const batch = await loadImageBatch(ids, attachments);
+      if (batch.bytes > remainingBytes) continue;
+      images.set(message.id, await Promise.all(batch.records.map(attachmentDataUrl)));
+      remainingCount -= batch.records.length;
+      remainingBytes -= batch.bytes;
+    }
   }
-
-  return { current: currentImages, history: historicalImages };
+  return images;
 }
 
-/** Converts one stored conversational message to normalized Provider input. */
+/** Converts one stored message to normalized Provider input. */
 function modelMessage(
   message: MessageRecord,
   images: readonly string[] = [],
 ): ModelInputItem | undefined {
   const content: ModelMessageContent[] = [];
-  if (message.text.length > 0) {
+  const text =
+    message.kind === 'supplement'
+      ? `${RUNTIME_SUPPLEMENT_PREFIX}${message.text.length === 0 ? '' : `\n\n${message.text}`}`
+      : message.text;
+  if (text.length > 0) {
     content.push({
       type: message.role === 'assistant' ? 'output_text' : 'input_text',
-      text: message.text,
+      text,
     });
   }
   if (message.role === 'user') {
@@ -182,61 +199,161 @@ function modelMessage(
   return { type: 'message', role: message.role, content };
 }
 
-/** Keeps the newest completed tool details under a bounded recovery context. */
-function boundedToolResults(
-  results: readonly CompletedToolResult[],
-): readonly CompletedToolResult[] {
-  const selected: CompletedToolResult[] = [];
-  let remaining = MAX_COMPLETED_TOOL_OUTPUT_CHARACTERS;
-  for (let index = results.length - 1; index >= 0 && remaining > 0; index -= 1) {
-    const result = results[index];
-    if (!result) continue;
-    const size = result.argumentsJson.length + result.output.length;
-    if (size > remaining) continue;
-    selected.push(result);
-    remaining -= size;
+/** Adds the legacy current user and completed tools when an old checkpoint lacks ordered items. */
+function continuationItems(
+  checkpoint: Checkpoint,
+  messages: readonly MessageRecord[],
+  task: TaskRun,
+): readonly ContinuationItem[] {
+  const items = [...checkpoint.continuationItems];
+  if (!items.some((item) => item.type === 'message_ref')) {
+    const userMessage = currentUserMessage(messages, task.id);
+    if (userMessage === undefined) {
+      throw new Error('Current task user message is missing.');
+    }
+    items.unshift({ type: 'message_ref', messageId: userMessage.id });
   }
-  return selected.reverse();
+  if (
+    checkpoint.completedToolResults.length > 0 &&
+    !items.some((item) => item.type === 'function_call')
+  ) {
+    for (const result of checkpoint.completedToolResults) {
+      items.push(
+        {
+          type: 'function_call',
+          callId: result.callId,
+          name: result.toolName,
+          argumentsJson: result.argumentsJson,
+        },
+        {
+          type: 'function_call_output',
+          callId: result.callId,
+          output: result.output,
+          resultRef: result.resultRef,
+        },
+      );
+    }
+  }
+  return items;
 }
 
-/** Builds Provider input from bounded persisted history, the current user turn, and recovery tools. */
+/** Validates message ownership and function-call ordering before provider materialization. */
+function validateContinuation(
+  items: readonly ContinuationItem[],
+  checkpoint: Checkpoint,
+  task: TaskRun,
+  messagesById: ReadonlyMap<string, MessageRecord>,
+  tasksById: ReadonlyMap<string, TaskRun>,
+): readonly MessageRecord[] {
+  const activeMessages: MessageRecord[] = [];
+  const seenMessages = new Set<string>();
+  const seenCalls = new Set<string>();
+  let unresolvedCall: Extract<ContinuationItem, { type: 'function_call' }> | null = null;
+
+  for (const item of items) {
+    if (item.type === 'message_ref') {
+      if (unresolvedCall !== null || seenMessages.has(item.messageId)) {
+        throw new Error('WorkSession continuation order is invalid.');
+      }
+      const message = messagesById.get(item.messageId);
+      const owner = message?.taskId === null ? undefined : tasksById.get(message?.taskId ?? '');
+      const validConversationMessage =
+        message?.kind === 'conversation' &&
+        ((message.role === 'user' && message.status === 'complete') ||
+          (message.role === 'assistant' &&
+            (message.status === 'complete' || message.status === 'interrupted')));
+      const validSupplement =
+        message?.kind === 'supplement' && message.role === 'user' && message.status === 'complete';
+      if (
+        message === undefined ||
+        owner === undefined ||
+        message.conversationId !== task.conversationId ||
+        owner.workSessionId !== task.workSessionId ||
+        (!validConversationMessage && !validSupplement)
+      ) {
+        throw new Error('WorkSession message reference is invalid.');
+      }
+      seenMessages.add(item.messageId);
+      activeMessages.push(message);
+      continue;
+    }
+    if (item.type === 'function_call') {
+      if (unresolvedCall !== null || seenCalls.has(item.callId)) {
+        throw new Error('WorkSession tool order is invalid.');
+      }
+      unresolvedCall = item;
+      seenCalls.add(item.callId);
+      continue;
+    }
+    if (unresolvedCall === null || unresolvedCall.callId !== item.callId) {
+      throw new Error('WorkSession tool output is invalid.');
+    }
+    unresolvedCall = null;
+  }
+
+  if (unresolvedCall === null) {
+    if (checkpoint.pendingToolCall !== null) {
+      throw new Error('Pending tool checkpoint is invalid.');
+    }
+  } else if (
+    checkpoint.pendingToolCall?.callId !== unresolvedCall.callId ||
+    checkpoint.pendingToolCall.name !== unresolvedCall.name ||
+    checkpoint.pendingToolCall.argumentsJson !== unresolvedCall.argumentsJson
+  ) {
+    throw new Error('Pending tool checkpoint is invalid.');
+  }
+  return activeMessages;
+}
+
+/** Builds Provider input from successful history and the exact active WorkSession checkpoint. */
 export async function buildAgentContext(
   context: AgentContextInput,
   dependencies: AgentContextDependencies,
 ): Promise<AgentContext> {
-  const messages = await dependencies.conversations.listMessages(context.task.conversationId);
-  const userMessage = currentUserMessage(messages, context.task.id);
-  if (userMessage === undefined) {
-    throw new Error('Current task user message is missing.');
-  }
-  const history = selectedHistoryMessages(messages, context.task.id, context.historyMessageLimit);
-  const images = await resolveConversationImages(userMessage, history, dependencies.attachments);
+  const [messages, tasks] = await Promise.all([
+    dependencies.conversations.listMessages(context.task.conversationId),
+    dependencies.tasks.listByConversation(context.task.conversationId),
+  ]);
+  const tasksById = new Map(tasks.map((task) => [task.id, task]));
+  const messagesById = new Map(messages.map((message) => [message.id, message]));
+  const history = selectedHistoryMessages(
+    messages,
+    tasks,
+    context.task.workSessionId,
+    context.historyMessageLimit,
+  );
+  const orderedItems = continuationItems(context.checkpoint, messages, context.task);
+  const activeMessages = validateContinuation(
+    orderedItems,
+    context.checkpoint,
+    context.task,
+    messagesById,
+    tasksById,
+  );
+  const images = await resolveConversationImages(activeMessages, history, dependencies.attachments);
 
   const input: ModelInputItem[] = [];
   for (const message of history) {
-    const item = modelMessage(message, images.history.get(message.id));
+    const item = modelMessage(message, images.get(message.id));
     if (item) input.push(item);
   }
-  const currentItem = modelMessage(userMessage, images.current);
-  if (currentItem) input.push(currentItem);
-  for (const result of boundedToolResults(context.checkpoint.completedToolResults)) {
-    input.push(
-      {
+  for (const item of orderedItems) {
+    if (item.type === 'message_ref') {
+      const message = messagesById.get(item.messageId);
+      if (message === undefined) throw new Error('WorkSession message reference is invalid.');
+      const modelItem = modelMessage(message, images.get(message.id));
+      if (modelItem) input.push(modelItem);
+    } else if (item.type === 'function_call') {
+      input.push({
         type: 'function_call',
-        callId: result.callId,
-        name: result.toolName,
-        argumentsJson: result.argumentsJson,
-      },
-      {
-        type: 'function_call_output',
-        callId: result.callId,
-        output: result.output,
-      },
-    );
+        callId: item.callId,
+        name: item.name,
+        argumentsJson: item.argumentsJson,
+      });
+    } else {
+      input.push({ type: 'function_call_output', callId: item.callId, output: item.output });
+    }
   }
 
-  return {
-    systemPrompt: context.customSystemPrompt,
-    input,
-  };
+  return { systemPrompt: context.customSystemPrompt, input };
 }

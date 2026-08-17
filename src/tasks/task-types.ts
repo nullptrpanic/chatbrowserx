@@ -1,4 +1,4 @@
-import type { ConversationId, TaskId } from '../shared/ids';
+import type { ConversationId, TaskId, WorkSessionId } from '../shared/ids';
 import type { TaskError } from './task-errors';
 
 export type TaskStatus =
@@ -13,6 +13,7 @@ export interface TaskLease {
 
 export interface TaskRun {
   readonly id: TaskId;
+  readonly workSessionId: WorkSessionId;
   readonly conversationId: ConversationId;
   readonly tabId: number | null;
   readonly goal: string;
@@ -26,6 +27,10 @@ export interface TaskRun {
 
 export type TaskEventType =
   | 'planning.started'
+  | 'reasoning.summary-recorded'
+  | 'tool.call-recorded'
+  | 'tool.result-recorded'
+  | 'task.supplements-applied'
   | 'task.auth-required'
   | 'task.paused'
   | 'task.resumed'
@@ -49,6 +54,7 @@ export interface TaskEvent {
   readonly reason: string;
   readonly at: number;
   readonly error: TaskError | null;
+  readonly reasoningSummary?: string | undefined;
 }
 
 /**

@@ -31,6 +31,8 @@ function buildSnapshot(): TaskSnapshot {
     sequence: 0,
     taskStatus: 'queued',
     completedToolResults: [],
+    continuationItems: [],
+    pendingToolCall: null,
     createdAt: task.createdAt,
   };
   return { task, checkpoint, events: [] };
@@ -42,6 +44,7 @@ function buildSnapshot(): TaskSnapshot {
 function buildCommands(snapshot: TaskSnapshot): TaskCommandPort {
   return {
     create: vi.fn(async () => snapshot),
+    continueCancelled: vi.fn(async () => snapshot),
     getSnapshot: vi.fn(async () => snapshot),
     pause: vi.fn(async () => snapshot),
     resume: vi.fn(async () => snapshot),
@@ -67,6 +70,7 @@ function buildPanel() {
     language: 'system',
     historyMessageLimit: 50,
     hasCodexToken: false,
+    hasTavilyKey: false,
   };
   const editableSettings: PanelEditableSettings = {
     model: settings.model,
@@ -75,6 +79,7 @@ function buildPanel() {
     language: settings.language,
     historyMessageLimit: settings.historyMessageLimit,
     codexAccessToken: 'saved-token',
+    tavilyKey: 'saved-tavily-key',
   };
   const snapshot: PanelSnapshot = {
     generatedAt: 1_000,
@@ -97,10 +102,11 @@ function buildPanel() {
   return {
     getSnapshot: vi.fn(async () => snapshot),
     submit: vi.fn(async () => buildSnapshot()),
+    supplement: vi.fn(async () => ({ accepted: true as const, id: 'supplement_1' })),
     openImagePreview: vi.fn(async () => ({ opened: true as const })),
     clearConversation: vi.fn(async () => ({ deletedAttachments: 0 })),
     getSettings: vi.fn(async () => editableSettings),
-    saveSettings: vi.fn(async () => ({ ...settings, hasCodexToken: true })),
+    saveSettings: vi.fn(async () => ({ ...settings, hasCodexToken: true, hasTavilyKey: true })),
   };
 }
 
@@ -248,6 +254,7 @@ describe('createMessageRouter', () => {
           systemPrompt: '',
           language: 'zh-CN',
           codexAccessToken: 'must-not-be-stored',
+          tavilyKey: 'must-not-be-stored',
         },
       },
       { senderTabId: 7 },
@@ -434,8 +441,19 @@ describe('createMessageRouter', () => {
       type: 'chat.submit',
       payload: { tabId: 7, text: 'Do it', attachmentIds: [] },
     });
+    await router({
+      version: PROTOCOL_VERSION,
+      requestId: 'req_supplement',
+      type: 'chat.supplement',
+      payload: { taskId: 'task_1', text: 'Use official sources', attachmentIds: [] },
+    });
 
     expect(panel.getSnapshot).toHaveBeenCalledWith(7, undefined);
     expect(panel.submit).toHaveBeenCalledWith({ tabId: 7, text: 'Do it', attachmentIds: [] });
+    expect(panel.supplement).toHaveBeenCalledWith({
+      taskId: 'task_1',
+      text: 'Use official sources',
+      attachmentIds: [],
+    });
   });
 });

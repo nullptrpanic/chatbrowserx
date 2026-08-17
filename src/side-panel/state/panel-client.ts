@@ -211,6 +211,19 @@ export class PanelClient {
     await this.refresh();
   }
 
+  /** Queues text or images for the next safe Agent Loop boundary of the running task. */
+  async supplement(text: string, attachmentIds: readonly string[]): Promise<void> {
+    const taskId = this.#state.snapshot?.task?.id;
+    if (taskId === undefined) throw new Error('No active task is available for supplementation.');
+    await this.#send({
+      version: PROTOCOL_VERSION,
+      requestId: requestId(),
+      type: 'chat.supplement',
+      payload: { taskId, text, attachmentIds },
+    });
+    await this.refresh();
+  }
+
   /** Captures a viewport or selected region and returns its new attachment identifier. */
   async captureScreenshot(mode: 'viewport' | 'region'): Promise<string | null> {
     const data = await this.#send({

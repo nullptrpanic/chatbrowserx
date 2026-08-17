@@ -3,12 +3,14 @@ import { buildAgentContext } from '../../../src/agent/context/agent-context';
 import { IMAGE_POLICY } from '../../../src/attachments/attachment-policy';
 import type { AttachmentRepository } from '../../../src/persistence/attachment-repository';
 import type { ConversationRepository } from '../../../src/persistence/conversation-repository';
+import type { TaskRepository } from '../../../src/persistence/task-repository';
 import type { Checkpoint } from '../../../src/tasks/checkpoint-types';
 import type { MessageRecord } from '../../../src/tasks/message-types';
 import type { TaskRun } from '../../../src/tasks/task-types';
 
 const TASK: TaskRun = {
   id: 'task_1',
+  workSessionId: 'workSession_active',
   conversationId: 'conversation_1',
   tabId: 7,
   goal: 'Find the safest checkout option',
@@ -34,6 +36,8 @@ const CHECKPOINT: Checkpoint = {
       resultRef: 'evidence_1',
     },
   ],
+  continuationItems: [],
+  pendingToolCall: null,
   createdAt: 200,
 };
 
@@ -43,6 +47,7 @@ function message(
 ): MessageRecord {
   return {
     id: input.id,
+    kind: input.kind ?? 'conversation',
     conversationId: 'conversation_1',
     taskId: input.taskId ?? null,
     role: input.role,
@@ -63,9 +68,43 @@ function conversationRepository(messages: MessageRecord[]): ConversationReposito
     listByTab: vi.fn(async () => []),
     listMessages: vi.fn(async () => messages),
     appendMessage: vi.fn(async () => undefined),
+    appendSupplement: vi.fn(async () => undefined),
     updateMessage: vi.fn(async () => undefined),
     clearConversation: vi.fn(async () => undefined),
   };
+}
+
+/** Infers successful historical sessions while keeping the current task active. */
+function taskRepository(
+  messages: readonly MessageRecord[],
+  overrides: readonly TaskRun[] = [],
+): Pick<TaskRepository, 'listByConversation'> {
+  const overriddenIds = new Set(overrides.map(({ id }) => id));
+  const inferred = [
+    ...new Set(messages.flatMap((item) => (item.taskId === null ? [] : [item.taskId]))),
+  ]
+    .filter((taskId) => taskId !== TASK.id && !overriddenIds.has(taskId))
+    .map((taskId, index): TaskRun => ({
+      ...TASK,
+      id: taskId,
+      workSessionId: `workSession_${taskId}`,
+      status: 'completed',
+      createdAt: 10 + index,
+      updatedAt: 20 + index,
+      checkpointId: `checkpoint_${taskId}`,
+    }));
+  return {
+    listByConversation: vi.fn(async () => [...inferred, ...overrides, TASK]),
+  };
+}
+
+/** Builds all ports required by WorkSession-aware context materialization. */
+function contextDependencies(
+  messages: MessageRecord[],
+  attachments: Pick<AttachmentRepository, 'get'>,
+  tasks: Pick<TaskRepository, 'listByConversation'> = taskRepository(messages),
+) {
+  return { conversations: conversationRepository(messages), attachments, tasks };
 }
 
 describe('buildAgentContext', () => {
@@ -138,7 +177,7 @@ describe('buildAgentContext', () => {
         customSystemPrompt: 'Prefer primary sources.',
         historyMessageLimit: 2,
       },
-      { conversations: conversationRepository(messages), attachments },
+      contextDependencies(messages, attachments),
     );
 
     expect(context.systemPrompt).toBe('Prefer primary sources.');
@@ -190,12 +229,10 @@ describe('buildAgentContext', () => {
         customSystemPrompt: '',
         historyMessageLimit: 50,
       },
-      {
-        conversations: conversationRepository([
-          message({ id: 'current', taskId: 'task_1', role: 'user', text: 'Hello model.' }),
-        ]),
-        attachments: { get: attachmentGet },
-      },
+      contextDependencies(
+        [message({ id: 'current', taskId: 'task_1', role: 'user', text: 'Hello model.' })],
+        { get: attachmentGet },
+      ),
     );
 
     expect(context.input).toEqual([
@@ -217,12 +254,10 @@ describe('buildAgentContext', () => {
           customSystemPrompt: '',
           historyMessageLimit: 50,
         },
-        {
-          conversations: conversationRepository([
-            message({ id: 'old', taskId: 'task_old', role: 'user', text: 'Old task input' }),
-          ]),
-          attachments: { get: vi.fn(async () => undefined) },
-        },
+        contextDependencies(
+          [message({ id: 'old', taskId: 'task_old', role: 'user', text: 'Old task input' })],
+          { get: vi.fn(async () => undefined) },
+        ),
       ),
     ).rejects.toThrow('Current task user message is missing.');
   });
@@ -262,7 +297,7 @@ describe('buildAgentContext', () => {
           customSystemPrompt: '',
           historyMessageLimit: 50,
         },
-        { conversations: conversationRepository(messages), attachments },
+        contextDependencies(messages, attachments),
       ),
     ).rejects.toThrow(/attachment is invalid/i);
   });
@@ -310,7 +345,7 @@ describe('buildAgentContext', () => {
         customSystemPrompt: '',
         historyMessageLimit: 50,
       },
-      { conversations: conversationRepository(messages), attachments },
+      contextDependencies(messages, attachments),
     );
     const imageParts = context.input.flatMap((item) =>
       item.type === 'message' ? item.content.filter((part) => part.type === 'input_image') : [],
@@ -330,8 +365,8 @@ describe('buildAgentContext', () => {
         customSystemPrompt: '',
         historyMessageLimit: 1,
       },
-      {
-        conversations: conversationRepository([
+      contextDependencies(
+        [
           message({
             id: 'long-history',
             taskId: 'task_old',
@@ -346,9 +381,9 @@ describe('buildAgentContext', () => {
             text: 'Current follow-up',
             createdAt: 200,
           }),
-        ]),
-        attachments: { get: vi.fn(async () => undefined) },
-      },
+        ],
+        { get: vi.fn(async () => undefined) },
+      ),
     );
 
     expect(context.input[0]).toMatchObject({
@@ -378,8 +413,8 @@ describe('buildAgentContext', () => {
         customSystemPrompt: '',
         historyMessageLimit: 10,
       },
-      {
-        conversations: conversationRepository([
+      contextDependencies(
+        [
           message({
             id: 'older',
             taskId: 'task_older',
@@ -404,9 +439,9 @@ describe('buildAgentContext', () => {
             attachmentIds: currentIds,
             createdAt: 140,
           }),
-        ]),
-        attachments: { get },
-      },
+        ],
+        { get },
+      ),
     );
 
     const imageParts = context.input.flatMap((item) =>
@@ -415,5 +450,166 @@ describe('buildAgentContext', () => {
     expect(imageParts).toHaveLength(IMAGE_POLICY.maxCount);
     expect(get).not.toHaveBeenCalledWith('older_0');
     expect(get.mock.calls.map(([id]) => id)).toEqual([...currentIds, ...recentIds]);
+  });
+
+  it('keeps 50 successful-history messages and replays one active WorkSession in exact order', async () => {
+    const historicalMessages = Array.from({ length: 52 }, (_, index) =>
+      message({
+        id: `history_${index}`,
+        taskId: `task_history_${index}`,
+        role: 'user',
+        text: `History ${index}`,
+        createdAt: index + 1,
+      }),
+    );
+    const activeMessages = [
+      message({
+        id: 'active_initial',
+        taskId: 'task_active_previous',
+        role: 'user',
+        text: 'Initial request',
+        createdAt: 100,
+      }),
+      message({
+        id: 'cancelled_only',
+        taskId: 'task_cancelled_only',
+        role: 'user',
+        text: 'MUST NOT ENTER HISTORY',
+        createdAt: 101,
+      }),
+      message({
+        id: 'supplement_1',
+        kind: 'supplement',
+        taskId: TASK.id,
+        role: 'user',
+        text: 'Use official sources',
+        attachmentIds: ['attachment_supplement'],
+        createdAt: 102,
+      }),
+      message({
+        id: 'active_latest',
+        taskId: TASK.id,
+        role: 'user',
+        text: 'Continue with the new detail',
+        createdAt: 103,
+      }),
+    ];
+    const messages = [...historicalMessages, ...activeMessages];
+    const historicalTasks = historicalMessages.map((item, index): TaskRun => ({
+      ...TASK,
+      id: item.taskId as string,
+      workSessionId: `workSession_history_${index}`,
+      status: 'completed',
+      createdAt: index + 1,
+      updatedAt: index + 1,
+    }));
+    const tasks: TaskRun[] = [
+      ...historicalTasks,
+      {
+        ...TASK,
+        id: 'task_cancelled_only',
+        workSessionId: 'workSession_cancelled_only',
+        status: 'cancelled',
+      },
+      {
+        ...TASK,
+        id: 'task_active_previous',
+        status: 'cancelled',
+      },
+      TASK,
+    ];
+    const context = await buildAgentContext(
+      {
+        task: TASK,
+        checkpoint: {
+          ...CHECKPOINT,
+          completedToolResults: [
+            {
+              callId: 'call_1',
+              toolName: 'tavily_search',
+              argumentsJson: '{"query":"official"}',
+              output: '{"ok":true}',
+              resultRef: 'result_1',
+            },
+          ],
+          continuationItems: [
+            { type: 'message_ref', messageId: 'active_initial' },
+            {
+              type: 'function_call',
+              callId: 'call_1',
+              name: 'tavily_search',
+              argumentsJson: '{"query":"official"}',
+            },
+            {
+              type: 'function_call_output',
+              callId: 'call_1',
+              output: '{"ok":true}',
+              resultRef: 'result_1',
+            },
+            { type: 'message_ref', messageId: 'supplement_1' },
+            { type: 'message_ref', messageId: 'active_latest' },
+          ],
+        },
+        customSystemPrompt: '',
+        historyMessageLimit: 50,
+      },
+      contextDependencies(
+        messages,
+        {
+          get: vi.fn(async (id) =>
+            id === 'attachment_supplement'
+              ? {
+                  id,
+                  blob: new Blob([new Uint8Array([1])], { type: 'image/png' }),
+                  mimeType: 'image/png',
+                  byteSize: 1,
+                  width: 1,
+                  height: 1,
+                  source: 'file' as const,
+                  createdAt: 102,
+                }
+              : undefined,
+          ),
+        },
+        { listByConversation: vi.fn(async () => tasks) },
+      ),
+    );
+
+    expect(context.input).toHaveLength(55);
+    expect(context.input[0]).toMatchObject({
+      type: 'message',
+      content: [{ type: 'input_text', text: 'History 2' }],
+    });
+    expect(context.input.slice(-5)).toEqual([
+      {
+        type: 'message',
+        role: 'user',
+        content: [{ type: 'input_text', text: 'Initial request' }],
+      },
+      {
+        type: 'function_call',
+        callId: 'call_1',
+        name: 'tavily_search',
+        argumentsJson: '{"query":"official"}',
+      },
+      { type: 'function_call_output', callId: 'call_1', output: '{"ok":true}' },
+      {
+        type: 'message',
+        role: 'user',
+        content: [
+          {
+            type: 'input_text',
+            text: 'Additional information supplied while the task was running:\n\nUse official sources',
+          },
+          { type: 'input_image', imageUrl: 'data:image/png;base64,AQ==', detail: 'high' },
+        ],
+      },
+      {
+        type: 'message',
+        role: 'user',
+        content: [{ type: 'input_text', text: 'Continue with the new detail' }],
+      },
+    ]);
+    expect(JSON.stringify(context.input)).not.toContain('MUST NOT ENTER HISTORY');
   });
 });

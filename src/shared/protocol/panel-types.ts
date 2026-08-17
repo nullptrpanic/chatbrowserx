@@ -45,6 +45,7 @@ export interface PanelTaskEvent {
   readonly type: string;
   readonly reason: string;
   readonly at: number;
+  readonly reasoningSummary?: string | undefined;
 }
 
 export interface PanelCompletedToolResult {
@@ -53,6 +54,13 @@ export interface PanelCompletedToolResult {
   readonly argumentsJson: string;
   readonly output: string;
   readonly resultRef: string;
+}
+
+export interface PanelTaskSupplement {
+  readonly id: string;
+  readonly text: string;
+  readonly attachmentIds: readonly string[];
+  readonly createdAt: number;
 }
 
 export interface PanelTask {
@@ -70,6 +78,7 @@ export interface PanelTask {
   } | null;
   readonly events: readonly PanelTaskEvent[];
   readonly completedToolResults: readonly PanelCompletedToolResult[];
+  readonly supplements: readonly PanelTaskSupplement[];
 }
 
 export interface PanelSettingsSnapshot {
@@ -79,6 +88,7 @@ export interface PanelSettingsSnapshot {
   readonly language: 'system' | 'zh-CN' | 'en' | 'ja';
   readonly historyMessageLimit: number;
   readonly hasCodexToken: boolean;
+  readonly hasTavilyKey: boolean;
 }
 
 /** Settings returned only to the trusted settings screen after an explicit request. */
@@ -89,6 +99,7 @@ export interface PanelEditableSettings {
   readonly language: 'system' | 'zh-CN' | 'en' | 'ja';
   readonly historyMessageLimit: number;
   readonly codexAccessToken: string;
+  readonly tavilyKey: string;
 }
 
 export interface PanelSnapshot {

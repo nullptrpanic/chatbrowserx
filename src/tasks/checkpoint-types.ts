@@ -1,4 +1,5 @@
 import type { TaskId } from '../shared/ids';
+import type { ContinuationItem, PendingToolCall } from './continuation-types';
 import type { TaskStatus } from './task-types';
 
 export interface CompletedToolResult {
@@ -15,5 +16,7 @@ export interface Checkpoint {
   readonly sequence: number;
   readonly taskStatus: TaskStatus;
   readonly completedToolResults: readonly CompletedToolResult[];
+  readonly continuationItems: readonly ContinuationItem[];
+  readonly pendingToolCall: PendingToolCall | null;
   readonly createdAt: number;
 }

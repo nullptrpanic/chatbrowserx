@@ -5,6 +5,7 @@ import type { MessageRecord } from '../../src/tasks/message-types';
 
 const MESSAGE: MessageRecord = {
   id: 'message_1',
+  kind: 'conversation',
   conversationId: 'conversation_1',
   taskId: 'task_1',
   role: 'assistant',
@@ -24,6 +25,7 @@ function repository(): ConversationRepository {
     listByTab: vi.fn(async () => []),
     listMessages: vi.fn(async () => []),
     appendMessage: vi.fn(async () => undefined),
+    appendSupplement: vi.fn(async () => undefined),
     updateMessage: vi.fn(async () => undefined),
     clearConversation: vi.fn(async () => undefined),
   };

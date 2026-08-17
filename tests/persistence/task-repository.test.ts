@@ -21,6 +21,8 @@ function createCheckpoint(task: TaskRun, id = 'checkpoint_1'): Checkpoint {
     sequence: 1,
     taskStatus: task.status,
     completedToolResults: [],
+    continuationItems: [],
+    pendingToolCall: null,
     createdAt: task.updatedAt,
   };
 }
@@ -50,6 +52,7 @@ describe('IndexedDbTaskRepository', () => {
     );
     await database.add('tasks', {
       ...current,
+      workSessionId: undefined,
       status: 'acting',
       checkpointId: 'checkpoint_legacy',
       budget: { browserActionsUsed: 12, browserActionsLimit: 50 },
@@ -67,6 +70,13 @@ describe('IndexedDbTaskRepository', () => {
           output: '{}',
           resultRef: 'result_legacy',
         },
+        {
+          callId: 'call_tavily',
+          toolName: 'tavily_search',
+          argumentsJson: '{}',
+          output: '{"ok":true}',
+          resultRef: 'result_tavily',
+        },
       ],
       pendingAction: { actionId: 'action_legacy' },
       observationRef: 'observation_legacy',
@@ -76,11 +86,90 @@ describe('IndexedDbTaskRepository', () => {
     const task = await repository.get(current.id);
     const checkpoint = await repository.getCheckpoint('checkpoint_legacy');
 
-    expect(task).toMatchObject({ status: 'paused', lease: null });
+    expect(task).toMatchObject({
+      status: 'paused',
+      lease: null,
+      workSessionId: current.id,
+    });
     expect(task).not.toHaveProperty('budget');
-    expect(checkpoint).toMatchObject({ taskStatus: 'paused', completedToolResults: [] });
+    expect(checkpoint).toMatchObject({
+      taskStatus: 'paused',
+      completedToolResults: [
+        {
+          callId: 'call_tavily',
+          toolName: 'tavily_search',
+          argumentsJson: '{}',
+          output: '{"ok":true}',
+          resultRef: 'result_tavily',
+        },
+      ],
+      continuationItems: [
+        {
+          type: 'function_call',
+          callId: 'call_tavily',
+          name: 'tavily_search',
+          argumentsJson: '{}',
+        },
+        {
+          type: 'function_call_output',
+          callId: 'call_tavily',
+          output: '{"ok":true}',
+          resultRef: 'result_tavily',
+        },
+      ],
+      pendingToolCall: null,
+    });
     expect(checkpoint).not.toHaveProperty('pendingAction');
     expect(checkpoint).not.toHaveProperty('observationRef');
+    database.close();
+  });
+
+  it('repairs message references written after a legacy unresolved tool call', async () => {
+    const database = await openChatBrowserDatabase(
+      createTestDatabaseName('legacy-pending-call-order'),
+    );
+    const repository = new IndexedDbTaskRepository(database);
+    await database.add('checkpoints', {
+      id: 'checkpoint_legacy_pending',
+      taskId: 'task_legacy_pending',
+      sequence: 2,
+      taskStatus: 'cancelled',
+      completedToolResults: [],
+      continuationItems: [
+        { type: 'message_ref', messageId: 'message_initial' },
+        {
+          type: 'function_call',
+          callId: 'call_pending',
+          name: 'tavily_search',
+          argumentsJson: '{"query":"recovery"}',
+        },
+        { type: 'message_ref', messageId: 'message_after_call' },
+      ],
+      pendingToolCall: {
+        callId: 'call_pending',
+        name: 'tavily_search',
+        argumentsJson: '{"query":"recovery"}',
+      },
+      createdAt: 1_000,
+    });
+
+    await expect(repository.getCheckpoint('checkpoint_legacy_pending')).resolves.toMatchObject({
+      continuationItems: [
+        { type: 'message_ref', messageId: 'message_initial' },
+        { type: 'message_ref', messageId: 'message_after_call' },
+        {
+          type: 'function_call',
+          callId: 'call_pending',
+          name: 'tavily_search',
+          argumentsJson: '{"query":"recovery"}',
+        },
+      ],
+      pendingToolCall: {
+        callId: 'call_pending',
+        name: 'tavily_search',
+        argumentsJson: '{"query":"recovery"}',
+      },
+    });
     database.close();
   });
 
@@ -112,6 +201,8 @@ describe('IndexedDbTaskRepository', () => {
       sequence: 0,
       taskStatus: 'queued',
       completedToolResults: [],
+      continuationItems: [],
+      pendingToolCall: null,
       createdAt: queued.createdAt,
     };
 
@@ -119,6 +210,104 @@ describe('IndexedDbTaskRepository', () => {
 
     await expect(repository.get(queued.id)).resolves.toEqual(queued);
     await expect(repository.getCheckpoint(checkpoint.id)).resolves.toEqual(checkpoint);
+    database.close();
+  });
+
+  it('allows only one continuation from the latest cancelled WorkSession run', async () => {
+    const database = await openChatBrowserDatabase(createTestDatabaseName('task-continuation'));
+    const repository = new IndexedDbTaskRepository(database);
+    const source = {
+      ...createTask(
+        { conversationId: 'conv_1', tabId: 7, goal: 'Initial request' },
+        { clock, ids: { create: (prefix) => `${prefix}_source` } },
+      ),
+      checkpointId: 'checkpoint_source_0',
+    };
+    await repository.createInitial(source, {
+      id: 'checkpoint_source_0',
+      taskId: source.id,
+      sequence: 0,
+      taskStatus: 'queued',
+      completedToolResults: [],
+      continuationItems: [{ type: 'message_ref', messageId: 'message_1' }],
+      pendingToolCall: null,
+      createdAt: source.createdAt,
+    });
+    const cancelled = { ...source, status: 'cancelled' as const, updatedAt: 1_100 };
+    await repository.saveTransition({
+      task: { ...cancelled, checkpointId: 'checkpoint_source_1' },
+      event: {
+        id: 'event_cancelled',
+        taskId: source.id,
+        sequence: 1,
+        type: 'task.cancelled',
+        reason: 'user_cancel',
+        at: 1_100,
+        error: null,
+      },
+      checkpoint: {
+        id: 'checkpoint_source_1',
+        taskId: source.id,
+        sequence: 1,
+        taskStatus: 'cancelled',
+        completedToolResults: [],
+        continuationItems: [{ type: 'message_ref', messageId: 'message_1' }],
+        pendingToolCall: null,
+        createdAt: 1_100,
+      },
+    });
+
+    const continuationCheckpoint = (taskId: string, id: string): Checkpoint => ({
+      id,
+      taskId,
+      sequence: 0,
+      taskStatus: 'queued',
+      completedToolResults: [],
+      continuationItems: [
+        { type: 'message_ref', messageId: 'message_1' },
+        { type: 'message_ref', messageId: `message_${taskId}` },
+      ],
+      pendingToolCall: null,
+      createdAt: 1_200,
+    });
+    const first = {
+      ...createTask(
+        {
+          conversationId: source.conversationId,
+          tabId: 8,
+          goal: 'First continuation',
+          workSessionId: source.workSessionId,
+        },
+        { clock: { now: () => 1_200 }, ids: { create: () => 'task_cont_1' } },
+      ),
+      checkpointId: 'checkpoint_cont_1',
+    };
+    const second = {
+      ...createTask(
+        {
+          conversationId: source.conversationId,
+          tabId: 9,
+          goal: 'Racing continuation',
+          workSessionId: source.workSessionId,
+        },
+        { clock: { now: () => 1_200 }, ids: { create: () => 'task_cont_2' } },
+      ),
+      checkpointId: 'checkpoint_cont_2',
+    };
+
+    await repository.createContinuation(
+      source.id,
+      first,
+      continuationCheckpoint(first.id, 'checkpoint_cont_1'),
+    );
+    await expect(
+      repository.createContinuation(
+        source.id,
+        second,
+        continuationCheckpoint(second.id, 'checkpoint_cont_2'),
+      ),
+    ).rejects.toThrow(/latest cancelled/i);
+    await expect(repository.get(second.id)).resolves.toBeUndefined();
     database.close();
   });
 

@@ -22,6 +22,7 @@ export function SettingsView({ settings, t, onLoad, onSave }: SettingsViewProps)
   const [language, setLanguage] = useState(settings.language);
   const [historyMessageLimit, setHistoryMessageLimit] = useState(settings.historyMessageLimit);
   const [codexAccessToken, setCodexAccessToken] = useState('');
+  const [tavilyKey, setTavilyKey] = useState('');
   const [status, setStatus] = useState<'idle' | 'saving' | 'saved' | 'error'>('idle');
   const [loadFailed, setLoadFailed] = useState(false);
 
@@ -48,6 +49,7 @@ export function SettingsView({ settings, t, onLoad, onSave }: SettingsViewProps)
         setLanguage(loaded.language);
         setHistoryMessageLimit(loaded.historyMessageLimit);
         setCodexAccessToken(loaded.codexAccessToken);
+        setTavilyKey(loaded.tavilyKey);
       })
       .catch(() => {
         if (active) setLoadFailed(true);
@@ -69,6 +71,7 @@ export function SettingsView({ settings, t, onLoad, onSave }: SettingsViewProps)
       ...(codexAccessToken.trim().length === 0
         ? {}
         : { codexAccessToken: codexAccessToken.trim() }),
+      ...(tavilyKey.trim().length === 0 ? {} : { tavilyKey: tavilyKey.trim() }),
     };
     try {
       await onSave(input);
@@ -99,6 +102,14 @@ export function SettingsView({ settings, t, onLoad, onSave }: SettingsViewProps)
           hint={settings.hasCodexToken ? t('tokenStored') : t('codexToken')}
           value={codexAccessToken}
           onChange={setCodexAccessToken}
+          t={t}
+        />
+        <SecretField
+          id="tavily-api-key"
+          label={t('tavilyKey')}
+          hint={settings.hasTavilyKey ? t('tokenStored') : t('tavilyKey')}
+          value={tavilyKey}
+          onChange={setTavilyKey}
           t={t}
         />
         <label className="form-field" htmlFor="model">
@@ -151,7 +162,7 @@ export function SettingsView({ settings, t, onLoad, onSave }: SettingsViewProps)
             id="history-message-limit"
             type="number"
             min={1}
-            max={200}
+            max={50}
             step={1}
             value={historyMessageLimit}
             aria-label={t('historyMessageLimit')}

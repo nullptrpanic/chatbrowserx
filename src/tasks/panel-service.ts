@@ -24,6 +24,8 @@ const MAX_PANEL_EVENTS = 100;
 const MAX_PANEL_TOOL_RESULTS = 20;
 const MAX_PANEL_TOOL_ARGUMENTS = 20_000;
 const MAX_PANEL_TOOL_OUTPUT = 100_000;
+const MAX_PANEL_REASONING_SUMMARY = 20_000;
+const MAX_PANEL_SUPPLEMENTS = 100;
 const terminalTaskStatuses = new Set<TaskRun['status']>(['completed', 'failed', 'cancelled']);
 const previewImageTypes = new Set<string>(IMAGE_POLICY.acceptedMimeTypes);
 
@@ -35,14 +37,21 @@ export interface PanelServiceDependencies {
     | 'create'
     | 'listMessages'
     | 'appendMessage'
+    | 'appendSupplement'
     | 'updateMessage'
     | 'clearConversation'
   >;
-  readonly tasks: Pick<TaskRepository, 'listByConversation' | 'listEvents' | 'getCheckpoint'>;
+  readonly tasks: Pick<
+    TaskRepository,
+    'get' | 'listByConversation' | 'listEvents' | 'getCheckpoint'
+  >;
   readonly attachments: Pick<AttachmentRepository, 'get' | 'deleteUnreferenced'>;
   readonly settings: Pick<SettingsStore, 'get' | 'save'>;
-  readonly credentials: Pick<CredentialStore, 'getCodexAccessToken' | 'setCodexAccessToken'>;
-  readonly commands: Pick<TaskCommandPort, 'create'>;
+  readonly credentials: Pick<
+    CredentialStore,
+    'getCodexAccessToken' | 'setCodexAccessToken' | 'getTavilyKey' | 'setTavilyKey'
+  >;
+  readonly commands: Pick<TaskCommandPort, 'create' | 'continueCancelled'>;
   readonly cancelTask: (taskId: string) => Promise<TaskSnapshot>;
   readonly tabs: {
     get(tabId: number): Promise<{
@@ -69,12 +78,19 @@ export interface SubmitPanelMessageInput {
   readonly attachmentIds: readonly string[];
 }
 
+export interface SupplementPanelMessageInput {
+  readonly taskId: string;
+  readonly text: string;
+  readonly attachmentIds: readonly string[];
+}
+
 export interface SavePanelSettingsInput {
   readonly reasoningEffort: ReasoningEffort;
   readonly systemPrompt: string;
   readonly language: AppLanguage;
   readonly historyMessageLimit?: number | undefined;
   readonly codexAccessToken?: string | undefined;
+  readonly tavilyKey?: string | undefined;
 }
 
 /** Returns a supported origin and permission pattern without accepting internal browser pages. */
@@ -161,21 +177,22 @@ export class PanelService {
     const selectedSummary = selectedIndex < 0 ? null : (summaries[selectedIndex] ?? null);
     const selectedTasks = selectedIndex < 0 ? [] : (taskLists[selectedIndex] ?? []);
     const latestTask = selectedTasks.at(-1) ?? null;
-    const messages =
+    const storedMessages =
       selected === null
         ? []
         : (await this.#dependencies.conversations.listMessages(selected.id)).slice(
             -MAX_PANEL_MESSAGES,
           );
-    const attachments = await this.#readAttachmentMetadata(messages);
+    const messages = storedMessages.filter((message) => message.kind === 'conversation');
+    const attachments = await this.#readAttachmentMetadata(storedMessages);
     const visibleTaskIds = new Set(
-      messages.flatMap((message) => (message.taskId === null ? [] : [message.taskId])),
+      storedMessages.flatMap((message) => (message.taskId === null ? [] : [message.taskId])),
     );
     if (latestTask !== null) visibleTaskIds.add(latestTask.id);
     const panelTasks = await Promise.all(
       selectedTasks
         .filter((task) => visibleTaskIds.has(task.id))
-        .map((task) => this.#readTask(task)),
+        .map((task) => this.#readTask(task, storedMessages)),
     );
     const panelTask =
       latestTask === null ? null : (panelTasks.find((task) => task.id === latestTask.id) ?? null);
@@ -225,6 +242,7 @@ export class PanelService {
     }
 
     const now = this.#dependencies.clock.now();
+    let latestTask: TaskRun | undefined;
     const conversation =
       input.conversationId === undefined
         ? {
@@ -240,6 +258,7 @@ export class PanelService {
     }
     if (input.conversationId !== undefined) {
       const tasks = await this.#dependencies.tasks.listByConversation(conversation.id);
+      latestTask = tasks.at(-1);
       if (tasks.some((task) => !terminalTaskStatuses.has(task.status))) {
         throw new Error('Conversation already has an unfinished task.');
       }
@@ -250,6 +269,7 @@ export class PanelService {
 
     const message: MessageRecord = {
       id: this.#createId('message'),
+      kind: 'conversation',
       conversationId: conversation.id,
       taskId: null,
       role: 'user',
@@ -260,11 +280,21 @@ export class PanelService {
       updatedAt: now,
     };
     await this.#dependencies.conversations.appendMessage(message);
-    const snapshot = await this.#dependencies.commands.create({
-      conversationId: conversation.id,
-      tabId: input.tabId,
-      goal: taskGoal(text),
-    });
+    const goal = taskGoal(text);
+    const snapshot =
+      latestTask?.status === 'cancelled'
+        ? await this.#dependencies.commands.continueCancelled({
+            sourceTaskId: latestTask.id,
+            tabId: input.tabId,
+            goal,
+            userMessageId: message.id,
+          })
+        : await this.#dependencies.commands.create({
+            conversationId: conversation.id,
+            tabId: input.tabId,
+            goal,
+            userMessageId: message.id,
+          });
     await this.#dependencies.conversations.updateMessage({
       ...message,
       taskId: snapshot.task.id,
@@ -272,6 +302,45 @@ export class PanelService {
     });
     await this.#dependencies.scheduleTask(snapshot.task.id);
     return snapshot;
+  }
+
+  /** Persists additional text or images for the next safe loop boundary of a running task. */
+  async supplement(
+    input: SupplementPanelMessageInput,
+  ): Promise<{ readonly accepted: true; readonly id: string }> {
+    const taskId = input.taskId.trim();
+    const text = input.text.trim();
+    const attachmentIds = [...new Set(input.attachmentIds.map((id) => id.trim()))];
+    if (
+      taskId.length === 0 ||
+      taskId.length > 256 ||
+      text.length > 20_000 ||
+      (text.length === 0 && attachmentIds.length === 0) ||
+      attachmentIds.length > 8 ||
+      attachmentIds.some((id) => id.length === 0 || id.length > 256)
+    ) {
+      throw new Error('Supplement content is invalid.');
+    }
+    const task = await this.#dependencies.tasks.get(taskId);
+    if (task === undefined) {
+      throw new Error('Supplement task is unavailable.');
+    }
+
+    const now = this.#dependencies.clock.now();
+    const message: MessageRecord = {
+      id: this.#createId('supplement'),
+      kind: 'supplement',
+      conversationId: task.conversationId,
+      taskId: task.id,
+      role: 'user',
+      status: 'complete',
+      text,
+      attachmentIds,
+      createdAt: now,
+      updatedAt: now,
+    };
+    await this.#dependencies.conversations.appendSupplement(message);
+    return { accepted: true, id: message.id };
   }
 
   /** Opens one validated persisted image in the current page's full-viewport overlay. */
@@ -329,23 +398,28 @@ export class PanelService {
     if (input.codexAccessToken !== undefined) {
       await this.#dependencies.credentials.setCodexAccessToken(input.codexAccessToken);
     }
+    if (input.tavilyKey !== undefined) {
+      await this.#dependencies.credentials.setTavilyKey(input.tavilyKey);
+    }
     return this.#readSettings();
   }
 
   /** Reads editable settings, including credentials, only for the explicit trusted UI query. */
   async getSettings(): Promise<PanelEditableSettings> {
-    const [settings, codexAccessToken] = await Promise.all([
+    const [settings, codexAccessToken, tavilyKey] = await Promise.all([
       this.#dependencies.settings.get(),
       this.#dependencies.credentials.getCodexAccessToken(),
+      this.#dependencies.credentials.getTavilyKey(),
     ]);
     return {
       ...settings,
       codexAccessToken: codexAccessToken ?? '',
+      tavilyKey: tavilyKey ?? '',
     };
   }
 
   /** Reads a bounded task projection with its current checkpoint and latest audit events. */
-  async #readTask(task: TaskRun): Promise<PanelTask> {
+  async #readTask(task: TaskRun, messages: readonly MessageRecord[] = []): Promise<PanelTask> {
     const [checkpoint, events] = await Promise.all([
       task.checkpointId === null
         ? Promise.resolve(undefined)
@@ -373,6 +447,9 @@ export class PanelService {
         type: event.type,
         reason: event.reason,
         at: event.at,
+        ...(event.reasoningSummary === undefined
+          ? {}
+          : { reasoningSummary: event.reasoningSummary.slice(0, MAX_PANEL_REASONING_SUMMARY) }),
       })),
       completedToolResults: (checkpoint?.completedToolResults ?? [])
         .slice(-MAX_PANEL_TOOL_RESULTS)
@@ -382,6 +459,15 @@ export class PanelService {
           argumentsJson: result.argumentsJson.slice(0, MAX_PANEL_TOOL_ARGUMENTS),
           output: result.output.slice(0, MAX_PANEL_TOOL_OUTPUT),
           resultRef: result.resultRef.slice(0, 512),
+        })),
+      supplements: messages
+        .filter((message) => message.kind === 'supplement' && message.taskId === task.id)
+        .slice(-MAX_PANEL_SUPPLEMENTS)
+        .map((message) => ({
+          id: message.id,
+          text: message.text.slice(0, 20_000),
+          attachmentIds: [...message.attachmentIds].slice(0, 8),
+          createdAt: message.createdAt,
         })),
     };
   }
@@ -409,13 +495,15 @@ export class PanelService {
 
   /** Reads persisted app settings plus credential-presence booleans without exposing their values. */
   async #readSettings(): Promise<PanelSettingsSnapshot> {
-    const [settings, codexToken] = await Promise.all([
+    const [settings, codexToken, tavilyKey] = await Promise.all([
       this.#dependencies.settings.get(),
       this.#dependencies.credentials.getCodexAccessToken().catch(() => undefined),
+      this.#dependencies.credentials.getTavilyKey().catch(() => undefined),
     ]);
     return {
       ...settings,
       hasCodexToken: codexToken !== undefined,
+      hasTavilyKey: tavilyKey !== undefined,
     };
   }
 

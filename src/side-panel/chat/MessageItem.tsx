@@ -4,6 +4,7 @@ import type { Translator } from '../../shared/i18n/i18n';
 import type { PanelMessage, PanelTask } from '../../shared/protocol/panel-types';
 import { TaskProgressCard } from '../tasks/TaskProgressCard';
 import type { AttachmentDraftClient } from './use-image-draft';
+import { copyMessageToClipboard } from './copy-message';
 import { MessageImages } from './MessageImages';
 import { RestrictedMarkdown } from './RestrictedMarkdown';
 
@@ -34,11 +35,22 @@ export function MessageItem({
   onCancel = noop,
 }: MessageItemProps) {
   const [copied, setCopied] = useState(false);
+  const displayedText =
+    message.text.length > 0
+      ? message.text
+      : message.role === 'assistant' && message.status === 'error'
+        ? t('failedResponse')
+        : message.role === 'assistant' &&
+            message.status === 'interrupted' &&
+            task?.status === 'cancelled'
+          ? t('cancelledResponse')
+          : '';
   if (
     message.role === 'assistant' &&
-    (message.status === 'error' || message.status === 'interrupted') &&
+    message.status === 'interrupted' &&
     message.text.length === 0 &&
-    message.attachmentIds.length === 0
+    message.attachmentIds.length === 0 &&
+    task?.status !== 'cancelled'
   ) {
     return null;
   }
@@ -61,8 +73,8 @@ export function MessageItem({
           t={t}
           onOpenImagePreview={onOpenImagePreview}
         />
-        {message.text.length === 0 && message.status === 'streaming' ? null : (
-          <RestrictedMarkdown text={message.text} />
+        {displayedText.length === 0 && message.status === 'streaming' ? null : (
+          <RestrictedMarkdown text={displayedText} />
         )}
         {message.status === 'streaming' ? (
           <span className="streaming-label" role="status">
@@ -72,18 +84,24 @@ export function MessageItem({
             {t('streaming')}
           </span>
         ) : null}
-        {message.status === 'interrupted' ? (
+        {message.status === 'interrupted' && task?.status !== 'cancelled' ? (
           <p className="interrupted-label">{t('interrupted')}</p>
         ) : null}
-        {message.role === 'assistant' && message.text.length > 0 ? (
+        {displayedText.length > 0 || message.attachmentIds.length > 0 ? (
           <div className="message-actions">
             <button
               type="button"
               onClick={() => {
-                void navigator.clipboard.writeText(message.text).then(() => {
-                  setCopied(true);
-                  setTimeout(() => setCopied(false), 1_500);
-                });
+                void copyMessageToClipboard({
+                  text: displayedText,
+                  attachmentIds: message.attachmentIds,
+                  client: attachments,
+                })
+                  .then(() => {
+                    setCopied(true);
+                    setTimeout(() => setCopied(false), 1_500);
+                  })
+                  .catch(noop);
               }}
             >
               {copied ? <Check size={13} /> : <Copy size={13} />}
@@ -94,9 +112,11 @@ export function MessageItem({
         {task === null ? null : (
           <TaskProgressCard
             task={task}
+            attachments={attachments}
             t={t}
             embedded
             interactive={taskInteractive}
+            onOpenImagePreview={onOpenImagePreview}
             onPause={onPause}
             onResume={onResume}
             onRetry={onRetry}

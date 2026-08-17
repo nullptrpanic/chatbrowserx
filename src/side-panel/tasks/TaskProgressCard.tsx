@@ -1,16 +1,22 @@
 import { ChevronDown, ChevronUp, CircleStop, Pause, Play, RotateCcw } from 'lucide-react';
 import { useState } from 'react';
 import type { Translator } from '../../shared/i18n/i18n';
-import type { PanelTask } from '../../shared/protocol/panel-types';
+import type { PanelCompletedToolResult, PanelTask } from '../../shared/protocol/panel-types';
+import { MessageImages } from '../chat/MessageImages';
+import type { AttachmentDraftClient } from '../chat/use-image-draft';
 import { isTerminalToolName, TerminalToolResult } from './TerminalToolResult';
+import { ReasoningSummary } from './ReasoningSummary';
 import { TaskStatusLabel, taskEventLabel, taskStatusLabel } from './TaskStatusLabel';
+import { ToolResult } from './ToolResult';
 
 const runningStatuses = new Set<PanelTask['status']>(['queued', 'planning']);
 const resumableStatuses = new Set<PanelTask['status']>(['paused', 'waiting_for_auth']);
 
 export interface TaskProgressCardProps {
   readonly task: PanelTask;
+  readonly attachments: AttachmentDraftClient;
   readonly t: Translator;
+  readonly onOpenImagePreview?: ((attachmentId: string) => Promise<boolean>) | undefined;
   readonly onPause: () => void;
   readonly onResume: () => void;
   readonly onRetry: () => void;
@@ -22,7 +28,9 @@ export interface TaskProgressCardProps {
 /** Renders compact durable progress with expandable audit events and recovery controls. */
 export function TaskProgressCard({
   task,
+  attachments,
   t,
+  onOpenImagePreview,
   onPause,
   onResume,
   onRetry,
@@ -60,7 +68,14 @@ export function TaskProgressCard({
             {task.lastError.userMessage}
           </p>
         )}
-        {expanded ? <TaskDetailContent task={task} t={t} /> : null}
+        {expanded ? (
+          <TaskDetailContent
+            task={task}
+            attachments={attachments}
+            t={t}
+            onOpenImagePreview={onOpenImagePreview}
+          />
+        ) : null}
         <TaskControls
           task={task}
           t={t}
@@ -102,7 +117,14 @@ export function TaskProgressCard({
           {task.lastError.userMessage}
         </p>
       )}
-      {expanded ? <TaskDetailContent task={task} t={t} /> : null}
+      {expanded ? (
+        <TaskDetailContent
+          task={task}
+          attachments={attachments}
+          t={t}
+          onOpenImagePreview={onOpenImagePreview}
+        />
+      ) : null}
       <TaskControls
         task={task}
         t={t}
@@ -116,57 +138,141 @@ export function TaskProgressCard({
   );
 }
 
-function TaskDetailContent({ task, t }: { readonly task: PanelTask; readonly t: Translator }) {
+function TaskDetailContent({
+  task,
+  attachments,
+  t,
+  onOpenImagePreview,
+}: {
+  readonly task: PanelTask;
+  readonly attachments: AttachmentDraftClient;
+  readonly t: Translator;
+  readonly onOpenImagePreview?: ((attachmentId: string) => Promise<boolean>) | undefined;
+}) {
+  const toolResultsByEvent = groupToolResultsByEvent(task);
   return (
     <div className="task-detail-content">
-      {task.events.length === 0 && task.completedToolResults.length === 0 ? (
+      {task.events.length === 0 &&
+      task.completedToolResults.length === 0 &&
+      task.supplements.length === 0 ? (
         <p className="task-detail-empty">{t('noEvents')}</p>
       ) : null}
       {task.events.length === 0 ? null : (
         <ol className="task-event-list">
-          {task.events.map((event) => (
-            <li key={`${event.sequence}:${event.type}`}>
-              <span className="task-event-index">{event.sequence}</span>
-              <span>{taskEventLabel(event.type, t)}</span>
-              <time dateTime={new Date(event.at).toISOString()}>
-                {new Intl.DateTimeFormat(undefined, {
-                  hour: '2-digit',
-                  minute: '2-digit',
-                  second: '2-digit',
-                }).format(event.at)}
-              </time>
+          {task.events.map((event, eventIndex) => {
+            const toolResults = toolResultsByEvent.get(eventIndex) ?? [];
+            return (
+              <li key={`${event.sequence}:${event.type}`}>
+                <span className="task-event-index">{event.sequence}</span>
+                <span>{taskEventLabel(event.type, t)}</span>
+                <time dateTime={new Date(event.at).toISOString()}>
+                  {new Intl.DateTimeFormat(undefined, {
+                    hour: '2-digit',
+                    minute: '2-digit',
+                    second: '2-digit',
+                  }).format(event.at)}
+                </time>
+                {toolResults.length === 0 ? null : (
+                  <div className="task-event-tool-results">
+                    {toolResults.map((result) => (
+                      <CompletedToolResult key={result.callId} result={result} t={t} />
+                    ))}
+                  </div>
+                )}
+                {event.reasoningSummary === undefined ? null : (
+                  <ReasoningSummary summary={event.reasoningSummary} t={t} />
+                )}
+              </li>
+            );
+          })}
+        </ol>
+      )}
+      {task.events.length !== 0 || task.completedToolResults.length === 0 ? null : (
+        <div className="task-event-tool-results">
+          {task.completedToolResults.map((result) => (
+            <CompletedToolResult key={result.callId} result={result} t={t} />
+          ))}
+        </div>
+      )}
+      {task.supplements.length === 0 ? null : (
+        <ol className="task-supplement-list">
+          {task.supplements.map((supplement) => (
+            <li key={supplement.id} className="task-supplement-item">
+              <header>
+                <span>{t('userSupplement')}</span>
+                <time dateTime={new Date(supplement.createdAt).toISOString()}>
+                  {new Intl.DateTimeFormat(undefined, {
+                    hour: '2-digit',
+                    minute: '2-digit',
+                    second: '2-digit',
+                  }).format(supplement.createdAt)}
+                </time>
+              </header>
+              {supplement.text.length === 0 ? null : (
+                <p className="task-supplement-text">{supplement.text}</p>
+              )}
+              <MessageImages
+                attachmentIds={supplement.attachmentIds}
+                client={attachments}
+                t={t}
+                onOpenImagePreview={onOpenImagePreview}
+              />
             </li>
           ))}
         </ol>
       )}
-      {task.completedToolResults.length === 0 ? null : (
-        <div className="task-tool-results">
-          {task.completedToolResults.map((result) =>
-            isTerminalToolName(result.toolName) ? (
-              <TerminalToolResult key={result.callId} result={result} t={t} />
-            ) : (
-              <section className="tool-result" key={result.callId}>
-                <div className="tool-result-title">
-                  <span>{result.toolName}</span>
-                  <span>{t('toolCompleted')}</span>
-                </div>
-                {result.argumentsJson.length === 0 ? null : (
-                  <pre>
-                    <code>{result.argumentsJson}</code>
-                  </pre>
-                )}
-                {result.output.length === 0 ? null : (
-                  <pre>
-                    <code>{result.output}</code>
-                  </pre>
-                )}
-              </section>
-            ),
-          )}
-        </div>
-      )}
     </div>
   );
+}
+
+function CompletedToolResult({
+  result,
+  t,
+}: {
+  readonly result: PanelCompletedToolResult;
+  readonly t: Translator;
+}) {
+  return isTerminalToolName(result.toolName) ? (
+    <TerminalToolResult result={result} t={t} />
+  ) : (
+    <ToolResult result={result} t={t} />
+  );
+}
+
+/** Associates retained result tails with the matching retained tool events in chronological order. */
+function groupToolResultsByEvent(
+  task: PanelTask,
+): ReadonlyMap<number, readonly PanelCompletedToolResult[]> {
+  const grouped = new Map<number, PanelCompletedToolResult[]>();
+  if (task.events.length === 0 || task.completedToolResults.length === 0) return grouped;
+
+  const resultEventIndexes = task.events.flatMap((event, index) =>
+    event.type === 'tool.result-recorded' ? [index] : [],
+  );
+  const pairedCount = Math.min(resultEventIndexes.length, task.completedToolResults.length);
+  const firstPairedEvent = resultEventIndexes.length - pairedCount;
+  const firstPairedResult = task.completedToolResults.length - pairedCount;
+  const fallbackEvent = task.events.length - 1;
+  const appendResult = (eventIndex: number, result: PanelCompletedToolResult) => {
+    const existing = grouped.get(eventIndex);
+    if (existing === undefined) {
+      grouped.set(eventIndex, [result]);
+      return;
+    }
+    existing.push(result);
+  };
+
+  for (let resultIndex = 0; resultIndex < firstPairedResult; resultIndex += 1) {
+    const result = task.completedToolResults[resultIndex];
+    if (result !== undefined) appendResult(fallbackEvent, result);
+  }
+  for (let pairIndex = 0; pairIndex < pairedCount; pairIndex += 1) {
+    const eventIndex = resultEventIndexes[firstPairedEvent + pairIndex];
+    const result = task.completedToolResults[firstPairedResult + pairIndex];
+    if (eventIndex !== undefined && result !== undefined) appendResult(eventIndex, result);
+  }
+
+  return grouped;
 }
 
 interface TaskControlsProps {

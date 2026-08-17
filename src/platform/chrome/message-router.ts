@@ -26,6 +26,7 @@ export interface MessageRouterDependencies {
     PanelService,
     | 'getSnapshot'
     | 'submit'
+    | 'supplement'
     | 'openImagePreview'
     | 'clearConversation'
     | 'getSettings'
@@ -102,6 +103,11 @@ async function routeMessage(
       );
     case 'chat.submit':
       return successResponse(message.requestId, await dependencies.panel.submit(message.payload));
+    case 'chat.supplement':
+      return successResponse(
+        message.requestId,
+        await dependencies.panel.supplement(message.payload),
+      );
     case 'conversation.clear':
       return successResponse(
         message.requestId,

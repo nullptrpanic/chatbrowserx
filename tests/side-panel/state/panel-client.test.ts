@@ -17,6 +17,7 @@ function snapshot(sequence = 1): PanelSnapshot {
     lastError: null,
     events: [],
     completedToolResults: [],
+    supplements: [],
   };
   return {
     generatedAt: 1_000 + sequence,
@@ -48,6 +49,7 @@ function snapshot(sequence = 1): PanelSnapshot {
       language: 'system',
       historyMessageLimit: 50,
       hasCodexToken: true,
+      hasTavilyKey: true,
     },
   };
 }
@@ -61,6 +63,7 @@ describe('PanelClient', () => {
         systemPrompt: '',
         language: 'zh-CN',
         hasCodexToken: true,
+        hasTavilyKey: false,
       }),
     ).toMatchObject({ historyMessageLimit: 50 });
   });
@@ -73,6 +76,7 @@ describe('PanelClient', () => {
       language: 'zh-CN' as const,
       historyMessageLimit: 50,
       codexAccessToken: 'saved-token',
+      tavilyKey: 'saved-tavily-key',
     };
     const send = vi.fn<RuntimePort['send']>(async (message) => ({
       version: 1,
@@ -171,6 +175,46 @@ describe('PanelClient', () => {
         attachmentIds: [],
       },
     ]);
+    client.dispose();
+  });
+
+  it('submits a runtime supplement to the current running task and refreshes it', async () => {
+    const sentTypes: string[] = [];
+    const send = vi.fn<RuntimePort['send']>(async (message) => {
+      sentTypes.push(message.type);
+      return {
+        version: 1,
+        requestId: message.requestId,
+        ok: true,
+        data:
+          message.type === 'panel.getSnapshot'
+            ? snapshot()
+            : message.type === 'chat.supplement'
+              ? { accepted: true, id: 'supplement_1' }
+              : {},
+      };
+    });
+    const client = new PanelClient(
+      { send },
+      { getActiveTab: vi.fn(async () => ({ id: 7 })) },
+      { pollIntervalMs: 60_000 },
+    );
+    await client.connect();
+    sentTypes.length = 0;
+
+    await client.supplement('Use the attached detail', ['attachment_1']);
+
+    expect(send).toHaveBeenCalledWith(
+      expect.objectContaining({
+        type: 'chat.supplement',
+        payload: {
+          taskId: 'task_1',
+          text: 'Use the attached detail',
+          attachmentIds: ['attachment_1'],
+        },
+      }),
+    );
+    expect(sentTypes).toEqual(['chat.supplement', 'panel.getSnapshot']);
     client.dispose();
   });
 

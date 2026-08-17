@@ -44,6 +44,22 @@ const chatSubmitSchema = z
   })
   .strict();
 
+const chatSupplementSchema = z
+  .object({
+    version: z.literal(PROTOCOL_VERSION),
+    requestId: requestIdSchema,
+    type: z.literal('chat.supplement'),
+    payload: z
+      .object({
+        taskId: identifierSchema,
+        text: z.string().max(20_000),
+        attachmentIds: z.array(identifierSchema).max(8),
+      })
+      .strict()
+      .refine((value) => value.text.trim().length > 0 || value.attachmentIds.length > 0),
+  })
+  .strict();
+
 const conversationClearSchema = z
   .object({
     version: z.literal(PROTOCOL_VERSION),
@@ -72,8 +88,9 @@ const settingsSaveSchema = z
         reasoningEffort: z.enum(['low', 'medium', 'high', 'xhigh']),
         systemPrompt: z.string().max(20_000),
         language: z.enum(['system', 'zh-CN', 'en', 'ja']),
-        historyMessageLimit: z.number().int().min(1).max(200).default(50),
+        historyMessageLimit: z.number().int().min(1).max(50).default(50),
         codexAccessToken: z.string().trim().min(1).max(20_000).optional(),
+        tavilyKey: z.string().trim().min(1).max(20_000).optional(),
       })
       .strict(),
   })
@@ -206,6 +223,7 @@ export const extensionMessageSchema: z.ZodType<ExtensionMessage> = z.discriminat
   systemPingSchema,
   panelGetSnapshotSchema,
   chatSubmitSchema,
+  chatSupplementSchema,
   conversationClearSchema,
   settingsGetSchema,
   settingsSaveSchema,

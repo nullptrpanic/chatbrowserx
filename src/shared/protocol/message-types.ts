@@ -19,6 +19,7 @@ export type ExtensionMessage =
         attachmentIds: readonly string[];
       }
     >
+  | Message<'chat.supplement', { taskId: string; text: string; attachmentIds: readonly string[] }>
   | Message<'conversation.clear', { conversationId: string }>
   | Message<'settings.get', Record<string, never>>
   | Message<
@@ -29,6 +30,7 @@ export type ExtensionMessage =
         language: 'system' | 'zh-CN' | 'en' | 'ja';
         historyMessageLimit?: number | undefined;
         codexAccessToken?: string | undefined;
+        tavilyKey?: string | undefined;
       }
     >
   | Message<'task.create', { tabId: number; conversationId: string; goal: string }>

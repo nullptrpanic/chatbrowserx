@@ -6,6 +6,12 @@ export interface ModelUsage {
 
 export type ModelStreamEvent =
   | { readonly type: 'response.started'; readonly responseId: string }
+  | {
+      readonly type: 'reasoning.summary';
+      readonly itemId: string;
+      readonly summaryIndex: number;
+      readonly text: string;
+    }
   | { readonly type: 'text.delta'; readonly delta: string }
   | {
       readonly type: 'tool.started';

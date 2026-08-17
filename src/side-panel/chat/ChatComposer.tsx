@@ -33,12 +33,12 @@ export function ChatComposer({
   const fileInput = useRef<HTMLInputElement>(null);
   const [screenshotMenu, setScreenshotMenu] = useState(false);
   const [busy, setBusy] = useState(false);
-  const [error, setError] = useState<'send' | 'screenshot' | null>(null);
+  const [error, setError] = useState<'send' | 'supplement' | 'screenshot' | null>(null);
   const canSend = text.trim().length > 0 || draft.items.length > 0;
 
   /** Sends the current draft only after authentication and preserves it after any failure. */
   async function submit(): Promise<void> {
-    if (!canSend || busy || taskLocked) return;
+    if (!canSend || busy || (taskLocked && !running)) return;
     if (!hasToken) {
       onOpenSettings();
       return;
@@ -46,11 +46,15 @@ export function ChatComposer({
     setBusy(true);
     setError(null);
     try {
-      await client.submit(text, draft.attachmentIds);
+      if (running) {
+        await client.supplement(text, draft.attachmentIds);
+      } else {
+        await client.submit(text, draft.attachmentIds);
+      }
       onTextChange('');
       draft.clear();
     } catch {
-      setError('send');
+      setError(running ? 'supplement' : 'send');
     } finally {
       setBusy(false);
     }
@@ -97,8 +101,7 @@ export function ChatComposer({
             if (
               (event.metaKey || event.ctrlKey) &&
               event.key === 'Enter' &&
-              !running &&
-              !taskLocked
+              (!taskLocked || running)
             ) {
               event.preventDefault();
               void submit();
@@ -114,9 +117,11 @@ export function ChatComposer({
         <p className="composer-error" role="alert">
           {error === 'screenshot'
             ? t('screenshotError')
-            : error === 'send'
-              ? t('sendError')
-              : t('attachmentError')}
+            : error === 'supplement'
+              ? t('supplementError')
+              : error === 'send'
+                ? t('sendError')
+                : t('attachmentError')}
         </p>
       )}
       <div className="composer-toolbar">
@@ -162,25 +167,27 @@ export function ChatComposer({
             </div>
           ) : null}
         </div>
-        {running ? (
-          <button
-            type="button"
-            className="primary-action is-stop"
-            disabled={busy}
-            onClick={() => void client.cancelTask()}
-          >
-            <Square size={13} fill="currentColor" /> {t('stop')}
-          </button>
-        ) : (
+        <div className="composer-actions">
+          {running ? (
+            <button
+              type="button"
+              className="composer-stop-action"
+              disabled={busy}
+              onClick={() => void client.cancelTask()}
+            >
+              <Square size={12} fill="currentColor" /> {t('stop')}
+            </button>
+          ) : null}
           <button
             type="button"
             className="primary-action"
-            disabled={!canSend || busy || taskLocked}
+            disabled={!canSend || busy || (taskLocked && !running)}
             onClick={() => void submit()}
           >
-            <Send size={15} /> {busy ? t('sending') : t('send')}
+            <Send size={15} />
+            {busy ? t(running ? 'supplementing' : 'sending') : t(running ? 'supplement' : 'send')}
           </button>
-        )}
+        </div>
       </div>
     </section>
   );

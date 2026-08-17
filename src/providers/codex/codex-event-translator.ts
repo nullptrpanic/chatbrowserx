@@ -8,6 +8,11 @@ const objectSchema = z.object({ type: z.string().optional() }).passthrough();
 const responseSchema = z.object({ id: z.string().min(1) }).passthrough();
 const createdSchema = objectSchema.extend({ response: responseSchema });
 const textDeltaSchema = objectSchema.extend({ delta: z.string() });
+const reasoningSummaryDoneSchema = objectSchema.extend({
+  item_id: z.string().min(1),
+  summary_index: z.number().int().nonnegative(),
+  text: z.string(),
+});
 const functionCallItemSchema = z
   .object({
     id: z.string().min(1),
@@ -89,6 +94,7 @@ function normalizeUsage(usage: z.infer<typeof usageSchema> | null | undefined): 
 
 export class CodexEventTranslator {
   readonly #calls = new Map<string, FunctionCallState>();
+  readonly #reasoningSummaries = new Set<string>();
   #responseId: string | null = null;
   #responseCompleted = false;
 
@@ -108,6 +114,8 @@ export class CodexEventTranslator {
         return this.#created(event.data);
       case 'response.output_text.delta':
         return this.#textDelta(event.data);
+      case 'response.reasoning_summary_text.done':
+        return this.#reasoningSummaryDone(event.data);
       case 'response.output_item.added':
         return this.#outputItemAdded(event.data);
       case 'response.function_call_arguments.delta':
@@ -152,6 +160,26 @@ export class CodexEventTranslator {
   #textDelta(data: unknown): readonly ModelStreamEvent[] {
     const delta = parsePayload(textDeltaSchema, data).delta;
     return delta.length === 0 ? [] : [{ type: 'text.delta', delta }];
+  }
+
+  /** Records only the provider-authored summary, never raw chain-of-thought deltas. */
+  #reasoningSummaryDone(data: unknown): readonly ModelStreamEvent[] {
+    const summary = parsePayload(reasoningSummaryDoneSchema, data);
+    const key = `${summary.item_id}:${String(summary.summary_index)}`;
+    if (this.#reasoningSummaries.has(key)) {
+      throw providerErrorFromCode('INVALID_RESPONSE');
+    }
+    this.#reasoningSummaries.add(key);
+    return summary.text.length === 0
+      ? []
+      : [
+          {
+            type: 'reasoning.summary',
+            itemId: summary.item_id,
+            summaryIndex: summary.summary_index,
+            text: summary.text,
+          },
+        ];
   }
 
   /** Starts a supported function-call item and remembers its item-to-call mapping. */

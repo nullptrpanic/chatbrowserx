@@ -44,6 +44,7 @@
 }
 
 .composer-tool,
+.composer-stop-action,
 .primary-action {
   display: inline-flex;
   min-height: 32px;
@@ -69,7 +70,6 @@
 }
 
 .primary-action {
-  margin-left: auto;
   color: #fff;
   background: var(--cbx-accent);
 }
@@ -77,8 +77,21 @@
 .primary-action:hover {
   background: var(--cbx-accent-hover);
 }
-.primary-action.is-stop {
-  background: var(--cbx-danger);
+.composer-actions {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  margin-left: auto;
+}
+
+.composer-stop-action {
+  border: 1px solid color-mix(in srgb, var(--cbx-danger) 32%, var(--cbx-divider));
+  color: var(--cbx-danger);
+  background: var(--cbx-danger-soft);
+}
+
+.composer-stop-action:hover {
+  background: color-mix(in srgb, var(--cbx-danger) 14%, var(--cbx-raised));
 }
 
 .screenshot-control {

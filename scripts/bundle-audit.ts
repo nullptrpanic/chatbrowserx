@@ -96,7 +96,7 @@ export async function auditProductionBundle(root: string): Promise<BundleAuditRe
     {
       code: 'CONCRETE_TOOL_RUNTIME_RESIDUE',
       pattern:
-        /browser[._](?:observe|act)\b|page\.(?:observe|domAction)\b|\btavily\b|browserActions(?:Used|Limit)|waiting_for_confirmation/i,
+        /browser[._](?:observe|act)\b|page\.(?:observe|domAction)\b|browserActions(?:Used|Limit)|waiting_for_confirmation/i,
     },
     {
       code: 'E2E_CONTROL_RESIDUE',

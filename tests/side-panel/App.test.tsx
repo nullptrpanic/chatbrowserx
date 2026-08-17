@@ -30,6 +30,7 @@ function buildSnapshot(): PanelSnapshot {
       language: 'zh-CN',
       historyMessageLimit: 50,
       hasCodexToken: true,
+      hasTavilyKey: true,
     },
   };
 }
@@ -52,6 +53,7 @@ describe('App background connection', () => {
         language: 'zh-CN' as const,
         historyMessageLimit: 50,
         hasCodexToken: true,
+        hasTavilyKey: true,
       };
       return {
         version: 1,
@@ -61,7 +63,7 @@ describe('App background connection', () => {
           message.type === 'panel.getSnapshot'
             ? { ...buildSnapshot(), settings }
             : message.type === 'settings.get'
-              ? { ...settings, codexAccessToken: '' }
+              ? { ...settings, codexAccessToken: '', tavilyKey: '' }
               : message.type === 'settings.save'
                 ? settings
                 : { connected: true },
@@ -99,6 +101,7 @@ describe('App background connection', () => {
                 systemPrompt: '',
                 language: 'zh-CN',
                 codexAccessToken: 'saved-token',
+                tavilyKey: 'saved-tavily-key',
               }
             : { connected: true },
     }));
@@ -108,12 +111,15 @@ describe('App background connection', () => {
     await user.click(await screen.findByRole('button', { name: '设置' }));
 
     const tokenInput = await screen.findByDisplayValue('saved-token');
+    const tavilyInput = await screen.findByDisplayValue('saved-tavily-key');
     expect(tokenInput).toHaveAttribute('type', 'password');
+    expect(tavilyInput).toHaveAttribute('type', 'password');
 
     const showTokenButton = screen.getAllByRole('button', { name: '显示密钥' })[0];
     if (showTokenButton === undefined) throw new Error('Token reveal button is missing.');
     await user.click(showTokenButton);
     expect(tokenInput).toHaveAttribute('type', 'text');
+    expect(tavilyInput).toHaveAttribute('type', 'password');
     expect(send).toHaveBeenCalledWith(
       expect.objectContaining({ type: 'settings.get', payload: {} }),
     );
@@ -130,6 +136,7 @@ describe('App background connection', () => {
           settings: {
             ...current.settings,
             hasCodexToken: saved,
+            hasTavilyKey: saved,
           },
         };
       } else if (message.type === 'settings.get') {
@@ -139,12 +146,14 @@ describe('App background connection', () => {
           systemPrompt: '',
           language: 'zh-CN',
           codexAccessToken: '',
+          tavilyKey: '',
         };
       } else if (message.type === 'settings.save') {
         saved = true;
         data = {
           ...buildSnapshot().settings,
           hasCodexToken: true,
+          hasTavilyKey: true,
         };
       }
       return { version: 1, requestId: message.requestId, ok: true, data };
@@ -154,7 +163,9 @@ describe('App background connection', () => {
     render(<App runtimePort={{ send }} environment={environment} attachmentClient={attachments} />);
     await user.click(await screen.findByRole('button', { name: '设置' }));
     const tokenInput = screen.getByLabelText(/Codex Access Token/);
+    const tavilyInput = screen.getByLabelText(/Tavily API Key/);
     await user.type(tokenInput, 'new-token');
+    await user.type(tavilyInput, 'new-tavily-key');
 
     await user.click(screen.getByRole('button', { name: '保存设置' }));
 
@@ -165,9 +176,46 @@ describe('App background connection', () => {
         type: 'settings.save',
         payload: expect.objectContaining({
           codexAccessToken: 'new-token',
+          tavilyKey: 'new-tavily-key',
         }),
       }),
     );
+  });
+
+  it('omits a Tavily key that the user clears so the stored value is preserved', async () => {
+    const send = vi.fn<RuntimePort['send']>(async (message) => ({
+      version: 1,
+      requestId: message.requestId,
+      ok: true,
+      data:
+        message.type === 'panel.getSnapshot'
+          ? buildSnapshot()
+          : message.type === 'settings.get'
+            ? {
+                model: 'gpt-5.6-terra',
+                reasoningEffort: 'medium',
+                systemPrompt: '',
+                language: 'zh-CN',
+                historyMessageLimit: 50,
+                codexAccessToken: '',
+                tavilyKey: 'saved-tavily-key',
+              }
+            : message.type === 'settings.save'
+              ? buildSnapshot().settings
+              : { connected: true },
+    }));
+    const user = userEvent.setup();
+
+    render(<App runtimePort={{ send }} environment={environment} attachmentClient={attachments} />);
+    await user.click(await screen.findByRole('button', { name: '设置' }));
+    const tavilyInput = await screen.findByLabelText(/Tavily API Key/);
+    await user.clear(tavilyInput);
+    await user.click(screen.getByRole('button', { name: '保存设置' }));
+
+    const saveMessage = send.mock.calls
+      .map(([message]) => message)
+      .find((message) => message.type === 'settings.save');
+    expect(saveMessage?.payload).not.toHaveProperty('tavilyKey');
   });
 
   it('reports a credential load failure separately from save failures', async () => {
@@ -258,6 +306,68 @@ describe('App background connection', () => {
     expect(events).not.toContain('permission.granted');
   });
 
+  it('routes the running composer to a supplement while keeping Stop separate', async () => {
+    const base = buildSnapshot();
+    const task = {
+      id: 'task_running',
+      status: 'planning' as const,
+      goal: 'Inspect the current layout',
+      tabId: 7,
+      createdAt: 900,
+      updatedAt: 1_000,
+      sequence: 1,
+      lastError: null,
+      events: [{ sequence: 1, type: 'planning.started', reason: 'started', at: 1_000 }],
+      completedToolResults: [],
+      supplements: [],
+    };
+    const runningSnapshot: PanelSnapshot = {
+      ...base,
+      conversation: {
+        id: 'conversation_running',
+        title: task.goal,
+        tabId: 7,
+        createdAt: 900,
+        updatedAt: 1_000,
+        taskStatus: task.status,
+      },
+      tasks: [task],
+      task,
+    };
+    const send = vi.fn<RuntimePort['send']>(async (message) => ({
+      version: 1,
+      requestId: message.requestId,
+      ok: true,
+      data:
+        message.type === 'panel.getSnapshot'
+          ? runningSnapshot
+          : message.type === 'chat.supplement'
+            ? { accepted: true, id: 'supplement_1' }
+            : {},
+    }));
+    const user = userEvent.setup();
+
+    render(<App runtimePort={{ send }} environment={environment} attachmentClient={attachments} />);
+    await user.type(await screen.findByRole('textbox'), 'Also check the compact header');
+    await user.click(screen.getByRole('button', { name: '补充' }));
+
+    await waitFor(() =>
+      expect(send).toHaveBeenCalledWith(
+        expect.objectContaining({
+          type: 'chat.supplement',
+          payload: {
+            taskId: task.id,
+            text: 'Also check the compact header',
+            attachmentIds: [],
+          },
+        }),
+      ),
+    );
+    expect(send).not.toHaveBeenCalledWith(expect.objectContaining({ type: 'chat.submit' }));
+    expect(screen.getByRole('button', { name: '停止' })).toBeVisible();
+    expect(screen.getByRole('textbox')).toHaveValue('');
+  });
+
   it('shows an unavailable recovery action when the background cannot answer', async () => {
     const send = vi.fn<RuntimePort['send']>(async () => {
       throw new Error('Service worker stopped');
@@ -291,6 +401,7 @@ describe('App background connection', () => {
         lastError: null,
         events: [{ sequence: 1, type: 'task.paused', reason: 'user_pause', at: 1_000 }],
         completedToolResults: [],
+        supplements: [],
       },
     };
     const send = vi.fn<RuntimePort['send']>(async (message) => ({
@@ -339,6 +450,7 @@ describe('App background connection', () => {
         },
         events: [{ sequence: 1, type: 'task.failed', reason: 'provider_failure', at: 1_000 }],
         completedToolResults: [],
+        supplements: [],
       },
     };
     const send = vi.fn<RuntimePort['send']>(async (message) => ({

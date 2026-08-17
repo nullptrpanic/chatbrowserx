@@ -27,7 +27,7 @@ describe('ChromeSettingsStore', () => {
       reasoningEffort: 'high',
       systemPrompt: 'Keep browser actions concise.',
       language: 'zh-CN',
-      historyMessageLimit: 75,
+      historyMessageLimit: 42,
     });
 
     await expect(store.get()).resolves.toEqual({
@@ -35,7 +35,22 @@ describe('ChromeSettingsStore', () => {
       reasoningEffort: 'high',
       systemPrompt: 'Keep browser actions concise.',
       language: 'zh-CN',
+      historyMessageLimit: 42,
+    });
+  });
+
+  it('clamps a previously valid stored history limit above 50', async () => {
+    const storage = new MemoryStorageArea();
+    storage.values['settings.app'] = {
+      model: 'gpt-5.6-terra',
+      reasoningEffort: 'medium',
+      systemPrompt: '',
+      language: 'system',
       historyMessageLimit: 75,
+    };
+
+    await expect(new ChromeSettingsStore(storage).get()).resolves.toMatchObject({
+      historyMessageLimit: 50,
     });
   });
 
@@ -53,7 +68,7 @@ describe('ChromeSettingsStore', () => {
     await expect(store.get()).resolves.toEqual(DEFAULT_APP_SETTINGS);
   });
 
-  it.each([0, 201, 1.5])('rejects invalid history limit %s', async (historyMessageLimit) => {
+  it.each([0, 51, 1.5])('rejects invalid history limit %s', async (historyMessageLimit) => {
     const store = new ChromeSettingsStore(new MemoryStorageArea());
 
     await expect(store.save({ ...DEFAULT_APP_SETTINGS, historyMessageLimit })).rejects.toThrow(

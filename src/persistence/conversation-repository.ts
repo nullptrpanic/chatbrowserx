@@ -12,11 +12,21 @@ export interface ConversationRepository {
   listByTab(tabId: number): Promise<Conversation[]>;
   listMessages(conversationId: ConversationId): Promise<MessageRecord[]>;
   appendMessage(message: MessageRecord): Promise<void>;
+  appendSupplement(message: MessageRecord): Promise<void>;
   updateMessage(message: MessageRecord): Promise<void>;
   clearConversation(conversationId: ConversationId): Promise<void>;
 }
 
 const terminalStatuses = new Set<TaskStatus>(['completed', 'failed', 'cancelled']);
+const supplementableTaskStatuses = new Set<TaskStatus>(['queued', 'planning']);
+
+/** Adds the ordinary-message discriminator to records created before message kinds existed. */
+function normalizeMessage(message: MessageRecord): MessageRecord {
+  return {
+    ...message,
+    kind: message.kind === 'supplement' ? 'supplement' : 'conversation',
+  };
+}
 
 /**
  * Builds a compound-key range that contains all time-ordered records for one owner ID.
@@ -88,11 +98,12 @@ export class IndexedDbConversationRepository implements ConversationRepository {
    * Lists messages for one conversation in stable creation order.
    */
   async listMessages(conversationId: ConversationId): Promise<MessageRecord[]> {
-    return this.#database.getAllFromIndex(
+    const messages = await this.#database.getAllFromIndex(
       'messages',
       'by-conversation-created-at',
       ownerTimeRange(conversationId),
     );
+    return messages.map(normalizeMessage);
   }
 
   /**
@@ -108,6 +119,59 @@ export class IndexedDbConversationRepository implements ConversationRepository {
       throw new Error('Conversation does not exist.');
     }
 
+    for (const attachmentId of message.attachmentIds) {
+      const attachment = await transaction.objectStore('attachments').get(attachmentId);
+      if (attachment === undefined) {
+        throw new Error('Attachment does not exist.');
+      }
+    }
+
+    await transaction.objectStore('messages').add(message);
+    for (const attachmentId of message.attachmentIds) {
+      await transaction.objectStore('attachment-references').put({
+        attachmentId,
+        referenceId: `message:${message.id}`,
+      });
+    }
+    await transaction.objectStore('conversations').put({
+      ...conversation,
+      updatedAt: Math.max(conversation.updatedAt, message.updatedAt),
+    });
+    await transaction.done;
+  }
+
+  /**
+   * Atomically accepts one runtime supplement only while its owning task remains runnable.
+   */
+  async appendSupplement(message: MessageRecord): Promise<void> {
+    if (
+      message.kind !== 'supplement' ||
+      message.taskId === null ||
+      message.role !== 'user' ||
+      message.status !== 'complete' ||
+      message.text.length > 20_000 ||
+      (message.text.trim().length === 0 && message.attachmentIds.length === 0) ||
+      message.attachmentIds.length > 8
+    ) {
+      throw new Error('Supplement message is invalid.');
+    }
+
+    const transaction = this.#database.transaction(
+      ['tasks', 'conversations', 'messages', 'attachments', 'attachment-references'],
+      'readwrite',
+    );
+    const task = await transaction.objectStore('tasks').get(message.taskId);
+    if (
+      task === undefined ||
+      task.conversationId !== message.conversationId ||
+      !supplementableTaskStatuses.has(task.status)
+    ) {
+      throw new Error('Supplement requires a matching running task.');
+    }
+    const conversation = await transaction.objectStore('conversations').get(message.conversationId);
+    if (conversation === undefined) {
+      throw new Error('Conversation does not exist.');
+    }
     for (const attachmentId of message.attachmentIds) {
       const attachment = await transaction.objectStore('attachments').get(attachmentId);
       if (attachment === undefined) {

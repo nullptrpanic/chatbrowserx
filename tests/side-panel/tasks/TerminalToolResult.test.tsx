@@ -22,20 +22,23 @@ describe('TerminalToolResult', () => {
       />,
     );
 
+    expect(screen.getByText('执行完成')).toBeVisible();
+    expect(screen.queryByText(/exit\s*0/i)).not.toBeInTheDocument();
+    expect(screen.queryByText('npm run test:run')).not.toBeInTheDocument();
+    expect(screen.queryByText('37 tests passed')).not.toBeInTheDocument();
+
+    await user.click(screen.getByRole('button', { name: '展开终端输出' }));
     expect(screen.getByText('npm run test:run').closest('.terminal-command')).toHaveTextContent(
       '$npm run test:run',
     );
     expect(screen.getByText('37 tests passed')).toBeVisible();
-    expect(screen.getByText('执行完成')).toBeVisible();
-    expect(screen.queryByText(/exit\s*0/i)).not.toBeInTheDocument();
-
     await user.click(screen.getByRole('button', { name: '收起终端输出' }));
+    expect(screen.queryByText('npm run test:run')).not.toBeInTheDocument();
     expect(screen.queryByText('37 tests passed')).not.toBeInTheDocument();
-    await user.click(screen.getByRole('button', { name: '展开终端输出' }));
-    expect(screen.getByText('37 tests passed')).toBeVisible();
   });
 
-  it('falls back to rendering malformed arguments as plain text', () => {
+  it('falls back to rendering malformed arguments as plain text', async () => {
+    const user = userEvent.setup();
     render(
       <TerminalToolResult
         result={{
@@ -49,6 +52,8 @@ describe('TerminalToolResult', () => {
       />,
     );
 
+    expect(screen.queryByText('<script>alert("unsafe")</script>')).not.toBeInTheDocument();
+    await user.click(screen.getByRole('button', { name: '展开终端输出' }));
     expect(screen.getByText('<script>alert("unsafe")</script>')).toBeVisible();
     expect(document.querySelector('script')).toBeNull();
   });

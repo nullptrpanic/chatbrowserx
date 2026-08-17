@@ -18,6 +18,8 @@ function credentialStore(token?: string): CredentialStore {
     initialize: vi.fn(async () => undefined),
     getCodexAccessToken: vi.fn(async () => token),
     setCodexAccessToken: vi.fn(async () => undefined),
+    getTavilyKey: vi.fn(async () => undefined),
+    setTavilyKey: vi.fn(async () => undefined),
   };
 }
 
@@ -249,6 +251,49 @@ describe('CodexProvider', () => {
         }),
       }),
     );
+  });
+
+  it('normalizes a completed Responses reasoning summary without exposing raw reasoning', async () => {
+    const provider = new CodexProvider(
+      credentialStore(ACCESS_TOKEN),
+      vi.fn<typeof fetch>(async () =>
+        sseResponse([
+          {
+            event: 'response.created',
+            data: { type: 'response.created', response: { id: 'resp_reasoning' } },
+          },
+          {
+            event: 'response.reasoning_summary_text.done',
+            data: {
+              type: 'response.reasoning_summary_text.done',
+              item_id: 'reasoning_1',
+              summary_index: 0,
+              text: 'Compared the available evidence before answering.',
+            },
+          },
+          {
+            event: 'response.output_text.delta',
+            data: { type: 'response.output_text.delta', delta: 'Ready' },
+          },
+          {
+            event: 'response.completed',
+            data: { type: 'response.completed', response: { id: 'resp_reasoning' } },
+          },
+        ]),
+      ),
+    );
+
+    await expect(collect(provider.stream(REQUEST, new AbortController().signal))).resolves.toEqual([
+      { type: 'response.started', responseId: 'resp_reasoning' },
+      {
+        type: 'reasoning.summary',
+        itemId: 'reasoning_1',
+        summaryIndex: 0,
+        text: 'Compared the available evidence before answering.',
+      },
+      { type: 'text.delta', delta: 'Ready' },
+      { type: 'response.completed', responseId: 'resp_reasoning', usage: null },
+    ]);
   });
 
   it.each(['lookup', 'lookup_record', 'lookup-record'] as const)(

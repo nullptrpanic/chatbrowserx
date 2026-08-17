@@ -1,4 +1,4 @@
-import type { ConversationId } from '../shared/ids';
+import type { ConversationId, WorkSessionId } from '../shared/ids';
 import type { IdGenerator } from '../shared/ids';
 import type { Clock } from '../shared/time';
 import type { TaskRun } from './task-types';
@@ -7,6 +7,7 @@ export interface CreateTaskInput {
   readonly conversationId: ConversationId;
   readonly tabId: number;
   readonly goal: string;
+  readonly workSessionId?: WorkSessionId;
 }
 
 export interface TaskFactoryDependencies {
@@ -38,10 +39,19 @@ export function createTask(input: CreateTaskInput, dependencies: TaskFactoryDepe
     throw new Error('Task ID generator returned an empty identifier.');
   }
 
+  const workSessionId =
+    input.workSessionId === undefined
+      ? dependencies.ids.create('workSession').trim()
+      : input.workSessionId.trim();
+  if (workSessionId.length === 0) {
+    throw new Error('WorkSession ID is required.');
+  }
+
   const now = dependencies.clock.now();
 
   return {
     id,
+    workSessionId,
     conversationId,
     tabId: input.tabId,
     goal,

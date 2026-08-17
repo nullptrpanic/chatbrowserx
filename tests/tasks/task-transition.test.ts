@@ -17,14 +17,32 @@ describe('task transitions', () => {
       at: 1_001,
       reason: 'Request started.',
     });
-    const completed = transitionTask(planning, {
-      type: 'task.completed',
+    const callRecorded = transitionTask(planning, {
+      type: 'tool.call-recorded',
       at: 1_002,
+      reason: 'Tavily call recorded.',
+    });
+    const resultRecorded = transitionTask(callRecorded, {
+      type: 'tool.result-recorded',
+      at: 1_003,
+      reason: 'Tavily result recorded.',
+    });
+    const supplementsApplied = transitionTask(resultRecorded, {
+      type: 'task.supplements-applied',
+      at: 1_004,
+      reason: 'User supplements applied.',
+    });
+    const completed = transitionTask(supplementsApplied, {
+      type: 'task.completed',
+      at: 1_005,
       reason: 'Response completed.',
     });
 
     expect(queued.status).toBe('queued');
     expect(planning.status).toBe('planning');
+    expect(callRecorded.status).toBe('planning');
+    expect(resultRecorded.status).toBe('planning');
+    expect(supplementsApplied.status).toBe('planning');
     expect(completed.status).toBe('completed');
   });
 

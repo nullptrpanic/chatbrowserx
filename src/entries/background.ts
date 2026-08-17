@@ -18,6 +18,7 @@ import {
   type RecoveryTriggerPort,
 } from '../platform/chrome/register-background';
 import { CodexProvider } from '../providers/codex/codex-provider';
+import { TavilyClient } from '../providers/tavily/tavily-client';
 import type { IdGenerator, TaskId } from '../shared/ids';
 import type { Clock } from '../shared/time';
 import { RecoveryScanner } from '../tasks/recovery-scanner';
@@ -60,7 +61,7 @@ async function createBackgroundServices(
     ids: cryptoIds,
   });
   const settings = new ChromeSettingsStore();
-  const commands = new TaskCommandService(repository, systemClock, cryptoIds);
+  const commands = new TaskCommandService(repository, systemClock, cryptoIds, conversations);
   const installer = new ContentScriptInstaller();
   const screenshotPage = new ChromeScreenshotPagePort({
     installer,
@@ -77,17 +78,21 @@ async function createBackgroundServices(
     },
   });
   const codex = new CodexProvider(credentials);
+  const tavily = new TavilyClient(credentials);
   const planner = new CodexAgentPlanner({
     provider: codex,
     settings,
     conversations,
+    tasks: repository,
     attachments,
     ids: cryptoIds,
     clock: systemClock,
   });
   const executor = new TaskExecutor({
     repository,
+    conversations,
     planner,
+    tavily,
     clock: systemClock,
     ids: cryptoIds,
   });
@@ -132,6 +137,7 @@ async function createBackgroundServices(
   const router = createMessageRouter({
     commands: {
       create: (input) => commands.create(input),
+      continueCancelled: (input) => commands.continueCancelled(input),
       getSnapshot: (taskId) => commands.getSnapshot(taskId),
       pause: (taskId) => coordinator.pause(taskId),
       resume: (taskId) => coordinator.resume(taskId),

@@ -1,4 +1,5 @@
 export type TaskId = string;
+export type WorkSessionId = string;
 export type ConversationId = string;
 export type MessageId = string;
 export type AttachmentId = string;

@@ -39,7 +39,6 @@ describe('production bundle audit', () => {
     ['E2E_CONTROL_RESIDUE', 'const command = "test.fault";'],
     ['EXCLUDED_PROVIDER_OR_MEDIA_FEATURE', 'chrome.tabCapture.capture();'],
     ['CONCRETE_TOOL_RUNTIME_RESIDUE', 'const tool = "browser.observe";'],
-    ['CONCRETE_TOOL_RUNTIME_RESIDUE', 'const provider = "Tavily";'],
     ['DEBUGGER_RUNTIME_RESIDUE', 'chrome.debugger.attach({ tabId: 7 }, "1.3");'],
     ['RUNTIME_HOST_REQUEST_RESIDUE', 'chrome.permissions.request({ origins: ["https://x/*"] });'],
     ['MODEL_CONTEXT_INJECTION_RESIDUE', 'const prompt = "## Current page";'],
@@ -49,6 +48,18 @@ describe('production bundle audit', () => {
   ])('rejects %s', async (code, script) => {
     const result = await auditProductionBundle(await bundleFixture(script));
     expect(result.findings).toContainEqual({ code, asset: 'assets/app.js' });
+  });
+
+  it('accepts the approved fixed-endpoint Tavily runtime surface', async () => {
+    const script = [
+      'const tools = ["tavily_search", "tavily_extract", "tavily_crawl"];',
+      'const endpoints = ["https://api.tavily.com/search", "https://api.tavily.com/extract", "https://api.tavily.com/crawl"];',
+    ].join('\n');
+
+    await expect(auditProductionBundle(await bundleFixture(script))).resolves.toMatchObject({
+      passed: true,
+      findings: [],
+    });
   });
 
   it('rejects permission drift and source maps', async () => {

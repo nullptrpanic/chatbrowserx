@@ -1,6 +1,7 @@
 import type { IDBPDatabase } from 'idb';
 import type { ConversationId, TaskId } from '../shared/ids';
 import type { Checkpoint } from '../tasks/checkpoint-types';
+import type { ContinuationItem, PendingToolCall } from '../tasks/continuation-types';
 import type { TaskEvent, TaskLease, TaskRun, TaskStatus } from '../tasks/task-types';
 import type { ChatBrowserDatabase } from './database-schema';
 
@@ -17,9 +18,19 @@ export interface AcquireLeaseInput {
   readonly durationMs: number;
 }
 
+export class TaskRepositoryConflictError extends Error {
+  readonly code = 'UNAPPLIED_SUPPLEMENTS' as const;
+
+  constructor() {
+    super('Task completion requires every accepted WorkSession supplement to be applied.');
+    this.name = 'TaskRepositoryConflictError';
+  }
+}
+
 export interface TaskRepository {
   create(task: TaskRun): Promise<void>;
   createInitial(task: TaskRun, checkpoint: Checkpoint): Promise<void>;
+  createContinuation(sourceTaskId: TaskId, task: TaskRun, checkpoint: Checkpoint): Promise<void>;
   get(taskId: TaskId): Promise<TaskRun | undefined>;
   listByConversation(conversationId: ConversationId): Promise<TaskRun[]>;
   listEvents(taskId: TaskId, afterSequence?: number): Promise<TaskEvent[]>;
@@ -53,6 +64,10 @@ function normalizeTask(task: TaskRun): TaskRun {
   const status = normalizedStatus(task.status);
   return {
     id: task.id,
+    workSessionId:
+      typeof task.workSessionId === 'string' && task.workSessionId.trim().length > 0
+        ? task.workSessionId
+        : task.id,
     conversationId: task.conversationId,
     tabId: task.tabId,
     goal: task.goal,
@@ -65,16 +80,179 @@ function normalizeTask(task: TaskRun): TaskRun {
   };
 }
 
-/** Drops removed page observations and pending actions from a legacy checkpoint. */
+const validToolNamePattern = /^[a-zA-Z0-9_-]+$/;
+
+/** Returns a safe completed result or null for malformed or removed legacy tool records. */
+function normalizeCompletedToolResult(
+  value: unknown,
+): Checkpoint['completedToolResults'][number] | null {
+  if (typeof value !== 'object' || value === null) return null;
+  const result = value as Record<string, unknown>;
+  if (
+    typeof result.callId !== 'string' ||
+    result.callId.length === 0 ||
+    typeof result.toolName !== 'string' ||
+    !validToolNamePattern.test(result.toolName) ||
+    typeof result.argumentsJson !== 'string' ||
+    typeof result.output !== 'string' ||
+    typeof result.resultRef !== 'string' ||
+    result.resultRef.length === 0
+  ) {
+    return null;
+  }
+  return {
+    callId: result.callId,
+    toolName: result.toolName,
+    argumentsJson: result.argumentsJson,
+    output: result.output,
+    resultRef: result.resultRef,
+  };
+}
+
+/** Rebuilds provider-neutral call/output pairs from legacy completed-tool checkpoints. */
+function continuationFromCompletedResults(
+  results: Checkpoint['completedToolResults'],
+): ContinuationItem[] {
+  return results.flatMap((result): ContinuationItem[] => [
+    {
+      type: 'function_call',
+      callId: result.callId,
+      name: result.toolName,
+      argumentsJson: result.argumentsJson,
+    },
+    {
+      type: 'function_call_output',
+      callId: result.callId,
+      output: result.output,
+      resultRef: result.resultRef,
+    },
+  ]);
+}
+
+interface NormalizedContinuation {
+  readonly items: readonly ContinuationItem[];
+  readonly pendingToolCall: PendingToolCall | null;
+}
+
+/** Validates continuation state and repairs legacy messages written after an unresolved call. */
+function normalizeStoredContinuation(
+  rawItems: unknown,
+  rawPendingToolCall: unknown,
+): NormalizedContinuation | null {
+  if (!Array.isArray(rawItems)) return null;
+
+  const items: ContinuationItem[] = [];
+  const usedCallIds = new Set<string>();
+  let unresolvedCall: Extract<ContinuationItem, { type: 'function_call' }> | null = null;
+  for (const value of rawItems) {
+    if (typeof value !== 'object' || value === null) return null;
+    const item = value as Record<string, unknown>;
+    if (item.type === 'message_ref') {
+      if (typeof item.messageId !== 'string' || item.messageId.length === 0) return null;
+      const messageItem: ContinuationItem = {
+        type: 'message_ref',
+        messageId: item.messageId,
+      };
+      if (unresolvedCall === null) {
+        items.push(messageItem);
+      } else {
+        items.splice(items.length - 1, 0, messageItem);
+      }
+      continue;
+    }
+    if (item.type === 'function_call') {
+      if (
+        unresolvedCall !== null ||
+        typeof item.callId !== 'string' ||
+        item.callId.length === 0 ||
+        usedCallIds.has(item.callId) ||
+        typeof item.name !== 'string' ||
+        !validToolNamePattern.test(item.name) ||
+        typeof item.argumentsJson !== 'string'
+      ) {
+        return null;
+      }
+      unresolvedCall = {
+        type: 'function_call',
+        callId: item.callId,
+        name: item.name,
+        argumentsJson: item.argumentsJson,
+      };
+      usedCallIds.add(item.callId);
+      items.push(unresolvedCall);
+      continue;
+    }
+    if (item.type === 'function_call_output') {
+      if (
+        unresolvedCall === null ||
+        typeof item.callId !== 'string' ||
+        item.callId !== unresolvedCall.callId ||
+        typeof item.output !== 'string' ||
+        typeof item.resultRef !== 'string' ||
+        item.resultRef.length === 0
+      ) {
+        return null;
+      }
+      items.push({
+        type: 'function_call_output',
+        callId: item.callId,
+        output: item.output,
+        resultRef: item.resultRef,
+      });
+      unresolvedCall = null;
+      continue;
+    }
+    return null;
+  }
+
+  if (unresolvedCall === null) {
+    return rawPendingToolCall === null || rawPendingToolCall === undefined
+      ? { items, pendingToolCall: null }
+      : null;
+  }
+  if (typeof rawPendingToolCall !== 'object' || rawPendingToolCall === null) return null;
+  const pending = rawPendingToolCall as Record<string, unknown>;
+  if (
+    pending.callId !== unresolvedCall.callId ||
+    pending.name !== unresolvedCall.name ||
+    pending.argumentsJson !== unresolvedCall.argumentsJson
+  ) {
+    return null;
+  }
+  return {
+    items,
+    pendingToolCall: {
+      callId: unresolvedCall.callId,
+      name: unresolvedCall.name,
+      argumentsJson: unresolvedCall.argumentsJson,
+    },
+  };
+}
+
+/** Drops removed page state and projects old checkpoints onto safe continuation boundaries. */
 function normalizeCheckpoint(checkpoint: Checkpoint): Checkpoint {
+  const raw = checkpoint as Checkpoint & {
+    readonly continuationItems?: unknown;
+    readonly pendingToolCall?: unknown;
+  };
+  const completedToolResults = Array.isArray(checkpoint.completedToolResults)
+    ? checkpoint.completedToolResults
+        .map(normalizeCompletedToolResult)
+        .filter((result): result is NonNullable<typeof result> => result !== null)
+    : [];
+  const storedContinuation = normalizeStoredContinuation(
+    raw.continuationItems,
+    raw.pendingToolCall,
+  );
   return {
     id: checkpoint.id,
     taskId: checkpoint.taskId,
     sequence: checkpoint.sequence,
     taskStatus: normalizedStatus(checkpoint.taskStatus),
-    completedToolResults: checkpoint.completedToolResults.filter((result) =>
-      /^[a-zA-Z0-9_-]+$/.test(result.toolName),
-    ),
+    completedToolResults,
+    continuationItems:
+      storedContinuation?.items ?? continuationFromCompletedResults(completedToolResults),
+    pendingToolCall: storedContinuation?.pendingToolCall ?? null,
     createdAt: checkpoint.createdAt,
   };
 }
@@ -87,6 +265,11 @@ function taskSequenceRange(taskId: TaskId, afterSequence = -1): IDBKeyRange {
     [taskId, Math.max(0, afterSequence + 1)],
     [taskId, Number.MAX_SAFE_INTEGER],
   );
+}
+
+/** Builds the time-ordered message range for one conversation. */
+function conversationTimeRange(conversationId: ConversationId): IDBKeyRange {
+  return IDBKeyRange.bound([conversationId, 0], [conversationId, Number.MAX_SAFE_INTEGER]);
 }
 
 export class IndexedDbTaskRepository implements TaskRepository {
@@ -122,6 +305,60 @@ export class IndexedDbTaskRepository implements TaskRepository {
     }
 
     const transaction = this.#database.transaction(['tasks', 'checkpoints'], 'readwrite');
+    await transaction.objectStore('tasks').add(task);
+    await transaction.objectStore('checkpoints').add(checkpoint);
+    await transaction.done;
+  }
+
+  /**
+   * Atomically creates one queued continuation only from the latest cancelled run in a WorkSession.
+   */
+  async createContinuation(
+    sourceTaskId: TaskId,
+    task: TaskRun,
+    checkpoint: Checkpoint,
+  ): Promise<void> {
+    if (
+      task.status !== 'queued' ||
+      task.checkpointId !== checkpoint.id ||
+      checkpoint.taskId !== task.id ||
+      checkpoint.sequence !== 0 ||
+      checkpoint.taskStatus !== 'queued' ||
+      checkpoint.createdAt !== task.createdAt
+    ) {
+      throw new Error('Continuation records do not describe the same queued boundary.');
+    }
+
+    const transaction = this.#database.transaction(['tasks', 'checkpoints'], 'readwrite');
+    const sourceValue = await transaction.objectStore('tasks').get(sourceTaskId);
+    if (sourceValue === undefined) {
+      throw new Error('Continuation source task does not exist.');
+    }
+    const source = normalizeTask(sourceValue);
+    const conversationTasks = await transaction
+      .objectStore('tasks')
+      .index('by-conversation')
+      .getAll(source.conversationId);
+    const workSessionTasks = conversationTasks
+      .map(normalizeTask)
+      .filter((candidate) => candidate.workSessionId === source.workSessionId)
+      .sort(
+        (left, right) =>
+          left.createdAt - right.createdAt ||
+          left.updatedAt - right.updatedAt ||
+          left.id.localeCompare(right.id),
+      );
+    const latest = workSessionTasks.at(-1);
+    if (source.status !== 'cancelled' || latest?.id !== source.id) {
+      throw new Error('Continuation source must be the latest cancelled WorkSession task.');
+    }
+    if (
+      task.conversationId !== source.conversationId ||
+      task.workSessionId !== source.workSessionId
+    ) {
+      throw new Error('Continuation task must remain in the source WorkSession.');
+    }
+
     await transaction.objectStore('tasks').add(task);
     await transaction.objectStore('checkpoints').add(checkpoint);
     await transaction.done;
@@ -179,7 +416,7 @@ export class IndexedDbTaskRepository implements TaskRepository {
       throw new Error('Task transition records do not describe the same durable boundary.');
     }
     const transaction = this.#database.transaction(
-      ['tasks', 'task-events', 'checkpoints'],
+      ['tasks', 'task-events', 'checkpoints', 'messages'],
       'readwrite',
     );
     const existingTask = await transaction.objectStore('tasks').get(input.task.id);
@@ -194,6 +431,43 @@ export class IndexedDbTaskRepository implements TaskRepository {
     const expectedSequence = (latestEvent?.value.sequence ?? 0) + 1;
     if (input.event.sequence !== expectedSequence) {
       throw new Error(`Task event sequence must be ${expectedSequence}.`);
+    }
+
+    if (input.event.type === 'task.completed') {
+      if (input.checkpoint.pendingToolCall !== null) {
+        throw new Error('A task with a pending tool call cannot complete.');
+      }
+      const existing = normalizeTask(existingTask);
+      const conversationTasks = await transaction
+        .objectStore('tasks')
+        .index('by-conversation')
+        .getAll(existing.conversationId);
+      const workSessionTaskIds = new Set(
+        conversationTasks
+          .map(normalizeTask)
+          .filter((task) => task.workSessionId === existing.workSessionId)
+          .map((task) => task.id),
+      );
+      const referencedMessageIds = new Set(
+        input.checkpoint.continuationItems.flatMap((item) =>
+          item.type === 'message_ref' ? [item.messageId] : [],
+        ),
+      );
+      const messages = await transaction
+        .objectStore('messages')
+        .index('by-conversation-created-at')
+        .getAll(conversationTimeRange(existing.conversationId));
+      if (
+        messages.some(
+          (message) =>
+            message.kind === 'supplement' &&
+            message.taskId !== null &&
+            workSessionTaskIds.has(message.taskId) &&
+            !referencedMessageIds.has(message.id),
+        )
+      ) {
+        throw new TaskRepositoryConflictError();
+      }
     }
 
     await transaction.objectStore('tasks').put(input.task);

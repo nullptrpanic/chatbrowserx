@@ -32,8 +32,9 @@ const settingsSchema = z
     reasoningEffort: z.enum(['low', 'medium', 'high', 'xhigh']),
     systemPrompt: z.string().max(20_000),
     language: z.enum(['system', 'zh-CN', 'en', 'ja']),
-    historyMessageLimit: z.number().int().min(1).max(200).default(50),
+    historyMessageLimit: z.number().int().min(1).max(50).default(50),
     hasCodexToken: z.boolean(),
+    hasTavilyKey: z.boolean().default(false),
   })
   .strict();
 const editableSettingsSchema = z
@@ -42,8 +43,9 @@ const editableSettingsSchema = z
     reasoningEffort: z.enum(['low', 'medium', 'high', 'xhigh']),
     systemPrompt: z.string().max(20_000),
     language: z.enum(['system', 'zh-CN', 'en', 'ja']),
-    historyMessageLimit: z.number().int().min(1).max(200).default(50),
+    historyMessageLimit: z.number().int().min(1).max(50).default(50),
     codexAccessToken: z.string().max(20_000),
+    tavilyKey: z.string().max(20_000),
   })
   .strict();
 const completedToolResultSchema = z
@@ -53,6 +55,14 @@ const completedToolResultSchema = z
     argumentsJson: z.string().max(20_000),
     output: z.string().max(100_000),
     resultRef: z.string().max(512),
+  })
+  .strict();
+const taskSupplementSchema = z
+  .object({
+    id: idSchema,
+    text: z.string().max(20_000),
+    attachmentIds: z.array(idSchema).max(8),
+    createdAt: timestampSchema,
   })
   .strict();
 const panelTaskSchema = z
@@ -80,11 +90,13 @@ const panelTaskSchema = z
             type: z.string().max(128),
             reason: z.string().max(500),
             at: timestampSchema,
+            reasoningSummary: z.string().max(20_000).optional(),
           })
           .strict(),
       )
       .max(100),
     completedToolResults: z.array(completedToolResultSchema).max(20),
+    supplements: z.array(taskSupplementSchema).max(100).default([]),
   })
   .strict();
 

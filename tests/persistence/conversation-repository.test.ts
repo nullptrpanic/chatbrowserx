@@ -20,6 +20,7 @@ const conversation: Conversation = {
 
 const message: MessageRecord = {
   id: 'message_1',
+  kind: 'conversation',
   conversationId: conversation.id,
   taskId: null,
   role: 'user',
@@ -31,6 +32,28 @@ const message: MessageRecord = {
 };
 
 describe('IndexedDbConversationRepository', () => {
+  it('normalizes legacy messages to ordinary conversation messages', async () => {
+    const database = await openChatBrowserDatabase(createTestDatabaseName('legacy-message-kind'));
+    const conversations = new IndexedDbConversationRepository(database);
+    await conversations.create(conversation);
+    await database.add('messages', {
+      id: 'legacy_message',
+      conversationId: conversation.id,
+      taskId: null,
+      role: 'user',
+      status: 'complete',
+      text: 'Legacy message',
+      attachmentIds: [],
+      createdAt: 2,
+      updatedAt: 2,
+    } as never);
+
+    await expect(conversations.listMessages(conversation.id)).resolves.toEqual([
+      expect.objectContaining({ id: 'legacy_message', kind: 'conversation' }),
+    ]);
+    database.close();
+  });
+
   it('lists conversations from every tab by most recent activity', async () => {
     const database = await openChatBrowserDatabase(createTestDatabaseName('conversation-global'));
     const conversations = new IndexedDbConversationRepository(database);
@@ -143,6 +166,90 @@ describe('IndexedDbConversationRepository', () => {
     database.close();
   });
 
+  it('atomically appends an image-only supplement to a running task', async () => {
+    const database = await openChatBrowserDatabase(createTestDatabaseName('supplement-running'));
+    const conversations = new IndexedDbConversationRepository(database);
+    const tasks = new IndexedDbTaskRepository(database);
+    const attachments = new IndexedDbAttachmentRepository(database);
+    await conversations.create(conversation);
+    const task = createTask(
+      { conversationId: conversation.id, tabId: 7, goal: 'Research sources' },
+      { clock: { now: () => 2 }, ids: { create: (prefix) => `${prefix}_supplement` } },
+    );
+    await tasks.create(task);
+    await attachments.put({
+      id: 'attachment_1',
+      blob: new Blob([new Uint8Array([1])], { type: 'image/png' }),
+      mimeType: 'image/png',
+      byteSize: 1,
+      width: 1,
+      height: 1,
+      source: 'file',
+      createdAt: 1,
+    });
+
+    await conversations.appendSupplement({
+      id: 'supplement_1',
+      kind: 'supplement',
+      conversationId: conversation.id,
+      taskId: task.id,
+      role: 'user',
+      status: 'complete',
+      text: '',
+      attachmentIds: ['attachment_1'],
+      createdAt: 3,
+      updatedAt: 3,
+    });
+
+    await expect(conversations.listMessages(conversation.id)).resolves.toContainEqual(
+      expect.objectContaining({
+        id: 'supplement_1',
+        kind: 'supplement',
+        taskId: task.id,
+        attachmentIds: ['attachment_1'],
+      }),
+    );
+    await expect(attachments.deleteUnreferenced(10)).resolves.toBe(0);
+    database.close();
+  });
+
+  it.each(['paused', 'waiting_for_auth', 'completed', 'failed', 'cancelled'] as const)(
+    'rejects supplements after a task becomes %s',
+    async (status) => {
+      const database = await openChatBrowserDatabase(
+        createTestDatabaseName(`supplement-${status}`),
+      );
+      const conversations = new IndexedDbConversationRepository(database);
+      const tasks = new IndexedDbTaskRepository(database);
+      await conversations.create(conversation);
+      const task = {
+        ...createTask(
+          { conversationId: conversation.id, tabId: 7, goal: 'Research sources' },
+          { clock: { now: () => 2 }, ids: { create: (prefix) => `${prefix}_${status}` } },
+        ),
+        status,
+      };
+      await tasks.create(task);
+
+      await expect(
+        conversations.appendSupplement({
+          id: `supplement_${status}`,
+          kind: 'supplement',
+          conversationId: conversation.id,
+          taskId: task.id,
+          role: 'user',
+          status: 'complete',
+          text: 'Use official sources.',
+          attachmentIds: [],
+          createdAt: 3,
+          updatedAt: 3,
+        }),
+      ).rejects.toThrow(/running task/i);
+      await expect(conversations.listMessages(conversation.id)).resolves.toEqual([]);
+      database.close();
+    },
+  );
+
   it('cascades terminal task events and checkpoints when clearing history', async () => {
     const database = await openChatBrowserDatabase(createTestDatabaseName('conversation-cascade'));
     const conversations = new IndexedDbConversationRepository(database);
@@ -176,6 +283,8 @@ describe('IndexedDbConversationRepository', () => {
         sequence: 1,
         taskStatus: 'completed',
         completedToolResults: [],
+        continuationItems: [],
+        pendingToolCall: null,
         createdAt: 3,
       },
     });

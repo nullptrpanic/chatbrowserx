@@ -13,8 +13,9 @@ function buildFixture() {
     createdAt: 1_000,
     updatedAt: 1_200,
   };
-  const task = {
+  const task: TaskRun = {
     id: 'task_1',
+    workSessionId: 'workSession_1',
     conversationId: conversation.id,
     tabId: 7,
     goal: 'Book a room',
@@ -25,12 +26,14 @@ function buildFixture() {
     lease: null,
     lastError: null,
   };
-  const checkpoint = {
+  const checkpoint: Checkpoint = {
     id: 'checkpoint_1',
     taskId: task.id,
     sequence: 1,
     taskStatus: task.status,
     completedToolResults: [],
+    continuationItems: [{ type: 'message_ref' as const, messageId: 'message_1' }],
+    pendingToolCall: null,
     createdAt: 1_190,
   };
   const dependencies = {
@@ -42,6 +45,7 @@ function buildFixture() {
       listMessages: vi.fn(async (): Promise<MessageRecord[]> => [
         {
           id: 'message_1',
+          kind: 'conversation',
           conversationId: conversation.id,
           taskId: task.id,
           role: 'user' as const,
@@ -54,6 +58,7 @@ function buildFixture() {
       ]),
       appendMessage: vi.fn(async () => undefined),
       updateMessage: vi.fn(async () => undefined),
+      appendSupplement: vi.fn(async () => undefined),
       clearConversation: vi.fn(async () => undefined),
     },
     tasks: {
@@ -79,6 +84,7 @@ function buildFixture() {
         void arguments_;
         return checkpoint;
       }),
+      get: vi.fn(async () => task),
     },
     attachments: {
       get: vi.fn(async () => ({
@@ -107,9 +113,12 @@ function buildFixture() {
     credentials: {
       getCodexAccessToken: vi.fn(async () => 'secret-token'),
       setCodexAccessToken: vi.fn(async () => undefined),
+      getTavilyKey: vi.fn(async () => 'secret-tavily-key'),
+      setTavilyKey: vi.fn(async () => undefined),
     },
     commands: {
       create: vi.fn(async () => ({ task, checkpoint, events: [] })),
+      continueCancelled: vi.fn(async () => ({ task, checkpoint, events: [] })),
     },
     cancelTask: vi.fn(async () => ({ task, checkpoint, events: [] })),
     tabs: {
@@ -178,7 +187,54 @@ describe('PanelService', () => {
       conversationId: fixture.conversation.id,
       tabId: 9,
       goal: 'Continue from another page',
+      userMessageId: 'message_new',
     });
+  });
+
+  it('continues the latest cancelled task in the same WorkSession', async () => {
+    const fixture = buildFixture();
+    const cancelledTask = { ...fixture.task, status: 'cancelled' as const };
+    const continuedTask = {
+      ...fixture.task,
+      id: 'task_continued',
+      status: 'queued' as const,
+      tabId: 9,
+    };
+    fixture.dependencies.tasks.listByConversation.mockResolvedValue([cancelledTask]);
+    fixture.dependencies.commands.continueCancelled.mockResolvedValue({
+      task: continuedTask,
+      checkpoint: {
+        id: 'checkpoint_continued',
+        taskId: continuedTask.id,
+        sequence: 0,
+        taskStatus: 'queued',
+        completedToolResults: [],
+        continuationItems: [
+          { type: 'message_ref', messageId: 'message_1' },
+          { type: 'message_ref', messageId: 'message_new' },
+        ],
+        pendingToolCall: null,
+        createdAt: 2_000,
+      },
+      events: [],
+    });
+    const service = new PanelService(fixture.dependencies);
+
+    await service.submit({
+      tabId: 9,
+      conversationId: fixture.conversation.id,
+      text: 'Continue after cancellation',
+      attachmentIds: [],
+    });
+
+    expect(fixture.dependencies.commands.continueCancelled).toHaveBeenCalledWith({
+      sourceTaskId: cancelledTask.id,
+      tabId: 9,
+      goal: 'Continue after cancellation',
+      userMessageId: 'message_new',
+    });
+    expect(fixture.dependencies.commands.create).not.toHaveBeenCalled();
+    expect(fixture.dependencies.scheduleTask).toHaveBeenCalledWith(continuedTask.id);
   });
 
   it('falls back to the latest global conversation after another panel deletes the selection', async () => {
@@ -201,12 +257,120 @@ describe('PanelService', () => {
       tab: { id: 7, origin: 'https://example.com', supported: true, hasPermission: true },
       conversation: { id: fixture.conversation.id, taskStatus: 'completed' },
       task: { id: fixture.task.id, sequence: 1 },
-      settings: { hasCodexToken: true },
+      settings: { hasCodexToken: true, hasTavilyKey: true },
       attachments: [{ id: 'attachment_1', fileName: 'photo.png' }],
     });
     expect(JSON.stringify(snapshot)).not.toContain('secret-token');
     expect(JSON.stringify(snapshot)).not.toContain('blob');
     expect(snapshot.tab).not.toHaveProperty('debuggerAttached');
+  });
+
+  it('projects a bounded reasoning summary with its corresponding task event', async () => {
+    const fixture = buildFixture();
+    fixture.dependencies.tasks.listEvents.mockResolvedValue([
+      {
+        id: 'event_reasoning',
+        taskId: fixture.task.id,
+        sequence: 1,
+        type: 'reasoning.summary-recorded',
+        reason: 'model_reasoning_summary_recorded',
+        at: 1_180,
+        error: null,
+        reasoningSummary: 'r'.repeat(20_100),
+      },
+      {
+        id: 'event_completed',
+        taskId: fixture.task.id,
+        sequence: 2,
+        type: 'task.completed',
+        reason: 'done',
+        at: 1_190,
+        error: null,
+      },
+    ]);
+    const service = new PanelService(fixture.dependencies);
+
+    const snapshot = await service.getSnapshot(7);
+
+    expect(snapshot.task?.events[0]).toMatchObject({
+      type: 'reasoning.summary-recorded',
+      reasoningSummary: 'r'.repeat(20_000),
+    });
+  });
+
+  it('projects supplements under their running task without creating chat bubbles', async () => {
+    const fixture = buildFixture();
+    const runningTask = { ...fixture.task, status: 'planning' as const };
+    fixture.dependencies.tasks.listByConversation.mockResolvedValue([runningTask]);
+    fixture.dependencies.conversations.listMessages.mockResolvedValue([
+      {
+        id: 'message_1',
+        kind: 'conversation',
+        conversationId: fixture.conversation.id,
+        taskId: runningTask.id,
+        role: 'user',
+        status: 'complete',
+        text: 'Research this',
+        attachmentIds: [],
+        createdAt: 1_010,
+        updatedAt: 1_010,
+      },
+      {
+        id: 'supplement_1',
+        kind: 'supplement',
+        conversationId: fixture.conversation.id,
+        taskId: runningTask.id,
+        role: 'user',
+        status: 'complete',
+        text: 'Use official sources',
+        attachmentIds: ['attachment_1'],
+        createdAt: 1_100,
+        updatedAt: 1_100,
+      },
+    ]);
+    const service = new PanelService(fixture.dependencies);
+
+    const snapshot = await service.getSnapshot(7);
+
+    expect(snapshot.messages.map(({ id }) => id)).toEqual(['message_1']);
+    expect(snapshot.task?.supplements).toEqual([
+      {
+        id: 'supplement_1',
+        text: 'Use official sources',
+        attachmentIds: ['attachment_1'],
+        createdAt: 1_100,
+      },
+    ]);
+    expect(snapshot.attachments).toEqual([
+      expect.objectContaining({ id: 'attachment_1', fileName: 'photo.png' }),
+    ]);
+  });
+
+  it('persists a sanitized supplement for the current running task', async () => {
+    const fixture = buildFixture();
+    const runningTask = { ...fixture.task, status: 'queued' as const };
+    fixture.dependencies.tasks.get.mockResolvedValue(runningTask);
+    const service = new PanelService(fixture.dependencies);
+
+    await expect(
+      service.supplement({
+        taskId: runningTask.id,
+        text: ' Prioritize official sources. ',
+        attachmentIds: [],
+      }),
+    ).resolves.toEqual({ accepted: true, id: 'supplement_new' });
+    expect(fixture.dependencies.conversations.appendSupplement).toHaveBeenCalledWith({
+      id: 'supplement_new',
+      kind: 'supplement',
+      conversationId: fixture.conversation.id,
+      taskId: runningTask.id,
+      role: 'user',
+      status: 'complete',
+      text: 'Prioritize official sources.',
+      attachmentIds: [],
+      createdAt: 2_000,
+      updatedAt: 2_000,
+    });
   });
 
   it('projects message task IDs and bounded task execution details for answer-level rendering', async () => {
@@ -231,6 +395,7 @@ describe('PanelService', () => {
     fixture.dependencies.conversations.listMessages.mockResolvedValue([
       {
         id: 'message_user_1',
+        kind: 'conversation',
         conversationId: fixture.conversation.id,
         taskId: fixture.task.id,
         role: 'user',
@@ -242,6 +407,7 @@ describe('PanelService', () => {
       },
       {
         id: 'message_assistant_1',
+        kind: 'conversation',
         conversationId: fixture.conversation.id,
         taskId: fixture.task.id,
         role: 'assistant',
@@ -253,6 +419,7 @@ describe('PanelService', () => {
       },
       {
         id: 'message_assistant_2',
+        kind: 'conversation',
         conversationId: fixture.conversation.id,
         taskId: secondTask.id,
         role: 'assistant',
@@ -281,6 +448,8 @@ describe('PanelService', () => {
       sequence: 1,
       taskStatus: 'completed',
       completedToolResults: checkpointId === 'checkpoint_2' ? completedToolResults : [],
+      continuationItems: [],
+      pendingToolCall: null,
       createdAt: checkpointId === 'checkpoint_2' ? 1_300 : 1_190,
     }));
     const service = new PanelService(fixture.dependencies);
@@ -315,6 +484,7 @@ describe('PanelService', () => {
       language: 'zh-CN',
       historyMessageLimit: 50,
       codexAccessToken: 'secret-token',
+      tavilyKey: 'secret-tavily-key',
     });
   });
 
@@ -391,10 +561,12 @@ describe('PanelService', () => {
       language: 'en',
       historyMessageLimit: 24,
       codexAccessToken: 'new-token',
+      tavilyKey: 'new-tavily-key',
     });
     await service.clearConversation(fixture.conversation.id);
 
     expect(fixture.dependencies.credentials.setCodexAccessToken).toHaveBeenCalledWith('new-token');
+    expect(fixture.dependencies.credentials.setTavilyKey).toHaveBeenCalledWith('new-tavily-key');
     expect(fixture.dependencies.settings.save).toHaveBeenCalledWith(
       expect.objectContaining({ historyMessageLimit: 24 }),
     );

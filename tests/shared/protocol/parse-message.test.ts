@@ -23,6 +23,42 @@ describe('parseExtensionMessage', () => {
     });
   });
 
+  it('accepts and trims an explicitly supplied Tavily key', () => {
+    expect(
+      parseExtensionMessage({
+        version: 1,
+        requestId: 'req_tavily_settings',
+        type: 'settings.save',
+        payload: {
+          reasoningEffort: 'medium',
+          systemPrompt: '',
+          language: 'zh-CN',
+          historyMessageLimit: 50,
+          tavilyKey: '  tvly-key  ',
+        },
+      }),
+    ).toMatchObject({
+      type: 'settings.save',
+      payload: { tavilyKey: 'tvly-key' },
+    });
+  });
+
+  it('rejects history limits above the completed-message cap', () => {
+    expect(() =>
+      parseExtensionMessage({
+        version: 1,
+        requestId: 'req_history_limit',
+        type: 'settings.save',
+        payload: {
+          reasoningEffort: 'medium',
+          systemPrompt: '',
+          language: 'zh-CN',
+          historyMessageLimit: 51,
+        },
+      }),
+    ).toThrow(/invalid extension message/i);
+  });
+
   it('accepts a versioned task snapshot request', () => {
     expect(
       parseExtensionMessage({
@@ -37,6 +73,28 @@ describe('parseExtensionMessage', () => {
       type: 'task.getSnapshot',
       payload: { taskId: 'task_1' },
     });
+  });
+
+  it('accepts text or image-only runtime supplements and rejects empty ones', () => {
+    expect(
+      parseExtensionMessage({
+        version: 1,
+        requestId: 'req_supplement',
+        type: 'chat.supplement',
+        payload: { taskId: 'task_1', text: '', attachmentIds: ['attachment_1'] },
+      }),
+    ).toMatchObject({
+      type: 'chat.supplement',
+      payload: { taskId: 'task_1', text: '', attachmentIds: ['attachment_1'] },
+    });
+    expect(() =>
+      parseExtensionMessage({
+        version: 1,
+        requestId: 'req_empty_supplement',
+        type: 'chat.supplement',
+        payload: { taskId: 'task_1', text: '   ', attachmentIds: [] },
+      }),
+    ).toThrow(/invalid extension message/i);
   });
 
   it.each([

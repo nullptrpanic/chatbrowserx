@@ -19,7 +19,7 @@ export interface SettingsStore {
 }
 
 const SETTINGS_KEY = 'settings.app';
-const appSettingsSchema = z
+const storedAppSettingsSchema = z
   .object({
     model: z.string().trim().min(1).max(256),
     reasoningEffort: z.enum(['low', 'medium', 'high', 'xhigh']),
@@ -28,6 +28,9 @@ const appSettingsSchema = z
     historyMessageLimit: z.number().int().min(1).max(200).default(50),
   })
   .strict();
+const appSettingsSchema = storedAppSettingsSchema.extend({
+  historyMessageLimit: z.number().int().min(1).max(50).default(50),
+});
 
 export const DEFAULT_APP_SETTINGS: AppSettings = Object.freeze({
   model: 'gpt-5.6-terra',
@@ -56,12 +59,15 @@ export class ChromeSettingsStore implements SettingsStore {
       return { ...DEFAULT_APP_SETTINGS };
     }
 
-    const parsed = appSettingsSchema.safeParse(stored);
+    const parsed = storedAppSettingsSchema.safeParse(stored);
     if (!parsed.success) {
       throw new Error('Stored app settings are invalid.');
     }
 
-    return parsed.data;
+    return {
+      ...parsed.data,
+      historyMessageLimit: Math.min(parsed.data.historyMessageLimit, 50),
+    };
   }
 
   /**

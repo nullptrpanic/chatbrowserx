@@ -3,6 +3,7 @@ export type TaskErrorCode =
   | 'RateLimitError'
   | 'TransientProviderError'
   | 'InvalidProviderResponse'
+  | 'ToolCallLimitError'
   | 'TaskInputError'
   | 'TaskInterrupted';
 

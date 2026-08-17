@@ -33,7 +33,7 @@ export function readTerminalCommand(argumentsJson: string): string {
 
 /** Renders persisted command execution as a compact, independently collapsible terminal. */
 export function TerminalToolResult({ result, t }: TerminalToolResultProps) {
-  const [expanded, setExpanded] = useState(true);
+  const [expanded, setExpanded] = useState(false);
   const command = readTerminalCommand(result.argumentsJson);
   return (
     <section className="terminal-result" aria-label={`${result.toolName}: ${t('toolCompleted')}`}>
@@ -48,6 +48,7 @@ export function TerminalToolResult({ result, t }: TerminalToolResultProps) {
         </span>
         <button
           type="button"
+          aria-expanded={expanded}
           aria-label={t(expanded ? 'collapseTerminalOutput' : 'expandTerminalOutput')}
           title={t(expanded ? 'collapseTerminalOutput' : 'expandTerminalOutput')}
           onClick={() => setExpanded((value) => !value)}
@@ -55,14 +56,18 @@ export function TerminalToolResult({ result, t }: TerminalToolResultProps) {
           {expanded ? <ChevronUp size={13} /> : <ChevronDown size={13} />}
         </button>
       </div>
-      <div className="terminal-command">
-        <span aria-hidden="true">$</span>
-        <code>{command}</code>
-      </div>
-      {expanded && result.output.length > 0 ? (
-        <pre className="terminal-output">
-          <code>{result.output}</code>
-        </pre>
+      {expanded ? (
+        <div className="terminal-content">
+          <div className="terminal-command">
+            <span aria-hidden="true">$</span>
+            <code>{command}</code>
+          </div>
+          {result.output.length > 0 ? (
+            <pre className="terminal-output">
+              <code>{result.output}</code>
+            </pre>
+          ) : null}
+        </div>
       ) : null}
     </section>
   );

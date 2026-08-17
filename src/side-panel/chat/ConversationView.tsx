@@ -39,7 +39,8 @@ export function ConversationView({
   const tasksById = new Map(tasks.map((item) => [item.id, item]));
   const taskHostMessageIds = new Map<string, string>();
   for (const message of messages) {
-    if (canHostTaskDetails(message) && message.taskId !== null) {
+    const messageTask = message.taskId === null ? null : (tasksById.get(message.taskId) ?? null);
+    if (canHostTaskDetails(message, messageTask) && message.taskId !== null) {
       taskHostMessageIds.set(message.taskId, message.id);
     }
   }
@@ -82,6 +83,13 @@ export function ConversationView({
       ) : (
         <div className="message-list">
           {messages.map((message) => {
+            if (
+              message.role === 'assistant' &&
+              message.taskId !== null &&
+              taskHostMessageIds.get(message.taskId) !== message.id
+            ) {
+              return null;
+            }
             const messageTask =
               message.taskId !== null && taskHostMessageIds.get(message.taskId) === message.id
                 ? (tasksById.get(message.taskId) ?? null)
@@ -105,7 +113,9 @@ export function ConversationView({
           {task === null || attachedTaskIds.has(task.id) ? null : (
             <TaskProgressCard
               task={task}
+              attachments={attachments}
               t={t}
+              onOpenImagePreview={onOpenImagePreview}
               onPause={onPause}
               onResume={onResume}
               onRetry={onRetry}
@@ -131,14 +141,15 @@ export function ConversationView({
   );
 }
 
-/** Prevents an invisible failed placeholder from swallowing its task's fallback card. */
-function canHostTaskDetails(message: PanelMessage): boolean {
+/** Prevents an invisible interrupted placeholder from swallowing its task's fallback card. */
+function canHostTaskDetails(message: PanelMessage, task: PanelTask | null): boolean {
   return (
     message.role === 'assistant' &&
     !(
-      (message.status === 'error' || message.status === 'interrupted') &&
+      message.status === 'interrupted' &&
       message.text.length === 0 &&
-      message.attachmentIds.length === 0
+      message.attachmentIds.length === 0 &&
+      task?.status !== 'cancelled'
     )
   );
 }
