@@ -16,6 +16,7 @@ function buildFixture() {
   const commands = {
     pause: vi.fn(async () => snapshot),
     resume: vi.fn(async () => snapshot),
+    retry: vi.fn(async () => snapshot),
     cancel: vi.fn(async () => snapshot),
   };
   const coordinator = new TaskCoordinator({ executor: { run }, commands });
@@ -58,6 +59,15 @@ describe('TaskCoordinator', () => {
     fixture.resolve();
   });
 
+  it('returns retry after the durable command while rerunning the same task in background', async () => {
+    const fixture = buildFixture();
+
+    await expect(fixture.coordinator.retry('task_1')).resolves.toEqual(fixture.snapshot);
+    await vi.waitFor(() => expect(fixture.run).toHaveBeenCalledWith('task_1', expect.anything()));
+    expect(fixture.commands.retry).toHaveBeenCalledWith('task_1');
+    fixture.resolve();
+  });
+
   it('persists pause without waiting for an executor that ignores abort', async () => {
     let finish: (() => void) | undefined;
     const run = vi.fn(
@@ -69,6 +79,7 @@ describe('TaskCoordinator', () => {
     const commands = {
       pause: vi.fn(async () => ({ task: { id: 'task_1' } }) as TaskSnapshot),
       resume: vi.fn(),
+      retry: vi.fn(),
       cancel: vi.fn(),
     };
     const coordinator = new TaskCoordinator({ executor: { run }, commands });
@@ -82,5 +93,35 @@ describe('TaskCoordinator', () => {
     await expect(pausing).resolves.toMatchObject({ task: { id: 'task_1' } });
     finish?.();
     await running;
+  });
+
+  it('waits for an aborted runner to settle before persisting deletion-safe cancellation', async () => {
+    let finish: (() => void) | undefined;
+    const run = vi.fn(
+      (_taskId: string, signal: AbortSignal) =>
+        new Promise<void>((resolve) => {
+          finish = resolve;
+          signal.addEventListener('abort', () => undefined, { once: true });
+        }),
+    );
+    const snapshot = { task: { id: 'task_1' } } as TaskSnapshot;
+    const commands = {
+      pause: vi.fn(),
+      resume: vi.fn(),
+      retry: vi.fn(),
+      cancel: vi.fn(async () => snapshot),
+    };
+    const coordinator = new TaskCoordinator({ executor: { run }, commands });
+    const running = coordinator.start('task_1');
+
+    const cancellation = coordinator.cancel('task_1');
+    await Promise.resolve();
+    expect(run.mock.calls[0]?.[1].aborted).toBe(true);
+    expect(commands.cancel).not.toHaveBeenCalled();
+
+    finish?.();
+    await running;
+    await expect(cancellation).resolves.toBe(snapshot);
+    expect(commands.cancel).toHaveBeenCalledWith('task_1');
   });
 });

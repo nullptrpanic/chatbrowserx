@@ -17,6 +17,7 @@ const eventKeys: Readonly<Record<string, MessageKey>> = {
   'task.auth-required': 'taskWaitingAuth',
   'task.paused': 'taskPaused',
   'task.resumed': 'taskQueued',
+  'task.retried': 'taskRetried',
   'task.completed': 'taskCompleted',
   'task.failed': 'taskFailed',
   'task.cancelled': 'taskCancelled',

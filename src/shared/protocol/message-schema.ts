@@ -72,6 +72,7 @@ const settingsSaveSchema = z
         reasoningEffort: z.enum(['low', 'medium', 'high', 'xhigh']),
         systemPrompt: z.string().max(20_000),
         language: z.enum(['system', 'zh-CN', 'en', 'ja']),
+        historyMessageLimit: z.number().int().min(1).max(200).default(50),
         codexAccessToken: z.string().trim().min(1).max(20_000).optional(),
       })
       .strict(),
@@ -120,6 +121,15 @@ const taskResumeSchema = z
   })
   .strict();
 
+const taskRetrySchema = z
+  .object({
+    version: z.literal(PROTOCOL_VERSION),
+    requestId: requestIdSchema,
+    type: z.literal('task.retry'),
+    payload: z.object({ taskId: identifierSchema }).strict(),
+  })
+  .strict();
+
 const taskCancelSchema = z
   .object({
     version: z.literal(PROTOCOL_VERSION),
@@ -138,6 +148,20 @@ const screenshotCaptureSchema = z
       .object({
         tabId: z.number().int().nonnegative(),
         mode: z.enum(['viewport', 'region']),
+      })
+      .strict(),
+  })
+  .strict();
+
+const imagePreviewOpenSchema = z
+  .object({
+    version: z.literal(PROTOCOL_VERSION),
+    requestId: requestIdSchema,
+    type: z.literal('image.preview.open'),
+    payload: z
+      .object({
+        tabId: z.number().int().nonnegative(),
+        attachmentId: identifierSchema,
       })
       .strict(),
   })
@@ -189,8 +213,10 @@ export const extensionMessageSchema: z.ZodType<ExtensionMessage> = z.discriminat
   taskSnapshotSchema,
   taskPauseSchema,
   taskResumeSchema,
+  taskRetrySchema,
   taskCancelSchema,
   screenshotCaptureSchema,
+  imagePreviewOpenSchema,
   pageFeaturesEnsureSchema,
   selectionTranslateSchema,
   selectionAskSchema,
@@ -223,8 +249,34 @@ const pageOverlaysSetHiddenSchema = z
   })
   .strict();
 
+const pageImagePreviewOpenSchema = z
+  .object({
+    version: z.literal(PROTOCOL_VERSION),
+    requestId: requestIdSchema,
+    type: z.literal('page.imagePreview.open'),
+    payload: z
+      .object({
+        src: z
+          .string()
+          .min(1)
+          .max(14_000_000)
+          .refine((value) =>
+            [
+              'data:image/png;base64,',
+              'data:image/jpeg;base64,',
+              'data:image/webp;base64,',
+              'data:image/gif;base64,',
+            ].some((prefix) => value.startsWith(prefix)),
+          ),
+        alt: z.string().max(500),
+      })
+      .strict(),
+  })
+  .strict();
+
 export const pageCommandSchema: z.ZodType<PageCommand> = z.discriminatedUnion('type', [
   pagePingSchema,
   pageScreenshotSelectSchema,
   pageOverlaysSetHiddenSchema,
+  pageImagePreviewOpenSchema,
 ]);

@@ -5,6 +5,7 @@ const eventTargetStatus: Readonly<Record<TaskEventType, TaskStatus>> = {
   'task.auth-required': 'waiting_for_auth',
   'task.paused': 'paused',
   'task.resumed': 'queued',
+  'task.retried': 'queued',
   'task.completed': 'completed',
   'task.failed': 'failed',
   'task.cancelled': 'cancelled',
@@ -23,7 +24,7 @@ const allowedEvents: Readonly<Record<TaskStatus, ReadonlySet<TaskEventType>>> = 
   waiting_for_auth: new Set(['task.resumed', 'task.failed', 'task.cancelled']),
   paused: new Set(['task.resumed', 'task.failed', 'task.cancelled']),
   completed: new Set(),
-  failed: new Set(),
+  failed: new Set(['task.retried']),
   cancelled: new Set(),
 };
 
@@ -47,7 +48,10 @@ export function transitionTask(task: TaskRun, event: TaskTransitionEvent): TaskR
     throw new Error('Failed task transitions require a normalized error.');
   }
 
-  const lastError = event.type === 'task.resumed' ? null : (event.error ?? task.lastError);
+  const lastError =
+    event.type === 'task.resumed' || event.type === 'task.retried'
+      ? null
+      : (event.error ?? task.lastError);
 
   return {
     ...task,

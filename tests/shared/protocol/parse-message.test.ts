@@ -5,6 +5,24 @@ import {
 } from '../../../src/shared/protocol/parse-message';
 
 describe('parseExtensionMessage', () => {
+  it('defaults an older settings save payload to 50 history messages', () => {
+    expect(
+      parseExtensionMessage({
+        version: 1,
+        requestId: 'req_settings',
+        type: 'settings.save',
+        payload: {
+          reasoningEffort: 'medium',
+          systemPrompt: '',
+          language: 'zh-CN',
+        },
+      }),
+    ).toMatchObject({
+      type: 'settings.save',
+      payload: { historyMessageLimit: 50 },
+    });
+  });
+
   it('accepts a versioned task snapshot request', () => {
     expect(
       parseExtensionMessage({
@@ -27,6 +45,7 @@ describe('parseExtensionMessage', () => {
     ['task.pause', { taskId: 'task_1' }],
     ['task.resume', { taskId: 'task_1' }],
     ['task.cancel', { taskId: 'task_1' }],
+    ['image.preview.open', { tabId: 7, attachmentId: 'attachment_1' }],
   ])('accepts the supported %s command', (type, payload) => {
     expect(
       parseExtensionMessage({ version: 1, requestId: 'req_supported', type, payload }),
@@ -96,6 +115,17 @@ describe('parsePageCommand', () => {
         payload: { hidden: true },
       }),
     ).toMatchObject({ type: 'page.overlays.setHidden' });
+    expect(
+      parsePageCommand({
+        version: 1,
+        requestId: 'req_preview',
+        type: 'page.imagePreview.open',
+        payload: {
+          src: 'data:image/png;base64,cG5n',
+          alt: 'photo.png',
+        },
+      }),
+    ).toMatchObject({ type: 'page.imagePreview.open' });
   });
 
   it('rejects task commands and extra page payload fields', () => {

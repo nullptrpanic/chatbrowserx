@@ -6,11 +6,17 @@ import type { Translator } from '../../shared/i18n/i18n';
 export interface ImageAttachmentStripProps {
   readonly items: readonly ImageDraftItem[];
   readonly onRemove: (id: string) => void;
+  readonly onOpenImagePreview?: ((attachmentId: string) => Promise<boolean>) | undefined;
   readonly t: Translator;
 }
 
 /** Renders removable image thumbnails and an on-demand full-size preview dialog. */
-export function ImageAttachmentStrip({ items, onRemove, t }: ImageAttachmentStripProps) {
+export function ImageAttachmentStrip({
+  items,
+  onRemove,
+  onOpenImagePreview,
+  t,
+}: ImageAttachmentStripProps) {
   const [previewId, setPreviewId] = useState<string | null>(null);
   const preview = items.find((item) => item.id === previewId) ?? null;
   if (items.length === 0) return null;
@@ -23,7 +29,12 @@ export function ImageAttachmentStrip({ items, onRemove, t }: ImageAttachmentStri
             type="button"
             className="attachment-preview-button"
             aria-label={t('previewImage')}
-            onClick={() => setPreviewId(item.id)}
+            onClick={() => {
+              void (async () => {
+                const opened = (await onOpenImagePreview?.(item.id)) ?? false;
+                if (!opened) setPreviewId(item.id);
+              })();
+            }}
           >
             <img src={item.previewUrl} alt={t('pendingImages')} />
           </button>

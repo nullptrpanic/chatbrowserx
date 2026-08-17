@@ -24,7 +24,12 @@ export interface MessageRouterDependencies {
   readonly commands: TaskCommandPort;
   readonly panel: Pick<
     PanelService,
-    'getSnapshot' | 'submit' | 'clearConversation' | 'getSettings' | 'saveSettings'
+    | 'getSnapshot'
+    | 'submit'
+    | 'openImagePreview'
+    | 'clearConversation'
+    | 'getSettings'
+    | 'saveSettings'
   >;
   readonly screenshots: {
     captureViewport(tabId: number): Promise<{ readonly id: string }>;
@@ -135,6 +140,11 @@ async function routeMessage(
       await dependencies.scheduleTask(snapshot.task.id);
       return successResponse(message.requestId, snapshot);
     }
+    case 'task.retry': {
+      const snapshot = await dependencies.commands.retry(message.payload.taskId);
+      await dependencies.scheduleTask(snapshot.task.id);
+      return successResponse(message.requestId, snapshot);
+    }
     case 'task.cancel':
       return successResponse(
         message.requestId,
@@ -146,6 +156,17 @@ async function routeMessage(
         message.payload.mode === 'viewport'
           ? await dependencies.screenshots.captureViewport(message.payload.tabId)
           : await dependencies.screenshots.captureRegion(message.payload.tabId),
+      );
+    case 'image.preview.open':
+      if (context.senderTabId !== null) {
+        return errorResponse(message.requestId, 'INVALID_CONTEXT', 'Preview context is invalid.');
+      }
+      return successResponse(
+        message.requestId,
+        await dependencies.panel.openImagePreview(
+          message.payload.tabId,
+          message.payload.attachmentId,
+        ),
       );
     case 'page.features.ensure':
       if (dependencies.pageFeatures === undefined) throw new Error('Page features unavailable.');

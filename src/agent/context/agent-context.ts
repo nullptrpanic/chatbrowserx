@@ -18,6 +18,7 @@ export interface AgentContextInput {
   readonly task: TaskRun;
   readonly checkpoint: Checkpoint;
   readonly customSystemPrompt: string;
+  readonly historyMessageLimit: number;
 }
 
 export interface AgentContextDependencies {
@@ -39,6 +40,28 @@ function currentUserMessage(
     (message) =>
       message.taskId === taskId && message.role === 'user' && message.status === 'complete',
   );
+}
+
+/** Selects the newest completed conversational turns without replaying the current task. */
+function selectedHistoryMessages(
+  messages: readonly MessageRecord[],
+  taskId: string,
+  limit: number,
+): readonly MessageRecord[] {
+  if (!Number.isInteger(limit) || limit < 1 || limit > 200) {
+    throw new Error('History message limit is invalid.');
+  }
+  const selected = messages
+    .filter(
+      (message) =>
+        message.taskId !== taskId &&
+        message.status === 'complete' &&
+        (message.role === 'user' || message.role === 'assistant'),
+    )
+    .slice(-limit);
+
+  // Avoid starting Provider context with an assistant reply whose user turn was trimmed away.
+  return selected[0]?.role === 'assistant' ? selected.slice(1) : selected;
 }
 
 /** Converts bytes to base64 without exceeding function argument limits for large images. */
@@ -67,30 +90,96 @@ async function attachmentDataUrl(attachment: AttachmentRecord): Promise<string> 
   return `data:${mimeType};base64,${bytesToBase64(bytes)}`;
 }
 
-/** Resolves only image IDs explicitly attached to the current user message. */
-async function resolveImages(
+interface LoadedImageBatch {
+  readonly records: readonly AttachmentRecord[];
+  readonly bytes: number;
+}
+
+/** Loads and revalidates one deduplicated persisted image batch. */
+async function loadImageBatch(
   attachmentIds: readonly string[],
   attachments: Pick<AttachmentRepository, 'get'>,
-): Promise<readonly string[]> {
-  const ids = [...new Set(attachmentIds)].slice(0, MAX_MODEL_IMAGE_COUNT + 1);
-  if (ids.length > MAX_MODEL_IMAGE_COUNT) {
-    throw new Error('Referenced image attachment is invalid.');
-  }
-
+): Promise<LoadedImageBatch> {
+  const ids = [...new Set(attachmentIds)];
   const records: AttachmentRecord[] = [];
   let totalBytes = 0;
   for (const id of ids) {
     const attachment = await attachments.get(id);
-    if (!attachment) {
+    if (
+      !attachment ||
+      !APPROVED_IMAGE_TYPES.has(attachment.mimeType.toLowerCase()) ||
+      attachment.byteSize <= 0 ||
+      attachment.byteSize > MAX_MODEL_IMAGE_BYTES ||
+      attachment.byteSize !== attachment.blob.size ||
+      attachment.blob.type.toLowerCase() !== attachment.mimeType.toLowerCase()
+    ) {
       throw new Error('Referenced image attachment is invalid.');
     }
     totalBytes += attachment.byteSize;
-    if (totalBytes > MAX_MODEL_IMAGE_TOTAL_BYTES) {
-      throw new Error('Referenced image attachment is invalid.');
-    }
     records.push(attachment);
   }
-  return Promise.all(records.map(attachmentDataUrl));
+  return { records, bytes: totalBytes };
+}
+
+/** Materializes current images first, then complete historical batches from newest to oldest. */
+async function resolveConversationImages(
+  current: MessageRecord,
+  history: readonly MessageRecord[],
+  attachments: Pick<AttachmentRepository, 'get'>,
+): Promise<{
+  readonly current: readonly string[];
+  readonly history: ReadonlyMap<string, readonly string[]>;
+}> {
+  const currentIds = [...new Set(current.attachmentIds)];
+  if (currentIds.length > MAX_MODEL_IMAGE_COUNT) {
+    throw new Error('Referenced image attachment is invalid.');
+  }
+  const currentBatch = await loadImageBatch(currentIds, attachments);
+  if (currentBatch.bytes > MAX_MODEL_IMAGE_TOTAL_BYTES) {
+    throw new Error('Referenced image attachment is invalid.');
+  }
+  const currentImages = await Promise.all(currentBatch.records.map(attachmentDataUrl));
+
+  let remainingCount = MAX_MODEL_IMAGE_COUNT - currentBatch.records.length;
+  let remainingBytes = MAX_MODEL_IMAGE_TOTAL_BYTES - currentBatch.bytes;
+  const historicalImages = new Map<string, readonly string[]>();
+  for (let index = history.length - 1; index >= 0 && remainingCount > 0; index -= 1) {
+    const message = history[index];
+    if (!message || message.role !== 'user' || message.attachmentIds.length === 0) continue;
+    const ids = [...new Set(message.attachmentIds)];
+    if (ids.length > remainingCount) continue;
+
+    const batch = await loadImageBatch(ids, attachments);
+    if (batch.bytes > remainingBytes) continue;
+    historicalImages.set(message.id, await Promise.all(batch.records.map(attachmentDataUrl)));
+    remainingCount -= batch.records.length;
+    remainingBytes -= batch.bytes;
+  }
+
+  return { current: currentImages, history: historicalImages };
+}
+
+/** Converts one stored conversational message to normalized Provider input. */
+function modelMessage(
+  message: MessageRecord,
+  images: readonly string[] = [],
+): ModelInputItem | undefined {
+  const content: ModelMessageContent[] = [];
+  if (message.text.length > 0) {
+    content.push({
+      type: message.role === 'assistant' ? 'output_text' : 'input_text',
+      text: message.text,
+    });
+  }
+  if (message.role === 'user') {
+    content.push(
+      ...images.map((imageUrl) => ({ type: 'input_image', imageUrl, detail: 'high' }) as const),
+    );
+  }
+  if (content.length === 0 || (message.role !== 'user' && message.role !== 'assistant')) {
+    return undefined;
+  }
+  return { type: 'message', role: message.role, content };
 }
 
 /** Keeps the newest completed tool details under a bounded recovery context. */
@@ -110,7 +199,7 @@ function boundedToolResults(
   return selected.reverse();
 }
 
-/** Builds Provider input from only the current user message and completed tool exchanges. */
+/** Builds Provider input from bounded persisted history, the current user turn, and recovery tools. */
 export async function buildAgentContext(
   context: AgentContextInput,
   dependencies: AgentContextDependencies,
@@ -120,22 +209,16 @@ export async function buildAgentContext(
   if (userMessage === undefined) {
     throw new Error('Current task user message is missing.');
   }
-  const images = await resolveImages(userMessage.attachmentIds, dependencies.attachments);
-  const content: ModelMessageContent[] = [];
-  const text = userMessage.text;
-  if (text.length > 0) content.push({ type: 'input_text', text });
-  content.push(
-    ...images.map((imageUrl) => ({ type: 'input_image', imageUrl, detail: 'high' }) as const),
-  );
+  const history = selectedHistoryMessages(messages, context.task.id, context.historyMessageLimit);
+  const images = await resolveConversationImages(userMessage, history, dependencies.attachments);
 
   const input: ModelInputItem[] = [];
-  if (content.length > 0) {
-    input.push({
-      type: 'message',
-      role: 'user',
-      content,
-    });
+  for (const message of history) {
+    const item = modelMessage(message, images.history.get(message.id));
+    if (item) input.push(item);
   }
+  const currentItem = modelMessage(userMessage, images.current);
+  if (currentItem) input.push(currentItem);
   for (const result of boundedToolResults(context.checkpoint.completedToolResults)) {
     input.push(
       {

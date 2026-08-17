@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import { handlePageCommand } from '../../src/page/browser-command-handler';
 
 describe('handlePageCommand', () => {
@@ -14,6 +14,36 @@ describe('handlePageCommand', () => {
       ok: true,
       data: { installed: true },
     });
+  });
+
+  it('opens an image preview across the complete page viewport and closes on Escape', async () => {
+    await expect(
+      handlePageCommand(
+        {
+          version: 1,
+          requestId: 'req_preview',
+          type: 'page.imagePreview.open',
+          payload: { src: 'data:image/png;base64,cG5n', alt: 'photo.png' },
+        },
+        { document, window },
+      ),
+    ).resolves.toEqual({
+      version: 1,
+      requestId: 'req_preview',
+      ok: true,
+      data: { opened: true },
+    });
+
+    const host = document.querySelector<HTMLElement>('[data-chatbrowserx-overlay="image-preview"]');
+    expect(host).not.toBeNull();
+    expect(host).toHaveStyle({ position: 'fixed', inset: '0px' });
+
+    window.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape' }));
+    await vi.waitFor(() =>
+      expect(
+        document.querySelector('[data-chatbrowserx-overlay="image-preview"]'),
+      ).not.toBeInTheDocument(),
+    );
   });
 
   it('rejects removed page observation commands', async () => {

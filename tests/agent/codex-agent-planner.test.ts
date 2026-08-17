@@ -82,6 +82,7 @@ function repositories(existingMessages: readonly MessageRecord[] = []): {
     conversations: {
       create: vi.fn(async () => undefined),
       get: vi.fn(async () => undefined),
+      listAll: vi.fn(async () => []),
       listByTab: vi.fn(async () => []),
       listMessages: vi.fn(async () => [USER_MESSAGE, ...existingMessages]),
       appendMessage,
@@ -106,6 +107,7 @@ function settings(): SettingsStore {
       reasoningEffort: 'medium' as const,
       systemPrompt: 'Custom safe preference.',
       language: 'system' as const,
+      historyMessageLimit: 50,
     })),
     save: vi.fn(async () => undefined),
     reset: vi.fn(async () => ({
@@ -113,6 +115,7 @@ function settings(): SettingsStore {
       reasoningEffort: 'medium' as const,
       systemPrompt: '',
       language: 'system' as const,
+      historyMessageLimit: 50,
     })),
   };
 }

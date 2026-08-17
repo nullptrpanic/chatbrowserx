@@ -8,7 +8,7 @@ extensionTest(
 
     expect(serviceWorker.url()).toContain(`chrome-extension://${extensionId}/`);
     expect(sidePanelPage.url()).toContain(`chrome-extension://${extensionId}/`);
-    await expect(sidePanelPage.getByText('ChatBrowserX').first()).toBeVisible();
+    await expect(sidePanelPage.getByLabel('ChatBrowserX').first()).toBeVisible();
 
     await expect(
       sendExtensionMessage<{ readonly connected: boolean }>(sidePanelPage, {

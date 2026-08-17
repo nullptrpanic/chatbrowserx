@@ -21,6 +21,7 @@ export interface PanelConversationSummary {
 
 export interface PanelMessage {
   readonly id: string;
+  readonly taskId: string | null;
   readonly role: 'user' | 'assistant' | 'system';
   readonly status: 'complete' | 'streaming' | 'interrupted' | 'error';
   readonly text: string;
@@ -46,6 +47,14 @@ export interface PanelTaskEvent {
   readonly at: number;
 }
 
+export interface PanelCompletedToolResult {
+  readonly callId: string;
+  readonly toolName: string;
+  readonly argumentsJson: string;
+  readonly output: string;
+  readonly resultRef: string;
+}
+
 export interface PanelTask {
   readonly id: string;
   readonly status: PanelTaskStatus;
@@ -60,6 +69,7 @@ export interface PanelTask {
     readonly userMessage: string;
   } | null;
   readonly events: readonly PanelTaskEvent[];
+  readonly completedToolResults: readonly PanelCompletedToolResult[];
 }
 
 export interface PanelSettingsSnapshot {
@@ -67,6 +77,7 @@ export interface PanelSettingsSnapshot {
   readonly reasoningEffort: 'low' | 'medium' | 'high' | 'xhigh';
   readonly systemPrompt: string;
   readonly language: 'system' | 'zh-CN' | 'en' | 'ja';
+  readonly historyMessageLimit: number;
   readonly hasCodexToken: boolean;
 }
 
@@ -76,6 +87,7 @@ export interface PanelEditableSettings {
   readonly reasoningEffort: 'low' | 'medium' | 'high' | 'xhigh';
   readonly systemPrompt: string;
   readonly language: 'system' | 'zh-CN' | 'en' | 'ja';
+  readonly historyMessageLimit: number;
   readonly codexAccessToken: string;
 }
 
@@ -86,6 +98,7 @@ export interface PanelSnapshot {
   readonly conversations: readonly PanelConversationSummary[];
   readonly messages: readonly PanelMessage[];
   readonly attachments: readonly PanelAttachment[];
+  readonly tasks: readonly PanelTask[];
   readonly task: PanelTask | null;
   readonly settings: PanelSettingsSnapshot;
 }

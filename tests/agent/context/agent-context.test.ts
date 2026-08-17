@@ -59,6 +59,7 @@ function conversationRepository(messages: MessageRecord[]): ConversationReposito
   return {
     create: vi.fn(async () => undefined),
     get: vi.fn(async () => undefined),
+    listAll: vi.fn(async () => []),
     listByTab: vi.fn(async () => []),
     listMessages: vi.fn(async () => messages),
     appendMessage: vi.fn(async () => undefined),
@@ -68,26 +69,35 @@ function conversationRepository(messages: MessageRecord[]): ConversationReposito
 }
 
 describe('buildAgentContext', () => {
-  it('sends only the current user input, explicit attachments, and completed tool results', async () => {
+  it('replays ordered completed history without duplicating the current task', async () => {
     const messages = [
       message({
-        id: 'old',
+        id: 'previous-user',
         taskId: 'task_old',
         role: 'user',
-        text: `OLD USER INPUT ${'o'.repeat(33_000)}`,
+        text: 'Previous question',
+        createdAt: 100,
+      }),
+      message({
+        id: 'previous-assistant',
+        taskId: 'task_old',
+        role: 'assistant',
+        text: 'Previous answer',
+        createdAt: 110,
       }),
       message({
         id: 'interrupted',
-        taskId: 'task_1',
+        taskId: 'task_interrupted',
         role: 'assistant',
         text: 'PARTIAL COMPETING ANSWER',
         status: 'interrupted',
+        createdAt: 120,
       }),
       message({
         id: 'recent',
         taskId: 'task_1',
         role: 'assistant',
-        text: 'The cart is ready.',
+        text: 'CURRENT TASK ASSISTANT MUST NOT REPLAY',
         createdAt: 150,
       }),
       message({
@@ -126,12 +136,23 @@ describe('buildAgentContext', () => {
         task: TASK,
         checkpoint: CHECKPOINT,
         customSystemPrompt: 'Prefer primary sources.',
+        historyMessageLimit: 2,
       },
       { conversations: conversationRepository(messages), attachments },
     );
 
     expect(context.systemPrompt).toBe('Prefer primary sources.');
     expect(context.input).toEqual([
+      {
+        type: 'message',
+        role: 'user',
+        content: [{ type: 'input_text', text: 'Previous question' }],
+      },
+      {
+        type: 'message',
+        role: 'assistant',
+        content: [{ type: 'output_text', text: 'Previous answer' }],
+      },
       {
         type: 'message',
         role: 'user',
@@ -154,7 +175,7 @@ describe('buildAgentContext', () => {
     ]);
     const serialized = JSON.stringify(context.input);
     expect(serialized).not.toMatch(
-      /CURRENT OBSERVATION|Find the safest checkout option|Risk and recovery|Remaining budget|The cart is ready|OLD USER INPUT|PARTIAL COMPETING ANSWER|AQID/,
+      /CURRENT OBSERVATION|Find the safest checkout option|Risk and recovery|Remaining budget|CURRENT TASK ASSISTANT MUST NOT REPLAY|PARTIAL COMPETING ANSWER|AQID/,
     );
     expect(attachmentGet).toHaveBeenCalledTimes(1);
     expect(attachmentGet).toHaveBeenCalledWith('attachment_1');
@@ -167,6 +188,7 @@ describe('buildAgentContext', () => {
         task: TASK,
         checkpoint: { ...CHECKPOINT, completedToolResults: [] },
         customSystemPrompt: '',
+        historyMessageLimit: 50,
       },
       {
         conversations: conversationRepository([
@@ -193,6 +215,7 @@ describe('buildAgentContext', () => {
           task: TASK,
           checkpoint: { ...CHECKPOINT, completedToolResults: [] },
           customSystemPrompt: '',
+          historyMessageLimit: 50,
         },
         {
           conversations: conversationRepository([
@@ -237,6 +260,7 @@ describe('buildAgentContext', () => {
           task: TASK,
           checkpoint: CHECKPOINT,
           customSystemPrompt: '',
+          historyMessageLimit: 50,
         },
         { conversations: conversationRepository(messages), attachments },
       ),
@@ -284,6 +308,7 @@ describe('buildAgentContext', () => {
         task: TASK,
         checkpoint: CHECKPOINT,
         customSystemPrompt: '',
+        historyMessageLimit: 50,
       },
       { conversations: conversationRepository(messages), attachments },
     );
@@ -294,5 +319,101 @@ describe('buildAgentContext', () => {
     expect(context.systemPrompt).toBe('');
     expect(imageParts).toHaveLength(IMAGE_POLICY.maxCount);
     expect(imageParts.at(-1)).toMatchObject({ imageUrl: 'data:image/gif;base64,CA==' });
+  });
+
+  it('does not truncate a selected historical message by character count', async () => {
+    const longHistory = `LONG HISTORY ${'长'.repeat(150_000)}`;
+    const context = await buildAgentContext(
+      {
+        task: TASK,
+        checkpoint: { ...CHECKPOINT, completedToolResults: [] },
+        customSystemPrompt: '',
+        historyMessageLimit: 1,
+      },
+      {
+        conversations: conversationRepository([
+          message({
+            id: 'long-history',
+            taskId: 'task_old',
+            role: 'user',
+            text: longHistory,
+            createdAt: 100,
+          }),
+          message({
+            id: 'current',
+            taskId: 'task_1',
+            role: 'user',
+            text: 'Current follow-up',
+            createdAt: 200,
+          }),
+        ]),
+        attachments: { get: vi.fn(async () => undefined) },
+      },
+    );
+
+    expect(context.input[0]).toMatchObject({
+      type: 'message',
+      role: 'user',
+      content: [{ type: 'input_text', text: longHistory }],
+    });
+  });
+
+  it('prioritizes current images and fills the remaining budget from newest history', async () => {
+    const currentIds = Array.from({ length: 6 }, (_, index) => `current_${String(index)}`);
+    const recentIds = ['recent_0', 'recent_1'];
+    const get = vi.fn(async (id: string) => ({
+      id,
+      blob: new Blob([new Uint8Array([1])], { type: 'image/png' }),
+      mimeType: 'image/png',
+      byteSize: 1,
+      width: 1,
+      height: 1,
+      source: 'file' as const,
+      createdAt: 100,
+    }));
+    const context = await buildAgentContext(
+      {
+        task: TASK,
+        checkpoint: { ...CHECKPOINT, completedToolResults: [] },
+        customSystemPrompt: '',
+        historyMessageLimit: 10,
+      },
+      {
+        conversations: conversationRepository([
+          message({
+            id: 'older',
+            taskId: 'task_older',
+            role: 'user',
+            text: 'Older image',
+            attachmentIds: ['older_0'],
+            createdAt: 100,
+          }),
+          message({
+            id: 'recent',
+            taskId: 'task_recent',
+            role: 'user',
+            text: 'Recent images',
+            attachmentIds: recentIds,
+            createdAt: 120,
+          }),
+          message({
+            id: 'current',
+            taskId: 'task_1',
+            role: 'user',
+            text: 'Current images',
+            attachmentIds: currentIds,
+            createdAt: 140,
+          }),
+        ]),
+        attachments: { get },
+      },
+    );
+
+    const imageParts = context.input.flatMap((item) =>
+      item.type === 'message' ? item.content.filter((part) => part.type === 'input_image') : [],
+    );
+    expect(imageParts).toHaveLength(IMAGE_POLICY.maxCount);
+    expect(get).not.toHaveBeenCalledWith('older_0');
+    expect(get.mock.calls.map(([id]) => id)).toEqual([...currentIds, ...recentIds]);
   });
 });

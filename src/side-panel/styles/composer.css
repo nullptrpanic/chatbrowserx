@@ -6,7 +6,17 @@
   background: var(--cbx-panel);
 }
 
-.composer > textarea {
+.composer-input-surface {
+  overflow: hidden;
+  border: 1px solid var(--cbx-divider);
+  border-radius: 12px;
+  background: var(--cbx-raised);
+  transition:
+    border-color 120ms ease,
+    box-shadow 120ms ease;
+}
+
+.composer-input-surface > textarea {
   display: block;
   width: 100%;
   min-height: 40px;
@@ -14,14 +24,13 @@
   padding: 9px 10px;
   resize: none;
   overflow-y: auto;
-  border: 1px solid var(--cbx-divider);
-  border-radius: 11px;
+  border: 0;
   outline: none;
-  background: var(--cbx-raised);
+  background: transparent;
   line-height: 1.5;
 }
 
-.composer > textarea:focus {
+.composer-input-surface:focus-within {
   border-color: color-mix(in srgb, var(--cbx-accent) 60%, var(--cbx-divider));
   box-shadow: 0 0 0 3px color-mix(in srgb, var(--cbx-accent) 10%, transparent);
 }
@@ -105,8 +114,7 @@
 .attachment-strip {
   display: flex;
   gap: 7px;
-  margin-bottom: 7px;
-  padding: 2px;
+  padding: 8px 9px 1px;
   overflow-x: auto;
 }
 

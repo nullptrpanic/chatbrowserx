@@ -45,6 +45,7 @@ function buildCommands(snapshot: TaskSnapshot): TaskCommandPort {
     getSnapshot: vi.fn(async () => snapshot),
     pause: vi.fn(async () => snapshot),
     resume: vi.fn(async () => snapshot),
+    retry: vi.fn(async () => snapshot),
     cancel: vi.fn(async () => snapshot),
   };
 }
@@ -64,6 +65,7 @@ function buildPanel() {
     reasoningEffort: 'medium',
     systemPrompt: '',
     language: 'system',
+    historyMessageLimit: 50,
     hasCodexToken: false,
   };
   const editableSettings: PanelEditableSettings = {
@@ -71,6 +73,7 @@ function buildPanel() {
     reasoningEffort: settings.reasoningEffort,
     systemPrompt: settings.systemPrompt,
     language: settings.language,
+    historyMessageLimit: settings.historyMessageLimit,
     codexAccessToken: 'saved-token',
   };
   const snapshot: PanelSnapshot = {
@@ -87,12 +90,14 @@ function buildPanel() {
     conversations: [],
     messages: [],
     attachments: [],
+    tasks: [],
     task: null,
     settings,
   };
   return {
     getSnapshot: vi.fn(async () => snapshot),
     submit: vi.fn(async () => buildSnapshot()),
+    openImagePreview: vi.fn(async () => ({ opened: true as const })),
     clearConversation: vi.fn(async () => ({ deletedAttachments: 0 })),
     getSettings: vi.fn(async () => editableSettings),
     saveSettings: vi.fn(async () => ({ ...settings, hasCodexToken: true })),
@@ -255,7 +260,7 @@ describe('createMessageRouter', () => {
     expect(panel.saveSettings).not.toHaveBeenCalled();
   });
 
-  it('delegates task commands and schedules create and resume', async () => {
+  it('delegates task commands and schedules create, resume, and retry', async () => {
     const snapshot = buildSnapshot();
     const commands = buildCommands(snapshot);
     const scheduleTask = vi.fn(async () => undefined);
@@ -293,6 +298,12 @@ describe('createMessageRouter', () => {
     });
     await router({
       version: PROTOCOL_VERSION,
+      requestId: 'req_retry',
+      type: 'task.retry',
+      payload: { taskId: snapshot.task.id },
+    });
+    await router({
+      version: PROTOCOL_VERSION,
       requestId: 'req_cancel',
       type: 'task.cancel',
       payload: { taskId: snapshot.task.id },
@@ -306,9 +317,11 @@ describe('createMessageRouter', () => {
     expect(commands.pause).toHaveBeenCalledWith(snapshot.task.id);
     expect(commands.getSnapshot).toHaveBeenCalledWith(snapshot.task.id);
     expect(commands.resume).toHaveBeenCalledWith(snapshot.task.id);
+    expect(commands.retry).toHaveBeenCalledWith(snapshot.task.id);
     expect(commands.cancel).toHaveBeenCalledWith(snapshot.task.id);
     expect(scheduleTask).toHaveBeenNthCalledWith(1, snapshot.task.id);
     expect(scheduleTask).toHaveBeenNthCalledWith(2, snapshot.task.id);
+    expect(scheduleTask).toHaveBeenNthCalledWith(3, snapshot.task.id);
   });
 
   it('maps known and unexpected command failures to stable public errors', async () => {
@@ -375,6 +388,28 @@ describe('createMessageRouter', () => {
     expect(region).toMatchObject({ ok: true, data: { id: 'attachment_region' } });
     expect(screenshots.captureViewport).toHaveBeenCalledWith(7);
     expect(screenshots.captureRegion).toHaveBeenCalledWith(7);
+  });
+
+  it('routes a trusted side-panel image preview request by attachment reference only', async () => {
+    const panel = buildPanel();
+    const router = createMessageRouter({
+      commands: buildCommands(buildSnapshot()),
+      panel,
+      screenshots: buildScreenshots(),
+      requestRecoveryScan: vi.fn(async () => undefined),
+      scheduleTask: vi.fn(async () => undefined),
+    });
+
+    const response = await router({
+      version: PROTOCOL_VERSION,
+      requestId: 'req_preview',
+      type: 'image.preview.open',
+      payload: { tabId: 7, attachmentId: 'attachment_1' },
+    });
+
+    expect(response).toMatchObject({ ok: true, data: { opened: true } });
+    expect(panel.openImagePreview).toHaveBeenCalledWith(7, 'attachment_1');
+    expect(JSON.stringify(response)).not.toContain('data:image');
   });
 
   it('routes panel snapshots and chat submission through the sanitized panel boundary', async () => {

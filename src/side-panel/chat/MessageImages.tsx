@@ -13,10 +13,16 @@ export interface MessageImagesProps {
   readonly attachmentIds: readonly string[];
   readonly client: AttachmentDraftClient;
   readonly t: Translator;
+  readonly onOpenImagePreview?: ((attachmentId: string) => Promise<boolean>) | undefined;
 }
 
 /** Loads message image Blobs by reference and owns their short-lived object URLs. */
-export function MessageImages({ attachmentIds, client, t }: MessageImagesProps) {
+export function MessageImages({
+  attachmentIds,
+  client,
+  t,
+  onOpenImagePreview,
+}: MessageImagesProps) {
   const [images, setImages] = useState<readonly LoadedImage[]>([]);
   const [previewId, setPreviewId] = useState<string | null>(null);
   const attachmentKey = attachmentIds.join('\u001f');
@@ -50,7 +56,12 @@ export function MessageImages({ attachmentIds, client, t }: MessageImagesProps) 
           type="button"
           key={image.id}
           className="message-image-button"
-          onClick={() => setPreviewId(image.id)}
+          onClick={() => {
+            void (async () => {
+              const opened = (await onOpenImagePreview?.(image.id)) ?? false;
+              if (!opened) setPreviewId(image.id);
+            })();
+          }}
         >
           <img src={image.url} alt={image.alt} />
         </button>

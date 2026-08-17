@@ -1,7 +1,6 @@
 import type { ReactNode } from 'react';
 import type { Translator } from '../../shared/i18n/i18n';
 import type { PanelTabContext } from '../../shared/protocol/panel-types';
-import { PageContext } from './PageContext';
 import { TopBar, type PanelView } from './TopBar';
 
 export interface AppShellProps {
@@ -10,6 +9,8 @@ export interface AppShellProps {
   readonly tab: PanelTabContext | null;
   readonly t: Translator;
   readonly onNewTask: () => void;
+  readonly canClearConversation: boolean;
+  readonly onClearConversation: () => Promise<void>;
   readonly onViewChange: (view: PanelView) => void;
   readonly children: ReactNode;
 }
@@ -21,6 +22,8 @@ export function AppShell({
   tab,
   t,
   onNewTask,
+  canClearConversation,
+  onClearConversation,
   onViewChange,
   children,
 }: AppShellProps) {
@@ -29,11 +32,13 @@ export function AppShell({
       <TopBar
         view={view}
         connection={connection}
+        tab={tab}
         t={t}
         onNewTask={onNewTask}
+        canClearConversation={canClearConversation}
+        onClearConversation={onClearConversation}
         onViewChange={onViewChange}
       />
-      {tab === null ? null : <PageContext tab={tab} t={t} />}
       <div className={`panel-view panel-view-${view}`}>{children}</div>
     </main>
   );

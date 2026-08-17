@@ -73,36 +73,43 @@ export function ChatComposer({
 
   return (
     <section className="composer" aria-label={t('taskComposer')}>
-      <ImageAttachmentStrip items={draft.items} onRemove={draft.remove} t={t} />
-      <textarea
-        value={text}
-        rows={1}
-        maxLength={20_000}
-        placeholder={t('composerPlaceholder')}
-        aria-label={t('composerPlaceholder')}
-        onChange={(event) => onTextChange(event.target.value)}
-        onPaste={draft.handlePaste}
-        onInput={(event) => {
-          const element = event.currentTarget;
-          element.style.height = 'auto';
-          element.style.height = `${String(Math.min(element.scrollHeight, 220))}px`;
-        }}
-        onKeyDown={(event) => {
-          if (
-            (event.metaKey || event.ctrlKey) &&
-            event.key === 'Enter' &&
-            !running &&
-            !taskLocked
-          ) {
-            event.preventDefault();
-            void submit();
-          }
-          if (event.key === 'Backspace' && text.length === 0 && draft.items.length > 0) {
-            const last = draft.items.at(-1);
-            if (last !== undefined) draft.remove(last.id);
-          }
-        }}
-      />
+      <div className="composer-input-surface">
+        <ImageAttachmentStrip
+          items={draft.items}
+          onRemove={draft.remove}
+          onOpenImagePreview={(attachmentId) => client.openImagePreview(attachmentId)}
+          t={t}
+        />
+        <textarea
+          value={text}
+          rows={1}
+          maxLength={20_000}
+          placeholder={t('composerPlaceholder')}
+          aria-label={t('composerPlaceholder')}
+          onChange={(event) => onTextChange(event.target.value)}
+          onPaste={draft.handlePaste}
+          onInput={(event) => {
+            const element = event.currentTarget;
+            element.style.height = 'auto';
+            element.style.height = `${String(Math.min(element.scrollHeight, 220))}px`;
+          }}
+          onKeyDown={(event) => {
+            if (
+              (event.metaKey || event.ctrlKey) &&
+              event.key === 'Enter' &&
+              !running &&
+              !taskLocked
+            ) {
+              event.preventDefault();
+              void submit();
+            }
+            if (event.key === 'Backspace' && text.length === 0 && draft.items.length > 0) {
+              const last = draft.items.at(-1);
+              if (last !== undefined) draft.remove(last.id);
+            }
+          }}
+        />
+      </div>
       {draft.error === null && error === null ? null : (
         <p className="composer-error" role="alert">
           {error === 'screenshot'

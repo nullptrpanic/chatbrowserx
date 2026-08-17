@@ -76,6 +76,8 @@ export function App({ runtimePort, environment, panelClient, attachmentClient }:
       tab={snapshot?.tab ?? null}
       t={t}
       onNewTask={newTask}
+      canClearConversation={snapshot?.conversation !== null && snapshot?.conversation !== undefined}
+      onClearConversation={() => client.clearActiveConversation()}
       onViewChange={setView}
     >
       {state.status === 'loading' && snapshot === null ? (
@@ -115,12 +117,15 @@ export function App({ runtimePort, environment, panelClient, attachmentClient }:
             ) : null}
             <ConversationView
               messages={snapshot.messages}
+              tasks={snapshot.tasks}
               task={snapshot.task}
               attachments={attachments}
               t={t}
               onSuggestion={setDraftText}
+              onOpenImagePreview={(attachmentId) => client.openImagePreview(attachmentId)}
               onPause={() => void client.pauseTask()}
               onResume={() => void client.resumeTask()}
+              onRetry={() => void client.retryTask()}
               onCancel={() => void client.cancelTask()}
             />
           </div>
@@ -141,16 +146,13 @@ export function App({ runtimePort, environment, panelClient, attachmentClient }:
         <HistoryView
           conversations={snapshot.conversations}
           activeId={snapshot.conversation?.id ?? null}
-          canClearActive={
-            snapshot.task === null ||
-            ['completed', 'failed', 'cancelled'].includes(snapshot.task.status)
-          }
           t={t}
           onSelect={(id) => {
             void client.selectConversation(id).then(() => setView('conversation'));
           }}
           onNew={newTask}
           onClear={() => client.clearActiveConversation()}
+          onDelete={(id) => client.deleteConversation(id)}
         />
       ) : null}
       {snapshot !== null && view === 'settings' ? (

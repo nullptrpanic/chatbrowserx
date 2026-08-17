@@ -110,9 +110,13 @@ async function createBackgroundServices(
     permissions: {
       contains: (permissions) => chrome.permissions.contains({ origins: [...permissions.origins] }),
     },
+    imagePreview: {
+      open: (tabId, preview) => screenshotPage.openImagePreview(tabId, preview),
+    },
     clock: systemClock,
     ids: cryptoIds,
     scheduleTask,
+    cancelTask: (taskId) => coordinator.cancel(taskId),
   });
   const recovery = new RecoveryScanner({
     repository,
@@ -131,6 +135,7 @@ async function createBackgroundServices(
       getSnapshot: (taskId) => commands.getSnapshot(taskId),
       pause: (taskId) => coordinator.pause(taskId),
       resume: (taskId) => coordinator.resume(taskId),
+      retry: (taskId) => coordinator.retry(taskId),
       cancel: (taskId) => coordinator.cancel(taskId),
     },
     panel,

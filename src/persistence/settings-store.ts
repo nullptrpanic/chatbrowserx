@@ -9,6 +9,7 @@ export interface AppSettings {
   readonly reasoningEffort: ReasoningEffort;
   readonly systemPrompt: string;
   readonly language: AppLanguage;
+  readonly historyMessageLimit: number;
 }
 
 export interface SettingsStore {
@@ -24,6 +25,7 @@ const appSettingsSchema = z
     reasoningEffort: z.enum(['low', 'medium', 'high', 'xhigh']),
     systemPrompt: z.string().max(20_000),
     language: z.enum(['system', 'zh-CN', 'en', 'ja']),
+    historyMessageLimit: z.number().int().min(1).max(200).default(50),
   })
   .strict();
 
@@ -32,6 +34,7 @@ export const DEFAULT_APP_SETTINGS: AppSettings = Object.freeze({
   reasoningEffort: 'medium',
   systemPrompt: '',
   language: 'system',
+  historyMessageLimit: 50,
 });
 
 export class ChromeSettingsStore implements SettingsStore {

@@ -43,6 +43,7 @@ function buildDependencies(provider: ModelProvider) {
         reasoningEffort: 'medium' as const,
         systemPrompt: '',
         language: 'zh-CN' as const,
+        historyMessageLimit: 50,
       })),
     },
     panel: {

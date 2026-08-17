@@ -40,10 +40,14 @@ export function ImagePreviewDialog({ open, src, alt, onClose, t }: ImagePreviewD
         aria-label={t('imagePreviewDialog')}
         onMouseDown={(event) => event.stopPropagation()}
       >
-        <button ref={closeRef} type="button" className="image-preview-close" onClick={onClose}>
-          {t('closePreview')}
-        </button>
-        <img src={src} alt={alt} />
+        <div className="image-preview-toolbar">
+          <button ref={closeRef} type="button" className="image-preview-close" onClick={onClose}>
+            {t('closePreview')}
+          </button>
+        </div>
+        <div className="image-preview-canvas" onMouseDown={onClose}>
+          <img src={src} alt={alt} onMouseDown={(event) => event.stopPropagation()} />
+        </div>
       </div>
     </div>,
     document.body,

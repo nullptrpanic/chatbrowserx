@@ -27,6 +27,7 @@ export type ExtensionMessage =
         reasoningEffort: 'low' | 'medium' | 'high' | 'xhigh';
         systemPrompt: string;
         language: 'system' | 'zh-CN' | 'en' | 'ja';
+        historyMessageLimit?: number | undefined;
         codexAccessToken?: string | undefined;
       }
     >
@@ -34,8 +35,10 @@ export type ExtensionMessage =
   | Message<'task.getSnapshot', { taskId: string }>
   | Message<'task.pause', { taskId: string }>
   | Message<'task.resume', { taskId: string }>
+  | Message<'task.retry', { taskId: string }>
   | Message<'task.cancel', { taskId: string }>
   | Message<'screenshot.capture', { tabId: number; mode: 'viewport' | 'region' }>
+  | Message<'image.preview.open', { tabId: number; attachmentId: string }>
   | Message<'page.features.ensure', { tabId: number }>
   | Message<'selection.translate', { text: string; pageUrl: string; pageTitle: string }>
   | Message<
@@ -46,7 +49,8 @@ export type ExtensionMessage =
 export type PageCommand =
   | Message<'page.ping', Record<string, never>>
   | Message<'page.screenshot.select', Record<string, never>>
-  | Message<'page.overlays.setHidden', { hidden: boolean }>;
+  | Message<'page.overlays.setHidden', { hidden: boolean }>
+  | Message<'page.imagePreview.open', { src: string; alt: string }>;
 
 export interface ExtensionError {
   code: string;

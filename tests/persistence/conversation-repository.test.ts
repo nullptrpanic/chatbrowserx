@@ -31,6 +31,31 @@ const message: MessageRecord = {
 };
 
 describe('IndexedDbConversationRepository', () => {
+  it('lists conversations from every tab by most recent activity', async () => {
+    const database = await openChatBrowserDatabase(createTestDatabaseName('conversation-global'));
+    const conversations = new IndexedDbConversationRepository(database);
+    await conversations.create({
+      id: 'conversation_tab_7_older',
+      tabId: 7,
+      title: 'Older task',
+      createdAt: 10,
+      updatedAt: 20,
+    });
+    await conversations.create({
+      id: 'conversation_tab_9_newest',
+      tabId: 9,
+      title: 'Newest task',
+      createdAt: 30,
+      updatedAt: 40,
+    });
+
+    expect((await conversations.listAll()).map(({ id }) => id)).toEqual([
+      'conversation_tab_9_newest',
+      'conversation_tab_7_older',
+    ]);
+    database.close();
+  });
+
   it('orders messages, updates streaming text, and clears attachment references transactionally', async () => {
     const database = await openChatBrowserDatabase(createTestDatabaseName('conversation'));
     const conversations = new IndexedDbConversationRepository(database);

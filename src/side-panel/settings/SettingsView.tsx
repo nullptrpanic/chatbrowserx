@@ -20,6 +20,7 @@ export function SettingsView({ settings, t, onLoad, onSave }: SettingsViewProps)
   const [reasoningEffort, setReasoningEffort] = useState(settings.reasoningEffort);
   const [systemPrompt, setSystemPrompt] = useState(settings.systemPrompt);
   const [language, setLanguage] = useState(settings.language);
+  const [historyMessageLimit, setHistoryMessageLimit] = useState(settings.historyMessageLimit);
   const [codexAccessToken, setCodexAccessToken] = useState('');
   const [status, setStatus] = useState<'idle' | 'saving' | 'saved' | 'error'>('idle');
   const [loadFailed, setLoadFailed] = useState(false);
@@ -28,7 +29,13 @@ export function SettingsView({ settings, t, onLoad, onSave }: SettingsViewProps)
     setReasoningEffort(settings.reasoningEffort);
     setSystemPrompt(settings.systemPrompt);
     setLanguage(settings.language);
-  }, [settings.language, settings.reasoningEffort, settings.systemPrompt]);
+    setHistoryMessageLimit(settings.historyMessageLimit);
+  }, [
+    settings.historyMessageLimit,
+    settings.language,
+    settings.reasoningEffort,
+    settings.systemPrompt,
+  ]);
 
   useEffect(() => {
     let active = true;
@@ -39,6 +46,7 @@ export function SettingsView({ settings, t, onLoad, onSave }: SettingsViewProps)
         setReasoningEffort(loaded.reasoningEffort);
         setSystemPrompt(loaded.systemPrompt);
         setLanguage(loaded.language);
+        setHistoryMessageLimit(loaded.historyMessageLimit);
         setCodexAccessToken(loaded.codexAccessToken);
       })
       .catch(() => {
@@ -57,6 +65,7 @@ export function SettingsView({ settings, t, onLoad, onSave }: SettingsViewProps)
       reasoningEffort,
       systemPrompt,
       language,
+      historyMessageLimit,
       ...(codexAccessToken.trim().length === 0
         ? {}
         : { codexAccessToken: codexAccessToken.trim() }),
@@ -135,6 +144,20 @@ export function SettingsView({ settings, t, onLoad, onSave }: SettingsViewProps)
             <option value="en">{t('languageEnglish')}</option>
             <option value="ja">{t('languageJapanese')}</option>
           </select>
+        </label>
+        <label className="form-field" htmlFor="history-message-limit">
+          <span>{t('historyMessageLimit')}</span>
+          <input
+            id="history-message-limit"
+            type="number"
+            min={1}
+            max={200}
+            step={1}
+            value={historyMessageLimit}
+            aria-label={t('historyMessageLimit')}
+            onChange={(event) => setHistoryMessageLimit(Number(event.target.value))}
+          />
+          <small>{t('historyMessageLimitHint')}</small>
         </label>
         <div className="settings-actions">
           <span

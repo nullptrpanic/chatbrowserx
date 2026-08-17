@@ -1,4 +1,5 @@
 import type { AttachmentRepository } from '../persistence/attachment-repository';
+import { IMAGE_POLICY } from '../attachments/attachment-policy';
 import type { ConversationRepository } from '../persistence/conversation-repository';
 import type { CredentialStore } from '../persistence/credential-store';
 import type { SettingsStore, AppLanguage, ReasoningEffort } from '../persistence/settings-store';
@@ -20,12 +21,16 @@ import type { TaskRun } from './task-types';
 const ATTACHMENT_GC_GRACE_MS = 24 * 60 * 60 * 1_000;
 const MAX_PANEL_MESSAGES = 500;
 const MAX_PANEL_EVENTS = 100;
+const MAX_PANEL_TOOL_RESULTS = 20;
+const MAX_PANEL_TOOL_ARGUMENTS = 20_000;
+const MAX_PANEL_TOOL_OUTPUT = 100_000;
 const terminalTaskStatuses = new Set<TaskRun['status']>(['completed', 'failed', 'cancelled']);
+const previewImageTypes = new Set<string>(IMAGE_POLICY.acceptedMimeTypes);
 
 export interface PanelServiceDependencies {
   readonly conversations: Pick<
     ConversationRepository,
-    | 'listByTab'
+    | 'listAll'
     | 'get'
     | 'create'
     | 'listMessages'
@@ -38,6 +43,7 @@ export interface PanelServiceDependencies {
   readonly settings: Pick<SettingsStore, 'get' | 'save'>;
   readonly credentials: Pick<CredentialStore, 'getCodexAccessToken' | 'setCodexAccessToken'>;
   readonly commands: Pick<TaskCommandPort, 'create'>;
+  readonly cancelTask: (taskId: string) => Promise<TaskSnapshot>;
   readonly tabs: {
     get(tabId: number): Promise<{
       readonly id?: number | undefined;
@@ -47,6 +53,9 @@ export interface PanelServiceDependencies {
   };
   readonly permissions: {
     contains(permissions: { readonly origins: readonly string[] }): Promise<boolean>;
+  };
+  readonly imagePreview: {
+    open(tabId: number, preview: { readonly src: string; readonly alt: string }): Promise<void>;
   };
   readonly clock: Clock;
   readonly ids: IdGenerator;
@@ -64,6 +73,7 @@ export interface SavePanelSettingsInput {
   readonly reasoningEffort: ReasoningEffort;
   readonly systemPrompt: string;
   readonly language: AppLanguage;
+  readonly historyMessageLimit?: number | undefined;
   readonly codexAccessToken?: string | undefined;
 }
 
@@ -93,6 +103,16 @@ function taskGoal(text: string): string {
   return normalized.length > 0 ? normalized : '请根据所附图片完成当前页面任务。';
 }
 
+/** Encodes bounded image bytes without exceeding function argument limits. */
+function bytesToBase64(bytes: Uint8Array): string {
+  let binary = '';
+  const chunkSize = 8 * 1024;
+  for (let offset = 0; offset < bytes.length; offset += chunkSize) {
+    binary += String.fromCharCode(...bytes.subarray(offset, offset + chunkSize));
+  }
+  return btoa(binary);
+}
+
 export class PanelService {
   readonly #dependencies: PanelServiceDependencies;
 
@@ -101,11 +121,11 @@ export class PanelService {
     this.#dependencies = dependencies;
   }
 
-  /** Builds a fresh per-tab panel snapshot with no Blob bytes or credential values. */
+  /** Builds a fresh global-conversation snapshot with current-tab page context. */
   async getSnapshot(tabId: number, conversationId?: string): Promise<PanelSnapshot> {
     const [tab, conversations, settings] = await Promise.all([
       this.#dependencies.tabs.get(tabId),
-      this.#dependencies.conversations.listByTab(tabId),
+      this.#dependencies.conversations.listAll(),
       this.#readSettings(),
     ]);
     const url = (tab.url ?? '').slice(0, 4_096);
@@ -132,12 +152,11 @@ export class PanelService {
         taskStatus: task?.status ?? null,
       };
     });
-    const selectedIndex =
+    const requestedIndex =
       conversationId === undefined
-        ? summaries.length === 0
-          ? -1
-          : 0
+        ? -1
         : summaries.findIndex((conversation) => conversation.id === conversationId);
+    const selectedIndex = summaries.length === 0 ? -1 : Math.max(0, requestedIndex);
     const selected = selectedIndex < 0 ? null : (conversations[selectedIndex] ?? null);
     const selectedSummary = selectedIndex < 0 ? null : (summaries[selectedIndex] ?? null);
     const selectedTasks = selectedIndex < 0 ? [] : (taskLists[selectedIndex] ?? []);
@@ -149,7 +168,17 @@ export class PanelService {
             -MAX_PANEL_MESSAGES,
           );
     const attachments = await this.#readAttachmentMetadata(messages);
-    const panelTask = latestTask === null ? null : await this.#readTask(latestTask);
+    const visibleTaskIds = new Set(
+      messages.flatMap((message) => (message.taskId === null ? [] : [message.taskId])),
+    );
+    if (latestTask !== null) visibleTaskIds.add(latestTask.id);
+    const panelTasks = await Promise.all(
+      selectedTasks
+        .filter((task) => visibleTaskIds.has(task.id))
+        .map((task) => this.#readTask(task)),
+    );
+    const panelTask =
+      latestTask === null ? null : (panelTasks.find((task) => task.id === latestTask.id) ?? null);
 
     return {
       generatedAt: this.#dependencies.clock.now(),
@@ -165,6 +194,7 @@ export class PanelService {
       conversations: summaries,
       messages: messages.map((message) => ({
         id: message.id,
+        taskId: message.taskId,
         role: message.role,
         status: message.status,
         text: message.text,
@@ -173,6 +203,7 @@ export class PanelService {
         updatedAt: message.updatedAt,
       })),
       attachments,
+      tasks: panelTasks,
       task: panelTask,
       settings,
     };
@@ -204,8 +235,8 @@ export class PanelService {
             updatedAt: now,
           }
         : await this.#dependencies.conversations.get(input.conversationId);
-    if (conversation === undefined || conversation.tabId !== input.tabId) {
-      throw new Error('Conversation is unavailable for this tab.');
+    if (conversation === undefined) {
+      throw new Error('Conversation is unavailable.');
     }
     if (input.conversationId !== undefined) {
       const tasks = await this.#dependencies.tasks.listByConversation(conversation.id);
@@ -243,10 +274,41 @@ export class PanelService {
     return snapshot;
   }
 
-  /** Clears one terminal conversation and then collects only aged unreferenced attachments. */
+  /** Opens one validated persisted image in the current page's full-viewport overlay. */
+  async openImagePreview(tabId: number, attachmentId: string): Promise<{ readonly opened: true }> {
+    if (!Number.isInteger(tabId) || tabId < 0 || attachmentId.trim().length === 0) {
+      throw new Error('Image preview request is invalid.');
+    }
+    const attachment = await this.#dependencies.attachments.get(attachmentId);
+    const mimeType = attachment?.mimeType.toLowerCase() ?? '';
+    if (
+      attachment === undefined ||
+      !previewImageTypes.has(mimeType) ||
+      attachment.byteSize <= 0 ||
+      attachment.byteSize > IMAGE_POLICY.maxBytesPerImage ||
+      attachment.byteSize !== attachment.blob.size ||
+      attachment.blob.type.toLowerCase() !== mimeType
+    ) {
+      throw new Error('Image preview attachment is invalid.');
+    }
+    const bytes = new Uint8Array(await attachment.blob.arrayBuffer());
+    await this.#dependencies.imagePreview.open(tabId, {
+      src: `data:${mimeType};base64,${bytesToBase64(bytes)}`,
+      alt: (attachment.fileName ?? 'Image preview').slice(0, 500),
+    });
+    return { opened: true };
+  }
+
+  /** Stops unfinished work, deletes the complete conversation aggregate, then runs safe GC. */
   async clearConversation(
     conversationId: string,
   ): Promise<{ readonly deletedAttachments: number }> {
+    const tasks = await this.#dependencies.tasks.listByConversation(conversationId);
+    for (const task of tasks) {
+      if (!terminalTaskStatuses.has(task.status)) {
+        await this.#dependencies.cancelTask(task.id);
+      }
+    }
     await this.#dependencies.conversations.clearConversation(conversationId);
     const deletedAttachments = await this.#dependencies.attachments.deleteUnreferenced(
       this.#dependencies.clock.now() - ATTACHMENT_GC_GRACE_MS,
@@ -262,6 +324,7 @@ export class PanelService {
       reasoningEffort: input.reasoningEffort,
       systemPrompt: input.systemPrompt,
       language: input.language,
+      historyMessageLimit: input.historyMessageLimit ?? current.historyMessageLimit,
     });
     if (input.codexAccessToken !== undefined) {
       await this.#dependencies.credentials.setCodexAccessToken(input.codexAccessToken);
@@ -311,6 +374,15 @@ export class PanelService {
         reason: event.reason,
         at: event.at,
       })),
+      completedToolResults: (checkpoint?.completedToolResults ?? [])
+        .slice(-MAX_PANEL_TOOL_RESULTS)
+        .map((result) => ({
+          callId: result.callId.slice(0, 256),
+          toolName: result.toolName.slice(0, 128),
+          argumentsJson: result.argumentsJson.slice(0, MAX_PANEL_TOOL_ARGUMENTS),
+          output: result.output.slice(0, MAX_PANEL_TOOL_OUTPUT),
+          resultRef: result.resultRef.slice(0, 512),
+        })),
     };
   }
 

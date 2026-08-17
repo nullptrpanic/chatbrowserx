@@ -70,6 +70,7 @@ export class CodexAgentPlanner implements AgentPlanner {
         task: input.task,
         checkpoint: input.checkpoint,
         customSystemPrompt: settings.systemPrompt,
+        historyMessageLimit: settings.historyMessageLimit,
       },
       {
         conversations: this.#dependencies.conversations,

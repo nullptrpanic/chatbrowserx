@@ -5,6 +5,7 @@ import {
 } from '../shared/protocol/message-types';
 import { parsePageCommand } from '../shared/protocol/parse-message';
 import { setPageOverlaysHidden } from './page-overlay-registry';
+import { openPageImagePreview } from './image-preview/mount-image-preview';
 import { selectScreenshotRegion } from './screenshot/mount-screenshot-overlay';
 
 export interface PageCommandEnvironment {
@@ -53,6 +54,16 @@ export async function handlePageCommand(
       requestId: command.requestId,
       ok: true,
       data: await selectScreenshotRegion(environment.document, environment.window),
+    };
+  }
+
+  if (command?.type === 'page.imagePreview.open') {
+    openPageImagePreview(command.payload, environment.document, environment.window);
+    return {
+      version: PROTOCOL_VERSION,
+      requestId: command.requestId,
+      ok: true,
+      data: { opened: true },
     };
   }
 

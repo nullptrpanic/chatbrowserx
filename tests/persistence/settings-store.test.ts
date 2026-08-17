@@ -3,6 +3,20 @@ import { ChromeSettingsStore, DEFAULT_APP_SETTINGS } from '../../src/persistence
 import { MemoryStorageArea } from './test-helpers';
 
 describe('ChromeSettingsStore', () => {
+  it('migrates stored settings without a history limit to the default', async () => {
+    const storage = new MemoryStorageArea();
+    storage.values['settings.app'] = {
+      model: 'gpt-5.6-terra',
+      reasoningEffort: 'medium',
+      systemPrompt: '',
+      language: 'system',
+    };
+
+    await expect(new ChromeSettingsStore(storage).get()).resolves.toMatchObject({
+      historyMessageLimit: 50,
+    });
+  });
+
   it('returns exact defaults and saves normalized valid settings', async () => {
     const storage = new MemoryStorageArea();
     const store = new ChromeSettingsStore(storage);
@@ -13,6 +27,7 @@ describe('ChromeSettingsStore', () => {
       reasoningEffort: 'high',
       systemPrompt: 'Keep browser actions concise.',
       language: 'zh-CN',
+      historyMessageLimit: 75,
     });
 
     await expect(store.get()).resolves.toEqual({
@@ -20,6 +35,7 @@ describe('ChromeSettingsStore', () => {
       reasoningEffort: 'high',
       systemPrompt: 'Keep browser actions concise.',
       language: 'zh-CN',
+      historyMessageLimit: 75,
     });
   });
 
@@ -35,5 +51,13 @@ describe('ChromeSettingsStore', () => {
 
     expect(storage.values['credentials.codexAccessToken']).toBe('keep-me');
     await expect(store.get()).resolves.toEqual(DEFAULT_APP_SETTINGS);
+  });
+
+  it.each([0, 201, 1.5])('rejects invalid history limit %s', async (historyMessageLimit) => {
+    const store = new ChromeSettingsStore(new MemoryStorageArea());
+
+    await expect(store.save({ ...DEFAULT_APP_SETTINGS, historyMessageLimit })).rejects.toThrow(
+      /invalid app settings/i,
+    );
   });
 });

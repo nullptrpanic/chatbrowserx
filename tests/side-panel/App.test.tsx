@@ -21,12 +21,14 @@ function buildSnapshot(): PanelSnapshot {
     conversations: [],
     messages: [],
     attachments: [],
+    tasks: [],
     task: null,
     settings: {
       model: 'gpt-5.6-terra',
       reasoningEffort: 'medium',
       systemPrompt: '',
       language: 'zh-CN',
+      historyMessageLimit: 50,
       hasCodexToken: true,
     },
   };
@@ -41,6 +43,47 @@ const attachments = {
 };
 
 describe('App background connection', () => {
+  it('edits and saves the model history message limit', async () => {
+    const send = vi.fn<RuntimePort['send']>(async (message) => {
+      const settings = {
+        model: 'gpt-5.6-terra',
+        reasoningEffort: 'medium' as const,
+        systemPrompt: '',
+        language: 'zh-CN' as const,
+        historyMessageLimit: 50,
+        hasCodexToken: true,
+      };
+      return {
+        version: 1,
+        requestId: message.requestId,
+        ok: true,
+        data:
+          message.type === 'panel.getSnapshot'
+            ? { ...buildSnapshot(), settings }
+            : message.type === 'settings.get'
+              ? { ...settings, codexAccessToken: '' }
+              : message.type === 'settings.save'
+                ? settings
+                : { connected: true },
+      };
+    });
+    const user = userEvent.setup();
+
+    render(<App runtimePort={{ send }} environment={environment} attachmentClient={attachments} />);
+    await user.click(await screen.findByRole('button', { name: '设置' }));
+    const input = await screen.findByRole('spinbutton', { name: '历史消息条数' });
+    await user.clear(input);
+    await user.type(input, '24');
+    await user.click(screen.getByRole('button', { name: '保存设置' }));
+
+    expect(send).toHaveBeenCalledWith(
+      expect.objectContaining({
+        type: 'settings.save',
+        payload: expect.objectContaining({ historyMessageLimit: 24 }),
+      }),
+    );
+  });
+
   it('loads persisted credentials into masked settings fields and reveals them on request', async () => {
     const send = vi.fn<RuntimePort['send']>(async (message) => ({
       version: 1,
@@ -164,7 +207,10 @@ describe('App background connection', () => {
 
     expect(await screen.findByText('今天想聊什么？')).toBeVisible();
     expect(screen.getByText('Example form')).toBeVisible();
+    expect(screen.queryByText('ChatBrowserX')).not.toBeInTheDocument();
+    expect(screen.getByLabelText('ChatBrowserX')).toBeVisible();
     expect(screen.getByLabelText('已连接')).toBeVisible();
+    expect(screen.queryByRole('button', { name: '清空当前对话' })).not.toBeInTheDocument();
     expect(screen.queryByTitle('Debugger 按需连接')).not.toBeInTheDocument();
     expect(send).toHaveBeenCalledWith(
       expect.objectContaining({ version: 1, type: 'system.ping', payload: {} }),
@@ -244,6 +290,7 @@ describe('App background connection', () => {
         sequence: 1,
         lastError: null,
         events: [{ sequence: 1, type: 'task.paused', reason: 'user_pause', at: 1_000 }],
+        completedToolResults: [],
       },
     };
     const send = vi.fn<RuntimePort['send']>(async (message) => ({
@@ -263,5 +310,84 @@ describe('App background connection', () => {
     expect(screen.queryByText(/1\/50/)).not.toBeInTheDocument();
     expect(screen.queryByText('user_pause')).not.toBeInTheDocument();
     expect(send).not.toHaveBeenCalledWith(expect.objectContaining({ type: 'chat.submit' }));
+  });
+
+  it('shows Retry for a failed task and sends the dedicated retry command', async () => {
+    const base = buildSnapshot();
+    const failedSnapshot: PanelSnapshot = {
+      ...base,
+      conversation: {
+        id: 'conversation_1',
+        title: 'Failed task',
+        tabId: 7,
+        createdAt: 900,
+        updatedAt: 1_000,
+        taskStatus: 'failed',
+      },
+      task: {
+        id: 'task_1',
+        status: 'failed',
+        goal: 'Failed task',
+        tabId: 7,
+        createdAt: 900,
+        updatedAt: 1_000,
+        sequence: 1,
+        lastError: {
+          code: 'TransientProviderError',
+          retryable: true,
+          userMessage: 'Temporary failure.',
+        },
+        events: [{ sequence: 1, type: 'task.failed', reason: 'provider_failure', at: 1_000 }],
+        completedToolResults: [],
+      },
+    };
+    const send = vi.fn<RuntimePort['send']>(async (message) => ({
+      version: 1,
+      requestId: message.requestId,
+      ok: true,
+      data: message.type === 'panel.getSnapshot' ? failedSnapshot : {},
+    }));
+    const user = userEvent.setup();
+
+    render(<App runtimePort={{ send }} environment={environment} attachmentClient={attachments} />);
+    await user.click(await screen.findByRole('button', { name: '重试' }));
+
+    expect(send).toHaveBeenCalledWith(expect.objectContaining({ type: 'task.retry' }));
+    expect(screen.queryByRole('button', { name: '继续' })).not.toBeInTheDocument();
+  });
+
+  it('clears the current conversation from the top bar only after confirmation', async () => {
+    const activeSnapshot: PanelSnapshot = {
+      ...buildSnapshot(),
+      conversation: {
+        id: 'conversation_1',
+        title: 'Current conversation',
+        tabId: 7,
+        createdAt: 900,
+        updatedAt: 1_000,
+        taskStatus: null,
+      },
+    };
+    const send = vi.fn<RuntimePort['send']>(async (message) => ({
+      version: 1,
+      requestId: message.requestId,
+      ok: true,
+      data: message.type === 'panel.getSnapshot' ? activeSnapshot : {},
+    }));
+    const user = userEvent.setup();
+
+    render(<App runtimePort={{ send }} environment={environment} attachmentClient={attachments} />);
+    await user.click(await screen.findByRole('button', { name: '清空当前对话' }));
+    expect(send).not.toHaveBeenCalledWith(expect.objectContaining({ type: 'conversation.clear' }));
+    await user.click(screen.getByRole('button', { name: '确认清空' }));
+
+    await waitFor(() =>
+      expect(send).toHaveBeenCalledWith(
+        expect.objectContaining({
+          type: 'conversation.clear',
+          payload: { conversationId: 'conversation_1' },
+        }),
+      ),
+    );
   });
 });

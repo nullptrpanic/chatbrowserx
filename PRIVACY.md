@@ -4,17 +4,18 @@
 
 ChatBrowserX stores conversations, messages, task recovery state, events, and attachment references in IndexedDB. User-added images and user-triggered screenshots are stored as IndexedDB Blob records. Interface settings and the Codex Access Token are stored in `chrome.storage.local`, restricted to trusted extension contexts.
 
-Data is not stored with `chrome.storage.sync`. Clearing a completed conversation removes its conversation and task records; unreferenced attachments are collected after the cleanup grace period.
+Data is not stored with `chrome.storage.sync`. Clearing or deleting a conversation first stops unfinished work, then removes its messages, tasks, events, checkpoints, and attachment references. Unreferenced attachments are collected after the cleanup grace period.
 
 ## Data sent to Codex
 
 For an ordinary chat task, Codex receives only:
 
-- the user message that created that task;
-- images explicitly attached to that message;
+- up to the configured number of newest completed user and assistant messages (50 by default, configurable from 1 to 200);
+- the user message that created the current task;
+- images explicitly attached to those user messages, with current-message images taking priority under the existing image count and byte limits;
 - the system prompt exactly as saved in Settings.
 
-The production runtime currently registers no concrete tools. Requests with an empty tool list omit the complete tool contract. ChatBrowserX does not automatically send page text, DOM, iframe data, page snapshots, old conversation messages, budgets, checkpoints, risk policies, or screenshots.
+The history window is limited by message count only; selected message text is not additionally truncated by a character cap. The production runtime currently registers no concrete tools. Requests with an empty tool list omit the complete tool contract. A legacy checkpoint can contribute bounded completed function-call exchanges for recovery, but current tool-free tasks do not create new ones. ChatBrowserX does not automatically send page text, DOM, iframe data, page snapshots, budgets, risk policies, or screenshots that the user did not explicitly attach.
 
 The Codex Access Token is sent only to the fixed Codex endpoint. Explicit attachments may contain sensitive data; attach only data you are allowed to send.
 

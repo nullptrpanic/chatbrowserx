@@ -5,6 +5,7 @@ import { describe, expect, it } from 'vitest';
 import { openChatBrowserDatabase } from '../../src/persistence/open-database';
 import { IndexedDbTaskRepository } from '../../src/persistence/task-repository';
 import { TaskCommandService } from '../../src/tasks/task-command-service';
+import type { TaskError } from '../../src/tasks/task-errors';
 import { createTestDatabaseName } from '../persistence/test-helpers';
 
 /**
@@ -73,6 +74,68 @@ describe('TaskCommandService', () => {
       [2, 'task.resumed'],
       [3, 'task.cancelled'],
     ]);
+    database.close();
+  });
+
+  it('retries the same failed task with a fresh queued checkpoint and no stale error or lease', async () => {
+    const database = await openChatBrowserDatabase(createTestDatabaseName('command-retry'));
+    const repository = new IndexedDbTaskRepository(database);
+    const sources = createCommandSources();
+    const commands = new TaskCommandService(repository, sources.clock, sources.ids);
+    const created = await commands.create({
+      conversationId: 'conv_1',
+      tabId: 7,
+      goal: 'Complete the page',
+    });
+    const error: TaskError = {
+      code: 'TransientProviderError',
+      retryable: true,
+      recoveryAction: 'resume_task' as const,
+      userMessage: 'The provider is temporarily unavailable.',
+      evidenceRef: null,
+    };
+    await repository.saveTransition({
+      task: {
+        ...created.task,
+        status: 'failed',
+        updatedAt: 1_100,
+        checkpointId: 'checkpoint_failed',
+        lease: { ownerId: 'stale', acquiredAt: 1_050, expiresAt: 9_999, generation: 1 },
+        lastError: error,
+      },
+      event: {
+        id: 'event_failed',
+        taskId: created.task.id,
+        sequence: 1,
+        type: 'task.failed',
+        reason: 'Provider failed.',
+        at: 1_100,
+        error,
+      },
+      checkpoint: {
+        ...created.checkpoint,
+        id: 'checkpoint_failed',
+        sequence: 1,
+        taskStatus: 'failed',
+        createdAt: 1_100,
+      },
+    });
+
+    sources.advance(1_200);
+    const retried = await commands.retry(created.task.id);
+
+    expect(retried.task).toMatchObject({
+      id: created.task.id,
+      status: 'queued',
+      lastError: null,
+      lease: null,
+    });
+    expect(retried.checkpoint).toMatchObject({ sequence: 2, taskStatus: 'queued' });
+    expect(retried.events.at(-1)).toMatchObject({
+      sequence: 2,
+      type: 'task.retried',
+      reason: 'user_retry',
+    });
     database.close();
   });
 

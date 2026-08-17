@@ -3,7 +3,7 @@
   width: 100%;
   height: 100vh;
   min-width: 0;
-  grid-template-rows: 48px auto minmax(0, 1fr);
+  grid-template-rows: 46px minmax(0, 1fr);
   background: var(--cbx-panel);
 }
 
@@ -13,17 +13,95 @@
   align-items: center;
   justify-content: space-between;
   gap: 8px;
-  padding: 0 10px 0 12px;
+  padding: 0 8px 0 10px;
   border-bottom: 1px solid var(--cbx-divider);
   background: var(--cbx-panel);
 }
 
-.brand-lockup,
 .top-bar-actions {
   display: flex;
   min-width: 0;
   align-items: center;
   gap: 5px;
+}
+
+.clear-conversation-control {
+  position: relative;
+}
+
+.clear-conversation-trigger:hover,
+.clear-conversation-trigger[aria-expanded='true'] {
+  color: var(--cbx-danger);
+  background: color-mix(in srgb, var(--cbx-danger) 9%, transparent);
+}
+
+.clear-conversation-popover {
+  position: absolute;
+  z-index: 30;
+  top: calc(100% + 8px);
+  right: -38px;
+  width: min(270px, calc(100vw - 20px));
+  padding: 12px;
+  border: 1px solid var(--cbx-divider);
+  border-radius: 11px;
+  background: var(--cbx-raised);
+  box-shadow: var(--cbx-shadow);
+}
+
+.clear-conversation-popover::before {
+  position: absolute;
+  top: -5px;
+  right: 49px;
+  width: 9px;
+  height: 9px;
+  border-top: 1px solid var(--cbx-divider);
+  border-left: 1px solid var(--cbx-divider);
+  background: var(--cbx-raised);
+  content: '';
+  transform: rotate(45deg);
+}
+
+.clear-conversation-popover strong {
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.clear-conversation-popover p {
+  margin: 5px 0 0;
+  color: var(--cbx-muted);
+  font-size: 10px;
+  line-height: 1.5;
+}
+
+.clear-conversation-popover .clear-conversation-error {
+  color: var(--cbx-danger);
+}
+
+.clear-conversation-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 7px;
+  margin-top: 11px;
+}
+
+.clear-conversation-actions button {
+  min-height: 29px;
+  padding: 0 9px;
+  border-radius: 7px;
+  color: var(--cbx-muted);
+  background: var(--cbx-subtle);
+  cursor: pointer;
+  font-size: 10px;
+}
+
+.clear-conversation-actions .danger-button {
+  color: white;
+  background: var(--cbx-danger);
+}
+
+.clear-conversation-actions button:disabled {
+  cursor: wait;
+  opacity: 0.6;
 }
 
 .brand-mark {
@@ -34,15 +112,6 @@
   border-radius: 9px;
   color: #fff;
   background: var(--cbx-accent);
-}
-
-.brand-name {
-  overflow: hidden;
-  font-size: 13px;
-  font-weight: 500;
-  letter-spacing: -0.01em;
-  text-overflow: ellipsis;
-  white-space: nowrap;
 }
 
 .icon-button {
@@ -81,13 +150,14 @@
 .page-context {
   display: flex;
   min-width: 0;
-  min-height: 42px;
+  flex: 1;
+  min-height: 0;
   align-items: center;
   gap: 8px;
-  padding: 6px 12px;
-  border-bottom: 1px solid var(--cbx-divider);
+  padding: 4px 2px;
+  border: 0;
   color: var(--cbx-muted);
-  background: var(--cbx-raised);
+  background: transparent;
 }
 
 .page-context-copy {

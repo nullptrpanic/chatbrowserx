@@ -8,6 +8,7 @@ export interface CoordinatedTaskExecutor {
 export interface CoordinatedTaskCommands {
   pause(taskId: TaskId): Promise<TaskSnapshot>;
   resume(taskId: TaskId): Promise<TaskSnapshot>;
+  retry(taskId: TaskId): Promise<TaskSnapshot>;
   cancel(taskId: TaskId): Promise<TaskSnapshot>;
 }
 
@@ -61,9 +62,17 @@ export class TaskCoordinator {
     return snapshot;
   }
 
+  /** Stops any stale runner, persists a retry boundary, and schedules the same task ID again. */
+  async retry(taskId: TaskId): Promise<TaskSnapshot> {
+    await this.#stop(taskId);
+    const snapshot = await this.#dependencies.commands.retry(taskId);
+    this.#schedule(taskId);
+    return snapshot;
+  }
+
   /** Stops active work before persisting terminal cancellation. */
   async cancel(taskId: TaskId): Promise<TaskSnapshot> {
-    this.#abort(taskId);
+    await this.#stop(taskId);
     return this.#dependencies.commands.cancel(taskId);
   }
 

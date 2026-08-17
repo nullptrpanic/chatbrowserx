@@ -32,6 +32,7 @@ const settingsSchema = z
     reasoningEffort: z.enum(['low', 'medium', 'high', 'xhigh']),
     systemPrompt: z.string().max(20_000),
     language: z.enum(['system', 'zh-CN', 'en', 'ja']),
+    historyMessageLimit: z.number().int().min(1).max(200).default(50),
     hasCodexToken: z.boolean(),
   })
   .strict();
@@ -41,7 +42,49 @@ const editableSettingsSchema = z
     reasoningEffort: z.enum(['low', 'medium', 'high', 'xhigh']),
     systemPrompt: z.string().max(20_000),
     language: z.enum(['system', 'zh-CN', 'en', 'ja']),
+    historyMessageLimit: z.number().int().min(1).max(200).default(50),
     codexAccessToken: z.string().max(20_000),
+  })
+  .strict();
+const completedToolResultSchema = z
+  .object({
+    callId: idSchema,
+    toolName: z.string().min(1).max(128),
+    argumentsJson: z.string().max(20_000),
+    output: z.string().max(100_000),
+    resultRef: z.string().max(512),
+  })
+  .strict();
+const panelTaskSchema = z
+  .object({
+    id: idSchema,
+    status: taskStatusSchema,
+    goal: z.string().max(20_000),
+    tabId: z.number().int().nonnegative().nullable(),
+    createdAt: timestampSchema,
+    updatedAt: timestampSchema,
+    sequence: z.number().int().nonnegative(),
+    lastError: z
+      .object({
+        code: z.string().max(128),
+        retryable: z.boolean(),
+        userMessage: z.string().max(2_000),
+      })
+      .strict()
+      .nullable(),
+    events: z
+      .array(
+        z
+          .object({
+            sequence: z.number().int().positive(),
+            type: z.string().max(128),
+            reason: z.string().max(500),
+            at: timestampSchema,
+          })
+          .strict(),
+      )
+      .max(100),
+    completedToolResults: z.array(completedToolResultSchema).max(20),
   })
   .strict();
 
@@ -65,6 +108,7 @@ export const panelSnapshotSchema: z.ZodType<PanelSnapshot> = z
         z
           .object({
             id: idSchema,
+            taskId: idSchema.nullable(),
             role: z.enum(['user', 'assistant', 'system']),
             status: z.enum(['complete', 'streaming', 'interrupted', 'error']),
             text: z.string().max(1_000_000),
@@ -90,38 +134,8 @@ export const panelSnapshotSchema: z.ZodType<PanelSnapshot> = z
           .strict(),
       )
       .max(4_000),
-    task: z
-      .object({
-        id: idSchema,
-        status: taskStatusSchema,
-        goal: z.string().max(20_000),
-        tabId: z.number().int().nonnegative().nullable(),
-        createdAt: timestampSchema,
-        updatedAt: timestampSchema,
-        sequence: z.number().int().nonnegative(),
-        lastError: z
-          .object({
-            code: z.string().max(128),
-            retryable: z.boolean(),
-            userMessage: z.string().max(2_000),
-          })
-          .strict()
-          .nullable(),
-        events: z
-          .array(
-            z
-              .object({
-                sequence: z.number().int().positive(),
-                type: z.string().max(128),
-                reason: z.string().max(500),
-                at: timestampSchema,
-              })
-              .strict(),
-          )
-          .max(100),
-      })
-      .strict()
-      .nullable(),
+    tasks: z.array(panelTaskSchema).max(500),
+    task: panelTaskSchema.nullable(),
     settings: settingsSchema,
   })
   .strict();

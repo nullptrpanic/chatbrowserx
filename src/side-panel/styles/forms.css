@@ -10,6 +10,13 @@
   gap: 6px;
 }
 
+.history-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 30px;
+  align-items: center;
+  gap: 4px;
+}
+
 .history-item {
   display: grid;
   min-width: 0;
@@ -39,6 +46,25 @@
   font-size: 10px;
 }
 
+.history-delete {
+  display: grid;
+  width: 30px;
+  height: 30px;
+  place-items: center;
+  border-radius: 8px;
+  color: var(--cbx-muted);
+  background: transparent;
+  cursor: pointer;
+}
+.history-delete:hover {
+  color: var(--cbx-danger);
+  background: color-mix(in srgb, var(--cbx-danger) 9%, transparent);
+}
+.history-delete.is-confirming {
+  color: white;
+  background: var(--cbx-danger);
+}
+
 .view-empty {
   display: grid;
   min-height: 180px;
@@ -61,6 +87,12 @@
   background: transparent;
   cursor: pointer;
   font-size: 11px;
+}
+
+.history-action-error {
+  margin: 12px 0 0;
+  color: var(--cbx-danger);
+  font-size: 10px;
 }
 
 .settings-form {

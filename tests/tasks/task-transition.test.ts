@@ -55,6 +55,39 @@ describe('task transitions', () => {
     expect(resumed).toMatchObject({ status: 'queued', lastError: null });
   });
 
+  it('returns a failed task to the queued boundary only through retry', () => {
+    const queued = createTask(
+      { conversationId: 'conv_1', tabId: 7, goal: 'Answer the message' },
+      { clock, ids },
+    );
+    const failed = transitionTask(queued, {
+      type: 'task.failed',
+      at: 1_001,
+      reason: 'Provider failed.',
+      error: {
+        code: 'TransientProviderError',
+        retryable: true,
+        recoveryAction: 'resume_task',
+        userMessage: 'The provider is temporarily unavailable.',
+        evidenceRef: null,
+      },
+    });
+    const retried = transitionTask(failed, {
+      type: 'task.retried',
+      at: 1_002,
+      reason: 'User retried.',
+    });
+
+    expect(retried).toMatchObject({ status: 'queued', lastError: null });
+    expect(() =>
+      transitionTask(failed, {
+        type: 'task.resumed',
+        at: 1_002,
+        reason: 'Failed tasks are retried, not resumed.',
+      }),
+    ).toThrow(/illegal task transition/i);
+  });
+
   it('rejects skipped states, stale timestamps, and terminal-state changes', () => {
     const queued = createTask(
       { conversationId: 'conv_1', tabId: 7, goal: 'Answer the message' },

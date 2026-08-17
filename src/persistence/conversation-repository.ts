@@ -8,6 +8,7 @@ import type { ChatBrowserDatabase } from './database-schema';
 export interface ConversationRepository {
   create(conversation: Conversation): Promise<void>;
   get(conversationId: ConversationId): Promise<Conversation | undefined>;
+  listAll(): Promise<Conversation[]>;
   listByTab(tabId: number): Promise<Conversation[]>;
   listMessages(conversationId: ConversationId): Promise<MessageRecord[]>;
   appendMessage(message: MessageRecord): Promise<void>;
@@ -61,6 +62,14 @@ export class IndexedDbConversationRepository implements ConversationRepository {
    */
   async get(conversationId: ConversationId): Promise<Conversation | undefined> {
     return this.#database.get('conversations', conversationId);
+  }
+
+  /**
+   * Lists conversations from every browser tab by most recent activity.
+   */
+  async listAll(): Promise<Conversation[]> {
+    const conversations = await this.#database.getAll('conversations');
+    return conversations.sort((left, right) => right.updatedAt - left.updatedAt);
   }
 
   /**

@@ -12,6 +12,11 @@ export interface ScreenshotPagePortDependencies {
   readonly ids: IdGenerator;
 }
 
+export interface PageImagePreview {
+  readonly src: string;
+  readonly alt: string;
+}
+
 /** Checks the complete finite geometry returned by the isolated selection overlay. */
 function isScreenshotSelection(value: unknown): value is ScreenshotSelection {
   if (typeof value !== 'object' || value === null) return false;
@@ -74,6 +79,19 @@ export class ChromeScreenshotPagePort {
     if (data === null) return null;
     if (!isScreenshotSelection(data)) throw new Error('Screenshot selection is invalid.');
     return data;
+  }
+
+  /** Displays one already validated image across the current page viewport. */
+  async openImagePreview(tabId: number, preview: PageImagePreview): Promise<void> {
+    await this.#ensurePage(tabId);
+    const requestId = this.#dependencies.ids.create('page_request');
+    const response = await this.#dependencies.tabs.sendMessage(tabId, {
+      version: PROTOCOL_VERSION,
+      requestId,
+      type: 'page.imagePreview.open',
+      payload: preview,
+    });
+    readResponse(response, requestId);
   }
 
   /** Hides or restores all extension-owned page overlays around viewport capture. */

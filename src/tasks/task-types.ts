@@ -29,6 +29,7 @@ export type TaskEventType =
   | 'task.auth-required'
   | 'task.paused'
   | 'task.resumed'
+  | 'task.retried'
   | 'task.completed'
   | 'task.failed'
   | 'task.cancelled';

@@ -19,6 +19,7 @@ export interface TaskCommandPort {
   getSnapshot(taskId: TaskId): Promise<TaskSnapshot>;
   pause(taskId: TaskId): Promise<TaskSnapshot>;
   resume(taskId: TaskId): Promise<TaskSnapshot>;
+  retry(taskId: TaskId): Promise<TaskSnapshot>;
   cancel(taskId: TaskId): Promise<TaskSnapshot>;
 }
 
@@ -114,12 +115,21 @@ export class TaskCommandService implements TaskCommandPort {
     return this.#saveTransition(snapshot, 'task.resumed', 'user_resume');
   }
 
+  /** Requeues the same failed task without creating another persisted user message. */
+  async retry(taskId: TaskId): Promise<TaskSnapshot> {
+    const snapshot = await this.getSnapshot(taskId);
+    if (snapshot.task.status === 'queued') {
+      return snapshot;
+    }
+    return this.#saveTransition(snapshot, 'task.retried', 'user_retry');
+  }
+
   /**
    * Persists terminal cancellation while treating a repeated cancellation as a no-op.
    */
   async cancel(taskId: TaskId): Promise<TaskSnapshot> {
     const snapshot = await this.getSnapshot(taskId);
-    if (snapshot.task.status === 'cancelled') {
+    if (['completed', 'failed', 'cancelled'].includes(snapshot.task.status)) {
       return snapshot;
     }
     return this.#saveTransition(snapshot, 'task.cancelled', 'user_cancel');

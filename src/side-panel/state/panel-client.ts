@@ -101,7 +101,6 @@ export class PanelClient {
       if (activeTab === null) throw new Error('No active browser tab is available.');
       if (this.#tabId !== activeTab.id) {
         this.#tabId = activeTab.id;
-        this.#state = { ...this.#state, activeConversationId: undefined };
       }
       const activeConversationId = this.#state.activeConversationId;
       const data = await this.#send({
@@ -118,14 +117,25 @@ export class PanelClient {
       if (this.#disposed || generation !== this.#generation) return;
       let snapshot = parsePanelSnapshot(data);
       if (activeConversationId === null) {
-        snapshot = { ...snapshot, conversation: null, messages: [], attachments: [], task: null };
+        snapshot = {
+          ...snapshot,
+          conversation: null,
+          messages: [],
+          attachments: [],
+          tasks: [],
+          task: null,
+        };
       }
       this.#setState({
         status: 'ready',
         snapshot,
         error: null,
         activeConversationId:
-          activeConversationId === undefined ? snapshot.conversation?.id : activeConversationId,
+          activeConversationId === undefined
+            ? undefined
+            : activeConversationId === null
+              ? null
+              : (snapshot.conversation?.id ?? undefined),
       });
       const featureKey = `${String(snapshot.tab.id)}:${snapshot.tab.origin}`;
       if (snapshot.tab.hasPermission && this.#featuresEnsuredKey !== featureKey) {
@@ -140,7 +150,7 @@ export class PanelClient {
     }
   }
 
-  /** Switches to an existing per-tab conversation and refreshes its full durable state. */
+  /** Switches to an existing global conversation and refreshes its full durable state. */
   async selectConversation(conversationId: string): Promise<void> {
     this.#setState({ ...this.#state, activeConversationId: conversationId });
     await this.refresh();
@@ -155,7 +165,14 @@ export class PanelClient {
       snapshot:
         snapshot === null
           ? null
-          : { ...snapshot, conversation: null, messages: [], attachments: [], task: null },
+          : {
+              ...snapshot,
+              conversation: null,
+              messages: [],
+              attachments: [],
+              tasks: [],
+              task: null,
+            },
     });
   }
 
@@ -163,13 +180,19 @@ export class PanelClient {
   async submit(text: string, attachmentIds: readonly string[]): Promise<void> {
     const tabId = this.#requireTabId();
     const stateConversationId = this.#state.activeConversationId;
+    const submissionConversationId =
+      stateConversationId === undefined
+        ? this.#state.snapshot?.conversation?.id
+        : stateConversationId;
     const data = await this.#send({
       version: PROTOCOL_VERSION,
       requestId: requestId(),
       type: 'chat.submit',
       payload: {
         tabId,
-        ...(typeof stateConversationId === 'string' ? { conversationId: stateConversationId } : {}),
+        ...(typeof submissionConversationId === 'string'
+          ? { conversationId: submissionConversationId }
+          : {}),
         text,
         attachmentIds,
       },
@@ -201,6 +224,21 @@ export class PanelClient {
       throw new Error('Screenshot response is invalid.');
     }
     return data.id;
+  }
+
+  /** Opens an attachment on the current page, falling back to the Side Panel when unavailable. */
+  async openImagePreview(attachmentId: string): Promise<boolean> {
+    try {
+      const data = await this.#send({
+        version: PROTOCOL_VERSION,
+        requestId: requestId(),
+        type: 'image.preview.open',
+        payload: { tabId: this.#requireTabId(), attachmentId },
+      });
+      return typeof data === 'object' && data !== null && 'opened' in data && data.opened === true;
+    } catch {
+      return false;
+    }
   }
 
   /** Ensures screenshot and selected-text listeners are installed on one already-authorized tab. */
@@ -236,17 +274,23 @@ export class PanelClient {
     return parsePanelSettings(data);
   }
 
-  /** Clears the active terminal conversation and returns to a clean local draft. */
+  /** Clears the active conversation and returns to a clean local draft. */
   async clearActiveConversation(): Promise<void> {
     const conversationId = this.#state.snapshot?.conversation?.id;
     if (conversationId === undefined) return;
+    await this.deleteConversation(conversationId);
+  }
+
+  /** Deletes any history conversation while preserving a different active selection. */
+  async deleteConversation(conversationId: string): Promise<void> {
+    const deletingCurrent = this.#state.snapshot?.conversation?.id === conversationId;
     await this.#send({
       version: PROTOCOL_VERSION,
       requestId: requestId(),
       type: 'conversation.clear',
       payload: { conversationId },
     });
-    this.newConversation();
+    if (deletingCurrent) this.newConversation();
     await this.refresh();
   }
 
@@ -258,6 +302,11 @@ export class PanelClient {
   /** Resumes the active task from its durable model boundary. */
   resumeTask(): Promise<void> {
     return this.#runTaskCommand('task.resume');
+  }
+
+  /** Retries the active failed task without appending a duplicate user message. */
+  retryTask(): Promise<void> {
+    return this.#runTaskCommand('task.retry');
   }
 
   /** Cancels the active task without deleting its conversation history. */
@@ -275,7 +324,9 @@ export class PanelClient {
   }
 
   /** Sends one task command for the current snapshot and reloads its resulting boundary. */
-  async #runTaskCommand(type: 'task.pause' | 'task.resume' | 'task.cancel'): Promise<void> {
+  async #runTaskCommand(
+    type: 'task.pause' | 'task.resume' | 'task.retry' | 'task.cancel',
+  ): Promise<void> {
     const taskId = this.#state.snapshot?.task?.id;
     if (taskId === undefined) return;
     const message: ExtensionMessage = {
