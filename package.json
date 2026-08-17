@@ -9,8 +9,8 @@
   "scripts": {
     "dev": "vite",
     "build": "npm run typecheck && vite build",
-    "format": "prettier --write .",
-    "format:check": "prettier --check .",
+    "format": "prettier --single-quote --print-width 100 --write .",
+    "format:check": "prettier --single-quote --print-width 100 --check .",
     "lint": "eslint . --max-warnings=0",
     "typecheck": "tsc --noEmit",
     "test": "vitest",
