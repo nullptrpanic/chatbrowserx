@@ -10,7 +10,11 @@ export interface ContentScriptInstallerDependencies {
     contains(permissions: { readonly origins: readonly string[] }): Promise<boolean>;
   };
   readonly tabs: {
-    sendMessage(tabId: number, message: PageCommand): Promise<unknown>;
+    sendMessage(
+      tabId: number,
+      message: PageCommand,
+      options?: { readonly frameId: number },
+    ): Promise<unknown>;
   };
   readonly scripting: {
     executeScript(options: {
@@ -101,19 +105,23 @@ export class ContentScriptInstaller {
       type: 'page.ping',
       payload: {},
     };
+    let alreadyInstalled = false;
     try {
-      const response = await this.#dependencies.tabs.sendMessage(tabId, ping);
+      const response = await this.#dependencies.tabs.sendMessage(tabId, ping, { frameId: 0 });
       if (isInstalledResponse(response, requestId)) {
-        return { status: 'already_installed', originPattern };
+        alreadyInstalled = true;
       }
     } catch {
       // An absent receiver is the expected signal to install the bundle.
     }
 
     await this.#dependencies.scripting.executeScript({
-      target: { tabId, allFrames: false },
+      target: { tabId, allFrames: true },
       files: [this.#dependencies.scriptFile],
     });
-    return { status: 'installed', originPattern };
+    return {
+      status: alreadyInstalled ? 'already_installed' : 'installed',
+      originPattern,
+    };
   }
 }

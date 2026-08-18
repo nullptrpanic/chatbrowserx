@@ -12,10 +12,16 @@ import type { MessageRecord } from '../tasks/message-types';
 import { buildAgentContext } from './context/agent-context';
 import type { AgentEvent, AgentPlanInput, AgentPlanner } from './execution-types';
 import { StreamPersistenceBuffer } from './stream-persistence-buffer';
+import { BROWSER_TOOL_DEFINITIONS, parseBrowserToolCall } from './tools/browser-tool-schema';
 import { TAVILY_TOOL_DEFINITIONS, parseTavilyToolCall } from './tools/tavily-tool-schema';
+
+export interface TavilyAvailabilityPort {
+  isConfigured(): Promise<boolean>;
+}
 
 export interface CodexAgentPlannerDependencies {
   readonly provider: ModelProvider;
+  readonly tavilyAvailability: TavilyAvailabilityPort;
   readonly settings: Pick<SettingsStore, 'get'>;
   readonly conversations: Pick<
     ConversationRepository,
@@ -113,6 +119,16 @@ export class CodexAgentPlanner implements AgentPlanner {
   async *plan(input: AgentPlanInput, signal: AbortSignal): AsyncGenerator<AgentEvent> {
     const reusableMessage = await this.#prepareReusableMessage(input);
     const settings = await this.#dependencies.settings.get();
+    let tavilyConfigured: boolean;
+    try {
+      tavilyConfigured = await this.#dependencies.tavilyAvailability.isConfigured();
+    } catch {
+      tavilyConfigured = false;
+    }
+    const tools = tavilyConfigured
+      ? [...BROWSER_TOOL_DEFINITIONS, ...TAVILY_TOOL_DEFINITIONS]
+      : BROWSER_TOOL_DEFINITIONS;
+    const availableToolNames = new Set(tools.map(({ name }) => name));
     const context = await buildAgentContext(
       {
         task: input.task,
@@ -143,7 +159,7 @@ export class CodexAgentPlanner implements AgentPlanner {
           reasoningEffort: settings.reasoningEffort,
           systemPrompt: context.systemPrompt,
           input: context.input,
-          tools: TAVILY_TOOL_DEFINITIONS,
+          tools,
         },
         signal,
       )) {
@@ -214,11 +230,19 @@ export class CodexAgentPlanner implements AgentPlanner {
         if (state.hasText || !state.tool.completed || state.tool.argumentsJson === null) {
           throw providerErrorFromCode('INVALID_RESPONSE');
         }
-        const call = parseTavilyToolCall({
+        if (!availableToolNames.has(state.tool.name)) {
+          throw providerErrorFromCode('INVALID_RESPONSE');
+        }
+        const source = {
           callId: state.tool.callId,
           name: state.tool.name,
           argumentsJson: state.tool.argumentsJson,
-        });
+        };
+        if (state.tool.name.startsWith('browser_')) {
+          yield { type: 'browser.call', call: parseBrowserToolCall(source) };
+          return;
+        }
+        const call = parseTavilyToolCall(source);
         yield { type: 'tavily.call', ...call };
         return;
       }

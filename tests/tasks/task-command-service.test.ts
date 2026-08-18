@@ -272,6 +272,7 @@ describe('TaskCommandService', () => {
         callId: 'call_search',
         name: 'tavily_search',
         argumentsJson: '{"query":"browser recovery"}',
+        executionState: 'recorded' as const,
       },
       createdAt: 1_200,
     };

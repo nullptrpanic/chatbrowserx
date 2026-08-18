@@ -3,8 +3,11 @@
 ## Data stored locally
 
 ChatBrowserX stores conversations, WorkSession and TaskRun recovery state, ordinary messages,
-runtime supplements, events, pending/completed Tavily tool calls, and attachment references in
+runtime supplements, events, pending/completed Tavily and browser tool calls, and attachment references in
 IndexedDB. User-added images and user-triggered screenshots are stored as IndexedDB Blob records.
+Viewport screenshots explicitly requested by the browser agent are also stored as bounded IndexedDB
+Blob records and referenced by their completed tool result; base64 image data is not written into task
+checkpoints.
 Interface settings, the Codex Access Token, and the Tavily API Key are stored in
 `chrome.storage.local`, restricted to trusted extension contexts.
 
@@ -16,18 +19,27 @@ For an ordinary chat task, Codex receives only:
 
 - up to the configured number of newest completed user and assistant messages from successfully completed prior WorkSessions (50 by default, configurable from 1 to 50);
 - the current WorkSession's ordered user messages, accepted runtime supplements, and recorded function calls/outputs needed for continuation;
-- images explicitly attached to those messages or supplements, with active-WorkSession images taking priority under the existing image count and byte limits;
-- the system prompt exactly as saved in Settings.
+- images explicitly attached to those messages or supplements, plus bounded browser screenshots
+  produced by an explicit `browser_inspect` screenshot tool call, with active-WorkSession images taking
+  priority under the existing image count and byte limits;
+- browser tool outputs selected during the task, which can include cleaned page text, accessibility
+  labels, tab metadata, action results, screenshots, or sanitized network metadata/response text;
+- the saved system prompt after the fixed browser safety instructions.
 
 The history window is limited by message count only; selected message text is not additionally
 truncated by a character cap. Active WorkSession continuation items do not count toward that history
-message limit. The production runtime registers only `tavily_search`, `tavily_extract`, and
-`tavily_crawl`. Pending and completed Tavily calls are stored in checkpoints and sent back to Codex
-as ordered function calls/outputs so paused, cancelled, or restarted work can continue without
-repeating a recorded call. One result item is limited to 12,000 content characters and one call to
-40,000 aggregate content characters. ChatBrowserX does not automatically send page text, DOM,
-iframe data, page snapshots, budgets, risk policies, or screenshots that the user did not explicitly
-attach.
+message limit. The production runtime always registers the reviewed browser tools. It registers
+`tavily_search`, `tavily_extract`, and `tavily_crawl` only while a nonblank Tavily API Key is present;
+the Key itself is never exposed to the planner. Pending and completed tool calls are stored in
+checkpoints and sent back to Codex as ordered function calls/outputs so paused, cancelled, or
+restarted work can continue without repeating a recorded result. Ambiguous browser mutations are not
+replayed after a worker interruption. Tavily result items are limited to 12,000 content characters
+and one Tavily call to 40,000 aggregate content characters.
+
+Page data is read only when Codex selects a reviewed browser tool while executing the user's task; it
+is not silently appended to every request. Browser outputs are bounded before entering the model
+context. Screenshots are transiently materialized from local Blob references only for the relevant
+function output.
 
 The Codex Access Token is sent only to the fixed Codex endpoint. Explicit attachments may contain sensitive data; attach only data you are allowed to send.
 
@@ -47,16 +59,34 @@ credential-bearing, and non-HTTP(S) targets.
 
 ## Page access and captures
 
-All-site access supports user-triggered region screenshots and page-selection features. It does not cause background page reading.
+All-site access supports user-triggered screenshots, page-selection features, and reviewed browser
+agent operations on user-opened HTTP(S) tabs. Browser control may attach Chrome DevTools Protocol to
+the selected tab, which makes Chrome show its normal debugger notice. Browser-internal pages,
+extension pages, DevTools, local files, credential-bearing URLs, and unsupported schemes are rejected.
 
 - Viewport or region screenshots enter a model request only after the user captures and keeps them in the draft, then sends that draft.
+- An agent screenshot enters a model request only after Codex explicitly calls the screenshot inspect
+  tool for the selected tab. Extension overlays are hidden during capture and restored afterward.
 - Translation sends the selected text plus bounded page URL and title.
 - Ask AI turns the selected text and question into an explicit chat message.
 - Password and editable surfaces do not trigger the selection feature.
 
+## Network analysis
+
+Network capture starts only after Codex explicitly selects `browser_network_start`, records future
+traffic only, and never refreshes a page implicitly. Initial-load analysis therefore requires an
+explicit start, reload, wait, and list sequence. Capture buffers are in memory, scoped to one tab and
+debugger attachment, limited to 500 entries, and discarded on stop, detach, or worker loss.
+
+Request bodies are never returned. Response bodies are fetched from Chrome only when Codex explicitly
+selects `browser_network_get` with body inclusion, are not retained in the capture buffer, and are
+bounded before being returned. Cookie, Set-Cookie, Authorization and equivalent headers, sensitive
+query values, and sensitive JSON fields are removed or redacted. Binary, unavailable, invalid, and
+oversized bodies are marked rather than exposed.
+
 ## Data not collected
 
-This version contains no browser observation/action tools, voice input, speech recognition,
-recording, subtitles, microphone/tab audio capture, printing, PDF generation/reading, full-page
-stitching, generic network recording, desktop capture, cloud task sync, telemetry pipeline, or
-advertising tracker.
+This version contains no voice input, speech recognition, recording, subtitles, microphone/tab audio
+capture, printing, PDF generation/reading, full-page stitching, persistent generic network recording,
+request-body export, arbitrary JavaScript or raw-CDP model tool, desktop capture, cloud task sync,
+telemetry pipeline, or advertising tracker.

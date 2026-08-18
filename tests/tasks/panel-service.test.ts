@@ -391,6 +391,7 @@ describe('PanelService', () => {
       argumentsJson: index === 21 ? longArguments : '{}',
       output: index === 21 ? longOutput : `output_${index}`,
       resultRef: `result_${index}`,
+      attachmentIds: index === 21 ? ['attachment_tool'] : [],
     }));
     fixture.dependencies.conversations.listMessages.mockResolvedValue([
       {
@@ -471,6 +472,7 @@ describe('PanelService', () => {
     });
     expect(bashTask?.completedToolResults.at(-1)?.argumentsJson).toHaveLength(20_000);
     expect(bashTask?.completedToolResults.at(-1)?.output).toHaveLength(100_000);
+    expect(bashTask?.completedToolResults.at(-1)?.attachmentIds).toEqual(['attachment_tool']);
   });
 
   it('returns persisted credentials only from the explicit settings query', async () => {

@@ -4,9 +4,14 @@ import {
   type PageCommand,
 } from '../shared/protocol/message-types';
 import { parsePageCommand } from '../shared/protocol/parse-message';
+import {
+  extractReadableContent,
+  observeDomElements,
+} from '../browser/observation/content-extractor';
 import { setPageOverlaysHidden } from './page-overlay-registry';
 import { openPageImagePreview } from './image-preview/mount-image-preview';
 import { selectScreenshotRegion } from './screenshot/mount-screenshot-overlay';
+import { showVirtualPointer } from './browser/mount-virtual-pointer';
 
 export interface PageCommandEnvironment {
   readonly document: Document;
@@ -45,6 +50,34 @@ export async function handlePageCommand(
       requestId: command.requestId,
       ok: true,
       data: { installed: true },
+    };
+  }
+
+  if (command?.type === 'page.content.read') {
+    return {
+      version: PROTOCOL_VERSION,
+      requestId: command.requestId,
+      ok: true,
+      data: extractReadableContent(environment.document, environment.window),
+    };
+  }
+
+  if (command?.type === 'page.elements.observe') {
+    return {
+      version: PROTOCOL_VERSION,
+      requestId: command.requestId,
+      ok: true,
+      data: observeDomElements(environment.document, environment.window),
+    };
+  }
+
+  if (command?.type === 'page.pointer.show') {
+    await showVirtualPointer(command.payload, environment.document, environment.window);
+    return {
+      version: PROTOCOL_VERSION,
+      requestId: command.requestId,
+      ok: true,
+      data: { shown: true },
     };
   }
 

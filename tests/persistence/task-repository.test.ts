@@ -76,6 +76,7 @@ describe('IndexedDbTaskRepository', () => {
           argumentsJson: '{}',
           output: '{"ok":true}',
           resultRef: 'result_tavily',
+          attachmentIds: [],
         },
       ],
       pendingAction: { actionId: 'action_legacy' },
@@ -101,6 +102,7 @@ describe('IndexedDbTaskRepository', () => {
           argumentsJson: '{}',
           output: '{"ok":true}',
           resultRef: 'result_tavily',
+          attachmentIds: [],
         },
       ],
       continuationItems: [
@@ -149,7 +151,7 @@ describe('IndexedDbTaskRepository', () => {
         callId: 'call_pending',
         name: 'tavily_search',
         argumentsJson: '{"query":"recovery"}',
-      },
+      } as unknown as NonNullable<Checkpoint['pendingToolCall']>,
       createdAt: 1_000,
     });
 
@@ -168,6 +170,7 @@ describe('IndexedDbTaskRepository', () => {
         callId: 'call_pending',
         name: 'tavily_search',
         argumentsJson: '{"query":"recovery"}',
+        executionState: 'recorded',
       },
     });
     database.close();

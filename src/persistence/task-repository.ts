@@ -82,6 +82,15 @@ function normalizeTask(task: TaskRun): TaskRun {
 
 const validToolNamePattern = /^[a-zA-Z0-9_-]+$/;
 
+function normalizeAttachmentIds(value: unknown): readonly string[] {
+  if (value === undefined) return [];
+  if (!Array.isArray(value) || value.length > 8) return [];
+  const ids = value.filter(
+    (id): id is string => typeof id === 'string' && id.length > 0 && id.length <= 256,
+  );
+  return ids.length === value.length ? [...new Set(ids)] : [];
+}
+
 /** Returns a safe completed result or null for malformed or removed legacy tool records. */
 function normalizeCompletedToolResult(
   value: unknown,
@@ -106,6 +115,7 @@ function normalizeCompletedToolResult(
     argumentsJson: result.argumentsJson,
     output: result.output,
     resultRef: result.resultRef,
+    attachmentIds: normalizeAttachmentIds(result.attachmentIds),
   };
 }
 
@@ -125,6 +135,7 @@ function continuationFromCompletedResults(
       callId: result.callId,
       output: result.output,
       resultRef: result.resultRef,
+      attachmentIds: result.attachmentIds ?? [],
     },
   ]);
 }
@@ -198,6 +209,7 @@ function normalizeStoredContinuation(
         callId: item.callId,
         output: item.output,
         resultRef: item.resultRef,
+        attachmentIds: normalizeAttachmentIds(item.attachmentIds),
       });
       unresolvedCall = null;
       continue;
@@ -225,6 +237,8 @@ function normalizeStoredContinuation(
       callId: unresolvedCall.callId,
       name: unresolvedCall.name,
       argumentsJson: unresolvedCall.argumentsJson,
+      executionState:
+        pending.executionState === 'may_have_dispatched' ? 'may_have_dispatched' : 'recorded',
     },
   };
 }

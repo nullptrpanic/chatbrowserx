@@ -54,6 +54,7 @@ export interface PanelCompletedToolResult {
   readonly argumentsJson: string;
   readonly output: string;
   readonly resultRef: string;
+  readonly attachmentIds?: readonly string[];
 }
 
 export interface PanelTaskSupplement {

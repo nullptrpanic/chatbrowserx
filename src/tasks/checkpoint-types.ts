@@ -8,6 +8,8 @@ export interface CompletedToolResult {
   readonly argumentsJson: string;
   readonly output: string;
   readonly resultRef: string;
+  /** Durable Blob references used to reconstruct multimodal tool output on demand. */
+  readonly attachmentIds?: readonly string[];
 }
 
 export interface Checkpoint {

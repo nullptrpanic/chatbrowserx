@@ -16,10 +16,12 @@ export type ContinuationItem =
       readonly callId: string;
       readonly output: string;
       readonly resultRef: string;
+      readonly attachmentIds?: readonly string[];
     };
 
 export interface PendingToolCall {
   readonly callId: string;
   readonly name: string;
   readonly argumentsJson: string;
+  readonly executionState: 'recorded' | 'may_have_dispatched';
 }

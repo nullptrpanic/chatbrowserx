@@ -14,7 +14,7 @@ export const manifest = {
   description: 'A durable Codex chat client in Chrome Side Panel.',
   version: '0.1.0',
   icons,
-  permissions: ['activeTab', 'alarms', 'scripting', 'sidePanel', 'storage', 'tabs'],
+  permissions: ['activeTab', 'alarms', 'debugger', 'scripting', 'sidePanel', 'storage', 'tabs'],
   host_permissions: ['<all_urls>'],
   background: {
     service_worker: 'src/entries/background.ts',

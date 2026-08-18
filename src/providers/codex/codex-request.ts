@@ -49,7 +49,7 @@ function mapInputItem(item: ModelInputItem): Readonly<Record<string, unknown>> {
       return {
         type: 'function_call_output',
         call_id: item.callId,
-        output: item.output,
+        output: typeof item.output === 'string' ? item.output : item.output.map(mapContentPart),
       };
   }
 }

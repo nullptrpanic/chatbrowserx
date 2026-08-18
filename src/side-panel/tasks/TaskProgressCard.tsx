@@ -8,6 +8,7 @@ import { isTerminalToolName, TerminalToolResult } from './TerminalToolResult';
 import { ReasoningSummary } from './ReasoningSummary';
 import { TaskStatusLabel, taskEventLabel, taskStatusLabel } from './TaskStatusLabel';
 import { ToolResult } from './ToolResult';
+import { toolResultEventLabel } from './browser-tool-label';
 
 const runningStatuses = new Set<PanelTask['status']>(['queued', 'planning']);
 const resumableStatuses = new Set<PanelTask['status']>(['paused', 'waiting_for_auth']);
@@ -164,7 +165,11 @@ function TaskDetailContent({
             return (
               <li key={`${event.sequence}:${event.type}`}>
                 <span className="task-event-index">{event.sequence}</span>
-                <span>{taskEventLabel(event.type, t)}</span>
+                <span>
+                  {event.type === 'tool.result-recorded' && toolResults[0] !== undefined
+                    ? toolResultEventLabel(toolResults[0].toolName, t)
+                    : taskEventLabel(event.type, t)}
+                </span>
                 <time dateTime={new Date(event.at).toISOString()}>
                   {new Intl.DateTimeFormat(undefined, {
                     hour: '2-digit',
@@ -175,7 +180,13 @@ function TaskDetailContent({
                 {toolResults.length === 0 ? null : (
                   <div className="task-event-tool-results">
                     {toolResults.map((result) => (
-                      <CompletedToolResult key={result.callId} result={result} t={t} />
+                      <CompletedToolResult
+                        key={result.callId}
+                        result={result}
+                        attachments={attachments}
+                        t={t}
+                        onOpenImagePreview={onOpenImagePreview}
+                      />
                     ))}
                   </div>
                 )}
@@ -190,7 +201,13 @@ function TaskDetailContent({
       {task.events.length !== 0 || task.completedToolResults.length === 0 ? null : (
         <div className="task-event-tool-results">
           {task.completedToolResults.map((result) => (
-            <CompletedToolResult key={result.callId} result={result} t={t} />
+            <CompletedToolResult
+              key={result.callId}
+              result={result}
+              attachments={attachments}
+              t={t}
+              onOpenImagePreview={onOpenImagePreview}
+            />
           ))}
         </div>
       )}
@@ -227,15 +244,24 @@ function TaskDetailContent({
 
 function CompletedToolResult({
   result,
+  attachments,
   t,
+  onOpenImagePreview,
 }: {
   readonly result: PanelCompletedToolResult;
+  readonly attachments: AttachmentDraftClient;
   readonly t: Translator;
+  readonly onOpenImagePreview?: ((attachmentId: string) => Promise<boolean>) | undefined;
 }) {
   return isTerminalToolName(result.toolName) ? (
     <TerminalToolResult result={result} t={t} />
   ) : (
-    <ToolResult result={result} t={t} />
+    <ToolResult
+      result={result}
+      attachments={attachments}
+      t={t}
+      onOpenImagePreview={onOpenImagePreview}
+    />
   );
 }
 

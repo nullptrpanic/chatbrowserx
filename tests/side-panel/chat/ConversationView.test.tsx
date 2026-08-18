@@ -252,6 +252,90 @@ describe('ConversationView answer execution details', () => {
     expect(within(answer as HTMLElement).queryByText(/Reliable browsing/)).not.toBeInTheDocument();
   });
 
+  it('loads a screenshot only inside its expanded browser tool result', async () => {
+    const user = userEvent.setup();
+    vi.spyOn(URL, 'createObjectURL').mockReturnValue('blob:tool-screenshot');
+    const screenshotAttachments = {
+      addFiles: vi.fn(async () => []),
+      get: vi.fn(async (id: string) =>
+        id === 'attachment_screenshot'
+          ? {
+              id,
+              blob: new Blob([new Uint8Array([137, 80, 78, 71])], { type: 'image/png' }),
+              mimeType: 'image/png',
+              byteSize: 4,
+              width: 800,
+              height: 600,
+              source: 'visual_fallback' as const,
+              fileName: 'page-screenshot.png',
+              createdAt: 1_200,
+            }
+          : undefined,
+      ),
+    };
+    const task: PanelTask = {
+      ...completedTask('task_screenshot', 'Inspect the page', 1_300),
+      events: [
+        { sequence: 1, type: 'planning.started', reason: 'started', at: 1_000 },
+        {
+          sequence: 2,
+          type: 'tool.result-recorded',
+          reason: 'browser_inspect_result_recorded',
+          at: 1_200,
+        },
+        { sequence: 3, type: 'task.completed', reason: 'done', at: 1_300 },
+      ],
+      completedToolResults: [
+        {
+          callId: 'call_screenshot',
+          toolName: 'browser_inspect',
+          argumentsJson: '{"tabId":7,"mode":"screenshot"}',
+          output: '{"ok":true}',
+          resultRef: 'result_screenshot',
+          attachmentIds: ['attachment_screenshot'],
+        },
+      ],
+    };
+    const preview = vi.fn(async () => true);
+
+    render(
+      <ConversationView
+        messages={[
+          {
+            id: 'assistant_screenshot',
+            taskId: task.id,
+            role: 'assistant',
+            status: 'complete',
+            text: 'I inspected the page.',
+            attachmentIds: [],
+            createdAt: 1_300,
+            updatedAt: 1_300,
+          },
+        ]}
+        tasks={[task]}
+        task={task}
+        attachments={screenshotAttachments}
+        t={t}
+        onSuggestion={vi.fn()}
+        onOpenImagePreview={preview}
+        onPause={vi.fn()}
+        onResume={vi.fn()}
+        onRetry={vi.fn()}
+        onCancel={vi.fn()}
+      />,
+    );
+
+    expect(screen.queryByAltText('page-screenshot.png')).not.toBeInTheDocument();
+    await user.click(screen.getByRole('button', { name: '任务已完成 3 步 · 4.6 秒' }));
+    expect(screen.getByText('检查页面已完成')).toBeVisible();
+    expect(screen.queryByAltText('page-screenshot.png')).not.toBeInTheDocument();
+    await user.click(screen.getByRole('button', { name: '展开 检查页面 结果' }));
+    const image = await screen.findByAltText('page-screenshot.png');
+    expect(image).toHaveAttribute('src', 'blob:tool-screenshot');
+    await user.click(image.closest('button') as HTMLButtonElement);
+    expect(preview).toHaveBeenCalledWith('attachment_screenshot');
+  });
+
   it('places each completed tool result beneath its corresponding task event', async () => {
     const user = userEvent.setup();
     const task: PanelTask = {

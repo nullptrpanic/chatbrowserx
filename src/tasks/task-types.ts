@@ -29,6 +29,7 @@ export type TaskEventType =
   | 'planning.started'
   | 'reasoning.summary-recorded'
   | 'tool.call-recorded'
+  | 'tool.execution-started'
   | 'tool.result-recorded'
   | 'task.supplements-applied'
   | 'task.auth-required'

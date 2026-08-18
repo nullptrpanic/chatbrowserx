@@ -20,6 +20,7 @@
     "check:codex": "tsx scripts/check-codex-contract.ts"
   },
   "dependencies": {
+    "dom-accessibility-api": "^0.7.1",
     "idb": "8.0.3",
     "lucide-react": "1.31.0",
     "react": "19.2.8",
@@ -38,6 +39,7 @@
     "@types/react": "19.2.18",
     "@types/react-dom": "19.2.4",
     "@vitejs/plugin-react": "5.2.0",
+    "devtools-protocol": "^0.0.1672245",
     "eslint": "10.8.1",
     "fake-indexeddb": "6.2.5",
     "globals": "17.11.0",

@@ -50,6 +50,18 @@ export type ExtensionMessage =
 
 export type PageCommand =
   | Message<'page.ping', Record<string, never>>
+  | Message<'page.content.read', Record<string, never>>
+  | Message<'page.elements.observe', Record<string, never>>
+  | Message<
+      'page.pointer.show',
+      {
+        x: number;
+        y: number;
+        fromX: number;
+        fromY: number;
+        effect: 'move' | 'click' | 'double_click' | 'drag';
+      }
+    >
   | Message<'page.screenshot.select', Record<string, never>>
   | Message<'page.overlays.setHidden', { hidden: boolean }>
   | Message<'page.imagePreview.open', { src: string; alt: string }>;

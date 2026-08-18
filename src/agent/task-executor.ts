@@ -1,4 +1,6 @@
 import type { ConversationRepository } from '../persistence/conversation-repository';
+import type { AttachmentRepository } from '../persistence/attachment-repository';
+import type { BrowserExecutionPort } from '../browser/browser-execution-types';
 import { TaskRepositoryConflictError, type TaskRepository } from '../persistence/task-repository';
 import { isProviderError, type ProviderError } from '../providers/provider-errors';
 import type { TavilyExecutionPort, TavilyResultSet } from '../providers/tavily/tavily-types';
@@ -13,6 +15,7 @@ import { retainTaskReply } from '../tasks/task-reply-retention';
 import { transitionTask } from '../tasks/task-transition';
 import type { TaskEvent, TaskEventType, TaskRun } from '../tasks/task-types';
 import type { AgentEvent, AgentPlanner } from './execution-types';
+import { parseBrowserToolCall } from './tools/browser-tool-schema';
 import { parseTavilyToolCall } from './tools/tavily-tool-schema';
 
 export type TaskExecutorErrorCode =
@@ -40,6 +43,8 @@ export interface TaskExecutorDependencies {
   >;
   readonly planner: AgentPlanner;
   readonly tavily: TavilyExecutionPort;
+  readonly browser: BrowserExecutionPort;
+  readonly attachments?: Pick<AttachmentRepository, 'addReference' | 'removeReference'>;
   readonly clock: Clock;
   readonly ids: IdGenerator;
 }
@@ -58,6 +63,7 @@ type AgentOutcome = Exclude<AgentEvent, { readonly type: 'reasoning.summary' }>;
 
 const runnableStatuses = new Set<TaskRun['status']>(['queued', 'planning']);
 const TAVILY_TOOL_CALL_LIMIT = 8;
+const BROWSER_TOOL_CALL_LIMIT = 64;
 const tavilyToolNames = new Set(['tavily_search', 'tavily_extract', 'tavily_crawl']);
 
 function throwIfAborted(signal: AbortSignal): void {
@@ -88,12 +94,12 @@ function taskInputError(): TaskError {
   };
 }
 
-function toolCallLimitError(): TaskError {
+function toolCallLimitError(family: 'Tavily' | 'browser'): TaskError {
   return {
     code: 'ToolCallLimitError',
     retryable: false,
     recoveryAction: 'review_task_input',
-    userMessage: 'The task exceeded the Tavily tool-call limit.',
+    userMessage: `The task exceeded the ${family} tool-call limit.`,
     evidenceRef: null,
   };
 }
@@ -216,9 +222,10 @@ export class TaskExecutor {
           }
         }
 
+        const call = result.type === 'browser.call' ? result.call : result;
         if (
           snapshot.checkpoint.completedToolResults.some(
-            (completed) => completed.callId === result.callId,
+            (completed) => completed.callId === call.callId,
           )
         ) {
           return this.#saveBoundary(snapshot, ownerId, signal, {
@@ -227,33 +234,41 @@ export class TaskExecutor {
             error: invalidPlannerResultError(),
           });
         }
-        const completedTavilyCalls = snapshot.checkpoint.completedToolResults.filter((completed) =>
-          tavilyToolNames.has(completed.toolName),
+        const isBrowserCall = result.type === 'browser.call';
+        const completedFamilyCalls = snapshot.checkpoint.completedToolResults.filter((completed) =>
+          isBrowserCall
+            ? completed.toolName.startsWith('browser_')
+            : tavilyToolNames.has(completed.toolName),
         ).length;
-        if (completedTavilyCalls >= TAVILY_TOOL_CALL_LIMIT) {
+        const familyLimit = isBrowserCall ? BROWSER_TOOL_CALL_LIMIT : TAVILY_TOOL_CALL_LIMIT;
+        if (completedFamilyCalls >= familyLimit) {
           return this.#saveBoundary(snapshot, ownerId, signal, {
             type: 'task.failed',
-            reason: 'tavily_tool_call_limit_reached',
-            error: toolCallLimitError(),
+            reason: `${isBrowserCall ? 'browser' : 'tavily'}_tool_call_limit_reached`,
+            error: toolCallLimitError(isBrowserCall ? 'browser' : 'Tavily'),
           });
         }
 
+        const toolName =
+          result.type === 'browser.call' ? result.call.name : `tavily_${result.operation}`;
+
         snapshot = await this.#saveBoundary(snapshot, ownerId, signal, {
           type: 'tool.call-recorded',
-          reason: `tavily_${result.operation}_call_recorded`,
+          reason: `${toolName}_call_recorded`,
           continuationItems: [
             ...snapshot.checkpoint.continuationItems,
             {
               type: 'function_call',
-              callId: result.callId,
-              name: `tavily_${result.operation}`,
-              argumentsJson: result.argumentsJson,
+              callId: call.callId,
+              name: toolName,
+              argumentsJson: call.argumentsJson,
             },
           ],
           pendingToolCall: {
-            callId: result.callId,
-            name: `tavily_${result.operation}`,
-            argumentsJson: result.argumentsJson,
+            callId: call.callId,
+            name: toolName,
+            argumentsJson: call.argumentsJson,
+            executionState: 'recorded',
           },
         });
       }
@@ -262,7 +277,7 @@ export class TaskExecutor {
     }
   }
 
-  /** Executes a call that was durably recorded before any external Tavily side effect. */
+  /** Executes a durably recorded tool and prevents ambiguous browser mutations from replaying. */
   async #executePendingTool(
     snapshot: TaskSnapshot,
     ownerId: string,
@@ -270,6 +285,10 @@ export class TaskExecutor {
   ): Promise<TaskSnapshot> {
     const pending = snapshot.checkpoint.pendingToolCall;
     if (pending === null) return snapshot;
+
+    if (pending.name.startsWith('browser_')) {
+      return this.#executePendingBrowserTool(snapshot, ownerId, signal, pending);
+    }
 
     let call: Extract<AgentEvent, { readonly type: 'tavily.call' }>;
     let toolResult: TavilyResultSet;
@@ -281,32 +300,133 @@ export class TaskExecutor {
       return this.#handleFailure(snapshot, ownerId, signal, error, 'tavily');
     }
 
-    const completedResult: CompletedToolResult = {
-      callId: call.callId,
-      toolName: `tavily_${call.operation}`,
-      argumentsJson: call.argumentsJson,
-      output: JSON.stringify({
+    return this.#recordToolResult(
+      snapshot,
+      ownerId,
+      signal,
+      pending,
+      JSON.stringify({
         ok: true,
         results: toolResult.results,
         truncated: toolResult.truncated,
       }),
-      resultRef: this.#createId('toolResult'),
-    };
-    return this.#saveBoundary(snapshot, ownerId, signal, {
-      type: 'tool.result-recorded',
-      reason: `tavily_${call.operation}_result_recorded`,
-      completedToolResults: [...snapshot.checkpoint.completedToolResults, completedResult],
-      continuationItems: [
-        ...snapshot.checkpoint.continuationItems,
-        {
-          type: 'function_call_output',
-          callId: call.callId,
-          output: completedResult.output,
-          resultRef: completedResult.resultRef,
-        },
-      ],
-      pendingToolCall: null,
-    });
+    );
+  }
+
+  async #executePendingBrowserTool(
+    snapshot: TaskSnapshot,
+    ownerId: string,
+    signal: AbortSignal,
+    pending: PendingToolCall,
+  ): Promise<TaskSnapshot> {
+    let call: ReturnType<typeof parseBrowserToolCall>;
+    try {
+      call = parseBrowserToolCall(pending);
+    } catch (error) {
+      return this.#handleFailure(snapshot, ownerId, signal, error, 'browser');
+    }
+
+    if (pending.executionState === 'may_have_dispatched') {
+      return this.#recordToolResult(
+        snapshot,
+        ownerId,
+        signal,
+        pending,
+        JSON.stringify({
+          ok: false,
+          code: 'AMBIGUOUS_MUTATION',
+          message:
+            'The previous browser action may already have run. Inspect the current page before choosing the next action.',
+          retryable: false,
+          needsInspect: true,
+        }),
+      );
+    }
+
+    if (call.replay === 'mutation') {
+      snapshot = await this.#saveBoundary(snapshot, ownerId, signal, {
+        type: 'tool.execution-started',
+        reason: `${call.name}_execution_started`,
+        pendingToolCall: { ...pending, executionState: 'may_have_dispatched' },
+      });
+    }
+
+    try {
+      const toolResult = await this.#dependencies.browser.execute(call, signal);
+      return this.#recordToolResult(
+        snapshot,
+        ownerId,
+        signal,
+        pending,
+        toolResult.output,
+        toolResult.attachmentIds,
+      );
+    } catch (error) {
+      return this.#handleFailure(snapshot, ownerId, signal, error, 'browser');
+    }
+  }
+
+  async #recordToolResult(
+    snapshot: TaskSnapshot,
+    ownerId: string,
+    signal: AbortSignal,
+    pending: PendingToolCall,
+    output: string,
+    attachmentIds: readonly string[] = [],
+  ): Promise<TaskSnapshot> {
+    const durableAttachmentIds = [...new Set(attachmentIds)];
+    if (
+      durableAttachmentIds.length > 8 ||
+      durableAttachmentIds.some((id) => id.length === 0 || id.length > 256)
+    ) {
+      throw new Error('Browser tool attachment references are invalid.');
+    }
+    const resultRef = this.#createId('toolResult');
+    const referencedAttachmentIds: string[] = [];
+    try {
+      if (durableAttachmentIds.length > 0) {
+        const attachments = this.#dependencies.attachments;
+        if (!attachments) {
+          throw new Error('Browser tool attachment persistence is unavailable.');
+        }
+        for (const id of durableAttachmentIds) {
+          await attachments.addReference(id, resultRef);
+          referencedAttachmentIds.push(id);
+        }
+      }
+      const completedResult: CompletedToolResult = {
+        callId: pending.callId,
+        toolName: pending.name,
+        argumentsJson: pending.argumentsJson,
+        output,
+        resultRef,
+        attachmentIds: durableAttachmentIds,
+      };
+      return await this.#saveBoundary(snapshot, ownerId, signal, {
+        type: 'tool.result-recorded',
+        reason: `${pending.name}_result_recorded`,
+        completedToolResults: [...snapshot.checkpoint.completedToolResults, completedResult],
+        continuationItems: [
+          ...snapshot.checkpoint.continuationItems,
+          {
+            type: 'function_call_output',
+            callId: pending.callId,
+            output,
+            resultRef: completedResult.resultRef,
+            attachmentIds: durableAttachmentIds,
+          },
+        ],
+        pendingToolCall: null,
+      });
+    } catch (error) {
+      const attachments = this.#dependencies.attachments;
+      if (attachments && referencedAttachmentIds.length > 0) {
+        await Promise.allSettled(
+          referencedAttachmentIds.map((id) => attachments.removeReference(id, resultRef)),
+        );
+      }
+      throw error;
+    }
   }
 
   /** Commits every unconsumed WorkSession supplement before the next model request. */
@@ -439,7 +559,7 @@ export class TaskExecutor {
     ownerId: string,
     signal: AbortSignal,
     error: unknown,
-    source: 'model' | 'tavily',
+    source: 'model' | 'tavily' | 'browser',
   ): Promise<TaskSnapshot> {
     if (signal.aborted || isAbortError(error)) throw error;
     if (error instanceof TaskExecutorError && error.code === 'PLANNER_RESULT_INVALID') {
@@ -452,12 +572,17 @@ export class TaskExecutor {
     if (!isProviderError(error)) {
       return this.#saveBoundary(snapshot, ownerId, signal, {
         type: 'task.failed',
-        reason: source === 'tavily' ? 'tavily_execution_failed' : 'task_input_preparation_failed',
+        reason:
+          source === 'tavily'
+            ? 'tavily_execution_failed'
+            : source === 'browser'
+              ? 'browser_execution_failed'
+              : 'task_input_preparation_failed',
         error: taskInputError(),
       });
     }
     if (error.code === 'ABORTED') throw error;
-    const taskError = taskErrorFromProvider(error, source);
+    const taskError = taskErrorFromProvider(error, source === 'browser' ? 'model' : source);
     return this.#saveBoundary(snapshot, ownerId, signal, {
       type:
         error.code === 'AUTH'

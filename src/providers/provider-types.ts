@@ -8,8 +8,11 @@ export type ModelMessageContent =
   | {
       readonly type: 'input_image';
       readonly imageUrl: string;
-      readonly detail: 'auto' | 'low' | 'high';
+      readonly detail: 'auto' | 'low' | 'high' | 'original';
     };
+
+export type ModelFunctionOutput =
+  string | readonly Extract<ModelMessageContent, { readonly type: 'input_text' | 'input_image' }>[];
 
 export type ModelInputItem =
   | {
@@ -26,7 +29,7 @@ export type ModelInputItem =
   | {
       readonly type: 'function_call_output';
       readonly callId: string;
-      readonly output: string;
+      readonly output: ModelFunctionOutput;
     };
 
 export interface ModelToolDefinition {

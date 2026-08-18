@@ -55,6 +55,7 @@ const completedToolResultSchema = z
     argumentsJson: z.string().max(20_000),
     output: z.string().max(100_000),
     resultRef: z.string().max(512),
+    attachmentIds: z.array(idSchema).max(8).default([]),
   })
   .strict();
 const taskSupplementSchema = z

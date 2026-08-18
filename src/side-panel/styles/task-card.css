@@ -472,6 +472,11 @@
   white-space: pre-wrap;
 }
 
+.tool-result-content .message-images {
+  margin: 7px 0 0;
+  grid-template-columns: repeat(auto-fill, minmax(64px, 96px));
+}
+
 .task-controls {
   gap: 6px;
   margin-top: 10px;

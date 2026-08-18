@@ -168,6 +168,30 @@ describe('parsePageCommand', () => {
     expect(
       parsePageCommand({
         version: 1,
+        requestId: 'req_pointer',
+        type: 'page.pointer.show',
+        payload: { x: 100, y: 80, fromX: 10, fromY: 20, effect: 'click' },
+      }),
+    ).toMatchObject({ type: 'page.pointer.show' });
+    expect(
+      parsePageCommand({
+        version: 1,
+        requestId: 'req_content',
+        type: 'page.content.read',
+        payload: {},
+      }),
+    ).toMatchObject({ type: 'page.content.read' });
+    expect(
+      parsePageCommand({
+        version: 1,
+        requestId: 'req_elements',
+        type: 'page.elements.observe',
+        payload: {},
+      }),
+    ).toMatchObject({ type: 'page.elements.observe' });
+    expect(
+      parsePageCommand({
+        version: 1,
         requestId: 'req_hidden',
         type: 'page.overlays.setHidden',
         payload: { hidden: true },
@@ -187,6 +211,14 @@ describe('parsePageCommand', () => {
   });
 
   it('rejects task commands and extra page payload fields', () => {
+    expect(() =>
+      parsePageCommand({
+        version: 1,
+        requestId: 'req_pointer_invalid',
+        type: 'page.pointer.show',
+        payload: { x: -1, y: 80, fromX: 10, fromY: 20, effect: 'click', javascript: 'x' },
+      }),
+    ).toThrow(/invalid page command/i);
     expect(() =>
       parsePageCommand({
         version: 1,

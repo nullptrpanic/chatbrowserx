@@ -46,7 +46,7 @@ describe('ContentScriptInstaller', () => {
     expect(dependencies.scripting.executeScript).not.toHaveBeenCalled();
   });
 
-  it('reuses a responsive content script without injecting it twice', async () => {
+  it('refreshes the guarded bundle across accessible frames when the top frame responds', async () => {
     const dependencies = buildDependencies();
     const installer = new ContentScriptInstaller(dependencies);
 
@@ -57,7 +57,10 @@ describe('ContentScriptInstaller', () => {
     expect(dependencies.permissions.contains).toHaveBeenCalledWith({
       origins: ['https://example.test/*'],
     });
-    expect(dependencies.scripting.executeScript).not.toHaveBeenCalled();
+    expect(dependencies.scripting.executeScript).toHaveBeenCalledWith({
+      target: { tabId: 7, allFrames: true },
+      files: ['assets/page-content.js'],
+    });
   });
 
   it('injects the standalone bundle into all frames after an unanswered ping', async () => {
@@ -70,7 +73,7 @@ describe('ContentScriptInstaller', () => {
       originPattern: 'https://example.test/*',
     });
     expect(dependencies.scripting.executeScript).toHaveBeenCalledWith({
-      target: { tabId: 7, allFrames: false },
+      target: { tabId: 7, allFrames: true },
       files: ['assets/page-content.js'],
     });
   });

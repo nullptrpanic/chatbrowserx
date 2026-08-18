@@ -14,7 +14,7 @@ async function bundleFixture(script = 'const ready = true;'): Promise<string> {
   await writeFile(
     join(root, 'manifest.json'),
     JSON.stringify({
-      permissions: ['activeTab', 'alarms', 'scripting', 'sidePanel', 'storage', 'tabs'],
+      permissions: ['activeTab', 'alarms', 'debugger', 'scripting', 'sidePanel', 'storage', 'tabs'],
       host_permissions: ['<all_urls>'],
     }),
   );
@@ -39,7 +39,7 @@ describe('production bundle audit', () => {
     ['E2E_CONTROL_RESIDUE', 'const command = "test.fault";'],
     ['EXCLUDED_PROVIDER_OR_MEDIA_FEATURE', 'chrome.tabCapture.capture();'],
     ['CONCRETE_TOOL_RUNTIME_RESIDUE', 'const tool = "browser.observe";'],
-    ['DEBUGGER_RUNTIME_RESIDUE', 'chrome.debugger.attach({ tabId: 7 }, "1.3");'],
+    ['RAW_CDP_MODEL_TOOL_RESIDUE', 'const tool = "browser_cdp";'],
     ['RUNTIME_HOST_REQUEST_RESIDUE', 'chrome.permissions.request({ origins: ["https://x/*"] });'],
     ['MODEL_CONTEXT_INJECTION_RESIDUE', 'const prompt = "## Current page";'],
     ['DEVELOPMENT_FIXTURE_RESIDUE', 'const taskId = "task_preview";'],
@@ -54,6 +54,18 @@ describe('production bundle audit', () => {
     const script = [
       'const tools = ["tavily_search", "tavily_extract", "tavily_crawl"];',
       'const endpoints = ["https://api.tavily.com/search", "https://api.tavily.com/extract", "https://api.tavily.com/crawl"];',
+    ].join('\n');
+
+    await expect(auditProductionBundle(await bundleFixture(script))).resolves.toMatchObject({
+      passed: true,
+      findings: [],
+    });
+  });
+
+  it('accepts the approved debugger transport runtime surface', async () => {
+    const script = [
+      'chrome.debugger.attach({ tabId: 7 }, "1.3");',
+      'chrome.debugger.sendCommand({ tabId: 7, sessionId: "child" }, "DOM.getDocument");',
     ].join('\n');
 
     await expect(auditProductionBundle(await bundleFixture(script))).resolves.toMatchObject({
@@ -81,7 +93,15 @@ describe('production bundle audit', () => {
     await writeFile(
       join(root, 'manifest.json'),
       JSON.stringify({
-        permissions: ['activeTab', 'alarms', 'scripting', 'sidePanel', 'storage', 'tabs'],
+        permissions: [
+          'activeTab',
+          'alarms',
+          'debugger',
+          'scripting',
+          'sidePanel',
+          'storage',
+          'tabs',
+        ],
         optional_host_permissions: ['http://*/*', 'https://*/*'],
         host_permissions: ['<all_urls>'],
       }),

@@ -52,6 +52,56 @@ const MODEL_REQUEST: ModelRequest = {
 };
 
 describe('buildCodexRequest', () => {
+  it('maps multimodal function outputs without changing legacy string outputs', () => {
+    const request = buildCodexRequest({
+      accessToken: 'synthetic-token-value',
+      accountId: 'acct_123',
+      request: {
+        ...MODEL_REQUEST,
+        tools: [],
+        input: [
+          {
+            type: 'function_call_output',
+            callId: 'call_screenshot',
+            output: [
+              { type: 'input_text', text: '{"ok":true}' },
+              {
+                type: 'input_image',
+                imageUrl: 'data:image/png;base64,iVBORw0KGgo=',
+                detail: 'original',
+              },
+            ],
+          },
+          {
+            type: 'function_call_output',
+            callId: 'call_legacy',
+            output: '{"ok":true}',
+          },
+        ],
+      },
+    });
+
+    expect(request.body.input).toEqual([
+      {
+        type: 'function_call_output',
+        call_id: 'call_screenshot',
+        output: [
+          { type: 'input_text', text: '{"ok":true}' },
+          {
+            type: 'input_image',
+            image_url: 'data:image/png;base64,iVBORw0KGgo=',
+            detail: 'original',
+          },
+        ],
+      },
+      {
+        type: 'function_call_output',
+        call_id: 'call_legacy',
+        output: '{"ok":true}',
+      },
+    ]);
+  });
+
   it('omits the tool contract entirely when no tools are registered', () => {
     const request = buildCodexRequest({
       accessToken: 'synthetic-token-value',

@@ -4,6 +4,7 @@ const eventTargetStatus: Readonly<Record<TaskEventType, TaskStatus>> = {
   'planning.started': 'planning',
   'reasoning.summary-recorded': 'planning',
   'tool.call-recorded': 'planning',
+  'tool.execution-started': 'planning',
   'tool.result-recorded': 'planning',
   'task.supplements-applied': 'planning',
   'task.auth-required': 'waiting_for_auth',
@@ -27,6 +28,7 @@ const allowedEvents: Readonly<Record<TaskStatus, ReadonlySet<TaskEventType>>> = 
   planning: new Set([
     'reasoning.summary-recorded',
     'tool.call-recorded',
+    'tool.execution-started',
     'tool.result-recorded',
     'task.supplements-applied',
     'task.completed',

@@ -459,6 +459,7 @@ export class PanelService {
           argumentsJson: result.argumentsJson.slice(0, MAX_PANEL_TOOL_ARGUMENTS),
           output: result.output.slice(0, MAX_PANEL_TOOL_OUTPUT),
           resultRef: result.resultRef.slice(0, 512),
+          attachmentIds: [...(result.attachmentIds ?? [])].slice(0, 8),
         })),
       supplements: messages
         .filter((message) => message.kind === 'supplement' && message.taskId === task.id)

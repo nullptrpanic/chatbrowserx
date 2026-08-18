@@ -1,5 +1,8 @@
 import { describe, expect, it, vi } from 'vitest';
-import { buildAgentContext } from '../../../src/agent/context/agent-context';
+import {
+  BROWSER_SYSTEM_INSTRUCTIONS,
+  buildAgentContext,
+} from '../../../src/agent/context/agent-context';
 import { IMAGE_POLICY } from '../../../src/attachments/attachment-policy';
 import type { AttachmentRepository } from '../../../src/persistence/attachment-repository';
 import type { ConversationRepository } from '../../../src/persistence/conversation-repository';
@@ -108,6 +111,83 @@ function contextDependencies(
 }
 
 describe('buildAgentContext', () => {
+  it('rehydrates screenshot attachments only while materializing a function output', async () => {
+    const messages = [
+      message({
+        id: 'current',
+        taskId: TASK.id,
+        role: 'user',
+        text: 'Inspect the page visually.',
+      }),
+    ];
+    const get = vi.fn(async (id: string) =>
+      id === 'attachment_screenshot'
+        ? {
+            id,
+            blob: new Blob([new Uint8Array([137, 80, 78, 71])], { type: 'image/png' }),
+            mimeType: 'image/png',
+            byteSize: 4,
+            width: 800,
+            height: 600,
+            source: 'visual_fallback' as const,
+            createdAt: 200,
+          }
+        : undefined,
+    );
+
+    const context = await buildAgentContext(
+      {
+        task: TASK,
+        checkpoint: {
+          ...CHECKPOINT,
+          completedToolResults: [
+            {
+              callId: 'call_screenshot',
+              toolName: 'browser_inspect',
+              argumentsJson: '{"tabId":7,"mode":"screenshot"}',
+              output: '{"ok":true,"data":{"mode":"screenshot"}}',
+              resultRef: 'result_screenshot',
+              attachmentIds: ['attachment_screenshot'],
+            },
+          ],
+          continuationItems: [
+            { type: 'message_ref', messageId: 'current' },
+            {
+              type: 'function_call',
+              callId: 'call_screenshot',
+              name: 'browser_inspect',
+              argumentsJson: '{"tabId":7,"mode":"screenshot"}',
+            },
+            {
+              type: 'function_call_output',
+              callId: 'call_screenshot',
+              output: '{"ok":true,"data":{"mode":"screenshot"}}',
+              resultRef: 'result_screenshot',
+              attachmentIds: ['attachment_screenshot'],
+            },
+          ],
+        },
+        customSystemPrompt: '',
+        historyMessageLimit: 50,
+      },
+      contextDependencies(messages, { get }),
+    );
+
+    expect(context.input.at(-1)).toEqual({
+      type: 'function_call_output',
+      callId: 'call_screenshot',
+      output: [
+        { type: 'input_text', text: '{"ok":true,"data":{"mode":"screenshot"}}' },
+        {
+          type: 'input_image',
+          imageUrl: 'data:image/png;base64,iVBORw==',
+          detail: 'original',
+        },
+      ],
+    });
+    expect(get).toHaveBeenCalledWith('attachment_screenshot');
+  });
+
   it('replays ordered completed history without duplicating the current task', async () => {
     const messages = [
       message({
@@ -180,7 +260,7 @@ describe('buildAgentContext', () => {
       contextDependencies(messages, attachments),
     );
 
-    expect(context.systemPrompt).toBe('Prefer primary sources.');
+    expect(context.systemPrompt).toBe(`${BROWSER_SYSTEM_INSTRUCTIONS}\n\nPrefer primary sources.`);
     expect(context.input).toEqual([
       {
         type: 'message',
@@ -351,7 +431,7 @@ describe('buildAgentContext', () => {
       item.type === 'message' ? item.content.filter((part) => part.type === 'input_image') : [],
     );
 
-    expect(context.systemPrompt).toBe('');
+    expect(context.systemPrompt).toBe(BROWSER_SYSTEM_INSTRUCTIONS);
     expect(imageParts).toHaveLength(IMAGE_POLICY.maxCount);
     expect(imageParts.at(-1)).toMatchObject({ imageUrl: 'data:image/gif;base64,CA==' });
   });

@@ -2,6 +2,43 @@ import { describe, expect, it, vi } from 'vitest';
 import { handlePageCommand } from '../../src/page/browser-command-handler';
 
 describe('handlePageCommand', () => {
+  it('returns bounded readable content and DOM accessibility fallbacks', async () => {
+    document.head.innerHTML = '<title>Observed page</title>';
+    document.body.innerHTML = '<h1>Heading</h1><button aria-label="Continue"></button>';
+    const button = document.querySelector('button');
+    if (!button) throw new Error('Button fixture is missing.');
+    button.getBoundingClientRect = () => ({
+      x: 10,
+      y: 20,
+      width: 100,
+      height: 30,
+      top: 20,
+      left: 10,
+      right: 110,
+      bottom: 50,
+      toJSON: () => ({}),
+    });
+
+    await expect(
+      handlePageCommand(
+        { version: 1, requestId: 'req_content', type: 'page.content.read', payload: {} },
+        { document, window },
+      ),
+    ).resolves.toMatchObject({
+      ok: true,
+      data: { title: 'Observed page', headings: [{ level: 1, text: 'Heading' }] },
+    });
+    await expect(
+      handlePageCommand(
+        { version: 1, requestId: 'req_elements', type: 'page.elements.observe', payload: {} },
+        { document, window },
+      ),
+    ).resolves.toMatchObject({
+      ok: true,
+      data: [expect.objectContaining({ role: 'button', name: 'Continue' })],
+    });
+  });
+
   it('answers page ping without exposing other extension capabilities', async () => {
     await expect(
       handlePageCommand(

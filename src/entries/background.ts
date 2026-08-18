@@ -2,6 +2,14 @@ import { CodexAgentPlanner } from '../agent/codex-agent-planner';
 import { TaskExecutor } from '../agent/task-executor';
 import { AttachmentService } from '../attachments/attachment-service';
 import { cropCapturedImage } from '../attachments/crop-captured-image';
+import { BrowserToolExecutor } from '../browser/browser-tool-executor';
+import { BrowserActionExecutor } from '../browser/actions/browser-action-executor';
+import { ChromeDebuggerTransport } from '../browser/debugger/debugger-transport';
+import { TargetSessionRegistry } from '../browser/debugger/target-session-registry';
+import { ElementRefStore } from '../browser/observation/element-ref-store';
+import { PageObserver } from '../browser/observation/page-observer';
+import { NetworkCaptureRegistry } from '../browser/network/network-capture-registry';
+import { TabService } from '../browser/tab-service';
 import { IndexedDbAttachmentRepository } from '../persistence/attachment-repository';
 import { IndexedDbConversationRepository } from '../persistence/conversation-repository';
 import { ChromeCredentialStore } from '../persistence/credential-store';
@@ -9,6 +17,8 @@ import { openChatBrowserDatabase } from '../persistence/open-database';
 import { ChromeSettingsStore } from '../persistence/settings-store';
 import { IndexedDbTaskRepository } from '../persistence/task-repository';
 import { ContentScriptInstaller } from '../platform/chrome/content-script-installer';
+import { ChromePageObservationPort } from '../platform/chrome/page-observation-port';
+import { ChromePointerPagePort } from '../platform/chrome/pointer-page-port';
 import { captureVisibleTab } from '../platform/chrome/capture-visible-tab';
 import { createMessageRouter, type MessageRouter } from '../platform/chrome/message-router';
 import { ChromeScreenshotPagePort } from '../platform/chrome/screenshot-page-port';
@@ -79,8 +89,52 @@ async function createBackgroundServices(
   });
   const codex = new CodexProvider(credentials);
   const tavily = new TavilyClient(credentials);
+  const debuggerTransport = new ChromeDebuggerTransport();
+  const browserSessions = new TargetSessionRegistry(debuggerTransport);
+  const browserRefs = new ElementRefStore(cryptoIds);
+  const browserObserver = new PageObserver({
+    sessions: browserSessions,
+    transport: debuggerTransport,
+    content: new ChromePageObservationPort({
+      installer,
+      tabs: chrome.tabs,
+      ids: cryptoIds,
+    }),
+    refs: browserRefs,
+    persistScreenshot: async (blob) => {
+      const attachment = await attachmentService.addImageBlob(blob, 'visual_fallback');
+      return { id: attachment.id };
+    },
+  });
+  const browserActions = new BrowserActionExecutor({
+    sessions: browserSessions,
+    transport: debuggerTransport,
+    refs: browserRefs,
+    pointer: new ChromePointerPagePort({ installer, tabs: chrome.tabs, ids: cryptoIds }),
+  });
+  const browserNetwork = new NetworkCaptureRegistry({
+    sessions: browserSessions,
+    transport: debuggerTransport,
+    ids: cryptoIds,
+    clock: systemClock,
+  });
+  const browser = new BrowserToolExecutor({
+    tabs: new TabService(),
+    observer: browserObserver,
+    actions: browserActions,
+    network: browserNetwork,
+  });
   const planner = new CodexAgentPlanner({
     provider: codex,
+    tavilyAvailability: {
+      async isConfigured() {
+        try {
+          return Boolean((await credentials.getTavilyKey())?.trim());
+        } catch {
+          return false;
+        }
+      },
+    },
     settings,
     conversations,
     tasks: repository,
@@ -93,6 +147,8 @@ async function createBackgroundServices(
     conversations,
     planner,
     tavily,
+    browser,
+    attachments: attachmentService,
     clock: systemClock,
     ids: cryptoIds,
   });

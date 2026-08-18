@@ -249,6 +249,42 @@ const pagePingSchema = z
   })
   .strict();
 
+const pageContentReadSchema = z
+  .object({
+    version: z.literal(PROTOCOL_VERSION),
+    requestId: requestIdSchema,
+    type: z.literal('page.content.read'),
+    payload: z.object({}).strict(),
+  })
+  .strict();
+
+const pageElementsObserveSchema = z
+  .object({
+    version: z.literal(PROTOCOL_VERSION),
+    requestId: requestIdSchema,
+    type: z.literal('page.elements.observe'),
+    payload: z.object({}).strict(),
+  })
+  .strict();
+
+const pointerCoordinateSchema = z.number().finite().min(0).max(1_000_000);
+const pagePointerShowSchema = z
+  .object({
+    version: z.literal(PROTOCOL_VERSION),
+    requestId: requestIdSchema,
+    type: z.literal('page.pointer.show'),
+    payload: z
+      .object({
+        x: pointerCoordinateSchema,
+        y: pointerCoordinateSchema,
+        fromX: pointerCoordinateSchema,
+        fromY: pointerCoordinateSchema,
+        effect: z.enum(['move', 'click', 'double_click', 'drag']),
+      })
+      .strict(),
+  })
+  .strict();
+
 const pageScreenshotSelectSchema = z
   .object({
     version: z.literal(PROTOCOL_VERSION),
@@ -294,6 +330,9 @@ const pageImagePreviewOpenSchema = z
 
 export const pageCommandSchema: z.ZodType<PageCommand> = z.discriminatedUnion('type', [
   pagePingSchema,
+  pageContentReadSchema,
+  pageElementsObserveSchema,
+  pagePointerShowSchema,
   pageScreenshotSelectSchema,
   pageOverlaysSetHiddenSchema,
   pageImagePreviewOpenSchema,

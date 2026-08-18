@@ -4,6 +4,7 @@ import { extname, join, relative } from 'node:path';
 const APPROVED_PERMISSIONS = [
   'activeTab',
   'alarms',
+  'debugger',
   'scripting',
   'sidePanel',
   'storage',
@@ -76,8 +77,8 @@ export async function auditProductionBundle(root: string): Promise<BundleAuditRe
 
   const markers: readonly { readonly code: string; readonly pattern: RegExp }[] = [
     {
-      code: 'DEBUGGER_RUNTIME_RESIDUE',
-      pattern: /chrome\.debugger\b/i,
+      code: 'RAW_CDP_MODEL_TOOL_RESIDUE',
+      pattern: /["'](?:browser|page)[._](?:cdp|debugger|execute_cdp|send_cdp|send_command)["']/i,
     },
     {
       code: 'RUNTIME_HOST_REQUEST_RESIDUE',

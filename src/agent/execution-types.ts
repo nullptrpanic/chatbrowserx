@@ -5,6 +5,7 @@ import type {
   TavilyExtractToolInput,
   TavilySearchToolInput,
 } from './tools/tavily-tool-schema';
+import type { ParsedBrowserToolCall } from './tools/browser-tool-schema';
 
 export interface AgentPlanInput {
   readonly task: TaskRun;
@@ -13,6 +14,7 @@ export interface AgentPlanInput {
 
 export type AgentEvent =
   | { readonly type: 'reasoning.summary'; readonly text: string }
+  | { readonly type: 'browser.call'; readonly call: ParsedBrowserToolCall }
   | {
       readonly type: 'tavily.call';
       readonly operation: 'search';

@@ -24,10 +24,13 @@ npm run audit:bundle
 - `tests/providers`：Codex 请求、SSE、错误与通用工具接口。
 - `tests/persistence`：IndexedDB、旧任务归一、Storage 和 Blob。
 - `tests/side-panel`、`tests/page`：UI、附件、截图与选区。
+- `tests/browser`：标签页、CDP/OOPIF 会话、页面观察、动作、虚拟鼠标和网络采集。
 - `tests/release`：生产权限和产物残留审计。
 - `tests/e2e`：真实打包扩展壳。
 
-生产审计会拒绝 concrete browser/search tool 名称、旧动作进度字段、Debugger、运行时逐站授权、开发 fixture、动态代码、source map 和凭据形状。
+生产审计只允许已审核的 21 个 browser tools、3 个动态 Tavily tools、`debugger` 权限和
+`<all_urls>` host 权限；继续拒绝 raw-CDP/任意执行工具、旧动作字段、运行时逐站授权、开发
+fixture、动态代码、source map 和凭据形状。
 
 ## Provider 合约检查
 
@@ -41,6 +44,11 @@ CHATBROWSERX_CODEX_ACCESS_TOKEN='…' npm run check:codex
 
 - 组件使用 `PascalCase.tsx`，其他文件使用 `kebab-case.ts`。
 - Chrome、DOM 与网络依赖留在 Adapter 边界。
+- 模型只能调用严格、扁平且已审核的 browser schema；不得暴露任意 JavaScript、任意 CDP
+  方法或页面提供的脚本。
+- 浏览器 mutation 在 dispatch 前必须写 `may_have_dispatched` checkpoint；恢复时不得重复执行
+  可能已经生效的动作。
+- 网络采集只保留有界内存元数据，请求体永不返回，响应正文只允许显式按 ID 获取并先脱敏。
 - 新页面消息必须加入判别联合与严格 Zod schema。
 - 通用工具接口不等于具体工具授权；新增任何具体工具前必须先设计、测试并更新生产审计。
 - 凭据永远不进入 fixture、trace、快照或错误文本。

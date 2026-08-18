@@ -160,6 +160,32 @@ const SEARCH_ARGUMENTS = {
   excludeDomains: [],
 } as const;
 
+const BROWSER_TOOL_NAMES = [
+  'browser_list_tabs',
+  'browser_open_tab',
+  'browser_switch_tab',
+  'browser_close_tab',
+  'browser_navigate',
+  'browser_reload',
+  'browser_inspect',
+  'browser_click',
+  'browser_type',
+  'browser_keypress',
+  'browser_scroll',
+  'browser_hover',
+  'browser_select',
+  'browser_drag',
+  'browser_wait',
+  'browser_click_point',
+  'browser_drag_point',
+  'browser_network_start',
+  'browser_network_list',
+  'browser_network_get',
+  'browser_network_stop',
+] as const;
+
+const CONFIGURED_TAVILY = { isConfigured: async () => true } as const;
+
 describe('CodexAgentPlanner', () => {
   it('persists streamed text and completes a text-only turn', async () => {
     const model = provider(async function* () {
@@ -171,6 +197,7 @@ describe('CodexAgentPlanner', () => {
     const storage = repositories();
     const planner = new CodexAgentPlanner({
       provider: model.instance,
+      tavilyAvailability: CONFIGURED_TAVILY,
       settings: settings(),
       conversations: storage.conversations,
       tasks: storage.tasks,
@@ -192,7 +219,7 @@ describe('CodexAgentPlanner', () => {
     expect(model.requests[0]).toMatchObject({
       model: 'gpt-5.6-terra',
       reasoningEffort: 'medium',
-      systemPrompt: 'Custom safe preference.',
+      systemPrompt: expect.stringContaining('Custom safe preference.'),
       input: [
         {
           type: 'message',
@@ -202,9 +229,88 @@ describe('CodexAgentPlanner', () => {
       ],
     });
     expect(model.requests[0]?.tools.map(({ name }) => name)).toEqual([
+      ...BROWSER_TOOL_NAMES,
       'tavily_search',
       'tavily_extract',
       'tavily_crawl',
+    ]);
+  });
+
+  it('checks Tavily availability before every request and omits Tavily tools when unavailable', async () => {
+    let turn = 0;
+    const model = provider(async function* () {
+      turn += 1;
+      const responseId = `resp_${turn}`;
+      yield { type: 'response.started', responseId };
+      yield { type: 'text.delta', delta: `Answer ${turn}` };
+      yield { type: 'response.completed', responseId, usage: null };
+    });
+    const storage = repositories();
+    const tavilyAvailability = {
+      isConfigured: vi.fn().mockResolvedValueOnce(false).mockResolvedValueOnce(true),
+    };
+    let id = 0;
+    const planner = new CodexAgentPlanner({
+      provider: model.instance,
+      tavilyAvailability,
+      settings: settings(),
+      conversations: storage.conversations,
+      tasks: storage.tasks,
+      attachments: storage.attachments,
+      ids: { create: (prefix) => `${prefix}_${++id}` },
+      clock: { now: () => 500 + id },
+    });
+
+    await collect(planner);
+    await collect(planner);
+
+    expect(tavilyAvailability.isConfigured).toHaveBeenCalledTimes(2);
+    expect(model.requests[0]?.tools.map(({ name }) => name)).toEqual(BROWSER_TOOL_NAMES);
+    expect(model.requests[1]?.tools.map(({ name }) => name)).toEqual([
+      ...BROWSER_TOOL_NAMES,
+      'tavily_search',
+      'tavily_extract',
+      'tavily_crawl',
+    ]);
+  });
+
+  it('emits one validated browser call in the common Agent loop', async () => {
+    const model = provider(async function* () {
+      yield { type: 'response.started', responseId: 'resp_browser' };
+      yield { type: 'tool.started', callId: 'call_browser', name: 'browser_list_tabs' };
+      yield {
+        type: 'tool.completed',
+        callId: 'call_browser',
+        name: 'browser_list_tabs',
+        argumentsJson: '{}',
+      };
+      yield { type: 'response.completed', responseId: 'resp_browser', usage: null };
+    });
+    const storage = repositories();
+    const planner = new CodexAgentPlanner({
+      provider: model.instance,
+      tavilyAvailability: { isConfigured: vi.fn(async () => false) },
+      settings: settings(),
+      conversations: storage.conversations,
+      tasks: storage.tasks,
+      attachments: storage.attachments,
+      ids: { create: (prefix) => `${prefix}_1` },
+      clock: { now: () => 500 },
+    });
+
+    await expect(collect(planner)).resolves.toEqual([
+      {
+        type: 'browser.call',
+        call: {
+          family: 'browser',
+          operation: 'list_tabs',
+          replay: 'safe',
+          callId: 'call_browser',
+          name: 'browser_list_tabs',
+          argumentsJson: '{}',
+          arguments: {},
+        },
+      },
     ]);
   });
 
@@ -223,6 +329,7 @@ describe('CodexAgentPlanner', () => {
     const storage = repositories();
     const planner = new CodexAgentPlanner({
       provider: model.instance,
+      tavilyAvailability: CONFIGURED_TAVILY,
       settings: settings(),
       conversations: storage.conversations,
       tasks: storage.tasks,
@@ -278,6 +385,7 @@ describe('CodexAgentPlanner', () => {
       const storage = repositories();
       const planner = new CodexAgentPlanner({
         provider: model.instance,
+        tavilyAvailability: CONFIGURED_TAVILY,
         settings: settings(),
         conversations: storage.conversations,
         tasks: storage.tasks,
@@ -309,6 +417,7 @@ describe('CodexAgentPlanner', () => {
     const storage = repositories();
     const planner = new CodexAgentPlanner({
       provider: model.instance,
+      tavilyAvailability: CONFIGURED_TAVILY,
       settings: settings(),
       conversations: storage.conversations,
       tasks: storage.tasks,
@@ -367,6 +476,7 @@ describe('CodexAgentPlanner', () => {
     const invalidStorage = repositories();
     const invalidPlanner = new CodexAgentPlanner({
       provider: invalidModel.instance,
+      tavilyAvailability: CONFIGURED_TAVILY,
       settings: settings(),
       conversations: invalidStorage.conversations,
       tasks: invalidStorage.tasks,
@@ -398,6 +508,7 @@ describe('CodexAgentPlanner', () => {
     const storage = repositories();
     const planner = new CodexAgentPlanner({
       provider: model.instance,
+      tavilyAvailability: CONFIGURED_TAVILY,
       settings: settings(),
       conversations: storage.conversations,
       tasks: storage.tasks,
@@ -434,6 +545,7 @@ describe('CodexAgentPlanner', () => {
     const storage = repositories();
     const planner = new CodexAgentPlanner({
       provider: model.instance,
+      tavilyAvailability: CONFIGURED_TAVILY,
       settings: settings(),
       conversations: storage.conversations,
       tasks: storage.tasks,
@@ -462,6 +574,7 @@ describe('CodexAgentPlanner', () => {
     const storage = repositories();
     const planner = new CodexAgentPlanner({
       provider: model.instance,
+      tavilyAvailability: CONFIGURED_TAVILY,
       settings: settings(),
       conversations: storage.conversations,
       tasks: storage.tasks,
@@ -484,6 +597,7 @@ describe('CodexAgentPlanner', () => {
     const abortedStorage = repositories();
     const abortedPlanner = new CodexAgentPlanner({
       provider: abortedModel.instance,
+      tavilyAvailability: CONFIGURED_TAVILY,
       settings: settings(),
       conversations: abortedStorage.conversations,
       tasks: abortedStorage.tasks,
@@ -520,6 +634,7 @@ describe('CodexAgentPlanner', () => {
     ]);
     const planner = new CodexAgentPlanner({
       provider: model.instance,
+      tavilyAvailability: CONFIGURED_TAVILY,
       settings: settings(),
       conversations: storage.conversations,
       tasks: storage.tasks,
@@ -568,6 +683,7 @@ describe('CodexAgentPlanner', () => {
     ]);
     const planner = new CodexAgentPlanner({
       provider: model.instance,
+      tavilyAvailability: CONFIGURED_TAVILY,
       settings: settings(),
       conversations: storage.conversations,
       tasks: storage.tasks,
@@ -610,6 +726,7 @@ describe('CodexAgentPlanner', () => {
     ]);
     const planner = new CodexAgentPlanner({
       provider: model.instance,
+      tavilyAvailability: CONFIGURED_TAVILY,
       settings: settings(),
       conversations: storage.conversations,
       tasks: storage.tasks,
@@ -639,6 +756,7 @@ describe('CodexAgentPlanner', () => {
     const storage = repositories();
     const planner = new CodexAgentPlanner({
       provider: model.instance,
+      tavilyAvailability: CONFIGURED_TAVILY,
       settings: settings(),
       conversations: storage.conversations,
       tasks: storage.tasks,

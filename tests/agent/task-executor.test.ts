@@ -4,6 +4,8 @@ import 'fake-indexeddb/auto';
 import { describe, expect, it, vi } from 'vitest';
 import { TaskExecutor } from '../../src/agent/task-executor';
 import type { AgentEvent, AgentPlanInput } from '../../src/agent/execution-types';
+import { parseBrowserToolCall } from '../../src/agent/tools/browser-tool-schema';
+import type { BrowserExecutionPort } from '../../src/browser/browser-execution-types';
 import { openChatBrowserDatabase } from '../../src/persistence/open-database';
 import { IndexedDbConversationRepository } from '../../src/persistence/conversation-repository';
 import { IndexedDbTaskRepository } from '../../src/persistence/task-repository';
@@ -43,6 +45,13 @@ function tavilyPort(overrides: Partial<TavilyExecutionPort> = {}): TavilyExecuti
   };
 }
 
+function browserPort(overrides: Partial<BrowserExecutionPort> = {}): BrowserExecutionPort {
+  return {
+    execute: vi.fn(async () => ({ output: '{"ok":true}', attachmentIds: [] })),
+    ...overrides,
+  };
+}
+
 const SEARCH_ARGUMENTS: Extract<
   AgentEvent,
   { readonly type: 'tavily.call'; readonly operation: 'search' }
@@ -66,7 +75,299 @@ function searchCall(callId: string): AgentEvent {
   };
 }
 
+function browserCall(callId: string, name: string, arguments_: unknown): AgentEvent {
+  return {
+    type: 'browser.call',
+    call: parseBrowserToolCall({
+      callId,
+      name,
+      argumentsJson: JSON.stringify(arguments_),
+    }),
+  };
+}
+
 describe('TaskExecutor', () => {
+  it('retains browser screenshot attachment IDs and gives them a durable result reference', async () => {
+    const database = await openChatBrowserDatabase(createTestDatabaseName('browser-screenshot'));
+    const repository = new IndexedDbTaskRepository(database);
+    const dependencies = sources();
+    const commands = new TaskCommandService(
+      repository,
+      dependencies.clock,
+      dependencies.ids,
+      dependencies.conversations,
+    );
+    const created = await commands.create({
+      conversationId: 'conversation_1',
+      tabId: 7,
+      goal: 'Inspect the current page visually',
+    });
+    let turn = 0;
+    const planner = {
+      plan: () =>
+        (async function* () {
+          turn += 1;
+          if (turn === 1) {
+            yield browserCall('call_screenshot', 'browser_inspect', {
+              tabId: 7,
+              mode: 'screenshot',
+            });
+          } else {
+            yield {
+              type: 'task.completed',
+              reason: 'model_response_completed',
+              messageId: 'message_answer',
+            } as const;
+          }
+        })(),
+    };
+    const addReference = vi.fn(async () => undefined);
+    const removeReference = vi.fn(async () => undefined);
+    const executor = new TaskExecutor({
+      repository,
+      conversations: dependencies.conversations,
+      planner,
+      tavily: tavilyPort(),
+      browser: browserPort({
+        execute: vi.fn(async () => ({
+          output: '{"ok":true,"data":{"mode":"screenshot"}}',
+          attachmentIds: ['attachment_screenshot'],
+        })),
+      }),
+      attachments: { addReference, removeReference },
+      clock: dependencies.clock,
+      ids: dependencies.ids,
+    });
+
+    const result = await executor.run(created.task.id, new AbortController().signal);
+    const completed = result.checkpoint.completedToolResults[0];
+
+    expect(completed).toMatchObject({
+      callId: 'call_screenshot',
+      attachmentIds: ['attachment_screenshot'],
+    });
+    expect(
+      result.checkpoint.continuationItems.find(
+        (item) => item.type === 'function_call_output' && item.callId === 'call_screenshot',
+      ),
+    ).toMatchObject({
+      type: 'function_call_output',
+      callId: 'call_screenshot',
+      attachmentIds: ['attachment_screenshot'],
+    });
+    expect(addReference).toHaveBeenCalledWith('attachment_screenshot', completed?.resultRef);
+    expect(removeReference).not.toHaveBeenCalled();
+    database.close();
+  });
+
+  it('rolls back screenshot references when the result checkpoint cannot be saved', async () => {
+    const database = await openChatBrowserDatabase(
+      createTestDatabaseName('browser-screenshot-race'),
+    );
+    const repository = new IndexedDbTaskRepository(database);
+    const dependencies = sources();
+    const commands = new TaskCommandService(
+      repository,
+      dependencies.clock,
+      dependencies.ids,
+      dependencies.conversations,
+    );
+    const created = await commands.create({
+      conversationId: 'conversation_1',
+      tabId: 7,
+      goal: 'Inspect the current page visually',
+    });
+    const originalSaveTransition = repository.saveTransition.bind(repository);
+    vi.spyOn(repository, 'saveTransition').mockImplementation(async (input) => {
+      if (input.event.type === 'tool.result-recorded') throw new Error('synthetic conflict');
+      return originalSaveTransition(input);
+    });
+    const addReference = vi.fn(async () => undefined);
+    const removeReference = vi.fn(async () => undefined);
+    const executor = new TaskExecutor({
+      repository,
+      conversations: dependencies.conversations,
+      planner: {
+        plan: () =>
+          (async function* () {
+            yield browserCall('call_screenshot', 'browser_inspect', {
+              tabId: 7,
+              mode: 'screenshot',
+            });
+          })(),
+      },
+      tavily: tavilyPort(),
+      browser: browserPort({
+        execute: vi.fn(async () => ({
+          output: '{"ok":true,"data":{"mode":"screenshot"}}',
+          attachmentIds: ['attachment_screenshot'],
+        })),
+      }),
+      attachments: { addReference, removeReference },
+      clock: dependencies.clock,
+      ids: dependencies.ids,
+    });
+
+    await expect(executor.run(created.task.id, new AbortController().signal)).rejects.toThrow(
+      'synthetic conflict',
+    );
+    expect(addReference).toHaveBeenCalledOnce();
+    expect(removeReference).toHaveBeenCalledWith(
+      'attachment_screenshot',
+      expect.stringMatching(/^toolResult_/),
+    );
+    database.close();
+  });
+
+  it('durably marks a browser mutation before dispatch and records its result', async () => {
+    const database = await openChatBrowserDatabase(createTestDatabaseName('browser-mutation'));
+    const repository = new IndexedDbTaskRepository(database);
+    const dependencies = sources();
+    const commands = new TaskCommandService(
+      repository,
+      dependencies.clock,
+      dependencies.ids,
+      dependencies.conversations,
+    );
+    const created = await commands.create({
+      conversationId: 'conversation_1',
+      tabId: 7,
+      goal: 'Open a browser tab',
+    });
+    let turn = 0;
+    const planner = {
+      plan: () =>
+        (async function* () {
+          turn += 1;
+          if (turn === 1) {
+            yield browserCall('call_open', 'browser_open_tab', {
+              url: 'https://example.com',
+              activate: true,
+            });
+          } else {
+            yield {
+              type: 'task.completed',
+              reason: 'model_response_completed',
+              messageId: 'message_answer',
+            } as const;
+          }
+        })(),
+    };
+    const execute = vi.fn(async () => {
+      const dispatchBoundary = await commands.getSnapshot(created.task.id);
+      expect(dispatchBoundary.events.at(-1)?.type).toBe('tool.execution-started');
+      expect(dispatchBoundary.checkpoint.pendingToolCall).toMatchObject({
+        callId: 'call_open',
+        executionState: 'may_have_dispatched',
+      });
+      return { output: '{"ok":true,"tabId":91}', attachmentIds: [] };
+    });
+    const executor = new TaskExecutor({
+      repository,
+      conversations: dependencies.conversations,
+      planner,
+      tavily: tavilyPort(),
+      browser: browserPort({ execute }),
+      clock: dependencies.clock,
+      ids: dependencies.ids,
+    });
+
+    const result = await executor.run(created.task.id, new AbortController().signal);
+
+    expect(execute).toHaveBeenCalledOnce();
+    expect(result.events.map(({ type }) => type)).toEqual([
+      'planning.started',
+      'tool.call-recorded',
+      'tool.execution-started',
+      'tool.result-recorded',
+      'task.completed',
+    ]);
+    expect(result.checkpoint.completedToolResults[0]).toMatchObject({
+      callId: 'call_open',
+      toolName: 'browser_open_tab',
+      output: '{"ok":true,"tabId":91}',
+    });
+    database.close();
+  });
+
+  it('never replays a browser mutation that may already have been dispatched', async () => {
+    const database = await openChatBrowserDatabase(createTestDatabaseName('browser-ambiguous'));
+    const repository = new IndexedDbTaskRepository(database);
+    const dependencies = sources();
+    const commands = new TaskCommandService(
+      repository,
+      dependencies.clock,
+      dependencies.ids,
+      dependencies.conversations,
+    );
+    const created = await commands.create({
+      conversationId: 'conversation_1',
+      tabId: 7,
+      goal: 'Click once',
+    });
+    let turn = 0;
+    const planner = {
+      plan: () =>
+        (async function* () {
+          turn += 1;
+          if (turn === 1) {
+            yield browserCall('call_click', 'browser_click', {
+              tabId: 7,
+              ref: 'ref_1',
+              button: 'left',
+              count: 1,
+            });
+          } else {
+            yield {
+              type: 'task.completed',
+              reason: 'model_response_completed',
+              messageId: 'message_answer',
+            } as const;
+          }
+        })(),
+    };
+    const execute = vi.fn(async () => {
+      throw new DOMException('Worker stopped after dispatch.', 'AbortError');
+    });
+    const executor = new TaskExecutor({
+      repository,
+      conversations: dependencies.conversations,
+      planner,
+      tavily: tavilyPort(),
+      browser: browserPort({ execute }),
+      clock: dependencies.clock,
+      ids: dependencies.ids,
+    });
+
+    await expect(executor.run(created.task.id, new AbortController().signal)).rejects.toMatchObject(
+      {
+        name: 'AbortError',
+      },
+    );
+    await expect(commands.getSnapshot(created.task.id)).resolves.toMatchObject({
+      checkpoint: {
+        pendingToolCall: {
+          callId: 'call_click',
+          executionState: 'may_have_dispatched',
+        },
+      },
+    });
+
+    const recovered = await executor.run(created.task.id, new AbortController().signal);
+
+    expect(execute).toHaveBeenCalledOnce();
+    expect(recovered.task.status).toBe('completed');
+    const ambiguous = recovered.checkpoint.completedToolResults.find(
+      ({ callId }) => callId === 'call_click',
+    );
+    expect(JSON.parse(ambiguous?.output ?? '{}')).toMatchObject({
+      ok: false,
+      code: 'AMBIGUOUS_MUTATION',
+      needsInspect: true,
+    });
+    database.close();
+  });
+
   it('runs a pure model turn without invoking Tavily', async () => {
     const database = await openChatBrowserDatabase(createTestDatabaseName('text-executor'));
     const repository = new IndexedDbTaskRepository(database);
@@ -97,6 +398,7 @@ describe('TaskExecutor', () => {
       conversations: dependencies.conversations,
       planner: { plan },
       tavily: tavilyPort(),
+      browser: browserPort(),
       clock: dependencies.clock,
       ids: dependencies.ids,
     });
@@ -142,6 +444,7 @@ describe('TaskExecutor', () => {
           })(),
       },
       tavily: tavilyPort(),
+      browser: browserPort(),
       clock: dependencies.clock,
       ids: dependencies.ids,
     });
@@ -246,6 +549,7 @@ describe('TaskExecutor', () => {
       conversations: dependencies.conversations,
       planner: { plan },
       tavily,
+      browser: browserPort(),
       clock: dependencies.clock,
       ids: dependencies.ids,
     });
@@ -326,6 +630,7 @@ describe('TaskExecutor', () => {
       conversations: dependencies.conversations,
       planner: { plan },
       tavily,
+      browser: browserPort(),
       clock: dependencies.clock,
       ids: dependencies.ids,
     });
@@ -390,6 +695,7 @@ describe('TaskExecutor', () => {
       conversations: dependencies.conversations,
       planner: { plan },
       tavily,
+      browser: browserPort(),
       clock: dependencies.clock,
       ids: dependencies.ids,
     });
@@ -505,6 +811,7 @@ describe('TaskExecutor', () => {
       conversations,
       planner: { plan },
       tavily,
+      browser: browserPort(),
       clock: dependencies.clock,
       ids: dependencies.ids,
     });
@@ -619,6 +926,7 @@ describe('TaskExecutor', () => {
       conversations,
       planner: { plan },
       tavily: tavilyPort(),
+      browser: browserPort(),
       clock: dependencies.clock,
       ids: dependencies.ids,
     });
@@ -672,6 +980,7 @@ describe('TaskExecutor', () => {
       conversations: dependencies.conversations,
       planner: { plan },
       tavily,
+      browser: browserPort(),
       clock: dependencies.clock,
       ids: dependencies.ids,
     });
@@ -723,6 +1032,7 @@ describe('TaskExecutor', () => {
       conversations: dependencies.conversations,
       planner: { plan },
       tavily,
+      browser: browserPort(),
       clock: dependencies.clock,
       ids: dependencies.ids,
     });
@@ -765,6 +1075,7 @@ describe('TaskExecutor', () => {
           })(),
       },
       tavily: tavilyPort(),
+      browser: browserPort(),
       clock: dependencies.clock,
       ids: dependencies.ids,
     });
@@ -806,6 +1117,7 @@ describe('TaskExecutor', () => {
           })(),
       },
       tavily: tavilyPort(),
+      browser: browserPort(),
       clock: dependencies.clock,
       ids: dependencies.ids,
     });
@@ -872,6 +1184,7 @@ describe('TaskExecutor', () => {
           })(),
       },
       tavily: tavilyPort(),
+      browser: browserPort(),
       clock: dependencies.clock,
       ids: dependencies.ids,
     });
@@ -919,6 +1232,7 @@ describe('TaskExecutor', () => {
             throw providerErrorFromCode(code);
           }),
         }),
+        browser: browserPort(),
         clock: dependencies.clock,
         ids: dependencies.ids,
       });
@@ -966,6 +1280,7 @@ describe('TaskExecutor', () => {
           throw providerErrorFromCode('ABORTED');
         }),
       }),
+      browser: browserPort(),
       clock: dependencies.clock,
       ids: dependencies.ids,
     });
