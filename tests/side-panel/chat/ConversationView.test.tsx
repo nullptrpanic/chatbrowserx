@@ -252,6 +252,66 @@ describe('ConversationView answer execution details', () => {
     expect(within(answer as HTMLElement).queryByText(/Reliable browsing/)).not.toBeInTheDocument();
   });
 
+  it('shows a context-specific completion event instead of the generic search label', async () => {
+    const user = userEvent.setup();
+    const task: PanelTask = {
+      ...completedTask('task_commit', 'Preserve working state', 1_300),
+      events: [
+        { sequence: 1, type: 'planning.started', reason: 'started', at: 1_000 },
+        {
+          sequence: 2,
+          type: 'tool.result-recorded',
+          reason: 'commit_context_result_recorded',
+          at: 1_200,
+        },
+        { sequence: 3, type: 'task.completed', reason: 'done', at: 1_300 },
+      ],
+      completedToolResults: [
+        {
+          callId: 'call_commit',
+          toolName: 'commit_context',
+          argumentsJson: '{"state":"Goal: continue."}',
+          output: '{"ok":true,"compactedCalls":2,"releasedTextChars":100,"releasedImages":1}',
+          resultRef: 'result_commit',
+          attachmentIds: [],
+        },
+      ],
+    };
+
+    render(
+      <ConversationView
+        messages={[
+          {
+            id: 'assistant_commit',
+            taskId: task.id,
+            role: 'assistant',
+            status: 'complete',
+            text: 'Continued from the saved state.',
+            attachmentIds: [],
+            createdAt: 1_300,
+            updatedAt: 1_300,
+          },
+        ]}
+        tasks={[task]}
+        task={task}
+        attachments={attachments}
+        t={t}
+        onSuggestion={vi.fn()}
+        onPause={vi.fn()}
+        onResume={vi.fn()}
+        onRetry={vi.fn()}
+        onCancel={vi.fn()}
+      />,
+    );
+
+    await user.click(screen.getByRole('button', { name: '任务已完成 3 步 · 4.6 秒' }));
+
+    expect(screen.getByText('工作状态已提交')).toBeVisible();
+    expect(screen.getByText('提交工作状态')).toBeVisible();
+    expect(screen.queryByText('搜索结果已记录')).not.toBeInTheDocument();
+    expect(screen.queryByText('commit_context')).not.toBeInTheDocument();
+  });
+
   it('loads a screenshot only inside its expanded browser tool result', async () => {
     const user = userEvent.setup();
     vi.spyOn(URL, 'createObjectURL').mockReturnValue('blob:tool-screenshot');
@@ -633,12 +693,43 @@ describe('ConversationView answer execution details', () => {
     };
     const task: PanelTask = {
       ...completedTask('task_supplement', 'Analyze the layout', 1_300),
+      sequence: 4,
+      events: [
+        { sequence: 1, type: 'planning.started', reason: 'started', at: 1_000 },
+        {
+          sequence: 2,
+          type: 'task.supplements-applied',
+          reason: 'user_supplements_applied',
+          at: 1_200,
+          supplementIds: ['supplement_1', 'supplement_2'],
+        },
+        {
+          sequence: 3,
+          type: 'task.supplements-applied',
+          reason: 'user_supplements_applied',
+          at: 1_250,
+          supplementIds: ['supplement_3'],
+        },
+        { sequence: 4, type: 'task.completed', reason: 'done', at: 1_300 },
+      ],
       supplements: [
         {
           id: 'supplement_1',
           text: 'Please also inspect the mobile navigation.',
           attachmentIds: ['attachment_runtime'],
           createdAt: 1_150,
+        },
+        {
+          id: 'supplement_2',
+          text: 'Compare the compact breakpoint too.',
+          attachmentIds: [],
+          createdAt: 1_160,
+        },
+        {
+          id: 'supplement_3',
+          text: 'Keep the desktop navigation unchanged.',
+          attachmentIds: [],
+          createdAt: 1_230,
         },
       ],
     };
@@ -677,19 +768,31 @@ describe('ConversationView answer execution details', () => {
 
     await user.click(
       screen.getByRole('button', {
-        name: '任务已完成 3 步 · 4.6 秒',
+        name: '任务已完成 4 步 · 4.6 秒',
       }),
     );
 
-    const supplement = screen
-      .getByText('Please also inspect the mobile navigation.')
-      .closest('.task-supplement-item');
-    expect(supplement).not.toBeNull();
-    expect(within(supplement as HTMLElement).getByText('用户补充')).toBeVisible();
     expect(
-      within(supplement as HTMLElement).getByRole('img', { name: 'runtime-detail.png' }),
+      screen.queryByText('Please also inspect the mobile navigation.'),
+    ).not.toBeInTheDocument();
+    const appliedEvents = screen.getAllByText('已应用用户补充').map((label) => label.closest('li'));
+    expect(appliedEvents).toHaveLength(2);
+    const firstEvent = appliedEvents[0] as HTMLElement;
+    const secondEvent = appliedEvents[1] as HTMLElement;
+    const firstSupplements = within(firstEvent).getAllByRole('region', { name: '用户补充' });
+    const secondSupplements = within(secondEvent).getAllByRole('region', { name: '用户补充' });
+    expect(firstSupplements).toHaveLength(2);
+    expect(secondSupplements).toHaveLength(1);
+
+    await user.click(
+      within(firstSupplements[0] as HTMLElement).getByRole('button', { name: '展开用户补充' }),
+    );
+    const supplement = firstSupplements[0] as HTMLElement;
+    expect(
+      within(supplement).getByText('Please also inspect the mobile navigation.'),
     ).toBeVisible();
-    expect(within(supplement as HTMLElement).getByRole('time')).toHaveAttribute(
+    expect(within(supplement).getByRole('img', { name: 'runtime-detail.png' })).toBeVisible();
+    expect(within(supplement).getByRole('time')).toHaveAttribute(
       'datetime',
       new Date(1_150).toISOString(),
     );

@@ -4,14 +4,13 @@ import {
   type PageCommand,
 } from '../shared/protocol/message-types';
 import { parsePageCommand } from '../shared/protocol/parse-message';
-import {
-  extractReadableContent,
-  observeDomElements,
-} from '../browser/observation/content-extractor';
+import { extractReadableContent } from '../browser/observation/content-extractor';
 import { setPageOverlaysHidden } from './page-overlay-registry';
 import { openPageImagePreview } from './image-preview/mount-image-preview';
 import { selectScreenshotRegion } from './screenshot/mount-screenshot-overlay';
 import { showVirtualPointer } from './browser/mount-virtual-pointer';
+import { performPageAction } from './browser/page-action-performer';
+import { pageElementRefStore } from './browser/page-element-ref-store';
 
 export interface PageCommandEnvironment {
   readonly document: Document;
@@ -62,12 +61,17 @@ export async function handlePageCommand(
     };
   }
 
-  if (command?.type === 'page.elements.observe') {
+  if (command?.type === 'page.action.perform') {
     return {
       version: PROTOCOL_VERSION,
       requestId: command.requestId,
       ok: true,
-      data: observeDomElements(environment.document, environment.window),
+      data: await performPageAction(
+        command.payload,
+        pageElementRefStore(environment.document),
+        environment.document,
+        environment.window,
+      ),
     };
   }
 

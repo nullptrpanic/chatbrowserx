@@ -36,10 +36,31 @@
   border-color: var(--cbx-divider);
   background: var(--cbx-raised);
 }
+.history-item-title-row {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  gap: 6px;
+}
+
 .history-item-title {
+  min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+.history-running-indicator {
+  display: inline-flex;
+  flex: 0 0 auto;
+  color: var(--cbx-accent);
+  animation: history-running-spin 1.1s linear infinite;
+}
+
+@keyframes history-running-spin {
+  to {
+    transform: rotate(360deg);
+  }
 }
 .history-item-meta {
   color: var(--cbx-muted);

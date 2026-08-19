@@ -1,43 +1,27 @@
 import type { Protocol } from 'devtools-protocol';
 import type { DebuggerSession, DebuggerTransport } from '../debugger/debugger-transport';
-import type {
-  BrowserSessionSnapshot,
-  ChildTargetSession,
-  TargetSessionRegistry,
-} from '../debugger/target-session-registry';
-import type { DomObservedElement, ReadablePageContent } from './content-extractor';
-import type {
-  ElementRefStore,
-  InteractiveElement,
-  ObservedElementTarget,
-  ViewportRect,
-} from './element-ref-store';
+import type { TargetSessionRegistry } from '../debugger/target-session-registry';
+import type { ReadablePageContent } from './content-extractor';
+import type { ElementRefStore, ObservedElementTarget } from './element-ref-store';
+import { prepareModelScreenshot } from './model-screenshot';
+import {
+  SEMANTIC_SNAPSHOT_STYLES,
+  buildSemanticPageSnapshot,
+  type SemanticAction,
+  type SemanticPageEntry,
+} from './semantic-page-snapshot';
 
-const INTERACTIVE_ROLES = new Set([
-  'button',
-  'checkbox',
-  'combobox',
-  'link',
-  'menuitem',
-  'option',
-  'radio',
-  'searchbox',
-  'slider',
-  'spinbutton',
-  'switch',
-  'tab',
-  'textbox',
-  'treeitem',
-]);
-const MAX_INTERACTIVE_ELEMENTS = 200;
+const MAX_INTERACTIVE_ELEMENTS = 500;
+const MAX_INTERACTIVE_TARGETS = 200;
 const MAX_INTERACTIVE_JSON_CHARACTERS = 60_000;
+const INTERACTIVE_ENTRY_KEYS =
+  'd=depth,r=role(default generic),n=name,s=state,a=extra actions(ref defaults click),f=frame';
 const MAX_CONTENT_CHARACTERS = 40_000;
 const MAX_SCREENSHOT_BYTES = 10 * 1024 * 1024;
 const PNG_SIGNATURE = [137, 80, 78, 71, 13, 10, 26, 10] as const;
 
 export interface PageObservationContentPort {
   readContent(tabId: number): Promise<ReadablePageContent>;
-  observeElements(tabId: number): Promise<readonly DomObservedElement[]>;
   setOverlaysHidden(tabId: number, hidden: boolean): Promise<void>;
 }
 
@@ -47,6 +31,7 @@ export interface PageObservationResult {
   readonly data: Readonly<Record<string, unknown>>;
   readonly observation: null;
   readonly attachmentIds: readonly string[];
+  readonly debuggerSession: 'none' | 'ephemeral';
 }
 
 export interface PageObserverDependencies {
@@ -57,83 +42,31 @@ export interface PageObserverDependencies {
   readonly persistScreenshot?: (blob: Blob) => Promise<{ readonly id: string }>;
 }
 
-interface SessionOffset {
-  readonly x: number;
-  readonly y: number;
+interface CompactSemanticPageEntry {
+  readonly d: number;
+  readonly r?: string;
+  readonly n: string;
+  readonly s?: readonly string[];
+  readonly a?: readonly SemanticAction[];
+  readonly f?: string;
+  readonly ref?: string;
+}
+
+function compactSemanticEntry(entry: SemanticPageEntry, ref?: string): CompactSemanticPageEntry {
+  const extraActions = entry.actions?.filter((action) => action !== 'click');
+  return {
+    d: entry.depth,
+    ...(entry.role === 'generic' ? {} : { r: entry.role }),
+    n: entry.name,
+    ...(entry.state === undefined ? {} : { s: entry.state }),
+    ...(extraActions === undefined || extraActions.length === 0 ? {} : { a: extraActions }),
+    ...(entry.frame === undefined ? {} : { f: entry.frame }),
+    ...(ref === undefined ? {} : { ref }),
+  };
 }
 
 function throwIfAborted(signal: AbortSignal): void {
   if (signal.aborted) throw new DOMException('Page observation was aborted.', 'AbortError');
-}
-
-function axString(value: Protocol.Accessibility.AXValue | undefined): string {
-  return typeof value?.value === 'string' ? value.value.replace(/\s+/g, ' ').trim() : '';
-}
-
-function axBoolean(value: Protocol.Accessibility.AXValue | undefined): boolean {
-  return value?.value === true;
-}
-
-function axState(node: Protocol.Accessibility.AXNode): readonly string[] {
-  const states: string[] = [];
-  for (const property of node.properties ?? []) {
-    if (axBoolean(property.value)) states.push(property.name);
-    else if (
-      ['checked', 'expanded', 'selected', 'pressed'].includes(property.name) &&
-      (typeof property.value.value === 'string' || typeof property.value.value === 'number')
-    ) {
-      states.push(`${property.name}=${String(property.value.value).slice(0, 100)}`);
-    }
-  }
-  return [...new Set(states)].slice(0, 20);
-}
-
-function isInteractive(node: Protocol.Accessibility.AXNode, role: string): boolean {
-  return (
-    INTERACTIVE_ROLES.has(role) ||
-    (node.properties ?? []).some(
-      (property) =>
-        (property.name === 'focusable' || property.name === 'editable') &&
-        axBoolean(property.value),
-    )
-  );
-}
-
-function quadRect(quad: readonly number[] | undefined): ViewportRect | undefined {
-  if (!quad || quad.length < 8 || quad.some((coordinate) => !Number.isFinite(coordinate))) {
-    return undefined;
-  }
-  const xs = [quad[0], quad[2], quad[4], quad[6]].filter(
-    (value): value is number => value !== undefined,
-  );
-  const ys = [quad[1], quad[3], quad[5], quad[7]].filter(
-    (value): value is number => value !== undefined,
-  );
-  const x = Math.min(...xs);
-  const y = Math.min(...ys);
-  const width = Math.max(...xs) - x;
-  const height = Math.max(...ys) - y;
-  return width > 0 && height > 0 ? { x, y, width, height } : undefined;
-}
-
-function matchingFallback(
-  role: string,
-  bounds: ViewportRect,
-  fallbacks: readonly DomObservedElement[],
-): DomObservedElement | undefined {
-  const matches = fallbacks.filter(
-    (candidate) =>
-      candidate.role === role &&
-      Math.abs(candidate.bounds.x - bounds.x) <= 4 &&
-      Math.abs(candidate.bounds.y - bounds.y) <= 4 &&
-      Math.abs(candidate.bounds.width - bounds.width) <= 4 &&
-      Math.abs(candidate.bounds.height - bounds.height) <= 4,
-  );
-  return matches.length === 1 ? matches[0] : undefined;
-}
-
-function sessionKey(session: DebuggerSession): string {
-  return session.sessionId ?? 'root';
 }
 
 function screenshotPng(base64: string): Blob {
@@ -158,7 +91,7 @@ function screenshotPng(base64: string): Blob {
   return new Blob([bytes], { type: 'image/png' });
 }
 
-/** Builds content and semantic snapshots from the page bundle plus flattened CDP sessions. */
+/** Builds lightweight content or compact native AX snapshots across flattened CDP sessions. */
 export class PageObserver {
   readonly #dependencies: PageObserverDependencies;
 
@@ -168,12 +101,14 @@ export class PageObserver {
 
   async inspect(
     tabId: number,
-    mode: 'content' | 'interactive' | 'screenshot',
+    mode: 'content' | 'interactive' | 'interactive_deep' | 'screenshot',
     signal: AbortSignal,
   ): Promise<PageObservationResult> {
     throwIfAborted(signal);
     if (mode === 'content') return this.#inspectContent(tabId, signal);
-    if (mode === 'interactive') return this.#inspectInteractive(tabId, signal);
+    if (mode === 'interactive' || mode === 'interactive_deep') {
+      return this.#inspectInteractive(tabId, mode === 'interactive_deep', signal);
+    }
     return this.#inspectScreenshot(tabId, signal);
   }
 
@@ -206,7 +141,10 @@ export class PageObserver {
       ]);
       throwIfAborted(signal);
       const blob = screenshotPng(captured.data);
-      const attachment = await persist(blob);
+      const viewportWidth = Math.max(1, Math.round(metrics.visualViewport.clientWidth));
+      const viewportHeight = Math.max(1, Math.round(metrics.visualViewport.clientHeight));
+      const prepared = await prepareModelScreenshot(blob);
+      const attachment = await persist(prepared.blob);
       if (attachment.id.trim().length === 0 || attachment.id.length > 256) {
         throw new Error('Screenshot persistence returned an invalid reference.');
       }
@@ -216,12 +154,15 @@ export class PageObserver {
         data: {
           mode: 'screenshot',
           mimeType: 'image/png',
-          width: Math.max(1, Math.round(metrics.visualViewport.clientWidth)),
-          height: Math.max(1, Math.round(metrics.visualViewport.clientHeight)),
+          width: prepared.width,
+          height: prepared.height,
+          viewportWidth,
+          viewportHeight,
           attachmentId: attachment.id,
         },
         observation: null,
         attachmentIds: [attachment.id],
+        debuggerSession: 'ephemeral',
       };
     } finally {
       if (overlaysHidden) {
@@ -231,30 +172,8 @@ export class PageObserver {
   }
 
   async #inspectContent(tabId: number, signal: AbortSignal): Promise<PageObservationResult> {
-    const [top, browserSession] = await Promise.all([
-      this.#dependencies.content.readContent(tabId),
-      this.#dependencies.sessions.ensure(tabId, signal),
-    ]);
+    const top = await this.#dependencies.content.readContent(tabId);
     throwIfAborted(signal);
-    const frameTexts: { url: string; text: string }[] = [];
-    for (const child of browserSession.children.values()) {
-      const tree =
-        await this.#dependencies.transport.send<Protocol.Accessibility.GetFullAXTreeResponse>(
-          child.session,
-          'Accessibility.getFullAXTree',
-        );
-      const text = [
-        ...new Set(
-          tree.nodes
-            .filter((node) => !node.ignored)
-            .filter((node) => ['StaticText', 'heading', 'paragraph'].includes(axString(node.role)))
-            .map((node) => axString(node.name))
-            .filter(Boolean),
-        ),
-      ].join(' ');
-      if (text.length > 0) frameTexts.push({ url: child.url, text: text.slice(0, 20_000) });
-    }
-    const fullText = [top.text, ...frameTexts.map(({ text }) => text)].filter(Boolean).join('\n\n');
     return {
       tabId,
       url: top.url || null,
@@ -262,182 +181,159 @@ export class PageObserver {
         mode: 'content',
         title: top.title,
         url: top.url,
-        text: fullText.slice(0, MAX_CONTENT_CHARACTERS),
+        text: top.text.slice(0, MAX_CONTENT_CHARACTERS),
         headings: top.headings.slice(0, 100),
         links: top.links.slice(0, 100),
-        frames: frameTexts,
-        truncated: top.truncated || fullText.length > MAX_CONTENT_CHARACTERS,
+        frames: [],
+        truncated: top.truncated || top.text.length > MAX_CONTENT_CHARACTERS,
       },
       observation: null,
       attachmentIds: [],
+      debuggerSession: 'none',
     };
   }
 
-  async #inspectInteractive(tabId: number, signal: AbortSignal): Promise<PageObservationResult> {
-    const [browserSession, fallbacks] = await Promise.all([
-      this.#dependencies.sessions.ensure(tabId, signal),
-      this.#dependencies.content.observeElements(tabId),
-    ]);
+  async #inspectInteractive(
+    tabId: number,
+    _deep: boolean,
+    signal: AbortSignal,
+  ): Promise<PageObservationResult> {
+    const browserSession = await this.#dependencies.sessions.ensure(tabId, signal);
     throwIfAborted(signal);
-    const offsets = new Map<string, Promise<SessionOffset>>();
     const targets: ObservedElementTarget[] = [];
-    const sessionTargets: readonly { session: DebuggerSession; frame: string }[] = [
-      { session: browserSession.root, frame: 'main' },
+    const entries: SemanticPageEntry[] = [];
+    const sessionTargets: readonly {
+      session: DebuggerSession;
+      frame: string;
+      frameTargetId: string | null;
+    }[] = [
+      { session: browserSession.root, frame: 'main', frameTargetId: null },
       ...[...browserSession.children.values()].map((child) => ({
         session: child.session,
         frame: child.targetId,
+        frameTargetId: child.targetId,
       })),
     ];
 
     for (const sessionTarget of sessionTargets) {
-      const [tree, viewport, offset] = await Promise.all([
+      throwIfAborted(signal);
+      const [tree, domSnapshot, frameTree] = await Promise.all([
         this.#dependencies.transport.send<Protocol.Accessibility.GetFullAXTreeResponse>(
           sessionTarget.session,
           'Accessibility.getFullAXTree',
         ),
-        this.#visualViewport(sessionTarget.session),
-        this.#sessionOffset(browserSession, sessionTarget.session, offsets),
+        this.#dependencies.transport.send<Protocol.DOMSnapshot.CaptureSnapshotResponse>(
+          sessionTarget.session,
+          'DOMSnapshot.captureSnapshot',
+          {
+            computedStyles: [...SEMANTIC_SNAPSHOT_STYLES],
+          },
+        ),
+        this.#dependencies.transport.send<Protocol.Page.GetFrameTreeResponse>(
+          sessionTarget.session,
+          'Page.getFrameTree',
+        ),
       ]);
-      for (const node of tree.nodes) {
-        const role = axString(node.role).toLowerCase();
-        if (
-          node.ignored ||
-          node.backendDOMNodeId === undefined ||
-          !Number.isInteger(node.backendDOMNodeId) ||
-          !isInteractive(node, role)
-        ) {
-          continue;
-        }
-        let model: Protocol.DOM.GetBoxModelResponse;
-        try {
-          model = await this.#dependencies.transport.send<Protocol.DOM.GetBoxModelResponse>(
-            sessionTarget.session,
-            'DOM.getBoxModel',
-            { backendNodeId: node.backendDOMNodeId },
-          );
-        } catch {
-          continue;
-        }
-        const local = quadRect(model.model.border);
-        if (!local) continue;
-        const bounds = {
-          x: local.x - viewport.pageX + offset.x,
-          y: local.y - viewport.pageY + offset.y,
-          width: local.width,
-          height: local.height,
-        };
-        const cdpName = axString(node.name).slice(0, 500);
-        const fallback =
-          cdpName.length === 0 ? matchingFallback(role, bounds, fallbacks) : undefined;
+      const loaders = this.#frameLoaders(frameTree.frameTree);
+      const semantic = buildSemanticPageSnapshot({
+        axNodes: tree.nodes,
+        domSnapshot,
+        frame: sessionTarget.frame,
+      });
+      const localTargetIndexes = new Map<number, number>();
+      semantic.targets.forEach((target, localIndex) => {
+        const loaderId = loaders.get(target.documentFrameId);
+        if (!loaderId) return;
+        localTargetIndexes.set(localIndex, targets.length);
         targets.push({
-          session: sessionTarget.session,
-          backendNodeId: node.backendDOMNodeId,
-          role: role.slice(0, 100),
-          name: cdpName || fallback?.name.slice(0, 500) || '',
-          state: axState(node),
+          frameTargetId: sessionTarget.frameTargetId,
+          documentFrameId: target.documentFrameId,
+          loaderId,
+          backendNodeId: target.backendNodeId,
+          role: target.role,
+          name: target.name,
+          state: target.state,
+          actions: target.actions,
           frame: sessionTarget.frame,
-          bounds,
         });
-      }
+      });
+      entries.push(
+        ...semantic.entries.map((entry) => {
+          if (entry.targetIndex === undefined) return entry;
+          const targetIndex = localTargetIndexes.get(entry.targetIndex);
+          if (targetIndex === undefined) {
+            const { targetIndex: _targetIndex, actions: _actions, ...passive } = entry;
+            void _targetIndex;
+            void _actions;
+            return passive;
+          }
+          return { ...entry, targetIndex };
+        }),
+      );
     }
 
-    const originalCount = targets.length;
-    let boundedTargets = targets.slice(0, MAX_INTERACTIVE_ELEMENTS);
-    let elements: readonly InteractiveElement[] = [];
-    while (boundedTargets.length >= 0) {
-      elements = this.#dependencies.refs.replaceSnapshot(
-        tabId,
-        browserSession.generation,
-        boundedTargets,
-      );
+    const originalCount = entries.length;
+    const boundedEntries: SemanticPageEntry[] = [];
+    const usedTargetIndexes = new Set<number>();
+    for (const entry of entries.slice(0, MAX_INTERACTIVE_ELEMENTS)) {
       if (
-        JSON.stringify({ mode: 'interactive', generation: browserSession.generation, elements })
-          .length <= MAX_INTERACTIVE_JSON_CHARACTERS
+        entry.targetIndex !== undefined &&
+        !usedTargetIndexes.has(entry.targetIndex) &&
+        usedTargetIndexes.size >= MAX_INTERACTIVE_TARGETS
       ) {
+        continue;
+      }
+      boundedEntries.push(entry);
+      if (entry.targetIndex !== undefined) usedTargetIndexes.add(entry.targetIndex);
+      if (
+        JSON.stringify({ mode: 'interactive', elements: boundedEntries }).length >
+        MAX_INTERACTIVE_JSON_CHARACTERS
+      ) {
+        boundedEntries.pop();
         break;
       }
-      boundedTargets = boundedTargets.slice(0, -1);
     }
+    const selectedTargetIndexes: number[] = [];
+    const selectedTargets: ObservedElementTarget[] = [];
+    for (const targetIndex of usedTargetIndexes) {
+      const target = targets[targetIndex];
+      if (!target) continue;
+      selectedTargetIndexes.push(targetIndex);
+      selectedTargets.push(target);
+    }
+    const refs = this.#dependencies.refs.replaceSnapshot(tabId, selectedTargets);
+    const refByTargetIndex = new Map(
+      selectedTargetIndexes.map((targetIndex, index) => [targetIndex, refs[index] ?? '']),
+    );
+    const elements = boundedEntries.map((entry) => {
+      const ref =
+        entry.targetIndex === undefined ? undefined : refByTargetIndex.get(entry.targetIndex);
+      return compactSemanticEntry(entry, ref || undefined);
+    });
     const metadata = await this.#pageMetadata(browserSession.root);
     return {
       tabId,
       url: metadata.url,
       data: {
         mode: 'interactive',
-        generation: browserSession.generation,
+        keys: INTERACTIVE_ENTRY_KEYS,
         elements,
-        truncated: elements.length < originalCount,
+        ...(boundedEntries.length < originalCount ? { truncated: true } : {}),
       },
       observation: null,
       attachmentIds: [],
+      debuggerSession: 'ephemeral',
     };
   }
 
-  async #visualViewport(session: DebuggerSession): Promise<{ pageX: number; pageY: number }> {
-    const metrics = await this.#dependencies.transport.send<Protocol.Page.GetLayoutMetricsResponse>(
-      session,
-      'Page.getLayoutMetrics',
-    );
-    return {
-      pageX: metrics.visualViewport.pageX,
-      pageY: metrics.visualViewport.pageY,
+  #frameLoaders(frameTree: Protocol.Page.FrameTree): ReadonlyMap<string, string> {
+    const loaders = new Map<string, string>();
+    const visit = (tree: Protocol.Page.FrameTree): void => {
+      loaders.set(tree.frame.id, tree.frame.loaderId);
+      for (const child of tree.childFrames ?? []) visit(child);
     };
-  }
-
-  #sessionOffset(
-    snapshot: BrowserSessionSnapshot,
-    session: DebuggerSession,
-    cache: Map<string, Promise<SessionOffset>>,
-  ): Promise<SessionOffset> {
-    const key = sessionKey(session);
-    const cached = cache.get(key);
-    if (cached) return cached;
-    const calculating = this.#calculateSessionOffset(snapshot, session, cache);
-    cache.set(key, calculating);
-    return calculating;
-  }
-
-  async #calculateSessionOffset(
-    snapshot: BrowserSessionSnapshot,
-    session: DebuggerSession,
-    cache: Map<string, Promise<SessionOffset>>,
-  ): Promise<SessionOffset> {
-    if (session.sessionId === undefined) return { x: 0, y: 0 };
-    const child = [...snapshot.children.values()].find(
-      (candidate) => candidate.session.sessionId === session.sessionId,
-    );
-    if (!child) return { x: 0, y: 0 };
-    const parent = this.#parentSession(snapshot, child);
-    const [parentOffset, parentViewport, owner] = await Promise.all([
-      this.#sessionOffset(snapshot, parent, cache),
-      this.#visualViewport(parent),
-      this.#dependencies.transport.send<Protocol.DOM.GetFrameOwnerResponse>(
-        parent,
-        'DOM.getFrameOwner',
-        { frameId: child.targetId },
-      ),
-    ]);
-    const ownerModel = await this.#dependencies.transport.send<Protocol.DOM.GetBoxModelResponse>(
-      parent,
-      'DOM.getBoxModel',
-      { backendNodeId: owner.backendNodeId },
-    );
-    const ownerBounds = quadRect(ownerModel.model.border);
-    return ownerBounds
-      ? {
-          x: parentOffset.x + ownerBounds.x - parentViewport.pageX,
-          y: parentOffset.y + ownerBounds.y - parentViewport.pageY,
-        }
-      : parentOffset;
-  }
-
-  #parentSession(snapshot: BrowserSessionSnapshot, child: ChildTargetSession): DebuggerSession {
-    if (child.parentSessionId === null) return snapshot.root;
-    return (
-      [...snapshot.children.values()].find(
-        (candidate) => candidate.session.sessionId === child.parentSessionId,
-      )?.session ?? snapshot.root
-    );
+    visit(frameTree);
+    return loaders;
   }
 
   async #pageMetadata(session: DebuggerSession): Promise<{ url: string | null; title: string }> {

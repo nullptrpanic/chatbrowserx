@@ -75,6 +75,7 @@ export interface BrowserTabState {
 
 export interface BrowserTabPort {
   list(): Promise<readonly BrowserTabSummary[]>;
+  get(tabId: number): Promise<BrowserTabState>;
   open(url: string, activate: boolean): Promise<BrowserTabState>;
   activate(tabId: number): Promise<BrowserTabState>;
   close(tabId: number): Promise<void>;
@@ -175,6 +176,11 @@ export class TabService implements BrowserTabPort {
         ];
       })
       .slice(0, MAX_LISTED_TABS);
+  }
+
+  /** Reads one exact controllable tab without relying on window-level active state. */
+  get(tabId: number): Promise<BrowserTabState> {
+    return this.#getControllable(tabId);
   }
 
   async open(url: string, activate: boolean): Promise<BrowserTabState> {

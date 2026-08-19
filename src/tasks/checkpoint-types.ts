@@ -20,5 +20,7 @@ export interface Checkpoint {
   readonly completedToolResults: readonly CompletedToolResult[];
   readonly continuationItems: readonly ContinuationItem[];
   readonly pendingToolCall: PendingToolCall | null;
+  /** Durable browser target for this task; absent only on checkpoints written before this field. */
+  readonly browserTargetTabId?: number | null;
   readonly createdAt: number;
 }

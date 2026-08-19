@@ -55,9 +55,14 @@ export function App({ runtimePort, environment, panelClient, attachmentClient }:
     snapshot?.task !== undefined &&
     runningStatuses.has(snapshot.task.status);
   const taskLocked =
-    snapshot?.task !== null &&
-    snapshot?.task !== undefined &&
-    !terminalStatuses.has(snapshot.task.status);
+    (snapshot?.task !== null &&
+      snapshot?.task !== undefined &&
+      !terminalStatuses.has(snapshot.task.status)) ||
+    (snapshot?.conversations.some(
+      (conversation) =>
+        conversation.taskStatus !== null && !terminalStatuses.has(conversation.taskStatus),
+    ) ??
+      false);
   const loadSettings = useCallback(() => client.getSettings(), [client]);
 
   /** Starts a clean local conversation draft and returns to the main conversation view. */
@@ -123,6 +128,7 @@ export function App({ runtimePort, environment, panelClient, attachmentClient }:
               t={t}
               onSuggestion={setDraftText}
               onOpenImagePreview={(attachmentId) => client.openImagePreview(attachmentId)}
+              onOpenSourcePage={(source) => client.openSourcePage(source)}
               onPause={() => void client.pauseTask()}
               onResume={() => void client.resumeTask()}
               onRetry={() => void client.retryTask()}

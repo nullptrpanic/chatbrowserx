@@ -1,6 +1,7 @@
 import type { RuntimePort } from '../../platform/chrome/runtime-port';
 import type {
   PanelEditableSettings,
+  PanelMessageSourcePage,
   PanelSnapshot,
   PanelSettingsSnapshot,
 } from '../../shared/protocol/panel-types';
@@ -19,6 +20,7 @@ export interface PanelClientState {
 
 export interface PanelEnvironment {
   getActiveTab(): Promise<{ readonly id: number } | null>;
+  openSourcePage?(source: PanelMessageSourcePage): Promise<void>;
 }
 
 export interface PanelClientOptions {
@@ -38,6 +40,9 @@ export function createChromePanelEnvironment(): PanelEnvironment {
     async getActiveTab() {
       const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
       return tab?.id === undefined ? null : { id: tab.id };
+    },
+    async openSourcePage(source) {
+      await chrome.tabs.create({ url: source.url, active: true });
     },
   };
 }
@@ -178,7 +183,10 @@ export class PanelClient {
 
   /** Submits one text/image goal and activates the newly created durable conversation if needed. */
   async submit(text: string, attachmentIds: readonly string[]): Promise<void> {
-    const tabId = this.#requireTabId();
+    const activeTab = await this.#environment.getActiveTab();
+    if (activeTab === null) throw new Error('No active browser tab is available.');
+    const tabId = activeTab.id;
+    this.#tabId = tabId;
     const stateConversationId = this.#state.activeConversationId;
     const submissionConversationId =
       stateConversationId === undefined
@@ -252,6 +260,12 @@ export class PanelClient {
     } catch {
       return false;
     }
+  }
+
+  /** Opens the immutable URL captured when one user message was submitted. */
+  async openSourcePage(source: PanelMessageSourcePage): Promise<void> {
+    if (this.#environment.openSourcePage === undefined) return;
+    await this.#environment.openSourcePage(source);
   }
 
   /** Ensures screenshot and selected-text listeners are installed on one already-authorized tab. */

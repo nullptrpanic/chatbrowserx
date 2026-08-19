@@ -9,7 +9,8 @@ import { retainTaskReply } from './task-reply-retention';
 import { transitionTask } from './task-transition';
 import type { TaskEvent, TaskEventType, TaskRun } from './task-types';
 
-export type TaskCommandErrorCode = 'TASK_NOT_FOUND' | 'TASK_STATE_INVALID' | 'CHECKPOINT_NOT_FOUND';
+export type TaskCommandErrorCode =
+  'TASK_NOT_FOUND' | 'TASK_STATE_INVALID' | 'CHECKPOINT_NOT_FOUND' | 'TASK_ALREADY_RUNNING';
 
 export interface TaskSnapshot {
   readonly task: TaskRun;
@@ -102,11 +103,22 @@ export class TaskCommandService implements TaskCommandPort {
     this.#conversations = conversations;
   }
 
+  /** Rejects creation boundaries while any durable task still owns the global run slot. */
+  async #assertNoUnfinishedTask(): Promise<void> {
+    if ((await this.#repository.listUnfinished()).length > 0) {
+      throw new TaskCommandError('TASK_ALREADY_RUNNING', '已有任务运行中');
+    }
+  }
+
   /**
    * Creates a queued task and its sequence-zero checkpoint before exposing the task to scheduling.
    */
   async create(input: CreateTaskCommandInput): Promise<TaskSnapshot> {
-    const initialTask = createTask(input, { clock: this.#clock, ids: this.#ids });
+    await this.#assertNoUnfinishedTask();
+    const initialTask = createTask(input, {
+      clock: this.#clock,
+      ids: this.#ids,
+    });
     const checkpointId = this.#createId('checkpoint');
     const task: TaskRun = { ...initialTask, checkpointId };
     const checkpoint: Checkpoint = {
@@ -118,8 +130,14 @@ export class TaskCommandService implements TaskCommandPort {
       continuationItems:
         input.userMessageId === undefined
           ? []
-          : [{ type: 'message_ref', messageId: this.#readMessageId(input.userMessageId) }],
+          : [
+              {
+                type: 'message_ref',
+                messageId: this.#readMessageId(input.userMessageId),
+              },
+            ],
       pendingToolCall: null,
+      browserTargetTabId: task.tabId,
       createdAt: task.createdAt,
     };
 
@@ -129,6 +147,7 @@ export class TaskCommandService implements TaskCommandPort {
 
   /** Creates a fresh TaskRun while preserving the cancelled run's ordered WorkSession state. */
   async continueCancelled(input: ContinueCancelledTaskInput): Promise<TaskSnapshot> {
+    await this.#assertNoUnfinishedTask();
     const source = await this.getSnapshot(input.sourceTaskId);
     if (source.task.status !== 'cancelled') {
       throw new TaskCommandError(
@@ -212,6 +231,7 @@ export class TaskCommandService implements TaskCommandPort {
         source.checkpoint.pendingToolCall === null
           ? null
           : { ...source.checkpoint.pendingToolCall },
+      browserTargetTabId: task.tabId,
       createdAt: task.createdAt,
     };
 

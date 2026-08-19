@@ -103,6 +103,10 @@ describe('TabService', () => {
     const api = tabsApi([HTTP_TAB]);
     const service = new TabService(api);
 
+    await expect(service.get(7)).resolves.toMatchObject({
+      tabId: 7,
+      url: 'http://intranet.local/app',
+    });
     await expect(service.open('about:blank', true)).resolves.toMatchObject({ tabId: 91 });
     await expect(service.activate(7)).resolves.toMatchObject({ tabId: 7, active: true });
     await service.close(7);

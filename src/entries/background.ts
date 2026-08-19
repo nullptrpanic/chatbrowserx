@@ -92,14 +92,15 @@ async function createBackgroundServices(
   const debuggerTransport = new ChromeDebuggerTransport();
   const browserSessions = new TargetSessionRegistry(debuggerTransport);
   const browserRefs = new ElementRefStore(cryptoIds);
+  const browserPage = new ChromePageObservationPort({
+    installer,
+    tabs: chrome.tabs,
+    ids: cryptoIds,
+  });
   const browserObserver = new PageObserver({
     sessions: browserSessions,
     transport: debuggerTransport,
-    content: new ChromePageObservationPort({
-      installer,
-      tabs: chrome.tabs,
-      ids: cryptoIds,
-    }),
+    content: browserPage,
     refs: browserRefs,
     persistScreenshot: async (blob) => {
       const attachment = await attachmentService.addImageBlob(blob, 'visual_fallback');
@@ -111,6 +112,8 @@ async function createBackgroundServices(
     transport: debuggerTransport,
     refs: browserRefs,
     pointer: new ChromePointerPagePort({ installer, tabs: chrome.tabs, ids: cryptoIds }),
+    platform: { getOs: async () => (await chrome.runtime.getPlatformInfo()).os },
+    page: browserPage,
   });
   const browserNetwork = new NetworkCaptureRegistry({
     sessions: browserSessions,
@@ -123,6 +126,7 @@ async function createBackgroundServices(
     observer: browserObserver,
     actions: browserActions,
     network: browserNetwork,
+    sessions: browserSessions,
   });
   const planner = new CodexAgentPlanner({
     provider: codex,

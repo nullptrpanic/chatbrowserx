@@ -1,22 +1,5 @@
 import { beforeEach, describe, expect, it } from 'vitest';
-import {
-  extractReadableContent,
-  observeDomElements,
-} from '../../../src/browser/observation/content-extractor';
-
-function rect(x: number, y: number, width: number, height: number): DOMRect {
-  return {
-    x,
-    y,
-    width,
-    height,
-    top: y,
-    left: x,
-    right: x + width,
-    bottom: y + height,
-    toJSON: () => ({}),
-  };
-}
+import { extractReadableContent } from '../../../src/browser/observation/content-extractor';
 
 beforeEach(() => {
   document.head.innerHTML = '<title>Example page</title>';
@@ -66,29 +49,5 @@ describe('extractReadableContent', () => {
 
     expect(result.text).toHaveLength(40_000);
     expect(result.truncated).toBe(true);
-  });
-});
-
-describe('observeDomElements', () => {
-  it('computes fallback accessible names and excludes hidden or zero-area elements', () => {
-    document.body.innerHTML = `
-      <button aria-label="Continue checkout"></button>
-      <button id="hidden" style="display:none">Hidden</button>
-      <button id="zero">Zero</button>
-    `;
-    const [visible, hidden, zero] = [...document.querySelectorAll('button')];
-    if (!visible || !hidden || !zero) throw new Error('Button fixtures are missing.');
-    visible.getBoundingClientRect = () => rect(10, 20, 100, 30);
-    hidden.getBoundingClientRect = () => rect(10, 60, 100, 30);
-    zero.getBoundingClientRect = () => rect(0, 0, 0, 0);
-
-    expect(observeDomElements(document, window)).toEqual([
-      {
-        role: 'button',
-        name: 'Continue checkout',
-        state: [],
-        bounds: { x: 10, y: 20, width: 100, height: 30 },
-      },
-    ]);
   });
 });

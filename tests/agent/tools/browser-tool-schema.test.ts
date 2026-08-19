@@ -5,6 +5,7 @@ import {
 } from '../../../src/agent/tools/browser-tool-schema';
 
 const CASES = [
+  ['browser_get_current_tab', 'get_current_tab', 'safe', {}],
   ['browser_list_tabs', 'list_tabs', 'safe', {}],
   [
     'browser_open_tab',
@@ -12,7 +13,7 @@ const CASES = [
     'mutation',
     { url: 'http://localhost:3000/app', activate: true },
   ],
-  ['browser_switch_tab', 'switch_tab', 'mutation', { tabId: 7 }],
+  ['browser_switch_tab', 'switch_tab', 'safe', { tabId: 7 }],
   ['browser_close_tab', 'close_tab', 'mutation', { tabId: 7 }],
   ['browser_navigate', 'navigate', 'mutation', { tabId: 7, url: 'https://example.com/a' }],
   ['browser_reload', 'reload', 'mutation', { tabId: 7 }],
@@ -29,7 +30,7 @@ const CASES = [
     'browser_scroll',
     'scroll',
     'mutation',
-    { tabId: 7, target: 'viewport', direction: 'down', amount: 'page' },
+    { tabId: 7, target: 'viewport', deltaX: 0, deltaY: 100 },
   ],
   ['browser_hover', 'hover', 'mutation', { tabId: 7, ref: 'ref_1' }],
   ['browser_select', 'select', 'mutation', { tabId: 7, ref: 'ref_1', value: 'choice' }],
@@ -89,9 +90,109 @@ describe('BROWSER_TOOL_DEFINITIONS', () => {
       expect(serialized).not.toContain(`"${keyword}"`);
     }
   });
+
+  it('advertises one native interactive mode while still parsing legacy deep calls', () => {
+    const inspect = BROWSER_TOOL_DEFINITIONS.find(
+      (definition) => definition.name === 'browser_inspect',
+    );
+    const parameters = inspect?.parameters as
+      | {
+          readonly properties: Readonly<Record<string, unknown>>;
+        }
+      | undefined;
+    const mode = parameters?.properties.mode as { readonly enum?: readonly string[] };
+
+    expect(mode.enum).toEqual(['content', 'interactive', 'screenshot']);
+  });
+
+  it('requires a zero-capable tabId on every task-scoped model tool', () => {
+    const definitions = new Map(
+      BROWSER_TOOL_DEFINITIONS.map((definition) => [definition.name, definition.parameters]),
+    );
+    for (const name of [
+      'browser_navigate',
+      'browser_reload',
+      'browser_inspect',
+      'browser_click',
+      'browser_type',
+      'browser_keypress',
+      'browser_scroll',
+      'browser_hover',
+      'browser_select',
+      'browser_drag',
+      'browser_wait',
+      'browser_click_point',
+      'browser_drag_point',
+      'browser_network_start',
+      'browser_network_list',
+      'browser_network_get',
+      'browser_network_stop',
+    ]) {
+      const parameters = definitions.get(name) as {
+        readonly properties: Readonly<Record<string, Readonly<Record<string, unknown>>>>;
+        readonly required: readonly string[];
+      };
+      expect(parameters.properties.tabId).toMatchObject({
+        type: 'integer',
+        minimum: 0,
+      });
+      expect(parameters.required).toContain('tabId');
+    }
+    for (const name of ['browser_switch_tab', 'browser_close_tab']) {
+      const parameters = definitions.get(name) as {
+        readonly properties: Readonly<Record<string, unknown>>;
+        readonly required: readonly string[];
+      };
+      expect(parameters.properties).toHaveProperty('tabId');
+      expect(parameters.required).toContain('tabId');
+    }
+  });
 });
 
 describe('parseBrowserToolCall', () => {
+  it.each([
+    ['browser_navigate', { url: 'https://example.com/a' }],
+    ['browser_reload', {}],
+    ['browser_inspect', { mode: 'interactive' }],
+    ['browser_click', { ref: 'ref_1', button: 'left', count: 1 }],
+    ['browser_type', { ref: 'ref_1', text: 'hello', replace: true, submit: false }],
+    ['browser_network_list', { urlPattern: '/api/', limit: 25 }],
+  ])('accepts task-bound %s without a model-provided tabId', (name, arguments_) => {
+    expect(
+      parseBrowserToolCall({
+        callId: 'call_bound',
+        name,
+        argumentsJson: JSON.stringify(arguments_),
+      }),
+    ).toMatchObject({ name, arguments: arguments_ });
+  });
+
+  it('accepts explicit deep interactive inspection without adding another tool', () => {
+    expect(
+      parseBrowserToolCall({
+        callId: 'call_deep',
+        name: 'browser_inspect',
+        argumentsJson: JSON.stringify({ tabId: 7, mode: 'interactive_deep' }),
+      }),
+    ).toMatchObject({
+      operation: 'inspect',
+      arguments: { tabId: 7, mode: 'interactive_deep' },
+    });
+  });
+
+  it('accepts zero as the task-current tab sentinel', () => {
+    expect(
+      parseBrowserToolCall({
+        callId: 'call_current',
+        name: 'browser_inspect',
+        argumentsJson: JSON.stringify({ tabId: 0, mode: 'content' }),
+      }),
+    ).toMatchObject({
+      operation: 'inspect',
+      arguments: { tabId: 0, mode: 'content' },
+    });
+  });
+
   it.each(CASES)(
     'parses %s into one typed browser operation',
     (name, operation, replay, arguments_) => {
@@ -125,9 +226,17 @@ describe('parseBrowserToolCall', () => {
     ['browser_click', { tabId: 7, ref: 'x'.repeat(129), button: 'left', count: 1 }],
     [
       'browser_type',
-      { tabId: 7, ref: 'ref_1', text: 'x'.repeat(20_001), replace: true, submit: false },
+      {
+        tabId: 7,
+        ref: 'ref_1',
+        text: 'x'.repeat(20_001),
+        replace: true,
+        submit: false,
+      },
     ],
     ['browser_keypress', { tabId: 7, keys: 'x'.repeat(101) }],
+    ['browser_scroll', { tabId: 7, target: 'viewport', deltaX: 0, deltaY: 0 }],
+    ['browser_scroll', { tabId: 7, target: 'viewport', deltaX: 0, deltaY: 10_001 }],
     ['browser_wait', { tabId: 7, condition: 'delay', timeoutMs: 249 }],
     ['browser_click_point', { tabId: 7, x: -1, y: 1, button: 'left', count: 1 }],
     ['browser_network_list', { tabId: 7, urlPattern: '', limit: 101 }],
@@ -151,7 +260,11 @@ describe('parseBrowserToolCall', () => {
     { callId: '', name: 'browser_list_tabs', argumentsJson: '{}' },
     { callId: 'c'.repeat(257), name: 'browser_list_tabs', argumentsJson: '{}' },
     { callId: 'call_1', name: 'browser_eval', argumentsJson: '{}' },
-    { callId: 'call_1', name: 'browser_list_tabs', argumentsJson: '{secret-value' },
+    {
+      callId: 'call_1',
+      name: 'browser_list_tabs',
+      argumentsJson: '{secret-value',
+    },
     {
       callId: 'call_1',
       name: 'browser_list_tabs',

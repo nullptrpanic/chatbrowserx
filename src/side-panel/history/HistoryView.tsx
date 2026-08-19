@@ -1,8 +1,13 @@
-import { MessageSquareText, Plus, Trash2 } from 'lucide-react';
+import { LoaderCircle, MessageSquareText, Plus, Trash2 } from 'lucide-react';
 import { useState } from 'react';
 import type { Translator } from '../../shared/i18n/i18n';
 import type { PanelConversationSummary } from '../../shared/protocol/panel-types';
 import { taskStatusLabel } from '../tasks/TaskStatusLabel';
+
+const runningTaskStatuses: ReadonlySet<PanelConversationSummary['taskStatus']> = new Set([
+  'queued',
+  'planning',
+]);
 
 export interface HistoryViewProps {
   readonly conversations: readonly PanelConversationSummary[];
@@ -54,7 +59,18 @@ export function HistoryView({
                   className={`history-item ${conversation.id === activeId ? 'is-active' : ''}`}
                   onClick={() => onSelect(conversation.id)}
                 >
-                  <span className="history-item-title">{conversation.title}</span>
+                  <span className="history-item-title-row">
+                    <span className="history-item-title">{conversation.title}</span>
+                    {runningTaskStatuses.has(conversation.taskStatus) &&
+                    conversation.taskStatus !== null ? (
+                      <span
+                        className="history-running-indicator"
+                        title={taskStatusLabel(conversation.taskStatus, t)}
+                      >
+                        <LoaderCircle size={13} aria-hidden="true" />
+                      </span>
+                    ) : null}
+                  </span>
                   <span className="history-item-meta">
                     {new Intl.DateTimeFormat(undefined, {
                       month: 'short',

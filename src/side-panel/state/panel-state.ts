@@ -26,6 +26,13 @@ const conversationSchema = z
     taskStatus: taskStatusSchema.nullable(),
   })
   .strict();
+const messageSourcePageSchema = z
+  .object({
+    title: z.string().min(1).max(500),
+    url: z.string().url().max(4_096),
+    favIconUrl: z.string().max(8_192).nullable(),
+  })
+  .strict();
 const settingsSchema = z
   .object({
     model: z.string().min(1).max(256),
@@ -92,6 +99,7 @@ const panelTaskSchema = z
             reason: z.string().max(500),
             at: timestampSchema,
             reasoningSummary: z.string().max(20_000).optional(),
+            supplementIds: z.array(idSchema).max(100).optional(),
           })
           .strict(),
       )
@@ -126,6 +134,7 @@ export const panelSnapshotSchema: z.ZodType<PanelSnapshot> = z
             status: z.enum(['complete', 'streaming', 'interrupted', 'error']),
             text: z.string().max(1_000_000),
             attachmentIds: z.array(idSchema).max(64),
+            sourcePage: messageSourcePageSchema.optional(),
             createdAt: timestampSchema,
             updatedAt: timestampSchema,
           })

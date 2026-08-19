@@ -1,4 +1,4 @@
-import { render, screen } from '@testing-library/react';
+import { render, screen, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { createTranslator } from '../../../src/shared/i18n/i18n';
@@ -90,6 +90,48 @@ describe('MessageItem', () => {
     );
 
     expect(screen.getByRole('button', { name: '复制' })).toBeVisible();
+  });
+
+  it('renders the source page beside the user label and opens it from the question bubble', async () => {
+    const user = userEvent.setup();
+    const sourcePage = {
+      tabId: 7,
+      title: 'Median of Two Sorted Arrays',
+      url: 'https://leetcode.com/problems/median-of-two-sorted-arrays/description/',
+      favIconUrl: 'https://leetcode.com/favicon.ico',
+    };
+    const onOpenSourcePage = vi.fn(async () => undefined);
+    render(
+      <MessageItem
+        message={{
+          id: 'user_source',
+          taskId: 'task_1',
+          role: 'user',
+          status: 'complete',
+          text: '帮我填写这道题',
+          attachmentIds: [],
+          sourcePage,
+          createdAt: 1_000,
+          updatedAt: 1_000,
+        }}
+        attachments={attachments}
+        t={t}
+        onOpenSourcePage={onOpenSourcePage}
+      />,
+    );
+
+    const meta = screen.getByText('你').closest('.message-meta');
+    expect(meta).not.toBeNull();
+    const source = within(meta as HTMLElement).getByRole('button', {
+      name: '打开来源页面：Median of Two Sorted Arrays',
+    });
+    expect(source).toHaveTextContent('Median of Two Sorted Arrays');
+    expect(source.querySelector('img')).toHaveAttribute('src', 'https://leetcode.com/favicon.ico');
+
+    await user.click(source);
+
+    expect(onOpenSourcePage).toHaveBeenCalledWith(sourcePage);
+    expect(screen.getByRole('article')).toHaveClass('has-source-page');
   });
 
   it('copies user text and images as cross-application plain and rich clipboard formats', async () => {

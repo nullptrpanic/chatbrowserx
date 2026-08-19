@@ -184,14 +184,6 @@ describe('parsePageCommand', () => {
     expect(
       parsePageCommand({
         version: 1,
-        requestId: 'req_elements',
-        type: 'page.elements.observe',
-        payload: {},
-      }),
-    ).toMatchObject({ type: 'page.elements.observe' });
-    expect(
-      parsePageCommand({
-        version: 1,
         requestId: 'req_hidden',
         type: 'page.overlays.setHidden',
         payload: { hidden: true },
@@ -211,6 +203,14 @@ describe('parsePageCommand', () => {
   });
 
   it('rejects task commands and extra page payload fields', () => {
+    expect(() =>
+      parsePageCommand({
+        version: 1,
+        requestId: 'req_elements',
+        type: 'page.elements.observe',
+        payload: {},
+      }),
+    ).toThrow(/invalid page command/i);
     expect(() =>
       parsePageCommand({
         version: 1,

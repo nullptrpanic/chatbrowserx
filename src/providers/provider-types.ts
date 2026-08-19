@@ -40,12 +40,15 @@ export interface ModelToolDefinition {
   readonly strict: true;
 }
 
+export type ModelToolChoice = 'auto' | { readonly type: 'function'; readonly name: string };
+
 export interface ModelRequest {
   readonly model: string;
   readonly reasoningEffort: ModelReasoningEffort;
   readonly systemPrompt: string;
   readonly input: readonly ModelInputItem[];
   readonly tools: readonly ModelToolDefinition[];
+  readonly toolChoice?: ModelToolChoice;
 }
 
 export interface ModelProvider {

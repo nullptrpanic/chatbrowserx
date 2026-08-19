@@ -248,6 +248,7 @@ function normalizeCheckpoint(checkpoint: Checkpoint): Checkpoint {
   const raw = checkpoint as Checkpoint & {
     readonly continuationItems?: unknown;
     readonly pendingToolCall?: unknown;
+    readonly browserTargetTabId?: unknown;
   };
   const completedToolResults = Array.isArray(checkpoint.completedToolResults)
     ? checkpoint.completedToolResults
@@ -258,15 +259,25 @@ function normalizeCheckpoint(checkpoint: Checkpoint): Checkpoint {
     raw.continuationItems,
     raw.pendingToolCall,
   );
+  const browserTargetTabId =
+    raw.browserTargetTabId === null ||
+    (typeof raw.browserTargetTabId === 'number' &&
+      Number.isSafeInteger(raw.browserTargetTabId) &&
+      raw.browserTargetTabId >= 0 &&
+      raw.browserTargetTabId <= 2_147_483_647)
+      ? raw.browserTargetTabId
+      : undefined;
+  const continuationItems =
+    storedContinuation?.items ?? continuationFromCompletedResults(completedToolResults);
   return {
     id: checkpoint.id,
     taskId: checkpoint.taskId,
     sequence: checkpoint.sequence,
     taskStatus: normalizedStatus(checkpoint.taskStatus),
     completedToolResults,
-    continuationItems:
-      storedContinuation?.items ?? continuationFromCompletedResults(completedToolResults),
+    continuationItems,
     pendingToolCall: storedContinuation?.pendingToolCall ?? null,
+    ...(browserTargetTabId === undefined ? {} : { browserTargetTabId }),
     createdAt: checkpoint.createdAt,
   };
 }

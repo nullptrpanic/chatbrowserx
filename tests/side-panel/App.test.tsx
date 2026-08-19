@@ -413,14 +413,45 @@ describe('App background connection', () => {
     const user = userEvent.setup();
 
     render(<App runtimePort={{ send }} environment={environment} attachmentClient={attachments} />);
-    await user.type(await screen.findByRole('textbox'), 'Start another task');
+    const textbox = await screen.findByRole('textbox');
+    await user.type(textbox, 'Start another task');
 
+    expect(textbox).toBeDisabled();
     expect(screen.getByRole('button', { name: '发送' })).toBeDisabled();
     expect(screen.getAllByText('任务已暂停').length).toBeGreaterThan(0);
     expect(screen.queryByText(/浏览器动作/)).not.toBeInTheDocument();
     expect(screen.queryByText(/1\/50/)).not.toBeInTheDocument();
     expect(screen.queryByText('user_pause')).not.toBeInTheDocument();
     expect(send).not.toHaveBeenCalledWith(expect.objectContaining({ type: 'chat.submit' }));
+  });
+
+  it('locks a different conversation composer when a globally shared task is unfinished', async () => {
+    const snapshot: PanelSnapshot = {
+      ...buildSnapshot(),
+      conversations: [
+        {
+          id: 'conversation_running_elsewhere',
+          title: 'Running elsewhere',
+          tabId: 9,
+          createdAt: 900,
+          updatedAt: 1_000,
+          taskStatus: 'planning',
+        },
+      ],
+    };
+    const send = vi.fn<RuntimePort['send']>(async (message) => ({
+      version: 1,
+      requestId: message.requestId,
+      ok: true,
+      data: message.type === 'panel.getSnapshot' ? snapshot : { connected: true },
+    }));
+
+    render(<App runtimePort={{ send }} environment={environment} attachmentClient={attachments} />);
+
+    expect(await screen.findByRole('textbox')).toBeDisabled();
+    expect(screen.getByRole('button', { name: /图片/ })).toBeDisabled();
+    expect(screen.getByRole('button', { name: /^截图/ })).toBeDisabled();
+    expect(screen.getByRole('button', { name: '发送' })).toBeDisabled();
   });
 
   it('shows Retry for a failed task and sends the dedicated retry command', async () => {

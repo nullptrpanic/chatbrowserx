@@ -51,7 +51,13 @@ export type ExtensionMessage =
 export type PageCommand =
   | Message<'page.ping', Record<string, never>>
   | Message<'page.content.read', Record<string, never>>
-  | Message<'page.elements.observe', Record<string, never>>
+  | Message<
+      'page.action.perform',
+      | { action: 'click'; ref: string; button: 'left' | 'right' | 'middle'; count: 1 | 2 }
+      | { action: 'type'; ref: string; text: string; replace: boolean; submit: boolean }
+      | { action: 'scroll'; target: string; deltaX: number; deltaY: number }
+      | { action: 'select'; ref: string; value: string }
+    >
   | Message<
       'page.pointer.show',
       {

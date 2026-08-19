@@ -5,6 +5,40 @@ import { createTranslator } from '../../../src/shared/i18n/i18n';
 import { HistoryView } from '../../../src/side-panel/history/HistoryView';
 
 describe('HistoryView', () => {
+  it('marks the globally running conversation with a live status icon', () => {
+    render(
+      <HistoryView
+        conversations={[
+          {
+            id: 'conversation_running',
+            title: 'Running task',
+            tabId: 9,
+            createdAt: 900,
+            updatedAt: 1_100,
+            taskStatus: 'planning',
+          },
+          {
+            id: 'conversation_done',
+            title: 'Completed task',
+            tabId: 7,
+            createdAt: 800,
+            updatedAt: 1_000,
+            taskStatus: 'completed',
+          },
+        ]}
+        activeId={null}
+        t={createTranslator('zh-CN')}
+        onSelect={vi.fn()}
+        onNew={vi.fn()}
+        onClear={vi.fn(async () => undefined)}
+        onDelete={vi.fn(async () => undefined)}
+      />,
+    );
+
+    expect(screen.getAllByTitle('正在生成回复')).toHaveLength(1);
+    expect(screen.queryByTitle('任务已完成')).not.toBeInTheDocument();
+  });
+
   it('deletes any history item after an explicit inline confirmation', async () => {
     const onDelete = vi.fn(async () => undefined);
     const user = userEvent.setup();

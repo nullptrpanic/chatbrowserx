@@ -1,12 +1,16 @@
 import { ChevronDown, ChevronUp, CircleStop, Pause, Play, RotateCcw } from 'lucide-react';
 import { useState } from 'react';
 import type { Translator } from '../../shared/i18n/i18n';
-import type { PanelCompletedToolResult, PanelTask } from '../../shared/protocol/panel-types';
-import { MessageImages } from '../chat/MessageImages';
+import type {
+  PanelCompletedToolResult,
+  PanelTask,
+  PanelTaskSupplement,
+} from '../../shared/protocol/panel-types';
 import type { AttachmentDraftClient } from '../chat/use-image-draft';
 import { isTerminalToolName, TerminalToolResult } from './TerminalToolResult';
 import { ReasoningSummary } from './ReasoningSummary';
 import { TaskStatusLabel, taskEventLabel, taskStatusLabel } from './TaskStatusLabel';
+import { TaskSupplement } from './TaskSupplement';
 import { ToolResult } from './ToolResult';
 import { toolResultEventLabel } from './browser-tool-label';
 
@@ -151,6 +155,7 @@ function TaskDetailContent({
   readonly onOpenImagePreview?: ((attachmentId: string) => Promise<boolean>) | undefined;
 }) {
   const toolResultsByEvent = groupToolResultsByEvent(task);
+  const supplementsByEvent = groupSupplementsByEvent(task);
   return (
     <div className="task-detail-content">
       {task.events.length === 0 &&
@@ -162,6 +167,7 @@ function TaskDetailContent({
         <ol className="task-event-list">
           {task.events.map((event, eventIndex) => {
             const toolResults = toolResultsByEvent.get(eventIndex) ?? [];
+            const supplements = supplementsByEvent.grouped.get(eventIndex) ?? [];
             return (
               <li key={`${event.sequence}:${event.type}`}>
                 <span className="task-event-index">{event.sequence}</span>
@@ -193,6 +199,15 @@ function TaskDetailContent({
                 {event.reasoningSummary === undefined ? null : (
                   <ReasoningSummary summary={event.reasoningSummary} t={t} />
                 )}
+                {supplements.map((supplement) => (
+                  <TaskSupplement
+                    key={supplement.id}
+                    supplement={supplement}
+                    attachments={attachments}
+                    t={t}
+                    onOpenImagePreview={onOpenImagePreview}
+                  />
+                ))}
               </li>
             );
           })}
@@ -211,35 +226,52 @@ function TaskDetailContent({
           ))}
         </div>
       )}
-      {task.supplements.length === 0 ? null : (
-        <ol className="task-supplement-list">
-          {task.supplements.map((supplement) => (
-            <li key={supplement.id} className="task-supplement-item">
-              <header>
-                <span>{t('userSupplement')}</span>
-                <time dateTime={new Date(supplement.createdAt).toISOString()}>
-                  {new Intl.DateTimeFormat(undefined, {
-                    hour: '2-digit',
-                    minute: '2-digit',
-                    second: '2-digit',
-                  }).format(supplement.createdAt)}
-                </time>
-              </header>
-              {supplement.text.length === 0 ? null : (
-                <p className="task-supplement-text">{supplement.text}</p>
-              )}
-              <MessageImages
-                attachmentIds={supplement.attachmentIds}
-                client={attachments}
-                t={t}
-                onOpenImagePreview={onOpenImagePreview}
-              />
-            </li>
-          ))}
-        </ol>
-      )}
+      {supplementsByEvent.unmatched.map((supplement) => (
+        <TaskSupplement
+          key={supplement.id}
+          supplement={supplement}
+          attachments={attachments}
+          t={t}
+          onOpenImagePreview={onOpenImagePreview}
+        />
+      ))}
     </div>
   );
+}
+
+interface GroupedSupplements {
+  readonly grouped: ReadonlyMap<number, readonly PanelTaskSupplement[]>;
+  readonly unmatched: readonly PanelTaskSupplement[];
+}
+
+/** Uses persisted IDs for exact grouping and timestamps only for legacy supplement events. */
+function groupSupplementsByEvent(task: PanelTask): GroupedSupplements {
+  const grouped = new Map<number, PanelTaskSupplement[]>();
+  const supplementsById = new Map(
+    task.supplements.map((supplement) => [supplement.id, supplement]),
+  );
+  const assigned = new Set<string>();
+
+  for (const [eventIndex, event] of task.events.entries()) {
+    if (event.type !== 'task.supplements-applied') continue;
+    const supplements =
+      event.supplementIds === undefined
+        ? task.supplements.filter(
+            (supplement) => !assigned.has(supplement.id) && supplement.createdAt <= event.at,
+          )
+        : event.supplementIds.flatMap((id) => {
+            const supplement = supplementsById.get(id);
+            return supplement === undefined || assigned.has(id) ? [] : [supplement];
+          });
+    if (supplements.length === 0) continue;
+    supplements.forEach(({ id }) => assigned.add(id));
+    grouped.set(eventIndex, supplements);
+  }
+
+  return {
+    grouped,
+    unmatched: task.supplements.filter(({ id }) => !assigned.has(id)),
+  };
 }
 
 function CompletedToolResult({

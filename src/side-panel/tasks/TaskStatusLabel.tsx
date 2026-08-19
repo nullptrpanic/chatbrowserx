@@ -17,6 +17,7 @@ const eventKeys: Readonly<Record<string, MessageKey>> = {
   'reasoning.summary-recorded': 'taskReasoningSummaryRecorded',
   'tool.call-recorded': 'taskToolCallRecorded',
   'tool.result-recorded': 'taskToolResultRecorded',
+  'provider.continuation-invalidated': 'taskContinuationRecovered',
   'task.supplements-applied': 'taskSupplementsApplied',
   'task.auth-required': 'taskWaitingAuth',
   'task.paused': 'taskPaused',

@@ -176,6 +176,85 @@ describe('IndexedDbTaskRepository', () => {
     database.close();
   });
 
+  it('preserves a compact continuation without reconstructing older audit results', async () => {
+    const database = await openChatBrowserDatabase(
+      createTestDatabaseName('compacted-context-continuation'),
+    );
+    const repository = new IndexedDbTaskRepository(database);
+    const commitArguments = JSON.stringify({ state: 'Goal: continue from the checkpoint.' });
+    const commitOutput =
+      '{"ok":true,"compactedCalls":1,"releasedTextChars":2048,"releasedImages":1}';
+    await database.add('checkpoints', {
+      id: 'checkpoint_compacted',
+      taskId: 'task_compacted',
+      sequence: 4,
+      taskStatus: 'planning',
+      completedToolResults: [
+        {
+          callId: 'call_inspect',
+          toolName: 'browser_inspect',
+          argumentsJson: '{"mode":"screenshot"}',
+          output: '{"ok":true,"large":"old raw result"}',
+          resultRef: 'result_inspect',
+          attachmentIds: ['attachment_old'],
+        },
+        {
+          callId: 'call_commit',
+          toolName: 'commit_context',
+          argumentsJson: commitArguments,
+          output: commitOutput,
+          resultRef: 'result_commit',
+          attachmentIds: [],
+        },
+      ],
+      continuationItems: [
+        { type: 'message_ref', messageId: 'message_user' },
+        {
+          type: 'function_call',
+          callId: 'call_commit',
+          name: 'commit_context',
+          argumentsJson: commitArguments,
+        },
+        {
+          type: 'function_call_output',
+          callId: 'call_commit',
+          output: commitOutput,
+          resultRef: 'result_commit',
+          attachmentIds: [],
+        },
+      ],
+      pendingToolCall: null,
+      createdAt: 1_000,
+    });
+
+    const checkpoint = await repository.getCheckpoint('checkpoint_compacted');
+
+    expect(checkpoint?.completedToolResults.map(({ toolName }) => toolName)).toEqual([
+      'browser_inspect',
+      'commit_context',
+    ]);
+    expect(checkpoint?.continuationItems).toEqual([
+      { type: 'message_ref', messageId: 'message_user' },
+      {
+        type: 'function_call',
+        callId: 'call_commit',
+        name: 'commit_context',
+        argumentsJson: commitArguments,
+      },
+      {
+        type: 'function_call_output',
+        callId: 'call_commit',
+        output: commitOutput,
+        resultRef: 'result_commit',
+        attachmentIds: [],
+      },
+    ]);
+    expect(checkpoint?.continuationItems).not.toContainEqual(
+      expect.objectContaining({ callId: 'call_inspect' }),
+    );
+    database.close();
+  });
+
   it('creates only the durable stores used by the current task and conversation model', async () => {
     const database = await openChatBrowserDatabase(createTestDatabaseName('schema-stores'));
 
@@ -236,7 +315,11 @@ describe('IndexedDbTaskRepository', () => {
       pendingToolCall: null,
       createdAt: source.createdAt,
     });
-    const cancelled = { ...source, status: 'cancelled' as const, updatedAt: 1_100 };
+    const cancelled = {
+      ...source,
+      status: 'cancelled' as const,
+      updatedAt: 1_100,
+    };
     await repository.saveTransition({
       task: { ...cancelled, checkpointId: 'checkpoint_source_1' },
       event: {
@@ -383,7 +466,9 @@ describe('IndexedDbTaskRepository', () => {
         checkpoint: duplicateCheckpoint,
       }),
     ).rejects.toThrow(/event sequence/i);
-    await expect(repository.get(queued.id)).resolves.toMatchObject({ status: 'planning' });
+    await expect(repository.get(queued.id)).resolves.toMatchObject({
+      status: 'planning',
+    });
     await expect(repository.getCheckpoint(duplicateCheckpoint.id)).resolves.toBeUndefined();
     database.close();
   });
@@ -411,7 +496,11 @@ describe('IndexedDbTaskRepository', () => {
       now: 1_000,
       durationMs: 30_000,
     });
-    expect(firstLease).toMatchObject({ ownerId: 'runner_a', generation: 1, expiresAt: 31_000 });
+    expect(firstLease).toMatchObject({
+      ownerId: 'runner_a',
+      generation: 1,
+      expiresAt: 31_000,
+    });
     await expect(
       repository.tryAcquireLease({
         taskId: firstTask.id,
@@ -465,7 +554,11 @@ describe('IndexedDbTaskRepository', () => {
         now: 10_000,
         durationMs: 30_000,
       }),
-    ).resolves.toMatchObject({ ownerId: 'runner_a', generation: 1, expiresAt: 40_000 });
+    ).resolves.toMatchObject({
+      ownerId: 'runner_a',
+      generation: 1,
+      expiresAt: 40_000,
+    });
     database.close();
   });
 });

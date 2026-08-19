@@ -23,23 +23,54 @@ const contentSchema = z
   })
   .strict();
 const coordinateSchema = z.number().finite().min(-1_000_000).max(1_000_000);
-const domElementSchema = z
-  .object({
-    role: z.string().max(100),
-    name: z.string().max(500),
-    state: z.array(z.string().max(100)).max(20),
-    bounds: z
-      .object({
-        x: coordinateSchema,
-        y: coordinateSchema,
-        width: z.number().finite().positive().max(1_000_000),
-        height: z.number().finite().positive().max(1_000_000),
-      })
-      .strict(),
-  })
-  .strict();
-const domElementsSchema = z.array(domElementSchema).max(200);
+const pageActionReasonSchema = z.enum([
+  'ref_not_found',
+  'scroll_target_not_found',
+  'unsupported_action',
+  'trusted_input_required',
+]);
+const pageActionBase = {
+  applied: z.boolean(),
+  url: z.string().max(4_096),
+  reason: pageActionReasonSchema.optional(),
+} as const;
+const pageActionResultSchema = z.discriminatedUnion('action', [
+  z.object({ action: z.literal('click'), ...pageActionBase, dispatched: z.boolean() }).strict(),
+  z
+    .object({
+      action: z.literal('type'),
+      ...pageActionBase,
+      dispatched: z.boolean(),
+      value: z.string().max(20_000),
+      submitted: z.boolean(),
+      target: z.object({ x: coordinateSchema, y: coordinateSchema }).strict().optional(),
+    })
+    .strict(),
+  z
+    .object({
+      action: z.literal('scroll'),
+      ...pageActionBase,
+      moved: z.boolean(),
+      actualDeltaX: z.number().finite(),
+      actualDeltaY: z.number().finite(),
+    })
+    .strict(),
+  z
+    .object({
+      action: z.literal('select'),
+      ...pageActionBase,
+      dispatched: z.boolean(),
+      value: z.string().max(2_000),
+    })
+    .strict(),
+]);
 const overlayStateSchema = z.object({ hidden: z.boolean() }).strict();
+
+export type PageActionInput = Extract<
+  PageCommand,
+  { readonly type: 'page.action.perform' }
+>['payload'];
+export type PageActionOutput = z.infer<typeof pageActionResultSchema>;
 
 export type PageObservationPortErrorCode = 'PAGE_UNAVAILABLE' | 'INVALID_PAGE_RESPONSE';
 
@@ -75,17 +106,38 @@ export class ChromePageObservationPort implements PageObservationContentPort {
   }
 
   async readContent(tabId: number) {
-    return this.#parse(contentSchema, await this.#send(tabId, 'page.content.read'));
+    return this.#parse(
+      contentSchema,
+      await this.#send(tabId, (requestId) => ({
+        version: PROTOCOL_VERSION,
+        requestId,
+        type: 'page.content.read',
+        payload: {},
+      })),
+    );
   }
 
-  async observeElements(tabId: number) {
-    return this.#parse(domElementsSchema, await this.#send(tabId, 'page.elements.observe'));
+  async performAction(tabId: number, action: PageActionInput): Promise<PageActionOutput> {
+    return this.#parse(
+      pageActionResultSchema,
+      await this.#send(tabId, (requestId) => ({
+        version: PROTOCOL_VERSION,
+        requestId,
+        type: 'page.action.perform',
+        payload: action,
+      })),
+    );
   }
 
   async setOverlaysHidden(tabId: number, hidden: boolean): Promise<void> {
     const state = this.#parse(
       overlayStateSchema,
-      await this.#send(tabId, 'page.overlays.setHidden', hidden),
+      await this.#send(tabId, (requestId) => ({
+        version: PROTOCOL_VERSION,
+        requestId,
+        type: 'page.overlays.setHidden',
+        payload: { hidden },
+      })),
     );
     if (state.hidden !== hidden) {
       throw new PageObservationPortError(
@@ -106,11 +158,7 @@ export class ChromePageObservationPort implements PageObservationContentPort {
     return parsed.data;
   }
 
-  async #send(
-    tabId: number,
-    type: 'page.content.read' | 'page.elements.observe' | 'page.overlays.setHidden',
-    hidden = false,
-  ): Promise<unknown> {
+  async #send(tabId: number, command: (requestId: string) => PageCommand): Promise<unknown> {
     const requestId = this.#dependencies.ids.create('pageCommand').trim();
     if (requestId.length === 0 || requestId.length > 128) {
       throw new PageObservationPortError(
@@ -127,11 +175,9 @@ export class ChromePageObservationPort implements PageObservationContentPort {
       ) {
         throw new PageObservationPortError('PAGE_UNAVAILABLE', 'This page cannot be observed.');
       }
-      const command: PageCommand =
-        type === 'page.overlays.setHidden'
-          ? { version: PROTOCOL_VERSION, requestId, type, payload: { hidden } }
-          : { version: PROTOCOL_VERSION, requestId, type, payload: {} };
-      const raw = await this.#dependencies.tabs.sendMessage(tabId, command, { frameId: 0 });
+      const raw = await this.#dependencies.tabs.sendMessage(tabId, command(requestId), {
+        frameId: 0,
+      });
       if (!this.#isSuccessfulResponse(raw, requestId)) {
         throw new PageObservationPortError(
           'INVALID_PAGE_RESPONSE',

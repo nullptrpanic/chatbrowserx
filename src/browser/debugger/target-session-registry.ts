@@ -100,6 +100,9 @@ export class TargetSessionRegistry {
   readonly #states = new Map<number, MutableSessionState>();
   readonly #inFlight = new Map<number, Promise<MutableSessionState>>();
   readonly #generations = new Map<number, number>();
+  readonly #ownersByTab = new Map<number, Set<string>>();
+  readonly #tabsByOwner = new Map<string, Set<number>>();
+  readonly #lifecycleQueues = new Map<number, Promise<void>>();
 
   constructor(transport: DebuggerTransport) {
     this.#transport = transport;
@@ -130,6 +133,38 @@ export class TargetSessionRegistry {
     return snapshot(state);
   }
 
+  /** Retains one tab for a runner without attaching until its first CDP operation. */
+  retain(tabId: number, ownerId: string): Promise<void> {
+    if (ownerId.length === 0 || ownerId.length > 256) {
+      return Promise.reject(new Error('Browser session owner is invalid.'));
+    }
+    return this.#serializeLifecycle(tabId, () => {
+      const owners = this.#ownersByTab.get(tabId) ?? new Set<string>();
+      owners.add(ownerId);
+      this.#ownersByTab.set(tabId, owners);
+      const tabs = this.#tabsByOwner.get(ownerId) ?? new Set<number>();
+      tabs.add(tabId);
+      this.#tabsByOwner.set(ownerId, tabs);
+    });
+  }
+
+  /** Detaches tabs no longer retained by any runner, preserving concurrent tasks on shared tabs. */
+  async releaseOwner(ownerId: string): Promise<void> {
+    const tabs = [...(this.#tabsByOwner.get(ownerId) ?? [])];
+    this.#tabsByOwner.delete(ownerId);
+    await Promise.all(
+      tabs.map((tabId) =>
+        this.#serializeLifecycle(tabId, async () => {
+          const owners = this.#ownersByTab.get(tabId);
+          owners?.delete(ownerId);
+          if (owners !== undefined && owners.size > 0) return;
+          this.#ownersByTab.delete(tabId);
+          await this.#releaseSession(tabId);
+        }),
+      ),
+    );
+  }
+
   sessionForTarget(tabId: number, targetId: string): DebuggerSession | undefined {
     const session = this.#states.get(tabId)?.children.get(targetId)?.session;
     return session === undefined ? undefined : { ...session };
@@ -141,6 +176,18 @@ export class TargetSessionRegistry {
   }
 
   async release(tabId: number): Promise<void> {
+    await this.#serializeLifecycle(tabId, async () => {
+      for (const ownerId of this.#ownersByTab.get(tabId) ?? []) {
+        const tabs = this.#tabsByOwner.get(ownerId);
+        tabs?.delete(tabId);
+        if (tabs?.size === 0) this.#tabsByOwner.delete(ownerId);
+      }
+      this.#ownersByTab.delete(tabId);
+      await this.#releaseSession(tabId);
+    });
+  }
+
+  async #releaseSession(tabId: number): Promise<void> {
     const attaching = this.#inFlight.get(tabId);
     if (attaching) await attaching.catch(() => undefined);
     if (this.#states.has(tabId)) {
@@ -151,6 +198,15 @@ export class TargetSessionRegistry {
       }
     }
     this.invalidate(tabId);
+  }
+
+  #serializeLifecycle(tabId: number, action: () => void | Promise<void>): Promise<void> {
+    const previous = this.#lifecycleQueues.get(tabId) ?? Promise.resolve();
+    const current = previous.catch(() => undefined).then(action);
+    this.#lifecycleQueues.set(tabId, current);
+    return current.finally(() => {
+      if (this.#lifecycleQueues.get(tabId) === current) this.#lifecycleQueues.delete(tabId);
+    });
   }
 
   async #attach(tabId: number): Promise<MutableSessionState> {

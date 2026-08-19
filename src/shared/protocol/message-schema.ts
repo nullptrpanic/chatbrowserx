@@ -258,12 +258,46 @@ const pageContentReadSchema = z
   })
   .strict();
 
-const pageElementsObserveSchema = z
+const pageActionPerformSchema = z
   .object({
     version: z.literal(PROTOCOL_VERSION),
     requestId: requestIdSchema,
-    type: z.literal('page.elements.observe'),
-    payload: z.object({}).strict(),
+    type: z.literal('page.action.perform'),
+    payload: z.discriminatedUnion('action', [
+      z
+        .object({
+          action: z.literal('click'),
+          ref: z.string().trim().min(1).max(128),
+          button: z.enum(['left', 'right', 'middle']),
+          count: z.union([z.literal(1), z.literal(2)]),
+        })
+        .strict(),
+      z
+        .object({
+          action: z.literal('type'),
+          ref: z.string().trim().min(1).max(128),
+          text: z.string().max(20_000),
+          replace: z.boolean(),
+          submit: z.boolean(),
+        })
+        .strict(),
+      z
+        .object({
+          action: z.literal('scroll'),
+          target: z.string().trim().min(1).max(128),
+          deltaX: z.number().int().min(-10_000).max(10_000),
+          deltaY: z.number().int().min(-10_000).max(10_000),
+        })
+        .strict()
+        .refine(({ deltaX, deltaY }) => deltaX !== 0 || deltaY !== 0),
+      z
+        .object({
+          action: z.literal('select'),
+          ref: z.string().trim().min(1).max(128),
+          value: z.string().max(2_000),
+        })
+        .strict(),
+    ]),
   })
   .strict();
 
@@ -331,7 +365,7 @@ const pageImagePreviewOpenSchema = z
 export const pageCommandSchema: z.ZodType<PageCommand> = z.discriminatedUnion('type', [
   pagePingSchema,
   pageContentReadSchema,
-  pageElementsObserveSchema,
+  pageActionPerformSchema,
   pagePointerShowSchema,
   pageScreenshotSelectSchema,
   pageOverlaysSetHiddenSchema,

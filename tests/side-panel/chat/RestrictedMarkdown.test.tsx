@@ -3,6 +3,35 @@ import { describe, expect, it } from 'vitest';
 import { RestrictedMarkdown } from '../../../src/side-panel/chat/RestrictedMarkdown';
 
 describe('RestrictedMarkdown', () => {
+  it('renders a GFM table as semantic rows inside a horizontal scroll container', () => {
+    render(
+      <RestrictedMarkdown
+        text={[
+          '| 字段 | 页面内容 |',
+          '| :--- | ---: |',
+          '| 需求名称 | 网络出口管控、流量审计 |',
+          '| 核心价值 | 记录每次 `toolcall` 的网络访问目标 |',
+        ].join('\n')}
+      />,
+    );
+
+    const table = screen.getByRole('table');
+    const headers = within(table).getAllByRole('columnheader');
+    const rows = within(table).getAllByRole('row');
+
+    expect(table.parentElement).toHaveClass('markdown-table-scroll');
+    expect(headers).toHaveLength(2);
+    expect(headers[0]).toHaveTextContent('字段');
+    expect(headers[0]).toHaveStyle({ textAlign: 'left' });
+    expect(headers[1]).toHaveTextContent('页面内容');
+    expect(headers[1]).toHaveStyle({ textAlign: 'right' });
+    expect(rows).toHaveLength(3);
+    expect(within(rows[1] as HTMLElement).getByRole('cell', { name: '需求名称' })).toBeVisible();
+    expect(within(rows[2] as HTMLElement).getByText('toolcall')).toHaveClass(
+      'markdown-inline-code',
+    );
+  });
+
   it('renders common safe Markdown blocks and distinguishes fenced from inline code', () => {
     const { container } = render(
       <RestrictedMarkdown

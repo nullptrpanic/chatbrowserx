@@ -1,4 +1,5 @@
 import type { ModelInputItem, ModelMessageContent, ModelRequest } from '../provider-types';
+import { providerErrorFromCode } from '../provider-errors';
 import { CODEX_MODEL, CODEX_RESPONSES_URL } from './codex-constants';
 import { toCodexToolName } from './codex-tool-name';
 
@@ -56,6 +57,11 @@ function mapInputItem(item: ModelInputItem): Readonly<Record<string, unknown>> {
 
 /** Builds the only supported Codex URL, headers, and request body. */
 export function buildCodexRequest(input: BuildCodexRequestInput): CodexHttpRequest {
+  const requestedToolChoice = input.request.toolChoice ?? 'auto';
+  if (input.request.tools.length === 0 && requestedToolChoice !== 'auto') {
+    throw providerErrorFromCode('INVALID_RESPONSE');
+  }
+
   const toolContract =
     input.request.tools.length === 0
       ? {}
@@ -64,7 +70,18 @@ export function buildCodexRequest(input: BuildCodexRequestInput): CodexHttpReque
             ...tool,
             name: toCodexToolName(tool.name),
           })),
-          tool_choice: 'auto',
+          tool_choice:
+            requestedToolChoice === 'auto'
+              ? requestedToolChoice
+              : (() => {
+                  if (!input.request.tools.some((tool) => tool.name === requestedToolChoice.name)) {
+                    throw providerErrorFromCode('INVALID_RESPONSE');
+                  }
+                  return {
+                    type: requestedToolChoice.type,
+                    name: toCodexToolName(requestedToolChoice.name),
+                  };
+                })(),
           parallel_tool_calls: false,
         };
 

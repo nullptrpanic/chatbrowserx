@@ -1,4 +1,5 @@
 import { describe, expect, it } from 'vitest';
+import { CONTEXT_COMMIT_TOOL_DEFINITION } from '../../../src/agent/tools/context-commit-tool-schema';
 import { CODEX_MODEL, CODEX_RESPONSES_URL } from '../../../src/providers/codex/codex-constants';
 import { buildCodexRequest } from '../../../src/providers/codex/codex-request';
 import type { ModelRequest } from '../../../src/providers/provider-types';
@@ -15,7 +16,11 @@ const MODEL_REQUEST: ModelRequest = {
       role: 'user',
       content: [
         { type: 'input_text', text: 'Open the result.' },
-        { type: 'input_image', imageUrl: 'data:image/png;base64,AAAA', detail: 'high' },
+        {
+          type: 'input_image',
+          imageUrl: 'data:image/png;base64,AAAA',
+          detail: 'high',
+        },
       ],
     },
     {
@@ -125,6 +130,72 @@ describe('buildCodexRequest', () => {
     expect(JSON.stringify(request.body).length).toBeLessThan(1_024);
   });
 
+  it('defaults to auto and maps explicit auto or one named registered tool', () => {
+    const defaultChoice = buildCodexRequest({
+      accessToken: 'synthetic-token-value',
+      accountId: 'acct_123',
+      request: MODEL_REQUEST,
+    });
+    const explicitAuto = buildCodexRequest({
+      accessToken: 'synthetic-token-value',
+      accountId: 'acct_123',
+      request: { ...MODEL_REQUEST, toolChoice: 'auto' },
+    });
+    const namedCommit = buildCodexRequest({
+      accessToken: 'synthetic-token-value',
+      accountId: 'acct_123',
+      request: {
+        ...MODEL_REQUEST,
+        tools: [...MODEL_REQUEST.tools, CONTEXT_COMMIT_TOOL_DEFINITION],
+        toolChoice: { type: 'function', name: 'commit_context' },
+      },
+    });
+
+    expect(defaultChoice.body.tool_choice).toBe('auto');
+    expect(explicitAuto.body.tool_choice).toBe('auto');
+    expect(namedCommit.body.tool_choice).toEqual({ type: 'function', name: 'commit_context' });
+  });
+
+  it('rejects named choices that are unavailable or invalid on the Codex wire', () => {
+    expect(() =>
+      buildCodexRequest({
+        accessToken: 'synthetic-token-value',
+        accountId: 'acct_123',
+        request: {
+          ...MODEL_REQUEST,
+          toolChoice: { type: 'function', name: 'commit_context' },
+        },
+      }),
+    ).toThrow('The model provider returned an invalid response.');
+    expect(() =>
+      buildCodexRequest({
+        accessToken: 'synthetic-token-value',
+        accountId: 'acct_123',
+        request: {
+          ...MODEL_REQUEST,
+          tools: [],
+          toolChoice: { type: 'function', name: 'commit_context' },
+        },
+      }),
+    ).toThrow('The model provider returned an invalid response.');
+    expect(() =>
+      buildCodexRequest({
+        accessToken: 'synthetic-token-value',
+        accountId: 'acct_123',
+        request: {
+          ...MODEL_REQUEST,
+          tools: [
+            {
+              ...CONTEXT_COMMIT_TOOL_DEFINITION,
+              name: 'invalid tool name',
+            },
+          ],
+          toolChoice: { type: 'function', name: 'invalid tool name' },
+        },
+      }),
+    ).toThrow('The model provider returned an invalid response.');
+  });
+
   it('builds the single fixed Codex HTTP contract and maps normalized input', () => {
     const request = buildCodexRequest({
       accessToken: 'synthetic-token-value',
@@ -149,7 +220,11 @@ describe('buildCodexRequest', () => {
           role: 'user',
           content: [
             { type: 'input_text', text: 'Open the result.' },
-            { type: 'input_image', image_url: 'data:image/png;base64,AAAA', detail: 'high' },
+            {
+              type: 'input_image',
+              image_url: 'data:image/png;base64,AAAA',
+              detail: 'high',
+            },
           ],
         },
         {
@@ -196,7 +271,11 @@ describe('buildCodexRequest', () => {
       type: 'function' as const,
       name,
       description: `${name} description`,
-      parameters: { type: 'object', properties: {}, additionalProperties: false },
+      parameters: {
+        type: 'object',
+        properties: {},
+        additionalProperties: false,
+      },
       strict: true as const,
     }));
     const request = buildCodexRequest({

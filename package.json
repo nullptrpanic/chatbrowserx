@@ -20,7 +20,6 @@
     "check:codex": "tsx scripts/check-codex-contract.ts"
   },
   "dependencies": {
-    "dom-accessibility-api": "^0.7.1",
     "idb": "8.0.3",
     "lucide-react": "1.31.0",
     "react": "19.2.8",

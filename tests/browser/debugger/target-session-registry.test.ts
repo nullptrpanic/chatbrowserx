@@ -172,6 +172,22 @@ describe('TargetSessionRegistry', () => {
     expect(String(thrown)).not.toContain('sensitive target details');
   });
 
+  it('detaches only after the last task owner releases a shared tab', async () => {
+    const debuggerTransport = transport();
+    const registry = new TargetSessionRegistry(debuggerTransport);
+    await registry.retain(7, 'runner_1');
+    await registry.ensure(7, new AbortController().signal);
+    await registry.retain(7, 'runner_2');
+
+    await registry.releaseOwner('runner_1');
+    expect(debuggerTransport.detach).not.toHaveBeenCalled();
+    expect(await registry.ensure(7, new AbortController().signal)).toMatchObject({ tabId: 7 });
+
+    await registry.releaseOwner('runner_2');
+    expect(debuggerTransport.detach).toHaveBeenCalledOnce();
+    expect(debuggerTransport.detach).toHaveBeenCalledWith(7);
+  });
+
   it('does not attach when the action is already aborted', async () => {
     const debuggerTransport = transport();
     const registry = new TargetSessionRegistry(debuggerTransport);

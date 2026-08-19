@@ -6,6 +6,15 @@ const inlinePattern =
 const unorderedItemPattern = /^\s*[-+*]\s+(.+)$/;
 const orderedItemPattern = /^\s*\d+[.)]\s+(.+)$/;
 
+type TableAlignment = 'left' | 'center' | 'right' | undefined;
+
+interface ParsedMarkdownTable {
+  readonly headers: readonly string[];
+  readonly alignments: readonly TableAlignment[];
+  readonly rows: readonly (readonly string[])[];
+  readonly nextIndex: number;
+}
+
 /** Renders a safe inline Markdown subset while React escapes all remaining text. */
 function renderInline(text: string, keyPrefix: string): ReactNode[] {
   return text.split(inlinePattern).map((part, index) => {
@@ -49,6 +58,130 @@ function renderLines(lines: readonly string[], keyPrefix: string): ReactNode[] {
   ]);
 }
 
+function isEscaped(text: string, index: number): boolean {
+  let backslashes = 0;
+  for (let cursor = index - 1; cursor >= 0 && text[cursor] === '\\'; cursor -= 1) {
+    backslashes += 1;
+  }
+  return backslashes % 2 === 1;
+}
+
+/** Splits one pipe row without treating escaped or inline-code pipes as column boundaries. */
+function splitTableRow(line: string): readonly string[] | null {
+  let source = line.trim();
+  if (!source.includes('|')) return null;
+
+  let hasOuterPipe = false;
+  if (source.startsWith('|')) {
+    source = source.slice(1);
+    hasOuterPipe = true;
+  }
+  if (source.endsWith('|') && !isEscaped(source, source.length - 1)) {
+    source = source.slice(0, -1);
+    hasOuterPipe = true;
+  }
+
+  const cells: string[] = [];
+  let cell = '';
+  let insideCode = false;
+  let foundSeparator = false;
+  for (let index = 0; index < source.length; index += 1) {
+    const character = source[index] ?? '';
+    if (character === '\\' && source[index + 1] === '|') {
+      cell += '|';
+      index += 1;
+      continue;
+    }
+    if (character === '`' && !isEscaped(source, index)) {
+      insideCode = !insideCode;
+      cell += character;
+      continue;
+    }
+    if (character === '|' && !insideCode) {
+      cells.push(cell.trim());
+      cell = '';
+      foundSeparator = true;
+      continue;
+    }
+    cell += character;
+  }
+  cells.push(cell.trim());
+  return hasOuterPipe || foundSeparator ? cells : null;
+}
+
+function tableAlignment(value: string): TableAlignment | null {
+  const separator = /^(:)?-{3,}(:)?$/.exec(value.trim());
+  if (separator === null) return null;
+  if (separator[1] && separator[2]) return 'center';
+  if (separator[1]) return 'left';
+  if (separator[2]) return 'right';
+  return undefined;
+}
+
+/** Recognizes one bounded GFM-style table beginning at the requested prose line. */
+function parseTable(lines: readonly string[], startIndex: number): ParsedMarkdownTable | null {
+  const headers = splitTableRow(lines[startIndex] ?? '');
+  const separators = splitTableRow(lines[startIndex + 1] ?? '');
+  if (headers === null || separators === null || headers.length !== separators.length) return null;
+
+  const alignments = separators.map(tableAlignment);
+  if (alignments.some((alignment) => alignment === null)) return null;
+
+  const rows: string[][] = [];
+  let index = startIndex + 2;
+  while (index < lines.length && (lines[index] ?? '').trim().length > 0) {
+    const cells = splitTableRow(lines[index] ?? '');
+    if (cells === null) break;
+    rows.push(headers.map((_, cellIndex) => cells[cellIndex] ?? ''));
+    index += 1;
+  }
+  return {
+    headers,
+    alignments: alignments as readonly TableAlignment[],
+    rows,
+    nextIndex: index,
+  };
+}
+
+function renderTable(table: ParsedMarkdownTable, keyPrefix: string): ReactNode {
+  const alignmentStyle = (index: number) => {
+    const textAlign = table.alignments[index];
+    return textAlign === undefined ? undefined : { textAlign };
+  };
+  return (
+    <div className="markdown-table-scroll" key={`${keyPrefix}:table`}>
+      <table>
+        <thead>
+          <tr>
+            {table.headers.map((header, index) => (
+              <th key={`${keyPrefix}:header:${String(index)}`} style={alignmentStyle(index)}>
+                {renderInline(header, `${keyPrefix}:header:${String(index)}`)}
+              </th>
+            ))}
+          </tr>
+        </thead>
+        <tbody>
+          {table.rows.map((row, rowIndex) => (
+            <tr key={`${keyPrefix}:row:${String(rowIndex)}`}>
+              {row.map((cell, cellIndex) => (
+                <td
+                  key={`${keyPrefix}:row:${String(rowIndex)}:cell:${String(cellIndex)}`}
+                  style={alignmentStyle(cellIndex)}
+                >
+                  {renderInline(
+                    cell,
+                    `${keyPrefix}:row:${String(rowIndex)}:cell:${String(cellIndex)}`,
+                  )}
+                </td>
+              ))}
+            </tr>
+          ))}
+        </tbody>
+      </table>
+    </div>
+  );
+}
+
 function isBlockStart(line: string): boolean {
   return (
     /^#{1,6}\s+/.test(line) ||
@@ -68,6 +201,13 @@ function renderProse(text: string, keyPrefix: string): ReactNode[] {
     const line = lines[index] ?? '';
     if (line.trim().length === 0) {
       index += 1;
+      continue;
+    }
+
+    const table = parseTable(lines, index);
+    if (table !== null) {
+      nodes.push(renderTable(table, `${keyPrefix}:${String(index)}`));
+      index = table.nextIndex;
       continue;
     }
 
@@ -140,7 +280,8 @@ function renderProse(text: string, keyPrefix: string): ReactNode[] {
     while (
       index < lines.length &&
       (lines[index] ?? '').trim().length > 0 &&
-      !isBlockStart(lines[index] ?? '')
+      !isBlockStart(lines[index] ?? '') &&
+      parseTable(lines, index) === null
     ) {
       paragraphLines.push(lines[index] ?? '');
       index += 1;

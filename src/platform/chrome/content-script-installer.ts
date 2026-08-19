@@ -105,11 +105,10 @@ export class ContentScriptInstaller {
       type: 'page.ping',
       payload: {},
     };
-    let alreadyInstalled = false;
     try {
       const response = await this.#dependencies.tabs.sendMessage(tabId, ping, { frameId: 0 });
       if (isInstalledResponse(response, requestId)) {
-        alreadyInstalled = true;
+        return { status: 'already_installed', originPattern };
       }
     } catch {
       // An absent receiver is the expected signal to install the bundle.
@@ -120,7 +119,7 @@ export class ContentScriptInstaller {
       files: [this.#dependencies.scriptFile],
     });
     return {
-      status: alreadyInstalled ? 'already_installed' : 'installed',
+      status: 'installed',
       originPattern,
     };
   }

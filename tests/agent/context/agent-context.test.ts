@@ -1,8 +1,5 @@
 import { describe, expect, it, vi } from 'vitest';
-import {
-  BROWSER_SYSTEM_INSTRUCTIONS,
-  buildAgentContext,
-} from '../../../src/agent/context/agent-context';
+import { buildAgentContext } from '../../../src/agent/context/agent-context';
 import { IMAGE_POLICY } from '../../../src/attachments/attachment-policy';
 import type { AttachmentRepository } from '../../../src/persistence/attachment-repository';
 import type { ConversationRepository } from '../../../src/persistence/conversation-repository';
@@ -107,10 +104,42 @@ function contextDependencies(
   attachments: Pick<AttachmentRepository, 'get'>,
   tasks: Pick<TaskRepository, 'listByConversation'> = taskRepository(messages),
 ) {
-  return { conversations: conversationRepository(messages), attachments, tasks };
+  return {
+    conversations: conversationRepository(messages),
+    attachments,
+    tasks,
+  };
 }
 
 describe('buildAgentContext', () => {
+  it('passes the configured system prompt without injecting browser instructions', async () => {
+    const context = await buildAgentContext(
+      {
+        task: TASK,
+        checkpoint: {
+          ...CHECKPOINT,
+          browserTargetTabId: 23,
+          completedToolResults: [],
+        },
+        customSystemPrompt: '你是一个浏览器助手',
+        historyMessageLimit: 50,
+      },
+      contextDependencies(
+        [
+          message({
+            id: 'current',
+            taskId: TASK.id,
+            role: 'user',
+            text: 'Analyze this page.',
+          }),
+        ],
+        { get: vi.fn(async () => undefined) },
+      ),
+    );
+
+    expect(context.systemPrompt).toBe('你是一个浏览器助手');
+  });
+
   it('rehydrates screenshot attachments only while materializing a function output', async () => {
     const messages = [
       message({
@@ -124,7 +153,9 @@ describe('buildAgentContext', () => {
       id === 'attachment_screenshot'
         ? {
             id,
-            blob: new Blob([new Uint8Array([137, 80, 78, 71])], { type: 'image/png' }),
+            blob: new Blob([new Uint8Array([137, 80, 78, 71])], {
+              type: 'image/png',
+            }),
             mimeType: 'image/png',
             byteSize: 4,
             width: 800,
@@ -177,7 +208,10 @@ describe('buildAgentContext', () => {
       type: 'function_call_output',
       callId: 'call_screenshot',
       output: [
-        { type: 'input_text', text: '{"ok":true,"data":{"mode":"screenshot"}}' },
+        {
+          type: 'input_text',
+          text: '{"ok":true,"data":{"mode":"screenshot"}}',
+        },
         {
           type: 'input_image',
           imageUrl: 'data:image/png;base64,iVBORw==',
@@ -186,6 +220,225 @@ describe('buildAgentContext', () => {
       ],
     });
     expect(get).toHaveBeenCalledWith('attachment_screenshot');
+  });
+
+  it('uses compact continuation as authoritative and omits older raw text and screenshots', async () => {
+    const largeInspectPayload = `OLD_INSPECT_PAYLOAD_${'x'.repeat(20_000)}`;
+    const commitArguments = JSON.stringify({
+      state: 'Goal: continue from the checkpoint. Verified: inspection completed.',
+    });
+    const commitOutput =
+      '{"ok":true,"compactedCalls":1,"releasedTextChars":20000,"releasedImages":1}';
+    const messages = [
+      message({
+        id: 'current',
+        taskId: TASK.id,
+        role: 'user',
+        text: 'Inspect the page and continue.',
+      }),
+    ];
+    const get = vi.fn(async (id: string) =>
+      id === 'old_screenshot'
+        ? {
+            id,
+            blob: new Blob([new Uint8Array([1])], { type: 'image/png' }),
+            mimeType: 'image/png',
+            byteSize: 1,
+            width: 1,
+            height: 1,
+            source: 'visual_fallback' as const,
+            createdAt: 150,
+          }
+        : undefined,
+    );
+
+    const context = await buildAgentContext(
+      {
+        task: TASK,
+        checkpoint: {
+          ...CHECKPOINT,
+          completedToolResults: [
+            {
+              callId: 'call_old_inspect',
+              toolName: 'browser_inspect',
+              argumentsJson: '{"mode":"screenshot"}',
+              output: largeInspectPayload,
+              resultRef: 'result_old_inspect',
+              attachmentIds: ['old_screenshot'],
+            },
+            {
+              callId: 'call_commit',
+              toolName: 'commit_context',
+              argumentsJson: commitArguments,
+              output: commitOutput,
+              resultRef: 'result_commit',
+              attachmentIds: [],
+            },
+          ],
+          continuationItems: [
+            { type: 'message_ref', messageId: 'current' },
+            {
+              type: 'function_call',
+              callId: 'call_commit',
+              name: 'commit_context',
+              argumentsJson: commitArguments,
+            },
+            {
+              type: 'function_call_output',
+              callId: 'call_commit',
+              output: commitOutput,
+              resultRef: 'result_commit',
+              attachmentIds: [],
+            },
+          ],
+        },
+        customSystemPrompt: '',
+        historyMessageLimit: 50,
+      },
+      contextDependencies(messages, { get }),
+    );
+
+    const serialized = JSON.stringify(context.input);
+    expect(serialized).toContain('Goal: continue from the checkpoint.');
+    expect(serialized).not.toContain(largeInspectPayload);
+    expect(serialized).not.toContain('data:image/png;base64');
+    expect(get).not.toHaveBeenCalledWith('old_screenshot');
+  });
+
+  it('keeps supplements and post-commit results ordered while loading only new screenshots', async () => {
+    const commitArguments = JSON.stringify({ state: 'Goal: continue with the corrected detail.' });
+    const commitOutput = '{"ok":true,"compactedCalls":1,"releasedTextChars":50,"releasedImages":1}';
+    const messages = [
+      message({
+        id: 'current',
+        taskId: TASK.id,
+        role: 'user',
+        text: 'Inspect the form.',
+      }),
+      message({
+        id: 'supplement',
+        kind: 'supplement',
+        taskId: TASK.id,
+        role: 'user',
+        text: 'Use the corrected account.',
+      }),
+    ];
+    const get = vi.fn(async (id: string) =>
+      id === 'new_screenshot' || id === 'old_screenshot'
+        ? {
+            id,
+            blob: new Blob([new Uint8Array([id === 'new_screenshot' ? 2 : 1])], {
+              type: 'image/png',
+            }),
+            mimeType: 'image/png',
+            byteSize: 1,
+            width: 1,
+            height: 1,
+            source: 'visual_fallback' as const,
+            createdAt: 200,
+          }
+        : undefined,
+    );
+
+    const context = await buildAgentContext(
+      {
+        task: TASK,
+        checkpoint: {
+          ...CHECKPOINT,
+          completedToolResults: [
+            {
+              callId: 'call_old_inspect',
+              toolName: 'browser_inspect',
+              argumentsJson: '{}',
+              output: 'old output',
+              resultRef: 'result_old_inspect',
+              attachmentIds: ['old_screenshot'],
+            },
+            {
+              callId: 'call_commit',
+              toolName: 'commit_context',
+              argumentsJson: commitArguments,
+              output: commitOutput,
+              resultRef: 'result_commit',
+              attachmentIds: [],
+            },
+            {
+              callId: 'call_new_inspect',
+              toolName: 'browser_inspect',
+              argumentsJson: '{"mode":"screenshot"}',
+              output: 'new output',
+              resultRef: 'result_new_inspect',
+              attachmentIds: ['new_screenshot'],
+            },
+          ],
+          continuationItems: [
+            { type: 'message_ref', messageId: 'current' },
+            { type: 'message_ref', messageId: 'supplement' },
+            {
+              type: 'function_call',
+              callId: 'call_commit',
+              name: 'commit_context',
+              argumentsJson: commitArguments,
+            },
+            {
+              type: 'function_call_output',
+              callId: 'call_commit',
+              output: commitOutput,
+              resultRef: 'result_commit',
+              attachmentIds: [],
+            },
+            {
+              type: 'function_call',
+              callId: 'call_new_inspect',
+              name: 'browser_inspect',
+              argumentsJson: '{"mode":"screenshot"}',
+            },
+            {
+              type: 'function_call_output',
+              callId: 'call_new_inspect',
+              output: 'new output',
+              resultRef: 'result_new_inspect',
+              attachmentIds: ['new_screenshot'],
+            },
+          ],
+        },
+        customSystemPrompt: '',
+        historyMessageLimit: 50,
+      },
+      contextDependencies(messages, { get }),
+    );
+
+    expect(context.input.map((item) => item.type)).toEqual([
+      'message',
+      'message',
+      'function_call',
+      'function_call_output',
+      'function_call',
+      'function_call_output',
+    ]);
+    expect(context.input[1]).toMatchObject({
+      type: 'message',
+      content: [
+        {
+          type: 'input_text',
+          text: expect.stringContaining('Use the corrected account.'),
+        },
+      ],
+    });
+    expect(context.input.at(-1)).toMatchObject({
+      type: 'function_call_output',
+      callId: 'call_new_inspect',
+      output: [
+        { type: 'input_text', text: 'new output' },
+        {
+          type: 'input_image',
+          imageUrl: 'data:image/png;base64,Ag==',
+          detail: 'original',
+        },
+      ],
+    });
+    expect(get).toHaveBeenCalledWith('new_screenshot');
+    expect(get).not.toHaveBeenCalledWith('old_screenshot');
   });
 
   it('replays ordered completed history without duplicating the current task', async () => {
@@ -260,7 +513,7 @@ describe('buildAgentContext', () => {
       contextDependencies(messages, attachments),
     );
 
-    expect(context.systemPrompt).toBe(`${BROWSER_SYSTEM_INSTRUCTIONS}\n\nPrefer primary sources.`);
+    expect(context.systemPrompt).toBe('Prefer primary sources.');
     expect(context.input).toEqual([
       {
         type: 'message',
@@ -277,7 +530,11 @@ describe('buildAgentContext', () => {
         role: 'user',
         content: [
           { type: 'input_text', text: 'Use this screenshot.' },
-          { type: 'input_image', imageUrl: 'data:image/png;base64,AAEC', detail: 'high' },
+          {
+            type: 'input_image',
+            imageUrl: 'data:image/png;base64,AAEC',
+            detail: 'high',
+          },
         ],
       },
       {
@@ -310,7 +567,14 @@ describe('buildAgentContext', () => {
         historyMessageLimit: 50,
       },
       contextDependencies(
-        [message({ id: 'current', taskId: 'task_1', role: 'user', text: 'Hello model.' })],
+        [
+          message({
+            id: 'current',
+            taskId: 'task_1',
+            role: 'user',
+            text: 'Hello model.',
+          }),
+        ],
         { get: attachmentGet },
       ),
     );
@@ -335,7 +599,14 @@ describe('buildAgentContext', () => {
           historyMessageLimit: 50,
         },
         contextDependencies(
-          [message({ id: 'old', taskId: 'task_old', role: 'user', text: 'Old task input' })],
+          [
+            message({
+              id: 'old',
+              taskId: 'task_old',
+              role: 'user',
+              text: 'Old task input',
+            }),
+          ],
           { get: vi.fn(async () => undefined) },
         ),
       ),
@@ -431,9 +702,11 @@ describe('buildAgentContext', () => {
       item.type === 'message' ? item.content.filter((part) => part.type === 'input_image') : [],
     );
 
-    expect(context.systemPrompt).toBe(BROWSER_SYSTEM_INSTRUCTIONS);
+    expect(context.systemPrompt).toBe('');
     expect(imageParts).toHaveLength(IMAGE_POLICY.maxCount);
-    expect(imageParts.at(-1)).toMatchObject({ imageUrl: 'data:image/gif;base64,CA==' });
+    expect(imageParts.at(-1)).toMatchObject({
+      imageUrl: 'data:image/gif;base64,CA==',
+    });
   });
 
   it('does not truncate a selected historical message by character count', async () => {
@@ -681,7 +954,11 @@ describe('buildAgentContext', () => {
             type: 'input_text',
             text: 'Additional information supplied while the task was running:\n\nUse official sources',
           },
-          { type: 'input_image', imageUrl: 'data:image/png;base64,AQ==', detail: 'high' },
+          {
+            type: 'input_image',
+            imageUrl: 'data:image/png;base64,AQ==',
+            detail: 'high',
+          },
         ],
       },
       {

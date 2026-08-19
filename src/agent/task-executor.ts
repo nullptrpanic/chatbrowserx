@@ -13,9 +13,14 @@ import type { TaskError } from '../tasks/task-errors';
 import { TaskLeaseManager } from '../tasks/task-lease';
 import { retainTaskReply } from '../tasks/task-reply-retention';
 import { transitionTask } from '../tasks/task-transition';
-import type { TaskEvent, TaskEventType, TaskRun } from '../tasks/task-types';
-import type { AgentEvent, AgentPlanner } from './execution-types';
+import type { TaskEvent, TaskEventType, TaskModelTurnMetrics, TaskRun } from '../tasks/task-types';
+import type { AgentEvent, AgentModelTurn, AgentPlanner } from './execution-types';
+import { compactContextAtCommit } from './context/context-commit';
 import { parseBrowserToolCall } from './tools/browser-tool-schema';
+import {
+  CONTEXT_COMMIT_TOOL_NAME,
+  parseContextCommitToolCall,
+} from './tools/context-commit-tool-schema';
 import { parseTavilyToolCall } from './tools/tavily-tool-schema';
 
 export type TaskExecutorErrorCode =
@@ -57,6 +62,9 @@ interface BoundaryInput {
   readonly continuationItems?: readonly ContinuationItem[];
   readonly pendingToolCall?: PendingToolCall | null;
   readonly reasoningSummary?: string;
+  readonly modelTurn?: TaskModelTurnMetrics;
+  readonly browserTargetTabId?: number | null;
+  readonly supplementIds?: readonly string[];
 }
 
 type AgentOutcome = Exclude<AgentEvent, { readonly type: 'reasoning.summary' }>;
@@ -65,6 +73,25 @@ const runnableStatuses = new Set<TaskRun['status']>(['queued', 'planning']);
 const TAVILY_TOOL_CALL_LIMIT = 8;
 const BROWSER_TOOL_CALL_LIMIT = 64;
 const tavilyToolNames = new Set(['tavily_search', 'tavily_extract', 'tavily_crawl']);
+const taskScopedBrowserOperations = new Set<ReturnType<typeof parseBrowserToolCall>['operation']>([
+  'navigate',
+  'reload',
+  'inspect',
+  'click',
+  'type',
+  'keypress',
+  'scroll',
+  'hover',
+  'select',
+  'drag',
+  'wait',
+  'click_point',
+  'drag_point',
+  'network_start',
+  'network_list',
+  'network_get',
+  'network_stop',
+]);
 
 function throwIfAborted(signal: AbortSignal): void {
   if (signal.aborted) throw new DOMException('Task execution was aborted.', 'AbortError');
@@ -102,6 +129,124 @@ function toolCallLimitError(family: 'Tavily' | 'browser'): TaskError {
     userMessage: `The task exceeded the ${family} tool-call limit.`,
     evidenceRef: null,
   };
+}
+
+/** Resolves legacy checkpoints against the immutable tab captured by their TaskRun. */
+function currentBrowserTarget(snapshot: TaskSnapshot): number | null {
+  return snapshot.checkpoint.browserTargetTabId === undefined
+    ? snapshot.task.tabId
+    : snapshot.checkpoint.browserTargetTabId;
+}
+
+/** Reads only the trusted internal success envelope fields needed to advance tab state. */
+function successfulBrowserTabId(output: string): number | undefined {
+  try {
+    const value: unknown = JSON.parse(output);
+    if (
+      typeof value !== 'object' ||
+      value === null ||
+      !('ok' in value) ||
+      value.ok !== true ||
+      !('tabId' in value) ||
+      typeof value.tabId !== 'number' ||
+      !Number.isSafeInteger(value.tabId) ||
+      value.tabId < 0 ||
+      value.tabId > 2_147_483_647
+    ) {
+      return undefined;
+    }
+    return value.tabId;
+  } catch {
+    return undefined;
+  }
+}
+
+/** Advances the durable target only after a browser operation proves its state change succeeded. */
+function browserTargetAfterCall(
+  snapshot: TaskSnapshot,
+  call: ReturnType<typeof parseBrowserToolCall>,
+  output: string,
+): number | null | undefined {
+  const resultTabId = successfulBrowserTabId(output);
+  if (resultTabId === undefined) return undefined;
+  if (
+    call.operation === 'close_tab' &&
+    (call.arguments as { readonly tabId: number }).tabId === currentBrowserTarget(snapshot)
+  ) {
+    return null;
+  }
+  if (
+    call.operation === 'switch_tab' ||
+    call.operation === 'open_tab' ||
+    taskScopedBrowserOperations.has(call.operation)
+  ) {
+    return resultTabId;
+  }
+  return undefined;
+}
+
+interface BrowserTypeArguments {
+  readonly tabId?: number;
+  readonly ref: string;
+  readonly text: string;
+  readonly replace: boolean;
+  readonly submit: boolean;
+}
+
+function resolvedBrowserTypeTabId(arguments_: BrowserTypeArguments, currentTabId: number): number {
+  return arguments_.tabId === undefined || arguments_.tabId === 0 ? currentTabId : arguments_.tabId;
+}
+
+/** Detects an immediately repeated failed editor write before it can redispatch a mutation. */
+function duplicateFailedBrowserTypeOutput(
+  snapshot: TaskSnapshot,
+  call: ReturnType<typeof parseBrowserToolCall>,
+): string | null {
+  if (call.operation !== 'type') return null;
+  const previous = snapshot.checkpoint.completedToolResults.findLast((result) =>
+    result.toolName.startsWith('browser_'),
+  );
+  if (previous?.toolName !== 'browser_type') return null;
+  try {
+    const envelope: unknown = JSON.parse(previous.output);
+    if (typeof envelope !== 'object' || envelope === null || !('code' in envelope)) return null;
+    if (
+      envelope.code !== 'TYPE_VERIFICATION_FAILED' &&
+      envelope.code !== 'DUPLICATE_FAILED_ACTION'
+    ) {
+      return null;
+    }
+    const previousCall = parseBrowserToolCall({
+      callId: previous.callId,
+      name: previous.toolName,
+      argumentsJson: previous.argumentsJson,
+    });
+    if (previousCall.operation !== 'type') return null;
+    const currentArguments = call.arguments as BrowserTypeArguments;
+    const previousArguments = previousCall.arguments as BrowserTypeArguments;
+    const currentTarget = currentBrowserTarget(snapshot);
+    if (
+      currentTarget === null ||
+      resolvedBrowserTypeTabId(currentArguments, currentTarget) !==
+        resolvedBrowserTypeTabId(previousArguments, currentTarget) ||
+      currentArguments.ref !== previousArguments.ref ||
+      currentArguments.text !== previousArguments.text ||
+      currentArguments.replace !== previousArguments.replace ||
+      currentArguments.submit !== previousArguments.submit
+    ) {
+      return null;
+    }
+    return JSON.stringify({
+      ok: false,
+      code: 'DUPLICATE_FAILED_ACTION',
+      message:
+        'The same editor input already failed on this page state. Inspect the page before trying again.',
+      retryable: false,
+      needsInspect: true,
+    });
+  } catch {
+    return null;
+  }
 }
 
 function taskErrorFromProvider(error: ProviderError, source: 'model' | 'tavily'): TaskError {
@@ -150,6 +295,33 @@ function taskErrorFromProvider(error: ProviderError, source: 'model' | 'tavily')
         evidenceRef: null,
       };
   }
+}
+
+/** Projects one completed provider turn onto bounded numeric task telemetry. */
+function taskModelTurnMetrics(turn: AgentModelTurn): TaskModelTurnMetrics {
+  const usage = turn.usage;
+  return {
+    inputItemCount: turn.inputItemCount,
+    elapsedMs: turn.elapsedMs,
+    firstEventMs: turn.firstEventMs,
+    ...(turn.firstTextMs === undefined ? {} : { firstTextMs: turn.firstTextMs }),
+    ...(usage === null
+      ? {}
+      : {
+          inputTokens: usage.inputTokens,
+          outputTokens: usage.outputTokens,
+          totalTokens: usage.totalTokens,
+          ...(usage.cachedInputTokens === undefined
+            ? {}
+            : { cachedInputTokens: usage.cachedInputTokens }),
+          ...(usage.cacheWriteInputTokens === undefined
+            ? {}
+            : { cacheWriteInputTokens: usage.cacheWriteInputTokens }),
+          ...(usage.reasoningOutputTokens === undefined
+            ? {}
+            : { reasoningOutputTokens: usage.reasoningOutputTokens }),
+        }),
+  };
 }
 
 /** Runs a durable sequential Tavily/model loop with checkpointed results. */
@@ -214,6 +386,9 @@ export class TaskExecutor {
               reason: result.reason,
               continuationItems,
               pendingToolCall: null,
+              ...(result.modelTurn === undefined
+                ? {}
+                : { modelTurn: taskModelTurnMetrics(result.modelTurn) }),
             });
           } catch (error) {
             if (!(error instanceof TaskRepositoryConflictError)) throw error;
@@ -222,7 +397,8 @@ export class TaskExecutor {
           }
         }
 
-        const call = result.type === 'browser.call' ? result.call : result;
+        const call =
+          result.type === 'browser.call' || result.type === 'context.commit' ? result.call : result;
         if (
           snapshot.checkpoint.completedToolResults.some(
             (completed) => completed.callId === call.callId,
@@ -234,23 +410,28 @@ export class TaskExecutor {
             error: invalidPlannerResultError(),
           });
         }
-        const isBrowserCall = result.type === 'browser.call';
-        const completedFamilyCalls = snapshot.checkpoint.completedToolResults.filter((completed) =>
-          isBrowserCall
-            ? completed.toolName.startsWith('browser_')
-            : tavilyToolNames.has(completed.toolName),
-        ).length;
-        const familyLimit = isBrowserCall ? BROWSER_TOOL_CALL_LIMIT : TAVILY_TOOL_CALL_LIMIT;
-        if (completedFamilyCalls >= familyLimit) {
-          return this.#saveBoundary(snapshot, ownerId, signal, {
-            type: 'task.failed',
-            reason: `${isBrowserCall ? 'browser' : 'tavily'}_tool_call_limit_reached`,
-            error: toolCallLimitError(isBrowserCall ? 'browser' : 'Tavily'),
-          });
+        if (result.type !== 'context.commit') {
+          const isBrowserCall = result.type === 'browser.call';
+          const completedFamilyCalls = snapshot.checkpoint.completedToolResults.filter(
+            (completed) =>
+              isBrowserCall
+                ? completed.toolName.startsWith('browser_')
+                : tavilyToolNames.has(completed.toolName),
+          ).length;
+          const familyLimit = isBrowserCall ? BROWSER_TOOL_CALL_LIMIT : TAVILY_TOOL_CALL_LIMIT;
+          if (completedFamilyCalls >= familyLimit) {
+            return this.#saveBoundary(snapshot, ownerId, signal, {
+              type: 'task.failed',
+              reason: `${isBrowserCall ? 'browser' : 'tavily'}_tool_call_limit_reached`,
+              error: toolCallLimitError(isBrowserCall ? 'browser' : 'Tavily'),
+            });
+          }
         }
 
         const toolName =
-          result.type === 'browser.call' ? result.call.name : `tavily_${result.operation}`;
+          result.type === 'browser.call' || result.type === 'context.commit'
+            ? result.call.name
+            : `tavily_${result.operation}`;
 
         snapshot = await this.#saveBoundary(snapshot, ownerId, signal, {
           type: 'tool.call-recorded',
@@ -270,10 +451,17 @@ export class TaskExecutor {
             argumentsJson: call.argumentsJson,
             executionState: 'recorded',
           },
+          ...(result.modelTurn === undefined
+            ? {}
+            : { modelTurn: taskModelTurnMetrics(result.modelTurn) }),
         });
       }
     } finally {
-      await this.#leases.release(taskId, ownerId);
+      try {
+        await this.#dependencies.browser.release(ownerId);
+      } finally {
+        await this.#leases.release(taskId, ownerId);
+      }
     }
   }
 
@@ -286,6 +474,9 @@ export class TaskExecutor {
     const pending = snapshot.checkpoint.pendingToolCall;
     if (pending === null) return snapshot;
 
+    if (pending.name === CONTEXT_COMMIT_TOOL_NAME) {
+      return this.#executePendingContextCommit(snapshot, ownerId, signal, pending);
+    }
     if (pending.name.startsWith('browser_')) {
       return this.#executePendingBrowserTool(snapshot, ownerId, signal, pending);
     }
@@ -311,6 +502,43 @@ export class TaskExecutor {
         truncated: toolResult.truncated,
       }),
     );
+  }
+
+  /** Resolves the internal commit without dispatching an external side effect. */
+  async #executePendingContextCommit(
+    snapshot: TaskSnapshot,
+    ownerId: string,
+    signal: AbortSignal,
+    pending: PendingToolCall,
+  ): Promise<TaskSnapshot> {
+    const resultRef = this.#createId('toolResult');
+    let compaction: ReturnType<typeof compactContextAtCommit>;
+    try {
+      parseContextCommitToolCall(pending);
+      compaction = compactContextAtCommit(
+        snapshot.checkpoint.continuationItems,
+        pending,
+        resultRef,
+      );
+    } catch (error) {
+      return this.#handleFailure(snapshot, ownerId, signal, error, 'model');
+    }
+
+    const completedResult: CompletedToolResult = {
+      callId: pending.callId,
+      toolName: pending.name,
+      argumentsJson: pending.argumentsJson,
+      output: compaction.output,
+      resultRef,
+      attachmentIds: [],
+    };
+    return this.#saveBoundary(snapshot, ownerId, signal, {
+      type: 'tool.result-recorded',
+      reason: `${pending.name}_result_recorded`,
+      completedToolResults: [...snapshot.checkpoint.completedToolResults, completedResult],
+      continuationItems: compaction.continuationItems,
+      pendingToolCall: null,
+    });
   }
 
   async #executePendingBrowserTool(
@@ -343,6 +571,11 @@ export class TaskExecutor {
       );
     }
 
+    const duplicateFailure = duplicateFailedBrowserTypeOutput(snapshot, call);
+    if (duplicateFailure !== null) {
+      return this.#recordToolResult(snapshot, ownerId, signal, pending, duplicateFailure);
+    }
+
     if (call.replay === 'mutation') {
       snapshot = await this.#saveBoundary(snapshot, ownerId, signal, {
         type: 'tool.execution-started',
@@ -352,7 +585,10 @@ export class TaskExecutor {
     }
 
     try {
-      const toolResult = await this.#dependencies.browser.execute(call, signal);
+      const toolResult = await this.#dependencies.browser.execute(call, signal, {
+        currentTabId: currentBrowserTarget(snapshot),
+        sessionOwnerId: ownerId,
+      });
       return this.#recordToolResult(
         snapshot,
         ownerId,
@@ -360,6 +596,7 @@ export class TaskExecutor {
         pending,
         toolResult.output,
         toolResult.attachmentIds,
+        browserTargetAfterCall(snapshot, call, toolResult.output),
       );
     } catch (error) {
       return this.#handleFailure(snapshot, ownerId, signal, error, 'browser');
@@ -373,6 +610,7 @@ export class TaskExecutor {
     pending: PendingToolCall,
     output: string,
     attachmentIds: readonly string[] = [],
+    browserTargetTabId?: number | null,
   ): Promise<TaskSnapshot> {
     const durableAttachmentIds = [...new Set(attachmentIds)];
     if (
@@ -417,6 +655,7 @@ export class TaskExecutor {
           },
         ],
         pendingToolCall: null,
+        ...(browserTargetTabId === undefined ? {} : { browserTargetTabId }),
       });
     } catch (error) {
       const attachments = this.#dependencies.attachments;
@@ -468,6 +707,7 @@ export class TaskExecutor {
     return this.#saveBoundary(snapshot, ownerId, signal, {
       type: 'task.supplements-applied',
       reason: 'user_supplements_applied',
+      supplementIds: supplements.map(({ id }) => id).slice(-100),
       continuationItems: [
         ...snapshot.checkpoint.continuationItems,
         ...supplements.map((message): ContinuationItem => ({
@@ -652,6 +892,8 @@ export class TaskExecutor {
       at: now,
       error: input.error ?? null,
       ...(input.reasoningSummary === undefined ? {} : { reasoningSummary: input.reasoningSummary }),
+      ...(input.modelTurn === undefined ? {} : { modelTurn: input.modelTurn }),
+      ...(input.supplementIds === undefined ? {} : { supplementIds: [...input.supplementIds] }),
     };
     const checkpoint: Checkpoint = {
       ...snapshot.checkpoint,
@@ -664,9 +906,16 @@ export class TaskExecutor {
         input.pendingToolCall === undefined
           ? snapshot.checkpoint.pendingToolCall
           : input.pendingToolCall,
+      ...(input.browserTargetTabId === undefined
+        ? {}
+        : { browserTargetTabId: input.browserTargetTabId }),
       createdAt: now,
     };
-    await this.#dependencies.repository.saveTransition({ task, event, checkpoint });
+    await this.#dependencies.repository.saveTransition({
+      task,
+      event,
+      checkpoint,
+    });
     if (input.type === 'task.failed') {
       await retainTaskReply(task, 'error', this.#dependencies);
     }

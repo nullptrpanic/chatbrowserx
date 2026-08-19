@@ -19,6 +19,12 @@ export interface PanelConversationSummary {
   readonly taskStatus: PanelTaskStatus | null;
 }
 
+export interface PanelMessageSourcePage {
+  readonly title: string;
+  readonly url: string;
+  readonly favIconUrl: string | null;
+}
+
 export interface PanelMessage {
   readonly id: string;
   readonly taskId: string | null;
@@ -26,6 +32,7 @@ export interface PanelMessage {
   readonly status: 'complete' | 'streaming' | 'interrupted' | 'error';
   readonly text: string;
   readonly attachmentIds: readonly string[];
+  readonly sourcePage?: PanelMessageSourcePage | undefined;
   readonly createdAt: number;
   readonly updatedAt: number;
 }
@@ -46,6 +53,7 @@ export interface PanelTaskEvent {
   readonly reason: string;
   readonly at: number;
   readonly reasoningSummary?: string | undefined;
+  readonly supplementIds?: readonly string[] | undefined;
 }
 
 export interface PanelCompletedToolResult {

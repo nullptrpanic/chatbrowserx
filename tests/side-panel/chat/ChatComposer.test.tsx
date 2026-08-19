@@ -176,4 +176,32 @@ describe('ChatComposer', () => {
     expect(onTextChange).not.toHaveBeenCalledWith('');
     expect(screen.getByRole('textbox')).toHaveValue('Keep this draft');
   });
+
+  it('shows the global task message when a cross-tab submit race reaches the backend', async () => {
+    const client = {
+      submit: vi.fn(async () => Promise.reject(new Error('TASK_ALREADY_RUNNING'))),
+      captureScreenshot: vi.fn(async () => null),
+      cancelTask: vi.fn(async () => undefined),
+    } as unknown as PanelClient;
+    const user = userEvent.setup();
+
+    render(
+      <ChatComposer
+        client={client}
+        attachments={{ addFiles: vi.fn(async () => []), get: vi.fn(async () => undefined) }}
+        text="Keep this draft"
+        running={false}
+        taskLocked={false}
+        hasToken
+        t={createTranslator('zh-CN')}
+        onTextChange={vi.fn()}
+        onOpenSettings={vi.fn()}
+      />,
+    );
+
+    await user.click(screen.getByRole('button', { name: '发送' }));
+
+    expect(await screen.findByRole('alert')).toHaveTextContent('已有任务运行中');
+    expect(screen.getByRole('textbox')).toHaveValue('Keep this draft');
+  });
 });

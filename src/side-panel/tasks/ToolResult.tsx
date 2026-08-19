@@ -13,10 +13,41 @@ export interface ToolResultProps {
   readonly onOpenImagePreview?: ((attachmentId: string) => Promise<boolean>) | undefined;
 }
 
+/** Reads only the bounded numeric fields from a trusted internal commit result. */
+function contextCommitSummary(result: PanelCompletedToolResult, t: Translator): string | null {
+  if (result.toolName !== 'commit_context') return null;
+  try {
+    const value: unknown = JSON.parse(result.output);
+    if (typeof value !== 'object' || value === null) return null;
+    const record = value as Record<string, unknown>;
+    const calls = record.compactedCalls;
+    const chars = record.releasedTextChars;
+    const images = record.releasedImages;
+    if (
+      record.ok !== true ||
+      typeof calls !== 'number' ||
+      typeof chars !== 'number' ||
+      typeof images !== 'number' ||
+      !Number.isSafeInteger(calls) ||
+      !Number.isSafeInteger(chars) ||
+      !Number.isSafeInteger(images) ||
+      calls < 0 ||
+      chars < 0 ||
+      images < 0
+    ) {
+      return null;
+    }
+    return t('contextCommitSummary', { calls, chars, images });
+  } catch {
+    return null;
+  }
+}
+
 /** Renders one persisted non-terminal tool result behind an independent compact disclosure. */
 export function ToolResult({ result, attachments, t, onOpenImagePreview }: ToolResultProps) {
   const [expanded, setExpanded] = useState(false);
   const displayName = toolDisplayName(result.toolName, t);
+  const commitSummary = contextCommitSummary(result, t);
   return (
     <section className="tool-result" aria-label={`${displayName}: ${t('toolCompleted')}`}>
       <button
@@ -38,6 +69,7 @@ export function ToolResult({ result, attachments, t, onOpenImagePreview }: ToolR
           )}
         </span>
       </button>
+      {commitSummary === null ? null : <p className="tool-result-summary">{commitSummary}</p>}
       {expanded ? (
         <div className="tool-result-content">
           {result.argumentsJson.length === 0 ? null : (

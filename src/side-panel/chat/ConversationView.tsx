@@ -1,7 +1,11 @@
 import { ArrowDown, FileText, ListChecks, Search } from 'lucide-react';
 import { useEffect, useRef, useState } from 'react';
 import type { Translator } from '../../shared/i18n/i18n';
-import type { PanelMessage, PanelTask } from '../../shared/protocol/panel-types';
+import type {
+  PanelMessage,
+  PanelMessageSourcePage,
+  PanelTask,
+} from '../../shared/protocol/panel-types';
 import type { AttachmentDraftClient } from './use-image-draft';
 import { MessageItem } from './MessageItem';
 import { TaskProgressCard } from '../tasks/TaskProgressCard';
@@ -14,6 +18,7 @@ export interface ConversationViewProps {
   readonly t: Translator;
   readonly onSuggestion: (value: string) => void;
   readonly onOpenImagePreview?: ((attachmentId: string) => Promise<boolean>) | undefined;
+  readonly onOpenSourcePage?: ((source: PanelMessageSourcePage) => Promise<void>) | undefined;
   readonly onPause: () => void;
   readonly onResume: () => void;
   readonly onRetry: () => void;
@@ -29,6 +34,7 @@ export function ConversationView({
   t,
   onSuggestion,
   onOpenImagePreview,
+  onOpenSourcePage,
   onPause,
   onResume,
   onRetry,
@@ -103,6 +109,7 @@ export function ConversationView({
                 attachments={attachments}
                 t={t}
                 onOpenImagePreview={onOpenImagePreview}
+                onOpenSourcePage={onOpenSourcePage}
                 onPause={onPause}
                 onResume={onResume}
                 onRetry={onRetry}

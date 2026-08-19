@@ -34,6 +34,33 @@ describe('TaskCoordinator', () => {
     await Promise.all([first, second]);
   });
 
+  it('rejects a different task while one executor is already active', async () => {
+    const fixture = buildFixture();
+    const first = fixture.coordinator.start('task_1');
+
+    await expect(fixture.coordinator.start('task_2')).rejects.toMatchObject({
+      code: 'TASK_ALREADY_RUNNING',
+      message: '已有任务运行中',
+    });
+    expect(fixture.run).toHaveBeenCalledTimes(1);
+
+    fixture.resolve();
+    await first;
+  });
+
+  it('does not persist resume for one task while another executor is active', async () => {
+    const fixture = buildFixture();
+    const first = fixture.coordinator.start('task_1');
+
+    await expect(fixture.coordinator.resume('task_2')).rejects.toMatchObject({
+      code: 'TASK_ALREADY_RUNNING',
+    });
+    expect(fixture.commands.resume).not.toHaveBeenCalled();
+
+    fixture.resolve();
+    await first;
+  });
+
   it('aborts active execution before persisting pause or cancellation', async () => {
     const fixture = buildFixture();
     const running = fixture.coordinator.start('task_1');

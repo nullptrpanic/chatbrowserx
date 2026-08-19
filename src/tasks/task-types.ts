@@ -56,6 +56,23 @@ export interface TaskEvent {
   readonly at: number;
   readonly error: TaskError | null;
   readonly reasoningSummary?: string | undefined;
+  readonly modelTurn?: TaskModelTurnMetrics | undefined;
+  /** Exact supplements consumed at this Agent Loop boundary. */
+  readonly supplementIds?: readonly string[] | undefined;
+}
+
+/** Numeric-only model telemetry attached to its durable task boundary. */
+export interface TaskModelTurnMetrics {
+  readonly inputItemCount: number;
+  readonly elapsedMs: number;
+  readonly firstEventMs: number;
+  readonly firstTextMs?: number;
+  readonly inputTokens?: number;
+  readonly outputTokens?: number;
+  readonly totalTokens?: number;
+  readonly cachedInputTokens?: number;
+  readonly cacheWriteInputTokens?: number;
+  readonly reasoningOutputTokens?: number;
 }
 
 /**

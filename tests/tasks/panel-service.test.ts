@@ -62,6 +62,7 @@ function buildFixture() {
       clearConversation: vi.fn(async () => undefined),
     },
     tasks: {
+      listUnfinished: vi.fn(async (): Promise<TaskRun[]> => []),
       listByConversation: vi.fn(async (conversationId: string): Promise<TaskRun[]> => {
         void conversationId;
         return [task];
@@ -122,7 +123,12 @@ function buildFixture() {
     },
     cancelTask: vi.fn(async () => ({ task, checkpoint, events: [] })),
     tabs: {
-      get: vi.fn(async () => ({ id: 7, title: 'Example', url: 'https://example.com/form' })),
+      get: vi.fn(async () => ({
+        id: 7,
+        title: 'Example',
+        url: 'https://example.com/form',
+        favIconUrl: 'https://example.com/favicon.ico',
+      })),
     },
     permissions: { contains: vi.fn(async () => true) },
     imagePreview: {
@@ -159,6 +165,7 @@ describe('PanelService', () => {
       id: 9,
       title: 'Other page',
       url: 'https://other.example/page',
+      favIconUrl: 'https://other.example/favicon.ico',
     });
     const service = new PanelService(fixture.dependencies);
 
@@ -188,6 +195,68 @@ describe('PanelService', () => {
       tabId: 9,
       goal: 'Continue from another page',
       userMessageId: 'message_new',
+    });
+  });
+
+  it('persists the source page snapshot on each submitted user message', async () => {
+    const fixture = buildFixture();
+    fixture.dependencies.tabs.get.mockResolvedValue({
+      id: 9,
+      title: 'Median of Two Sorted Arrays',
+      url: 'https://leetcode.com/problems/median-of-two-sorted-arrays/description/',
+      favIconUrl: 'https://leetcode.com/favicon.ico',
+    });
+    const service = new PanelService(fixture.dependencies);
+
+    await service.submit({
+      tabId: 9,
+      conversationId: fixture.conversation.id,
+      text: 'Fill in this solution',
+      attachmentIds: [],
+    });
+
+    expect(fixture.dependencies.conversations.appendMessage).toHaveBeenCalledWith(
+      expect.objectContaining({
+        sourcePage: {
+          title: 'Median of Two Sorted Arrays',
+          url: 'https://leetcode.com/problems/median-of-two-sorted-arrays/description/',
+          favIconUrl: 'https://leetcode.com/favicon.ico',
+        },
+      }),
+    );
+  });
+
+  it('drops a legacy source tab ID when projecting a persisted user message', async () => {
+    const fixture = buildFixture();
+    const legacySourcePage = {
+      tabId: 7,
+      title: 'Median of Two Sorted Arrays',
+      url: 'https://leetcode.com/problems/median-of-two-sorted-arrays/description/',
+      favIconUrl: 'https://leetcode.com/favicon.ico',
+    };
+    fixture.dependencies.conversations.listMessages.mockResolvedValue([
+      {
+        id: 'message_source',
+        kind: 'conversation',
+        conversationId: fixture.conversation.id,
+        taskId: fixture.task.id,
+        role: 'user',
+        status: 'complete',
+        text: 'Fill in this solution',
+        attachmentIds: [],
+        createdAt: 1_010,
+        updatedAt: 1_010,
+        sourcePage: legacySourcePage,
+      } as MessageRecord,
+    ]);
+    const service = new PanelService(fixture.dependencies);
+
+    const snapshot = await service.getSnapshot(7);
+
+    expect(snapshot.messages[0]?.sourcePage).toEqual({
+      title: 'Median of Two Sorted Arrays',
+      url: 'https://leetcode.com/problems/median-of-two-sorted-arrays/description/',
+      favIconUrl: 'https://leetcode.com/favicon.ico',
     });
   });
 
@@ -302,6 +371,18 @@ describe('PanelService', () => {
     const fixture = buildFixture();
     const runningTask = { ...fixture.task, status: 'planning' as const };
     fixture.dependencies.tasks.listByConversation.mockResolvedValue([runningTask]);
+    fixture.dependencies.tasks.listEvents.mockResolvedValue([
+      {
+        id: 'event_supplements',
+        taskId: runningTask.id,
+        sequence: 1,
+        type: 'task.supplements-applied',
+        reason: 'user_supplements_applied',
+        at: 1_150,
+        error: null,
+        supplementIds: ['supplement_1'],
+      },
+    ]);
     fixture.dependencies.conversations.listMessages.mockResolvedValue([
       {
         id: 'message_1',
@@ -341,6 +422,7 @@ describe('PanelService', () => {
         createdAt: 1_100,
       },
     ]);
+    expect(snapshot.task?.events[0]?.supplementIds).toEqual(['supplement_1']);
     expect(snapshot.attachments).toEqual([
       expect.objectContaining({ id: 'attachment_1', fileName: 'photo.png' }),
     ]);
@@ -548,9 +630,54 @@ describe('PanelService', () => {
         text: 'Start another task',
         attachmentIds: [],
       }),
-    ).rejects.toThrow(/unfinished task/i);
+    ).rejects.toMatchObject({ code: 'TASK_ALREADY_RUNNING', message: '已有任务运行中' });
     expect(fixture.dependencies.conversations.appendMessage).not.toHaveBeenCalled();
     expect(fixture.dependencies.commands.create).not.toHaveBeenCalled();
+  });
+
+  it('rejects a new task when any other global conversation has unfinished work', async () => {
+    const fixture = buildFixture();
+    fixture.dependencies.tasks.listUnfinished.mockResolvedValue([
+      {
+        ...fixture.task,
+        id: 'task_running_elsewhere',
+        conversationId: 'conversation_elsewhere',
+        status: 'planning',
+      },
+    ]);
+    const service = new PanelService(fixture.dependencies);
+
+    await expect(
+      service.submit({ tabId: 7, text: 'Start a parallel task', attachmentIds: [] }),
+    ).rejects.toMatchObject({
+      code: 'TASK_ALREADY_RUNNING',
+      message: '已有任务运行中',
+    });
+    expect(fixture.dependencies.conversations.create).not.toHaveBeenCalled();
+    expect(fixture.dependencies.conversations.appendMessage).not.toHaveBeenCalled();
+    expect(fixture.dependencies.commands.create).not.toHaveBeenCalled();
+  });
+
+  it('serializes concurrent submissions before either can create a second task', async () => {
+    const fixture = buildFixture();
+    let releaseCheck: (() => void) | undefined;
+    fixture.dependencies.tasks.listUnfinished.mockImplementationOnce(
+      () =>
+        new Promise<TaskRun[]>((resolve) => {
+          releaseCheck = () => resolve([]);
+        }),
+    );
+    const service = new PanelService(fixture.dependencies);
+
+    const first = service.submit({ tabId: 7, text: 'First task', attachmentIds: [] });
+    await Promise.resolve();
+    await expect(
+      service.submit({ tabId: 7, text: 'Second task', attachmentIds: [] }),
+    ).rejects.toMatchObject({ code: 'TASK_ALREADY_RUNNING' });
+    releaseCheck?.();
+    await first;
+
+    expect(fixture.dependencies.commands.create).toHaveBeenCalledTimes(1);
   });
 
   it('saves only supplied secrets and clears terminal history before garbage collection', async () => {

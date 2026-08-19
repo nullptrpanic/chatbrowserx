@@ -8,7 +8,10 @@ export function mountVirtualPointer(
   window_: Window = window,
 ): VirtualPointerOverlay {
   const existing = mounted.get(document_);
-  if (existing?.connected) return existing;
+  if (existing?.connected) {
+    existing.ensureExclusive();
+    return existing;
+  }
   const pointer = new VirtualPointerOverlay(document_, window_);
   mounted.set(document_, pointer);
   return pointer;

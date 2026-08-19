@@ -1,8 +1,14 @@
-import { describe, expect, it, vi } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { RuntimePort } from '../../../src/platform/chrome/runtime-port';
-import type { PanelSnapshot } from '../../../src/shared/protocol/panel-types';
-import { PanelClient } from '../../../src/side-panel/state/panel-client';
-import { parsePanelSettings } from '../../../src/side-panel/state/panel-state';
+import type {
+  PanelMessageSourcePage,
+  PanelSnapshot,
+} from '../../../src/shared/protocol/panel-types';
+import {
+  createChromePanelEnvironment,
+  PanelClient,
+} from '../../../src/side-panel/state/panel-client';
+import { parsePanelSettings, parsePanelSnapshot } from '../../../src/side-panel/state/panel-state';
 
 /** Builds a valid sanitized snapshot at one deterministic task sequence. */
 function snapshot(sequence = 1): PanelSnapshot {
@@ -54,7 +60,74 @@ function snapshot(sequence = 1): PanelSnapshot {
   };
 }
 
+const sourcePage: PanelMessageSourcePage = {
+  title: 'Median of Two Sorted Arrays',
+  url: 'https://leetcode.com/problems/median-of-two-sorted-arrays/description/',
+  favIconUrl: 'https://leetcode.com/favicon.ico',
+};
+
+afterEach(() => {
+  vi.unstubAllGlobals();
+});
+
 describe('PanelClient', () => {
+  it('opens the saved source URL without reusing a previously recorded tab', async () => {
+    const get = vi.fn(async () => ({ id: 17, windowId: 4 }));
+    const update = vi.fn(async () => ({ id: 17 }));
+    const create = vi.fn(async () => ({ id: 18 }));
+    const focusWindow = vi.fn(async () => ({ id: 4 }));
+    vi.stubGlobal('chrome', {
+      tabs: { query: vi.fn(), get, update, create },
+      windows: { update: focusWindow },
+    });
+    const environment = createChromePanelEnvironment() as ReturnType<
+      typeof createChromePanelEnvironment
+    > & {
+      openSourcePage(source: PanelMessageSourcePage): Promise<void>;
+    };
+
+    await environment.openSourcePage(sourcePage);
+
+    expect(create).toHaveBeenCalledWith({ url: sourcePage.url, active: true });
+    expect(get).not.toHaveBeenCalled();
+    expect(update).not.toHaveBeenCalled();
+    expect(focusWindow).not.toHaveBeenCalled();
+  });
+
+  it('accepts a bounded source page snapshot on a user message', () => {
+    expect(
+      parsePanelSnapshot({
+        ...snapshot(),
+        messages: [
+          {
+            id: 'message_source',
+            taskId: 'task_1',
+            role: 'user',
+            status: 'complete',
+            text: 'Fill in this solution',
+            attachmentIds: [],
+            sourcePage: {
+              title: 'Median of Two Sorted Arrays',
+              url: 'https://leetcode.com/problems/median-of-two-sorted-arrays/description/',
+              favIconUrl: 'https://leetcode.com/favicon.ico',
+            },
+            createdAt: 1_000,
+            updatedAt: 1_000,
+          },
+        ],
+      }),
+    ).toMatchObject({
+      messages: [
+        {
+          sourcePage: {
+            title: 'Median of Two Sorted Arrays',
+            url: 'https://leetcode.com/problems/median-of-two-sorted-arrays/description/',
+          },
+        },
+      ],
+    });
+  });
+
   it('defaults an older settings projection to 50 history messages', () => {
     expect(
       parsePanelSettings({
@@ -175,6 +248,46 @@ describe('PanelClient', () => {
         attachmentIds: [],
       },
     ]);
+    client.dispose();
+  });
+
+  it('uses the active tab at send time when the user switches before the next poll', async () => {
+    let activeTabId = 7;
+    const submittedTabIds: number[] = [];
+    const send = vi.fn<RuntimePort['send']>(async (message) => {
+      if (message.type === 'panel.getSnapshot') {
+        return {
+          version: 1,
+          requestId: message.requestId,
+          ok: true,
+          data: {
+            ...snapshot(),
+            tab: { ...snapshot().tab, id: activeTabId },
+          },
+        };
+      }
+      if (message.type === 'chat.submit') {
+        submittedTabIds.push(message.payload.tabId);
+        return {
+          version: 1,
+          requestId: message.requestId,
+          ok: true,
+          data: { task: { conversationId: 'conversation_1' } },
+        };
+      }
+      return { version: 1, requestId: message.requestId, ok: true, data: {} };
+    });
+    const client = new PanelClient(
+      { send },
+      { getActiveTab: vi.fn(async () => ({ id: activeTabId })) },
+      { pollIntervalMs: 60_000 },
+    );
+    await client.connect();
+
+    activeTabId = 9;
+    await client.submit('Question from the newly active page', []);
+
+    expect(submittedTabIds).toEqual([9]);
     client.dispose();
   });
 

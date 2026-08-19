@@ -1,5 +1,4 @@
 import type { IdGenerator } from '../../shared/ids';
-import type { DebuggerSession } from '../debugger/debugger-transport';
 
 export interface ViewportRect {
   readonly x: number;
@@ -8,31 +7,27 @@ export interface ViewportRect {
   readonly height: number;
 }
 
-export interface InteractiveElement {
-  readonly ref: string;
-  readonly role: string;
-  readonly name: string;
-  readonly state: readonly string[];
-  readonly frame: string;
-  readonly bounds: ViewportRect;
-}
-
 export interface ObservedElementTarget {
-  readonly session: DebuggerSession;
+  readonly frameTargetId: string | null;
+  readonly documentFrameId: string;
+  readonly loaderId: string;
   readonly backendNodeId: number;
   readonly role: string;
   readonly name: string;
   readonly state: readonly string[];
+  readonly actions: readonly string[];
   readonly frame: string;
-  readonly bounds: ViewportRect;
 }
 
 export interface ResolvedElementRef {
   readonly tabId: number;
-  readonly generation: number;
-  readonly session: DebuggerSession;
+  readonly frameTargetId: string | null;
+  readonly documentFrameId: string;
+  readonly loaderId: string;
   readonly backendNodeId: number;
-  readonly bounds: ViewportRect;
+  readonly role: string;
+  readonly state: readonly string[];
+  readonly actions: readonly string[];
 }
 
 export type ElementRefStoreErrorCode =
@@ -56,25 +51,38 @@ interface StoredElementRef extends ResolvedElementRef {
   readonly ref: string;
 }
 
-function targetKey(target: ObservedElementTarget): string {
-  return `${target.session.tabId}:${target.session.sessionId ?? 'root'}:${target.backendNodeId}`;
+const MAX_PASSTHROUGH_REF_CHARACTERS = 16;
+const FNV_64_OFFSET = 0xcbf29ce484222325n;
+const FNV_64_PRIME = 0x100000001b3n;
+
+function compactRef(value: string): string {
+  if (value.length <= MAX_PASSTHROUGH_REF_CHARACTERS && /^[a-z0-9_-]+$/i.test(value)) {
+    return value;
+  }
+  let hash = FNV_64_OFFSET;
+  for (let index = 0; index < value.length; index += 1) {
+    hash ^= BigInt(value.charCodeAt(index));
+    hash = BigInt.asUintN(64, hash * FNV_64_PRIME);
+  }
+  return `e${hash.toString(36)}`;
 }
 
-/** Replaces generation-scoped element refs so stale model refs cannot target a new DOM. */
+function targetKey(target: ObservedElementTarget): string {
+  return `${target.frameTargetId ?? 'root'}:${target.documentFrameId}:${target.backendNodeId}`;
+}
+
+/** Stores opaque refs against document identity rather than an ephemeral debugger attachment. */
 export class ElementRefStore {
   readonly #ids: Pick<IdGenerator, 'create'>;
   readonly #refs = new Map<string, StoredElementRef>();
   readonly #refsByTab = new Map<number, Set<string>>();
+  readonly #issuedRefs = new Set<string>();
 
   constructor(ids: Pick<IdGenerator, 'create'>) {
     this.#ids = ids;
   }
 
-  replaceSnapshot(
-    tabId: number,
-    generation: number,
-    targets: readonly ObservedElementTarget[],
-  ): readonly InteractiveElement[] {
+  replaceSnapshot(tabId: number, targets: readonly ObservedElementTarget[]): readonly string[] {
     if (targets.length > 200) {
       throw new ElementRefStoreError('AMBIGUOUS_TARGET', 'The element snapshot is too large.');
     }
@@ -88,31 +96,27 @@ export class ElementRefStore {
 
     this.invalidate(tabId);
     const tabRefs = new Set<string>();
-    const elements = targets.map((target): InteractiveElement => {
+    const refs = targets.map((target): string => {
       const ref = this.#createRef();
       this.#refs.set(ref, {
         ref,
         tabId,
-        generation,
-        session: { ...target.session },
+        frameTargetId: target.frameTargetId,
+        documentFrameId: target.documentFrameId,
+        loaderId: target.loaderId,
         backendNodeId: target.backendNodeId,
-        bounds: { ...target.bounds },
+        role: target.role,
+        state: [...target.state],
+        actions: [...target.actions],
       });
       tabRefs.add(ref);
-      return {
-        ref,
-        role: target.role,
-        name: target.name,
-        state: [...target.state],
-        frame: target.frame,
-        bounds: { ...target.bounds },
-      };
+      return ref;
     });
     this.#refsByTab.set(tabId, tabRefs);
-    return elements;
+    return refs;
   }
 
-  resolve(ref: string, tabId: number, generation: number): ResolvedElementRef {
+  resolve(ref: string, tabId: number): ResolvedElementRef {
     const stored = this.#refs.get(ref);
     if (!stored) {
       throw new ElementRefStoreError('REF_NOT_FOUND', 'The element ref does not exist.');
@@ -123,15 +127,15 @@ export class ElementRefStore {
         'The element ref belongs to a different tab.',
       );
     }
-    if (stored.generation !== generation) {
-      throw new ElementRefStoreError('STALE_REF', 'The element ref is stale.');
-    }
     return {
       tabId: stored.tabId,
-      generation: stored.generation,
-      session: { ...stored.session },
+      frameTargetId: stored.frameTargetId,
+      documentFrameId: stored.documentFrameId,
+      loaderId: stored.loaderId,
       backendNodeId: stored.backendNodeId,
-      bounds: { ...stored.bounds },
+      role: stored.role,
+      state: [...stored.state],
+      actions: [...stored.actions],
     };
   }
 
@@ -142,8 +146,12 @@ export class ElementRefStore {
 
   #createRef(): string {
     for (let attempt = 0; attempt < 5; attempt += 1) {
-      const ref = this.#ids.create('element').trim();
-      if (ref.length > 0 && ref.length <= 128 && !this.#refs.has(ref)) return ref;
+      const source = this.#ids.create('element').trim();
+      if (source.length === 0 || source.length > 128) continue;
+      const ref = compactRef(source);
+      if (ref.length > 128 || this.#issuedRefs.has(ref)) continue;
+      this.#issuedRefs.add(ref);
+      return ref;
     }
     throw new ElementRefStoreError('REF_GENERATION_FAILED', 'An element ref could not be created.');
   }

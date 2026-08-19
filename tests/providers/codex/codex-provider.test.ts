@@ -73,7 +73,10 @@ describe('CodexProvider', () => {
     const events = [
       {
         event: 'response.created',
-        data: { type: 'response.created', response: { id: 'resp_without_content_type' } },
+        data: {
+          type: 'response.created',
+          response: { id: 'resp_without_content_type' },
+        },
       },
       {
         event: 'response.output_text.delta',
@@ -81,10 +84,15 @@ describe('CodexProvider', () => {
       },
       {
         event: 'response.completed',
-        data: { type: 'response.completed', response: { id: 'resp_without_content_type' } },
+        data: {
+          type: 'response.completed',
+          response: { id: 'resp_without_content_type' },
+        },
       },
     ];
-    const response = new Response(new TextEncoder().encode(sseBody(events)), { status: 200 });
+    const response = new Response(new TextEncoder().encode(sseBody(events)), {
+      status: 200,
+    });
     expect(response.headers.get('Content-Type')).toBeNull();
     const provider = new CodexProvider(
       credentialStore(ACCESS_TOKEN),
@@ -94,7 +102,11 @@ describe('CodexProvider', () => {
     await expect(collect(provider.stream(REQUEST, new AbortController().signal))).resolves.toEqual([
       { type: 'response.started', responseId: 'resp_without_content_type' },
       { type: 'text.delta', delta: 'Ready' },
-      { type: 'response.completed', responseId: 'resp_without_content_type', usage: null },
+      {
+        type: 'response.completed',
+        responseId: 'resp_without_content_type',
+        usage: null,
+      },
     ]);
   });
 
@@ -132,7 +144,10 @@ describe('CodexProvider', () => {
         sseResponse([
           {
             event: 'response.created',
-            data: { type: 'response.created', response: { id: 'resp_receiver' } },
+            data: {
+              type: 'response.created',
+              response: { id: 'resp_receiver' },
+            },
           },
           {
             event: 'response.output_text.delta',
@@ -140,7 +155,10 @@ describe('CodexProvider', () => {
           },
           {
             event: 'response.completed',
-            data: { type: 'response.completed', response: { id: 'resp_receiver' } },
+            data: {
+              type: 'response.completed',
+              response: { id: 'resp_receiver' },
+            },
           },
         ]),
       );
@@ -212,7 +230,16 @@ describe('CodexProvider', () => {
             type: 'response.completed',
             response: {
               id: 'resp_123',
-              usage: { input_tokens: 30, output_tokens: 12, total_tokens: 42 },
+              usage: {
+                input_tokens: 30,
+                output_tokens: 12,
+                total_tokens: 42,
+                input_tokens_details: {
+                  cached_tokens: 20,
+                  cache_write_tokens: 4,
+                },
+                output_tokens_details: { reasoning_tokens: 7 },
+              },
             },
           },
         },
@@ -225,7 +252,11 @@ describe('CodexProvider', () => {
       { type: 'response.started', responseId: 'resp_123' },
       { type: 'text.delta', delta: 'Working' },
       { type: 'tool.started', callId: 'call_1', name: 'lookup_record' },
-      { type: 'tool.arguments.delta', callId: 'call_1', delta: '{"type":"click"}' },
+      {
+        type: 'tool.arguments.delta',
+        callId: 'call_1',
+        delta: '{"type":"click"}',
+      },
       {
         type: 'tool.completed',
         callId: 'call_1',
@@ -235,7 +266,14 @@ describe('CodexProvider', () => {
       {
         type: 'response.completed',
         responseId: 'resp_123',
-        usage: { inputTokens: 30, outputTokens: 12, totalTokens: 42 },
+        usage: {
+          inputTokens: 30,
+          outputTokens: 12,
+          totalTokens: 42,
+          cachedInputTokens: 20,
+          cacheWriteInputTokens: 4,
+          reasoningOutputTokens: 7,
+        },
       },
     ]);
 
@@ -253,6 +291,68 @@ describe('CodexProvider', () => {
     );
   });
 
+  it('rejects conflicting canonical function-call arguments', async () => {
+    const provider = new CodexProvider(
+      credentialStore(ACCESS_TOKEN),
+      vi.fn<typeof fetch>(async () =>
+        sseResponse([
+          {
+            event: 'response.created',
+            data: {
+              type: 'response.created',
+              response: { id: 'resp_tool_conflict' },
+            },
+          },
+          {
+            event: 'response.output_item.added',
+            data: {
+              type: 'response.output_item.added',
+              item: {
+                id: 'item_tool_conflict',
+                type: 'function_call',
+                call_id: 'call_tool_conflict',
+                name: 'lookup_record',
+                arguments: '',
+              },
+            },
+          },
+          {
+            event: 'response.function_call_arguments.done',
+            data: {
+              type: 'response.function_call_arguments.done',
+              item_id: 'item_tool_conflict',
+              arguments: '{"value":"first"}',
+            },
+          },
+          {
+            event: 'response.output_item.done',
+            data: {
+              type: 'response.output_item.done',
+              item: {
+                id: 'item_tool_conflict',
+                type: 'function_call',
+                call_id: 'call_tool_conflict',
+                name: 'lookup_record',
+                arguments: '{"value":"different"}',
+              },
+            },
+          },
+          {
+            event: 'response.completed',
+            data: {
+              type: 'response.completed',
+              response: { id: 'resp_tool_conflict' },
+            },
+          },
+        ]),
+      ),
+    );
+
+    await expect(
+      collect(provider.stream(REQUEST, new AbortController().signal)),
+    ).rejects.toMatchObject({ code: 'INVALID_RESPONSE' });
+  });
+
   it('normalizes a completed Responses reasoning summary without exposing raw reasoning', async () => {
     const provider = new CodexProvider(
       credentialStore(ACCESS_TOKEN),
@@ -260,7 +360,10 @@ describe('CodexProvider', () => {
         sseResponse([
           {
             event: 'response.created',
-            data: { type: 'response.created', response: { id: 'resp_reasoning' } },
+            data: {
+              type: 'response.created',
+              response: { id: 'resp_reasoning' },
+            },
           },
           {
             event: 'response.reasoning_summary_text.done',
@@ -277,7 +380,10 @@ describe('CodexProvider', () => {
           },
           {
             event: 'response.completed',
-            data: { type: 'response.completed', response: { id: 'resp_reasoning' } },
+            data: {
+              type: 'response.completed',
+              response: { id: 'resp_reasoning' },
+            },
           },
         ]),
       ),
@@ -296,6 +402,935 @@ describe('CodexProvider', () => {
     ]);
   });
 
+  it('uses the finalized refusal when no refusal delta was delivered', async () => {
+    const provider = new CodexProvider(
+      credentialStore(ACCESS_TOKEN),
+      vi.fn<typeof fetch>(async () =>
+        sseResponse([
+          {
+            event: 'response.created',
+            data: {
+              type: 'response.created',
+              response: { id: 'resp_refusal_done' },
+            },
+          },
+          {
+            event: 'response.refusal.done',
+            data: {
+              type: 'response.refusal.done',
+              item_id: 'message_refusal',
+              output_index: 0,
+              content_index: 0,
+              refusal: 'I cannot help with that request.',
+            },
+          },
+          {
+            event: 'response.completed',
+            data: {
+              type: 'response.completed',
+              response: { id: 'resp_refusal_done' },
+            },
+          },
+        ]),
+      ),
+    );
+
+    await expect(collect(provider.stream(REQUEST, new AbortController().signal))).resolves.toEqual([
+      { type: 'response.started', responseId: 'resp_refusal_done' },
+      { type: 'text.delta', delta: 'I cannot help with that request.' },
+      {
+        type: 'response.completed',
+        responseId: 'resp_refusal_done',
+        usage: null,
+      },
+    ]);
+  });
+
+  it('uses finalized output text when no output-text delta was delivered', async () => {
+    const provider = new CodexProvider(
+      credentialStore(ACCESS_TOKEN),
+      vi.fn<typeof fetch>(async () =>
+        sseResponse([
+          {
+            event: 'response.created',
+            data: {
+              type: 'response.created',
+              response: { id: 'resp_text_done' },
+            },
+          },
+          {
+            event: 'response.output_text.done',
+            data: {
+              type: 'response.output_text.done',
+              item_id: 'message_text',
+              output_index: 0,
+              content_index: 0,
+              text: 'Final text without a preceding delta.',
+            },
+          },
+          {
+            event: 'response.completed',
+            data: {
+              type: 'response.completed',
+              response: { id: 'resp_text_done' },
+            },
+          },
+        ]),
+      ),
+    );
+
+    await expect(collect(provider.stream(REQUEST, new AbortController().signal))).resolves.toEqual([
+      { type: 'response.started', responseId: 'resp_text_done' },
+      { type: 'text.delta', delta: 'Final text without a preceding delta.' },
+      { type: 'response.completed', responseId: 'resp_text_done', usage: null },
+    ]);
+  });
+
+  it.each([
+    ['does not duplicate completed text', 'Complete answer.', 'Complete answer.', []],
+    ['emits only the missing finalized suffix', 'Partial ', 'Partial answer.', ['answer.']],
+  ] as const)('%s', async (_label, streamed, finalized, finalizedDeltas) => {
+    const provider = new CodexProvider(
+      credentialStore(ACCESS_TOKEN),
+      vi.fn<typeof fetch>(async () =>
+        sseResponse([
+          {
+            event: 'response.created',
+            data: {
+              type: 'response.created',
+              response: { id: 'resp_text_reconciled' },
+            },
+          },
+          {
+            event: 'response.output_text.delta',
+            data: {
+              type: 'response.output_text.delta',
+              item_id: 'message_text',
+              output_index: 0,
+              content_index: 0,
+              delta: streamed,
+            },
+          },
+          {
+            event: 'response.output_text.done',
+            data: {
+              type: 'response.output_text.done',
+              item_id: 'message_text',
+              output_index: 0,
+              content_index: 0,
+              text: finalized,
+            },
+          },
+          {
+            event: 'response.completed',
+            data: {
+              type: 'response.completed',
+              response: { id: 'resp_text_reconciled' },
+            },
+          },
+        ]),
+      ),
+    );
+
+    await expect(collect(provider.stream(REQUEST, new AbortController().signal))).resolves.toEqual([
+      { type: 'response.started', responseId: 'resp_text_reconciled' },
+      { type: 'text.delta', delta: streamed },
+      ...finalizedDeltas.map((delta) => ({
+        type: 'text.delta' as const,
+        delta,
+      })),
+      {
+        type: 'response.completed',
+        responseId: 'resp_text_reconciled',
+        usage: null,
+      },
+    ]);
+  });
+
+  it('uses a completed output-text content part when finer-grained text events are missing', async () => {
+    const provider = new CodexProvider(
+      credentialStore(ACCESS_TOKEN),
+      vi.fn<typeof fetch>(async () =>
+        sseResponse([
+          {
+            event: 'response.created',
+            data: {
+              type: 'response.created',
+              response: { id: 'resp_content_part' },
+            },
+          },
+          {
+            event: 'response.content_part.done',
+            data: {
+              type: 'response.content_part.done',
+              item_id: 'message_content_part',
+              output_index: 0,
+              content_index: 0,
+              part: {
+                type: 'output_text',
+                text: 'Recovered from the completed content part.',
+                annotations: [],
+              },
+            },
+          },
+          {
+            event: 'response.completed',
+            data: {
+              type: 'response.completed',
+              response: { id: 'resp_content_part' },
+            },
+          },
+        ]),
+      ),
+    );
+
+    await expect(collect(provider.stream(REQUEST, new AbortController().signal))).resolves.toEqual([
+      { type: 'response.started', responseId: 'resp_content_part' },
+      {
+        type: 'text.delta',
+        delta: 'Recovered from the completed content part.',
+      },
+      {
+        type: 'response.completed',
+        responseId: 'resp_content_part',
+        usage: null,
+      },
+    ]);
+  });
+
+  it('reconciles a completed content part with output-text deltas already delivered', async () => {
+    const provider = new CodexProvider(
+      credentialStore(ACCESS_TOKEN),
+      vi.fn<typeof fetch>(async () =>
+        sseResponse([
+          {
+            event: 'response.created',
+            data: {
+              type: 'response.created',
+              response: { id: 'resp_content_reconciled' },
+            },
+          },
+          {
+            event: 'response.output_text.delta',
+            data: {
+              type: 'response.output_text.delta',
+              item_id: 'message_content_part',
+              output_index: 0,
+              content_index: 0,
+              delta: 'Partial ',
+            },
+          },
+          {
+            event: 'response.content_part.done',
+            data: {
+              type: 'response.content_part.done',
+              item_id: 'message_content_part',
+              output_index: 0,
+              content_index: 0,
+              part: {
+                type: 'output_text',
+                text: 'Partial answer.',
+                annotations: [],
+              },
+            },
+          },
+          {
+            event: 'response.completed',
+            data: {
+              type: 'response.completed',
+              response: { id: 'resp_content_reconciled' },
+            },
+          },
+        ]),
+      ),
+    );
+
+    await expect(collect(provider.stream(REQUEST, new AbortController().signal))).resolves.toEqual([
+      { type: 'response.started', responseId: 'resp_content_reconciled' },
+      { type: 'text.delta', delta: 'Partial ' },
+      { type: 'text.delta', delta: 'answer.' },
+      {
+        type: 'response.completed',
+        responseId: 'resp_content_reconciled',
+        usage: null,
+      },
+    ]);
+  });
+
+  it('uses a completed refusal content part when refusal events are missing', async () => {
+    const provider = new CodexProvider(
+      credentialStore(ACCESS_TOKEN),
+      vi.fn<typeof fetch>(async () =>
+        sseResponse([
+          {
+            event: 'response.created',
+            data: {
+              type: 'response.created',
+              response: { id: 'resp_refusal_part' },
+            },
+          },
+          {
+            event: 'response.content_part.done',
+            data: {
+              type: 'response.content_part.done',
+              item_id: 'message_refusal_part',
+              output_index: 0,
+              content_index: 0,
+              part: {
+                type: 'refusal',
+                refusal: 'This request cannot be completed.',
+              },
+            },
+          },
+          {
+            event: 'response.completed',
+            data: {
+              type: 'response.completed',
+              response: { id: 'resp_refusal_part' },
+            },
+          },
+        ]),
+      ),
+    );
+
+    await expect(collect(provider.stream(REQUEST, new AbortController().signal))).resolves.toEqual([
+      { type: 'response.started', responseId: 'resp_refusal_part' },
+      { type: 'text.delta', delta: 'This request cannot be completed.' },
+      {
+        type: 'response.completed',
+        responseId: 'resp_refusal_part',
+        usage: null,
+      },
+    ]);
+  });
+
+  it('uses a completed message output item as the final text fallback', async () => {
+    const provider = new CodexProvider(
+      credentialStore(ACCESS_TOKEN),
+      vi.fn<typeof fetch>(async () =>
+        sseResponse([
+          {
+            event: 'response.created',
+            data: {
+              type: 'response.created',
+              response: { id: 'resp_message_item' },
+            },
+          },
+          {
+            event: 'response.output_item.done',
+            data: {
+              type: 'response.output_item.done',
+              output_index: 0,
+              item: {
+                id: 'message_item',
+                type: 'message',
+                role: 'assistant',
+                status: 'completed',
+                content: [
+                  {
+                    type: 'output_text',
+                    text: 'Recovered from the completed message item.',
+                    annotations: [],
+                  },
+                ],
+              },
+            },
+          },
+          {
+            event: 'response.completed',
+            data: {
+              type: 'response.completed',
+              response: { id: 'resp_message_item' },
+            },
+          },
+        ]),
+      ),
+    );
+
+    await expect(collect(provider.stream(REQUEST, new AbortController().signal))).resolves.toEqual([
+      { type: 'response.started', responseId: 'resp_message_item' },
+      {
+        type: 'text.delta',
+        delta: 'Recovered from the completed message item.',
+      },
+      {
+        type: 'response.completed',
+        responseId: 'resp_message_item',
+        usage: null,
+      },
+    ]);
+  });
+
+  it('uses a refusal from a completed message output item as the final fallback', async () => {
+    const provider = new CodexProvider(
+      credentialStore(ACCESS_TOKEN),
+      vi.fn<typeof fetch>(async () =>
+        sseResponse([
+          {
+            event: 'response.created',
+            data: {
+              type: 'response.created',
+              response: { id: 'resp_message_refusal' },
+            },
+          },
+          {
+            event: 'response.output_item.done',
+            data: {
+              type: 'response.output_item.done',
+              output_index: 0,
+              item: {
+                id: 'message_refusal_item',
+                type: 'message',
+                role: 'assistant',
+                status: 'completed',
+                content: [
+                  {
+                    type: 'refusal',
+                    refusal: 'I cannot complete this request.',
+                  },
+                ],
+              },
+            },
+          },
+          {
+            event: 'response.completed',
+            data: {
+              type: 'response.completed',
+              response: { id: 'resp_message_refusal' },
+            },
+          },
+        ]),
+      ),
+    );
+
+    await expect(collect(provider.stream(REQUEST, new AbortController().signal))).resolves.toEqual([
+      { type: 'response.started', responseId: 'resp_message_refusal' },
+      { type: 'text.delta', delta: 'I cannot complete this request.' },
+      {
+        type: 'response.completed',
+        responseId: 'resp_message_refusal',
+        usage: null,
+      },
+    ]);
+  });
+
+  it('deduplicates the normal output-text completion cascade', async () => {
+    const text = 'One visible answer.';
+    const content = { type: 'output_text', text, annotations: [] } as const;
+    const provider = new CodexProvider(
+      credentialStore(ACCESS_TOKEN),
+      vi.fn<typeof fetch>(async () =>
+        sseResponse([
+          {
+            event: 'response.created',
+            data: {
+              type: 'response.created',
+              response: { id: 'resp_completion_cascade' },
+            },
+          },
+          {
+            event: 'response.output_text.delta',
+            data: {
+              type: 'response.output_text.delta',
+              item_id: 'message_cascade',
+              output_index: 0,
+              content_index: 0,
+              delta: text,
+            },
+          },
+          {
+            event: 'response.output_text.done',
+            data: {
+              type: 'response.output_text.done',
+              item_id: 'message_cascade',
+              output_index: 0,
+              content_index: 0,
+              text,
+            },
+          },
+          {
+            event: 'response.content_part.done',
+            data: {
+              type: 'response.content_part.done',
+              item_id: 'message_cascade',
+              output_index: 0,
+              content_index: 0,
+              part: content,
+            },
+          },
+          {
+            event: 'response.output_item.done',
+            data: {
+              type: 'response.output_item.done',
+              output_index: 0,
+              item: {
+                id: 'message_cascade',
+                type: 'message',
+                role: 'assistant',
+                status: 'completed',
+                content: [content],
+              },
+            },
+          },
+          {
+            event: 'response.completed',
+            data: {
+              type: 'response.completed',
+              response: { id: 'resp_completion_cascade' },
+            },
+          },
+        ]),
+      ),
+    );
+
+    await expect(collect(provider.stream(REQUEST, new AbortController().signal))).resolves.toEqual([
+      { type: 'response.started', responseId: 'resp_completion_cascade' },
+      { type: 'text.delta', delta: text },
+      {
+        type: 'response.completed',
+        responseId: 'resp_completion_cascade',
+        usage: null,
+      },
+    ]);
+  });
+
+  it('ignores unsupported event types without weakening recognized-event validation', async () => {
+    const provider = new CodexProvider(
+      credentialStore(ACCESS_TOKEN),
+      vi.fn<typeof fetch>(async () =>
+        sseResponse([
+          {
+            event: 'response.future_queued',
+            data: 'future payload shape',
+          },
+          {
+            event: 'response.created',
+            data: {
+              type: 'response.created',
+              response: { id: 'resp_unknown_events' },
+            },
+          },
+          {
+            event: 'response.future_progress',
+            data: { type: 'response.future_progress', marker: 'during' },
+          },
+          {
+            event: 'response.output_text.delta',
+            data: { type: 'response.output_text.delta', delta: 'Still valid' },
+          },
+          {
+            event: 'response.completed',
+            data: {
+              type: 'response.completed',
+              response: { id: 'resp_unknown_events' },
+            },
+          },
+          {
+            event: 'response.future_accounting',
+            data: { type: 'response.future_accounting', marker: 'after' },
+          },
+        ]),
+      ),
+    );
+
+    await expect(collect(provider.stream(REQUEST, new AbortController().signal))).resolves.toEqual([
+      { type: 'response.started', responseId: 'resp_unknown_events' },
+      { type: 'text.delta', delta: 'Still valid' },
+      {
+        type: 'response.completed',
+        responseId: 'resp_unknown_events',
+        usage: null,
+      },
+    ]);
+  });
+
+  it.each([
+    [
+      'before response.created',
+      [
+        {
+          event: 'response.output_text.delta',
+          data: { type: 'response.output_text.delta', delta: 'Too early' },
+        },
+        {
+          event: 'response.created',
+          data: {
+            type: 'response.created',
+            response: { id: 'resp_event_order' },
+          },
+        },
+        {
+          event: 'response.completed',
+          data: {
+            type: 'response.completed',
+            response: { id: 'resp_event_order' },
+          },
+        },
+      ],
+    ],
+    [
+      'after response.completed',
+      [
+        {
+          event: 'response.created',
+          data: {
+            type: 'response.created',
+            response: { id: 'resp_event_order' },
+          },
+        },
+        {
+          event: 'response.completed',
+          data: {
+            type: 'response.completed',
+            response: { id: 'resp_event_order' },
+          },
+        },
+        {
+          event: 'response.output_text.delta',
+          data: { type: 'response.output_text.delta', delta: 'Too late' },
+        },
+      ],
+    ],
+  ] as const)('rejects recognized content events %s', async (_label, events) => {
+    const provider = new CodexProvider(
+      credentialStore(ACCESS_TOKEN),
+      vi.fn<typeof fetch>(async () => sseResponse(events)),
+    );
+
+    await expect(
+      collect(provider.stream(REQUEST, new AbortController().signal)),
+    ).rejects.toMatchObject({ code: 'INVALID_RESPONSE' });
+  });
+
+  it.each([
+    [
+      'changes the item id for one output position',
+      [
+        {
+          event: 'response.output_text.delta',
+          data: {
+            type: 'response.output_text.delta',
+            item_id: 'message_original',
+            output_index: 0,
+            content_index: 0,
+            delta: 'Answer',
+          },
+        },
+        {
+          event: 'response.output_text.done',
+          data: {
+            type: 'response.output_text.done',
+            item_id: 'message_other',
+            output_index: 0,
+            content_index: 0,
+            text: 'Answer',
+          },
+        },
+      ],
+    ],
+    [
+      'changes the content type for one content position',
+      [
+        {
+          event: 'response.output_text.done',
+          data: {
+            type: 'response.output_text.done',
+            item_id: 'message_content_type',
+            output_index: 0,
+            content_index: 0,
+            text: 'Answer',
+          },
+        },
+        {
+          event: 'response.content_part.done',
+          data: {
+            type: 'response.content_part.done',
+            item_id: 'message_content_type',
+            output_index: 0,
+            content_index: 0,
+            part: { type: 'refusal', refusal: 'Refused' },
+          },
+        },
+      ],
+    ],
+    [
+      'provides only part of the optional text-delta identity',
+      [
+        {
+          event: 'response.output_text.delta',
+          data: {
+            type: 'response.output_text.delta',
+            item_id: 'message_partial_identity',
+            delta: 'Answer',
+          },
+        },
+      ],
+    ],
+  ] as const)('rejects a content stream that %s', async (_label, contentEvents) => {
+    const responseId = 'resp_content_identity';
+    const provider = new CodexProvider(
+      credentialStore(ACCESS_TOKEN),
+      vi.fn<typeof fetch>(async () =>
+        sseResponse([
+          {
+            event: 'response.created',
+            data: { type: 'response.created', response: { id: responseId } },
+          },
+          ...contentEvents,
+          {
+            event: 'response.completed',
+            data: {
+              type: 'response.completed',
+              response: { id: responseId },
+            },
+          },
+        ]),
+      ),
+    );
+
+    await expect(
+      collect(provider.stream(REQUEST, new AbortController().signal)),
+    ).rejects.toMatchObject({ code: 'INVALID_RESPONSE' });
+  });
+
+  it('rejects canonical text that conflicts with already streamed content', async () => {
+    const provider = new CodexProvider(
+      credentialStore(ACCESS_TOKEN),
+      vi.fn<typeof fetch>(async () =>
+        sseResponse([
+          {
+            event: 'response.created',
+            data: {
+              type: 'response.created',
+              response: { id: 'resp_text_conflict' },
+            },
+          },
+          {
+            event: 'response.output_text.delta',
+            data: {
+              type: 'response.output_text.delta',
+              item_id: 'message_text_conflict',
+              output_index: 0,
+              content_index: 0,
+              delta: 'Original',
+            },
+          },
+          {
+            event: 'response.output_text.done',
+            data: {
+              type: 'response.output_text.done',
+              item_id: 'message_text_conflict',
+              output_index: 0,
+              content_index: 0,
+              text: 'Different',
+            },
+          },
+        ]),
+      ),
+    );
+
+    await expect(
+      collect(provider.stream(REQUEST, new AbortController().signal)),
+    ).rejects.toMatchObject({ code: 'INVALID_RESPONSE' });
+  });
+
+  it.each([
+    [
+      'before response.created',
+      [
+        {
+          event: 'response.failed',
+          data: {
+            type: 'response.failed',
+            response: {
+              id: 'resp_failed_order',
+              error: { code: 'server_error' },
+            },
+          },
+        },
+      ],
+    ],
+    [
+      'with a mismatched response id',
+      [
+        {
+          event: 'response.created',
+          data: {
+            type: 'response.created',
+            response: { id: 'resp_failed_order' },
+          },
+        },
+        {
+          event: 'response.failed',
+          data: {
+            type: 'response.failed',
+            response: { id: 'resp_other', error: { code: 'server_error' } },
+          },
+        },
+      ],
+    ],
+    [
+      'after response.completed',
+      [
+        {
+          event: 'response.created',
+          data: {
+            type: 'response.created',
+            response: { id: 'resp_failed_order' },
+          },
+        },
+        {
+          event: 'response.completed',
+          data: {
+            type: 'response.completed',
+            response: { id: 'resp_failed_order' },
+          },
+        },
+        {
+          event: 'response.failed',
+          data: {
+            type: 'response.failed',
+            response: {
+              id: 'resp_failed_order',
+              error: { code: 'server_error' },
+            },
+          },
+        },
+      ],
+    ],
+  ] as const)('rejects response.failed %s', async (_label, events) => {
+    const provider = new CodexProvider(
+      credentialStore(ACCESS_TOKEN),
+      vi.fn<typeof fetch>(async () => sseResponse(events)),
+    );
+
+    await expect(
+      collect(provider.stream(REQUEST, new AbortController().signal)),
+    ).rejects.toMatchObject({ code: 'INVALID_RESPONSE' });
+  });
+
+  it('rejects an out-of-band error after a completed response', async () => {
+    const provider = new CodexProvider(
+      credentialStore(ACCESS_TOKEN),
+      vi.fn<typeof fetch>(async () =>
+        sseResponse([
+          {
+            event: 'response.created',
+            data: {
+              type: 'response.created',
+              response: { id: 'resp_error_after_complete' },
+            },
+          },
+          {
+            event: 'response.completed',
+            data: {
+              type: 'response.completed',
+              response: { id: 'resp_error_after_complete' },
+            },
+          },
+          {
+            event: 'error',
+            data: {
+              type: 'error',
+              code: 'server_error',
+              message: 'late error',
+            },
+          },
+        ]),
+      ),
+    );
+
+    await expect(
+      collect(provider.stream(REQUEST, new AbortController().signal)),
+    ).rejects.toMatchObject({ code: 'INVALID_RESPONSE' });
+  });
+
+  it.each([
+    [
+      'an incomplete response',
+      {
+        type: 'response.incomplete',
+        response: {
+          id: 'resp_terminal_error',
+          status: 'incomplete',
+          incomplete_details: { reason: 'max_output_tokens' },
+        },
+      },
+      'TRANSIENT',
+    ],
+    [
+      'a server-side failed response',
+      {
+        type: 'response.failed',
+        response: {
+          id: 'resp_terminal_error',
+          error: { code: 'server_error' },
+        },
+      },
+      'TRANSIENT',
+    ],
+    [
+      'a rate-limited failed response',
+      {
+        type: 'response.failed',
+        response: {
+          id: 'resp_terminal_error',
+          error: { code: 'rate_limit_exceeded' },
+        },
+      },
+      'RATE_LIMIT',
+    ],
+  ] as const)('normalizes %s', async (_label, terminal, code) => {
+    const provider = new CodexProvider(
+      credentialStore(ACCESS_TOKEN),
+      vi.fn<typeof fetch>(async () =>
+        sseResponse([
+          {
+            event: 'response.created',
+            data: {
+              type: 'response.created',
+              response: { id: 'resp_terminal_error' },
+            },
+          },
+          { event: terminal.type, data: terminal },
+        ]),
+      ),
+    );
+
+    await expect(
+      collect(provider.stream(REQUEST, new AbortController().signal)),
+    ).rejects.toMatchObject({ code, retryable: true });
+  });
+
+  it.each(['response.completed', 'response.incomplete'] as const)(
+    'rejects a mismatched %s terminal id',
+    async (eventType) => {
+      const terminal = {
+        type: eventType,
+        response: { id: 'resp_terminal_other' },
+      };
+      const provider = new CodexProvider(
+        credentialStore(ACCESS_TOKEN),
+        vi.fn<typeof fetch>(async () =>
+          sseResponse([
+            {
+              event: 'response.created',
+              data: {
+                type: 'response.created',
+                response: { id: 'resp_terminal_expected' },
+              },
+            },
+            { event: eventType, data: terminal },
+          ]),
+        ),
+      );
+
+      await expect(
+        collect(provider.stream(REQUEST, new AbortController().signal)),
+      ).rejects.toMatchObject({ code: 'INVALID_RESPONSE' });
+    },
+  );
+
   it.each(['lookup', 'lookup_record', 'lookup-record'] as const)(
     'preserves valid generic wire tool name %s',
     async (wireName) => {
@@ -303,7 +1338,10 @@ describe('CodexProvider', () => {
         sseResponse([
           {
             event: 'response.created',
-            data: { type: 'response.created', response: { id: 'resp_tool_name' } },
+            data: {
+              type: 'response.created',
+              response: { id: 'resp_tool_name' },
+            },
           },
           {
             event: 'response.output_item.done',
@@ -320,7 +1358,10 @@ describe('CodexProvider', () => {
           },
           {
             event: 'response.completed',
-            data: { type: 'response.completed', response: { id: 'resp_tool_name' } },
+            data: {
+              type: 'response.completed',
+              response: { id: 'resp_tool_name' },
+            },
           },
         ]),
       );
@@ -341,7 +1382,11 @@ describe('CodexProvider', () => {
           name: wireName,
           argumentsJson: '{}',
         },
-        { type: 'response.completed', responseId: 'resp_tool_name', usage: null },
+        {
+          type: 'response.completed',
+          responseId: 'resp_tool_name',
+          usage: null,
+        },
       ]);
     },
   );
@@ -414,7 +1459,10 @@ describe('CodexProvider', () => {
       sseResponse([
         {
           event: 'response.created',
-          data: { type: 'response.created', response: { id: 'resp_incomplete' } },
+          data: {
+            type: 'response.created',
+            response: { id: 'resp_incomplete' },
+          },
         },
       ]),
     );

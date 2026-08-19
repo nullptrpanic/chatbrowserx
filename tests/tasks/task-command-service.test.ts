@@ -44,10 +44,47 @@ describe('TaskCommandService', () => {
       userMessageId: 'message_1',
     });
 
-    expect(snapshot.task).toMatchObject({ status: 'queued', checkpointId: snapshot.checkpoint.id });
-    expect(snapshot.checkpoint).toMatchObject({ sequence: 0, taskStatus: 'queued' });
+    expect(snapshot.task).toMatchObject({
+      status: 'queued',
+      checkpointId: snapshot.checkpoint.id,
+    });
+    expect(snapshot.checkpoint).toMatchObject({
+      sequence: 0,
+      taskStatus: 'queued',
+      browserTargetTabId: 7,
+    });
     expect(snapshot.events).toEqual([]);
     await expect(repository.get(snapshot.task.id)).resolves.toEqual(snapshot.task);
+    database.close();
+  });
+
+  it('rejects creation while another global task is unfinished', async () => {
+    const database = await openChatBrowserDatabase(createTestDatabaseName('command-single-task'));
+    const repository = new IndexedDbTaskRepository(database);
+    const sources = createCommandSources();
+    const commands = new TaskCommandService(
+      repository,
+      sources.clock,
+      sources.ids,
+      new IndexedDbConversationRepository(database),
+    );
+    await commands.create({
+      conversationId: 'conv_1',
+      tabId: 7,
+      goal: 'First task',
+    });
+
+    await expect(
+      commands.create({
+        conversationId: 'conv_2',
+        tabId: 8,
+        goal: 'Second task',
+      }),
+    ).rejects.toMatchObject({
+      code: 'TASK_ALREADY_RUNNING',
+      message: '已有任务运行中',
+    });
+    await expect(repository.listUnfinished()).resolves.toHaveLength(1);
     database.close();
   });
 
@@ -133,6 +170,7 @@ describe('TaskCommandService', () => {
 
     expect(firstContinuation.task.id).not.toBe(firstCancelled.task.id);
     expect(firstContinuation.task.workSessionId).toBe(firstCancelled.task.workSessionId);
+    expect(firstContinuation.checkpoint.browserTargetTabId).toBe(8);
     expect(firstContinuation.checkpoint.continuationItems).toEqual([
       { type: 'message_ref', messageId: 'message_1' },
       { type: 'message_ref', messageId: 'message_2' },
@@ -149,11 +187,134 @@ describe('TaskCommandService', () => {
     });
 
     expect(secondContinuation.task.workSessionId).toBe(created.task.workSessionId);
+    expect(secondContinuation.checkpoint.browserTargetTabId).toBe(9);
     expect(secondContinuation.checkpoint.continuationItems).toEqual([
       { type: 'message_ref', messageId: 'message_1' },
       { type: 'message_ref', messageId: 'message_2' },
       { type: 'message_ref', messageId: 'message_3' },
     ]);
+    database.close();
+  });
+
+  it('continues a cancelled committed context without expanding older audit results', async () => {
+    const database = await openChatBrowserDatabase(
+      createTestDatabaseName('command-continuation-context-commit'),
+    );
+    const repository = new IndexedDbTaskRepository(database);
+    const conversations = new IndexedDbConversationRepository(database);
+    const sources = createCommandSources();
+    await conversations.create({
+      id: 'conv_1',
+      tabId: 7,
+      title: 'Continue committed context',
+      createdAt: 1_000,
+      updatedAt: 1_000,
+    });
+    const commands = new TaskCommandService(repository, sources.clock, sources.ids, conversations);
+    const created = await commands.create({
+      conversationId: 'conv_1',
+      tabId: 7,
+      goal: 'Initial request',
+      userMessageId: 'message_1',
+    });
+    const commitArguments = JSON.stringify({ state: 'Goal: continue. Next: inspect the form.' });
+    const commitOutput =
+      '{"ok":true,"compactedCalls":1,"releasedTextChars":100,"releasedImages":1}';
+    const committedCheckpoint = {
+      ...created.checkpoint,
+      id: 'checkpoint_committed',
+      sequence: 1,
+      taskStatus: 'planning' as const,
+      completedToolResults: [
+        {
+          callId: 'call_inspect',
+          toolName: 'browser_inspect',
+          argumentsJson: '{"mode":"screenshot"}',
+          output: '{"ok":true,"data":"old raw result"}',
+          resultRef: 'result_inspect',
+          attachmentIds: ['attachment_old'],
+        },
+        {
+          callId: 'call_commit',
+          toolName: 'commit_context',
+          argumentsJson: commitArguments,
+          output: commitOutput,
+          resultRef: 'result_commit',
+          attachmentIds: [],
+        },
+      ],
+      continuationItems: [
+        { type: 'message_ref' as const, messageId: 'message_1' },
+        {
+          type: 'function_call' as const,
+          callId: 'call_commit',
+          name: 'commit_context',
+          argumentsJson: commitArguments,
+        },
+        {
+          type: 'function_call_output' as const,
+          callId: 'call_commit',
+          output: commitOutput,
+          resultRef: 'result_commit',
+          attachmentIds: [],
+        },
+      ],
+      pendingToolCall: null,
+      createdAt: 1_100,
+    };
+    await repository.saveTransition({
+      task: {
+        ...created.task,
+        status: 'planning',
+        checkpointId: committedCheckpoint.id,
+        updatedAt: 1_100,
+      },
+      event: {
+        id: 'event_committed',
+        taskId: created.task.id,
+        sequence: 1,
+        type: 'tool.result-recorded',
+        reason: 'commit_context_result_recorded',
+        at: 1_100,
+        error: null,
+      },
+      checkpoint: committedCheckpoint,
+    });
+
+    sources.advance(1_200);
+    const cancelled = await commands.cancel(created.task.id);
+    sources.advance(1_300);
+    const continued = await commands.continueCancelled({
+      sourceTaskId: cancelled.task.id,
+      tabId: 8,
+      goal: 'Continue after commit',
+      userMessageId: 'message_2',
+    });
+
+    expect(continued.checkpoint.completedToolResults.map(({ toolName }) => toolName)).toEqual([
+      'browser_inspect',
+      'commit_context',
+    ]);
+    expect(continued.checkpoint.continuationItems).toEqual([
+      { type: 'message_ref', messageId: 'message_1' },
+      {
+        type: 'function_call',
+        callId: 'call_commit',
+        name: 'commit_context',
+        argumentsJson: commitArguments,
+      },
+      {
+        type: 'function_call_output',
+        callId: 'call_commit',
+        output: commitOutput,
+        resultRef: 'result_commit',
+        attachmentIds: [],
+      },
+      { type: 'message_ref', messageId: 'message_2' },
+    ]);
+    expect(continued.checkpoint.continuationItems).not.toContainEqual(
+      expect.objectContaining({ callId: 'call_inspect' }),
+    );
     database.close();
   });
 
@@ -435,7 +596,12 @@ describe('TaskCommandService', () => {
         status: 'failed',
         updatedAt: 1_100,
         checkpointId: 'checkpoint_failed',
-        lease: { ownerId: 'stale', acquiredAt: 1_050, expiresAt: 9_999, generation: 1 },
+        lease: {
+          ownerId: 'stale',
+          acquiredAt: 1_050,
+          expiresAt: 9_999,
+          generation: 1,
+        },
         lastError: error,
       },
       event: {
@@ -465,7 +631,10 @@ describe('TaskCommandService', () => {
       lastError: null,
       lease: null,
     });
-    expect(retried.checkpoint).toMatchObject({ sequence: 2, taskStatus: 'queued' });
+    expect(retried.checkpoint).toMatchObject({
+      sequence: 2,
+      taskStatus: 'queued',
+    });
     expect(retried.events.at(-1)).toMatchObject({
       sequence: 2,
       type: 'task.retried',

@@ -35,6 +35,19 @@
   box-shadow: 0 0 0 3px color-mix(in srgb, var(--cbx-accent) 10%, transparent);
 }
 
+.composer-input-surface-disabled {
+  border-color: var(--cbx-divider);
+  color: var(--cbx-muted);
+  background: var(--cbx-subtle);
+  box-shadow: none;
+}
+
+.composer-input-surface > textarea:disabled {
+  color: var(--cbx-muted);
+  cursor: not-allowed;
+  opacity: 1;
+}
+
 .composer-toolbar {
   display: flex;
   min-width: 0;

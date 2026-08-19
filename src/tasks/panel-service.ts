@@ -14,8 +14,8 @@ import type {
 } from '../shared/protocol/panel-types';
 import type { IdGenerator } from '../shared/ids';
 import type { Clock } from '../shared/time';
-import type { MessageRecord } from './message-types';
-import type { TaskCommandPort, TaskSnapshot } from './task-command-service';
+import type { MessageRecord, MessageSourcePage } from './message-types';
+import { TaskCommandError, type TaskCommandPort, type TaskSnapshot } from './task-command-service';
 import type { TaskRun } from './task-types';
 
 const ATTACHMENT_GC_GRACE_MS = 24 * 60 * 60 * 1_000;
@@ -26,6 +26,7 @@ const MAX_PANEL_TOOL_ARGUMENTS = 20_000;
 const MAX_PANEL_TOOL_OUTPUT = 100_000;
 const MAX_PANEL_REASONING_SUMMARY = 20_000;
 const MAX_PANEL_SUPPLEMENTS = 100;
+const MAX_SOURCE_FAVICON_URL = 8_192;
 const terminalTaskStatuses = new Set<TaskRun['status']>(['completed', 'failed', 'cancelled']);
 const previewImageTypes = new Set<string>(IMAGE_POLICY.acceptedMimeTypes);
 
@@ -43,7 +44,7 @@ export interface PanelServiceDependencies {
   >;
   readonly tasks: Pick<
     TaskRepository,
-    'get' | 'listByConversation' | 'listEvents' | 'getCheckpoint'
+    'get' | 'listByConversation' | 'listEvents' | 'getCheckpoint' | 'listUnfinished'
   >;
   readonly attachments: Pick<AttachmentRepository, 'get' | 'deleteUnreferenced'>;
   readonly settings: Pick<SettingsStore, 'get' | 'save'>;
@@ -58,6 +59,7 @@ export interface PanelServiceDependencies {
       readonly id?: number | undefined;
       readonly title?: string | undefined;
       readonly url?: string | undefined;
+      readonly favIconUrl?: string | undefined;
     }>;
   };
   readonly permissions: {
@@ -106,6 +108,36 @@ function readWebOrigin(
   }
 }
 
+/** Keeps only bounded favicon URLs that are safe to render in the trusted panel. */
+function readFaviconUrl(value: string | null | undefined): string | null {
+  if (typeof value !== 'string' || value.length === 0 || value.length > MAX_SOURCE_FAVICON_URL) {
+    return null;
+  }
+  if (value.startsWith('data:image/')) return value;
+  try {
+    const url = new URL(value);
+    return url.protocol === 'http:' || url.protocol === 'https:' ? value : null;
+  } catch {
+    return null;
+  }
+}
+
+/** Validates and bounds one durable page snapshot before persistence or panel projection. */
+function readMessageSourcePage(
+  source: MessageSourcePage | undefined,
+): MessageSourcePage | undefined {
+  if (source === undefined) return undefined;
+  const url = source.url.slice(0, 4_096);
+  const webOrigin = readWebOrigin(url);
+  if (webOrigin === null) return undefined;
+  const title = source.title.trim().slice(0, 500) || new URL(url).hostname;
+  return {
+    title,
+    url,
+    favIconUrl: readFaviconUrl(source.favIconUrl),
+  };
+}
+
 /** Derives a compact conversation title from the first nonblank message line. */
 function conversationTitle(text: string, hasAttachments: boolean): string {
   const line = text.split(/\r?\n/, 1)[0]?.trim() ?? '';
@@ -131,6 +163,7 @@ function bytesToBase64(bytes: Uint8Array): string {
 
 export class PanelService {
   readonly #dependencies: PanelServiceDependencies;
+  #submissionInFlight = false;
 
   /** Creates the sanitized Side Panel query and command boundary. */
   constructor(dependencies: PanelServiceDependencies) {
@@ -209,16 +242,20 @@ export class PanelService {
       },
       conversation: selectedSummary,
       conversations: summaries,
-      messages: messages.map((message) => ({
-        id: message.id,
-        taskId: message.taskId,
-        role: message.role,
-        status: message.status,
-        text: message.text,
-        attachmentIds: [...message.attachmentIds],
-        createdAt: message.createdAt,
-        updatedAt: message.updatedAt,
-      })),
+      messages: messages.map((message) => {
+        const sourcePage = readMessageSourcePage(message.sourcePage);
+        return {
+          id: message.id,
+          taskId: message.taskId,
+          role: message.role,
+          status: message.status,
+          text: message.text,
+          attachmentIds: [...message.attachmentIds],
+          ...(sourcePage === undefined ? {} : { sourcePage }),
+          createdAt: message.createdAt,
+          updatedAt: message.updatedAt,
+        };
+      }),
       attachments,
       tasks: panelTasks,
       task: panelTask,
@@ -241,67 +278,87 @@ export class PanelService {
       throw new Error('Message attachments are invalid.');
     }
 
-    const now = this.#dependencies.clock.now();
-    let latestTask: TaskRun | undefined;
-    const conversation =
-      input.conversationId === undefined
-        ? {
-            id: this.#createId('conversation'),
-            tabId: input.tabId,
-            title: conversationTitle(text, attachmentIds.length > 0),
-            createdAt: now,
-            updatedAt: now,
-          }
-        : await this.#dependencies.conversations.get(input.conversationId);
-    if (conversation === undefined) {
-      throw new Error('Conversation is unavailable.');
+    if (this.#submissionInFlight) {
+      throw new TaskCommandError('TASK_ALREADY_RUNNING', '已有任务运行中');
     }
-    if (input.conversationId !== undefined) {
-      const tasks = await this.#dependencies.tasks.listByConversation(conversation.id);
-      latestTask = tasks.at(-1);
-      if (tasks.some((task) => !terminalTaskStatuses.has(task.status))) {
-        throw new Error('Conversation already has an unfinished task.');
-      }
-    }
-    if (input.conversationId === undefined) {
-      await this.#dependencies.conversations.create(conversation);
-    }
+    this.#submissionInFlight = true;
 
-    const message: MessageRecord = {
-      id: this.#createId('message'),
-      kind: 'conversation',
-      conversationId: conversation.id,
-      taskId: null,
-      role: 'user',
-      status: 'complete',
-      text,
-      attachmentIds,
-      createdAt: now,
-      updatedAt: now,
-    };
-    await this.#dependencies.conversations.appendMessage(message);
-    const goal = taskGoal(text);
-    const snapshot =
-      latestTask?.status === 'cancelled'
-        ? await this.#dependencies.commands.continueCancelled({
-            sourceTaskId: latestTask.id,
-            tabId: input.tabId,
-            goal,
-            userMessageId: message.id,
-          })
-        : await this.#dependencies.commands.create({
-            conversationId: conversation.id,
-            tabId: input.tabId,
-            goal,
-            userMessageId: message.id,
-          });
-    await this.#dependencies.conversations.updateMessage({
-      ...message,
-      taskId: snapshot.task.id,
-      updatedAt: Math.max(message.updatedAt, snapshot.task.createdAt),
-    });
-    await this.#dependencies.scheduleTask(snapshot.task.id);
-    return snapshot;
+    try {
+      if ((await this.#dependencies.tasks.listUnfinished()).length > 0) {
+        throw new TaskCommandError('TASK_ALREADY_RUNNING', '已有任务运行中');
+      }
+
+      const sourceTab = await this.#dependencies.tabs.get(input.tabId);
+      const sourcePage = readMessageSourcePage({
+        title: sourceTab.title ?? '',
+        url: sourceTab.url ?? '',
+        favIconUrl: sourceTab.favIconUrl ?? null,
+      });
+      const now = this.#dependencies.clock.now();
+      let latestTask: TaskRun | undefined;
+      const conversation =
+        input.conversationId === undefined
+          ? {
+              id: this.#createId('conversation'),
+              tabId: input.tabId,
+              title: conversationTitle(text, attachmentIds.length > 0),
+              createdAt: now,
+              updatedAt: now,
+            }
+          : await this.#dependencies.conversations.get(input.conversationId);
+      if (conversation === undefined) {
+        throw new Error('Conversation is unavailable.');
+      }
+      if (input.conversationId !== undefined) {
+        const tasks = await this.#dependencies.tasks.listByConversation(conversation.id);
+        latestTask = tasks.at(-1);
+        if (tasks.some((task) => !terminalTaskStatuses.has(task.status))) {
+          throw new TaskCommandError('TASK_ALREADY_RUNNING', '已有任务运行中');
+        }
+      }
+      if (input.conversationId === undefined) {
+        await this.#dependencies.conversations.create(conversation);
+      }
+
+      const message: MessageRecord = {
+        id: this.#createId('message'),
+        kind: 'conversation',
+        conversationId: conversation.id,
+        taskId: null,
+        role: 'user',
+        status: 'complete',
+        text,
+        attachmentIds,
+        ...(sourcePage === undefined ? {} : { sourcePage }),
+        createdAt: now,
+        updatedAt: now,
+      };
+      await this.#dependencies.conversations.appendMessage(message);
+      const goal = taskGoal(text);
+      const snapshot =
+        latestTask?.status === 'cancelled'
+          ? await this.#dependencies.commands.continueCancelled({
+              sourceTaskId: latestTask.id,
+              tabId: input.tabId,
+              goal,
+              userMessageId: message.id,
+            })
+          : await this.#dependencies.commands.create({
+              conversationId: conversation.id,
+              tabId: input.tabId,
+              goal,
+              userMessageId: message.id,
+            });
+      await this.#dependencies.conversations.updateMessage({
+        ...message,
+        taskId: snapshot.task.id,
+        updatedAt: Math.max(message.updatedAt, snapshot.task.createdAt),
+      });
+      await this.#dependencies.scheduleTask(snapshot.task.id);
+      return snapshot;
+    } finally {
+      this.#submissionInFlight = false;
+    }
   }
 
   /** Persists additional text or images for the next safe loop boundary of a running task. */
@@ -450,6 +507,13 @@ export class PanelService {
         ...(event.reasoningSummary === undefined
           ? {}
           : { reasoningSummary: event.reasoningSummary.slice(0, MAX_PANEL_REASONING_SUMMARY) }),
+        ...(event.supplementIds === undefined
+          ? {}
+          : {
+              supplementIds: event.supplementIds
+                .slice(-MAX_PANEL_SUPPLEMENTS)
+                .map((id) => id.slice(0, 256)),
+            }),
       })),
       completedToolResults: (checkpoint?.completedToolResults ?? [])
         .slice(-MAX_PANEL_TOOL_RESULTS)

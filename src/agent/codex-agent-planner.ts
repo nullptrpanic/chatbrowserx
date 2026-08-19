@@ -5,14 +5,20 @@ import type { TaskRepository } from '../persistence/task-repository';
 import { CODEX_MODEL } from '../providers/codex/codex-constants';
 import { isProviderError, providerErrorFromCode } from '../providers/provider-errors';
 import type { ModelProvider } from '../providers/provider-types';
-import type { ModelStreamEvent } from '../providers/stream-events';
+import type { ModelStreamEvent, ModelUsage } from '../providers/stream-events';
 import type { IdGenerator } from '../shared/ids';
 import type { Clock } from '../shared/time';
 import type { MessageRecord } from '../tasks/message-types';
 import { buildAgentContext } from './context/agent-context';
-import type { AgentEvent, AgentPlanInput, AgentPlanner } from './execution-types';
+import { hasContextCommitCandidate } from './context/context-commit';
+import type { AgentEvent, AgentModelTurn, AgentPlanInput, AgentPlanner } from './execution-types';
 import { StreamPersistenceBuffer } from './stream-persistence-buffer';
 import { BROWSER_TOOL_DEFINITIONS, parseBrowserToolCall } from './tools/browser-tool-schema';
+import {
+  CONTEXT_COMMIT_TOOL_DEFINITION,
+  CONTEXT_COMMIT_TOOL_NAME,
+  parseContextCommitToolCall,
+} from './tools/context-commit-tool-schema';
 import { TAVILY_TOOL_DEFINITIONS, parseTavilyToolCall } from './tools/tavily-tool-schema';
 
 export interface TavilyAvailabilityPort {
@@ -43,6 +49,7 @@ interface ToolTurnState {
 interface ModelTurnState {
   responseId: string | null;
   completed: boolean;
+  usage: ModelUsage | null;
   hasText: boolean;
   tool: ToolTurnState | null;
 }
@@ -66,7 +73,8 @@ function inspectEnvelopeEvent(event: ModelStreamEvent, state: ModelTurnState): v
       throw providerErrorFromCode('INVALID_RESPONSE');
     }
     state.completed = true;
-  } else if (state.completed) {
+    state.usage = event.usage;
+  } else if (state.responseId === null || state.completed) {
     throw providerErrorFromCode('INVALID_RESPONSE');
   }
 }
@@ -74,7 +82,7 @@ function inspectEnvelopeEvent(event: ModelStreamEvent, state: ModelTurnState): v
 /** Accepts one and only one internally consistent function-call sequence. */
 function inspectToolEvent(event: ModelStreamEvent, state: ModelTurnState): void {
   if (event.type === 'tool.started') {
-    if (state.responseId === null || state.tool !== null || state.hasText) {
+    if (state.responseId === null || state.tool !== null) {
       throw providerErrorFromCode('INVALID_RESPONSE');
     }
     state.tool = {
@@ -84,12 +92,7 @@ function inspectToolEvent(event: ModelStreamEvent, state: ModelTurnState): void 
       argumentsJson: null,
     };
   } else if (event.type === 'tool.arguments.delta') {
-    if (
-      state.tool === null ||
-      state.tool.completed ||
-      state.tool.callId !== event.callId ||
-      state.hasText
-    ) {
+    if (state.tool === null || state.tool.completed || state.tool.callId !== event.callId) {
       throw providerErrorFromCode('INVALID_RESPONSE');
     }
   } else if (event.type === 'tool.completed') {
@@ -97,8 +100,7 @@ function inspectToolEvent(event: ModelStreamEvent, state: ModelTurnState): void 
       state.tool === null ||
       state.tool.completed ||
       state.tool.callId !== event.callId ||
-      state.tool.name !== event.name ||
-      state.hasText
+      state.tool.name !== event.name
     ) {
       throw providerErrorFromCode('INVALID_RESPONSE');
     }
@@ -125,9 +127,13 @@ export class CodexAgentPlanner implements AgentPlanner {
     } catch {
       tavilyConfigured = false;
     }
-    const tools = tavilyConfigured
-      ? [...BROWSER_TOOL_DEFINITIONS, ...TAVILY_TOOL_DEFINITIONS]
-      : BROWSER_TOOL_DEFINITIONS;
+    const tools = [
+      ...BROWSER_TOOL_DEFINITIONS,
+      ...(tavilyConfigured ? TAVILY_TOOL_DEFINITIONS : []),
+      ...(hasContextCommitCandidate(input.checkpoint.continuationItems)
+        ? [CONTEXT_COMMIT_TOOL_DEFINITION]
+        : []),
+    ];
     const availableToolNames = new Set(tools.map(({ name }) => name));
     const context = await buildAgentContext(
       {
@@ -145,12 +151,17 @@ export class CodexAgentPlanner implements AgentPlanner {
     const state: ModelTurnState = {
       responseId: null,
       completed: false,
+      usage: null,
       hasText: false,
       tool: null,
     };
     let pendingText = '';
     let buffer: StreamPersistenceBuffer | null = null;
+    let bufferFinalized = false;
     let assistantMessageId: string | null = null;
+    const turnStartedAt = this.#dependencies.clock.now();
+    let firstEventAt: number | null = null;
+    let firstTextAt: number | null = null;
 
     try {
       for await (const event of this.#dependencies.provider.stream(
@@ -163,6 +174,9 @@ export class CodexAgentPlanner implements AgentPlanner {
         },
         signal,
       )) {
+        const eventAt = this.#dependencies.clock.now();
+        firstEventAt ??= eventAt;
+        if (event.type === 'text.delta') firstTextAt ??= eventAt;
         inspectEnvelopeEvent(event, state);
         inspectToolEvent(event, state);
         if (event.type === 'reasoning.summary') {
@@ -174,9 +188,6 @@ export class CodexAgentPlanner implements AgentPlanner {
             yield { type: 'reasoning.summary', text: summary };
           }
         } else if (event.type === 'text.delta') {
-          if (state.tool !== null && /\S/.test(event.delta)) {
-            throw providerErrorFromCode('INVALID_RESPONSE');
-          }
           if (buffer !== null) {
             await buffer.append(event.delta);
           } else {
@@ -225,9 +236,23 @@ export class CodexAgentPlanner implements AgentPlanner {
       if (!state.completed) {
         throw providerErrorFromCode('INVALID_RESPONSE');
       }
+      if (state.responseId === null || firstEventAt === null) {
+        throw providerErrorFromCode('INVALID_RESPONSE');
+      }
+      const completedAt = this.#dependencies.clock.now();
+      const modelTurn: AgentModelTurn = {
+        inputItemCount: context.input.length,
+        elapsedMs: Math.max(0, completedAt - turnStartedAt),
+        firstEventMs: Math.max(0, firstEventAt - turnStartedAt),
+        ...(firstTextAt === null ? {} : { firstTextMs: Math.max(0, firstTextAt - turnStartedAt) }),
+        usage: state.usage,
+      };
 
       if (state.tool !== null) {
-        if (state.hasText || !state.tool.completed || state.tool.argumentsJson === null) {
+        if (!state.tool.completed || state.tool.argumentsJson === null) {
+          throw providerErrorFromCode('INVALID_RESPONSE');
+        }
+        if (state.hasText && (buffer === null || assistantMessageId === null)) {
           throw providerErrorFromCode('INVALID_RESPONSE');
         }
         if (!availableToolNames.has(state.tool.name)) {
@@ -238,25 +263,45 @@ export class CodexAgentPlanner implements AgentPlanner {
           name: state.tool.name,
           argumentsJson: state.tool.argumentsJson,
         };
+        if (state.tool.name === CONTEXT_COMMIT_TOOL_NAME) {
+          const call = parseContextCommitToolCall(source);
+          if (buffer !== null) {
+            await buffer.interrupt();
+            bufferFinalized = true;
+          }
+          yield { type: 'context.commit', call, modelTurn };
+          return;
+        }
         if (state.tool.name.startsWith('browser_')) {
-          yield { type: 'browser.call', call: parseBrowserToolCall(source) };
+          const call = parseBrowserToolCall(source);
+          if (buffer !== null) {
+            await buffer.interrupt();
+            bufferFinalized = true;
+          }
+          yield { type: 'browser.call', call, modelTurn };
           return;
         }
         const call = parseTavilyToolCall(source);
-        yield { type: 'tavily.call', ...call };
+        if (buffer !== null) {
+          await buffer.interrupt();
+          bufferFinalized = true;
+        }
+        yield { type: 'tavily.call', ...call, modelTurn };
         return;
       }
       if (!state.hasText || buffer === null || assistantMessageId === null) {
         throw providerErrorFromCode('INVALID_RESPONSE');
       }
       await buffer.complete();
+      bufferFinalized = true;
       yield {
         type: 'task.completed',
         reason: 'model_response_completed',
         messageId: assistantMessageId,
+        modelTurn,
       };
     } catch (error) {
-      if (buffer !== null) {
+      if (buffer !== null && !bufferFinalized) {
         if (
           signal.aborted ||
           (isProviderError(error) && ['ABORTED', 'TRANSIENT', 'RATE_LIMIT'].includes(error.code))

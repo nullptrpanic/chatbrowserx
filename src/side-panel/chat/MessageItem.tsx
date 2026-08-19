@@ -1,7 +1,11 @@
-import { Check, Copy } from 'lucide-react';
+import { Check, Copy, ExternalLink, Globe2 } from 'lucide-react';
 import { useState } from 'react';
 import type { Translator } from '../../shared/i18n/i18n';
-import type { PanelMessage, PanelTask } from '../../shared/protocol/panel-types';
+import type {
+  PanelMessage,
+  PanelMessageSourcePage,
+  PanelTask,
+} from '../../shared/protocol/panel-types';
 import { TaskProgressCard } from '../tasks/TaskProgressCard';
 import type { AttachmentDraftClient } from './use-image-draft';
 import { copyMessageToClipboard } from './copy-message';
@@ -15,6 +19,7 @@ export interface MessageItemProps {
   readonly task?: PanelTask | null;
   readonly taskInteractive?: boolean;
   readonly onOpenImagePreview?: ((attachmentId: string) => Promise<boolean>) | undefined;
+  readonly onOpenSourcePage?: ((source: PanelMessageSourcePage) => Promise<void>) | undefined;
   readonly onPause?: () => void;
   readonly onResume?: () => void;
   readonly onRetry?: () => void;
@@ -29,12 +34,15 @@ export function MessageItem({
   task = null,
   taskInteractive = false,
   onOpenImagePreview,
+  onOpenSourcePage,
   onPause = noop,
   onResume = noop,
   onRetry = noop,
   onCancel = noop,
 }: MessageItemProps) {
   const [copied, setCopied] = useState(false);
+  const [faviconFailed, setFaviconFailed] = useState(false);
+  const sourcePage = message.role === 'user' ? message.sourcePage : undefined;
   const displayedText =
     message.text.length > 0
       ? message.text
@@ -56,11 +64,30 @@ export function MessageItem({
   }
   return (
     <article
-      className={`message-item message-${message.role} is-${message.status} ${task === null ? '' : 'has-task-details'}`}
+      className={`message-item message-${message.role} is-${message.status} ${task === null ? '' : 'has-task-details'} ${sourcePage === undefined ? '' : 'has-source-page'}`}
     >
       <div className="message-bubble">
         <header className="message-meta">
           <span>{message.role === 'user' ? t('userMessage') : t('assistantMessage')}</span>
+          {sourcePage === undefined ? null : (
+            <button
+              type="button"
+              className="message-source-page"
+              aria-label={t('openSourcePage', { title: sourcePage.title })}
+              title={`${sourcePage.title}\n${sourcePage.url}`}
+              onClick={() => void onOpenSourcePage?.(sourcePage).catch(noop)}
+            >
+              <span className="message-source-icon" aria-hidden="true">
+                {sourcePage.favIconUrl === null || faviconFailed ? (
+                  <Globe2 size={12} />
+                ) : (
+                  <img src={sourcePage.favIconUrl} alt="" onError={() => setFaviconFailed(true)} />
+                )}
+              </span>
+              <span className="message-source-title">{sourcePage.title}</span>
+              <ExternalLink className="message-source-external" size={11} aria-hidden="true" />
+            </button>
+          )}
           <time dateTime={new Date(message.createdAt).toISOString()}>
             {new Intl.DateTimeFormat(undefined, { hour: '2-digit', minute: '2-digit' }).format(
               message.createdAt,

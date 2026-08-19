@@ -2,16 +2,45 @@ import { handlePageCommand } from '../page/browser-command-handler';
 import { mountSelectionFeature } from '../page/selection/mount-selection-feature';
 
 interface PageContentGlobal {
-  __chatBrowserXPageCommandsV1__?: boolean;
+  __chatBrowserXPageCommandsV1__?:
+    | boolean
+    | {
+        readonly listener: Parameters<typeof chrome.runtime.onMessage.addListener>[0];
+        readonly disposeSelection: () => void;
+      };
 }
 
 const pageGlobal = globalThis as PageContentGlobal;
+const previous = pageGlobal.__chatBrowserXPageCommandsV1__;
 
-if (pageGlobal.__chatBrowserXPageCommandsV1__ !== true) {
-  pageGlobal.__chatBrowserXPageCommandsV1__ = true;
-  chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
-    void handlePageCommand(message).then(sendResponse);
-    return true;
-  });
-  mountSelectionFeature();
+if (typeof previous === 'object') {
+  try {
+    chrome.runtime.onMessage.removeListener(previous.listener);
+  } catch {
+    // A listener from the previous extension context may already be detached.
+  }
+  try {
+    previous.disposeSelection();
+  } catch {
+    // Reinstallation must continue even if the previous context can no longer clean itself up.
+  }
+} else if (previous === true) {
+  // Migrate pages that still contain the boolean guard used by older builds.
+  for (const overlay of document.querySelectorAll('[data-chatbrowserx-overlay="selection"]')) {
+    overlay.remove();
+  }
 }
+
+const listener: Parameters<typeof chrome.runtime.onMessage.addListener>[0] = (
+  message,
+  _sender,
+  sendResponse,
+) => {
+  void handlePageCommand(message).then(sendResponse);
+  return true;
+};
+chrome.runtime.onMessage.addListener(listener);
+pageGlobal.__chatBrowserXPageCommandsV1__ = {
+  listener,
+  disposeSelection: mountSelectionFeature(),
+};

@@ -33,12 +33,15 @@ export function ChatComposer({
   const fileInput = useRef<HTMLInputElement>(null);
   const [screenshotMenu, setScreenshotMenu] = useState(false);
   const [busy, setBusy] = useState(false);
-  const [error, setError] = useState<'send' | 'supplement' | 'screenshot' | null>(null);
+  const [error, setError] = useState<'send' | 'supplement' | 'screenshot' | 'task-running' | null>(
+    null,
+  );
   const canSend = text.trim().length > 0 || draft.items.length > 0;
+  const inputLocked = taskLocked && !running;
 
   /** Sends the current draft only after authentication and preserves it after any failure. */
   async function submit(): Promise<void> {
-    if (!canSend || busy || (taskLocked && !running)) return;
+    if (!canSend || busy || inputLocked) return;
     if (!hasToken) {
       onOpenSettings();
       return;
@@ -53,8 +56,14 @@ export function ChatComposer({
       }
       onTextChange('');
       draft.clear();
-    } catch {
-      setError(running ? 'supplement' : 'send');
+    } catch (cause) {
+      setError(
+        !running && cause instanceof Error && cause.message === 'TASK_ALREADY_RUNNING'
+          ? 'task-running'
+          : running
+            ? 'supplement'
+            : 'send',
+      );
     } finally {
       setBusy(false);
     }
@@ -77,7 +86,9 @@ export function ChatComposer({
 
   return (
     <section className="composer" aria-label={t('taskComposer')}>
-      <div className="composer-input-surface">
+      <div
+        className={`composer-input-surface${inputLocked ? ' composer-input-surface-disabled' : ''}`}
+      >
         <ImageAttachmentStrip
           items={draft.items}
           onRemove={draft.remove}
@@ -90,6 +101,7 @@ export function ChatComposer({
           maxLength={20_000}
           placeholder={t('composerPlaceholder')}
           aria-label={t('composerPlaceholder')}
+          disabled={inputLocked}
           onChange={(event) => onTextChange(event.target.value)}
           onPaste={draft.handlePaste}
           onInput={(event) => {
@@ -98,11 +110,7 @@ export function ChatComposer({
             element.style.height = `${String(Math.min(element.scrollHeight, 220))}px`;
           }}
           onKeyDown={(event) => {
-            if (
-              (event.metaKey || event.ctrlKey) &&
-              event.key === 'Enter' &&
-              (!taskLocked || running)
-            ) {
+            if ((event.metaKey || event.ctrlKey) && event.key === 'Enter' && !inputLocked) {
               event.preventDefault();
               void submit();
             }
@@ -115,13 +123,15 @@ export function ChatComposer({
       </div>
       {draft.error === null && error === null ? null : (
         <p className="composer-error" role="alert">
-          {error === 'screenshot'
-            ? t('screenshotError')
-            : error === 'supplement'
-              ? t('supplementError')
-              : error === 'send'
-                ? t('sendError')
-                : t('attachmentError')}
+          {error === 'task-running'
+            ? t('taskAlreadyRunning')
+            : error === 'screenshot'
+              ? t('screenshotError')
+              : error === 'supplement'
+                ? t('supplementError')
+                : error === 'send'
+                  ? t('sendError')
+                  : t('attachmentError')}
         </p>
       )}
       <div className="composer-toolbar">
@@ -132,6 +142,7 @@ export function ChatComposer({
           accept="image/png,image/jpeg,image/webp,image/gif"
           multiple
           aria-label={t('addImage')}
+          disabled={busy || inputLocked}
           onChange={(event) => {
             const files = [...(event.currentTarget.files ?? [])];
             event.currentTarget.value = '';
@@ -141,7 +152,7 @@ export function ChatComposer({
         <button
           type="button"
           className="composer-tool"
-          disabled={busy}
+          disabled={busy || inputLocked}
           onClick={() => fileInput.current?.click()}
         >
           <ImagePlus size={16} /> {t('image')}
@@ -150,13 +161,13 @@ export function ChatComposer({
           <button
             type="button"
             className="composer-tool"
-            disabled={busy}
+            disabled={busy || inputLocked}
             aria-expanded={screenshotMenu}
             onClick={() => setScreenshotMenu((value) => !value)}
           >
             <Camera size={16} /> {t('screenshot')} <ChevronDown size={13} />
           </button>
-          {screenshotMenu ? (
+          {screenshotMenu && !inputLocked ? (
             <div className="screenshot-menu" role="menu">
               <button type="button" role="menuitem" onClick={() => void capture('region')}>
                 {t('regionScreenshot')}
@@ -181,7 +192,7 @@ export function ChatComposer({
           <button
             type="button"
             className="primary-action"
-            disabled={!canSend || busy || (taskLocked && !running)}
+            disabled={!canSend || busy || inputLocked}
             onClick={() => void submit()}
           >
             <Send size={15} />

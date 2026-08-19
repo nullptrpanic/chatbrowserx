@@ -1,10 +1,6 @@
-import { computeAccessibleName } from 'dom-accessibility-api';
-import type { ViewportRect } from './element-ref-store';
-
 const MAX_TEXT_CHARACTERS = 40_000;
 const MAX_HEADINGS = 100;
 const MAX_LINKS = 100;
-const MAX_DOM_ELEMENTS = 200;
 const EXCLUDED_TAGS = new Set(['SCRIPT', 'STYLE', 'NOSCRIPT', 'TEMPLATE', 'SVG', 'CANVAS']);
 
 export interface ReadableHeading {
@@ -24,13 +20,6 @@ export interface ReadablePageContent {
   readonly headings: readonly ReadableHeading[];
   readonly links: readonly ReadableLink[];
   readonly truncated: boolean;
-}
-
-export interface DomObservedElement {
-  readonly role: string;
-  readonly name: string;
-  readonly state: readonly string[];
-  readonly bounds: ViewportRect;
 }
 
 function normalizedText(value: string | null | undefined): string {
@@ -125,92 +114,4 @@ export function extractReadableContent(document_: Document, _window: Window): Re
     links,
     truncated: structureTruncated || fullText.length > MAX_TEXT_CHARACTERS,
   };
-}
-
-function implicitRole(element: Element): string {
-  const explicit = normalizedText(element.getAttribute('role')).toLowerCase();
-  if (explicit) return explicit;
-  if (element.tagName === 'A' && element.hasAttribute('href')) return 'link';
-  if (element.tagName === 'BUTTON') return 'button';
-  if (element.tagName === 'TEXTAREA') return 'textbox';
-  if (element.tagName === 'SELECT') return 'combobox';
-  if (element.tagName === 'INPUT') {
-    switch ((element as HTMLInputElement).type) {
-      case 'checkbox':
-        return 'checkbox';
-      case 'radio':
-        return 'radio';
-      case 'button':
-      case 'submit':
-      case 'reset':
-        return 'button';
-      default:
-        return 'textbox';
-    }
-  }
-  return element.getAttribute('contenteditable') === 'true' ? 'textbox' : 'generic';
-}
-
-/** Observes visible DOM controls only to fill AX names that CDP omitted. */
-export function observeDomElements(
-  document_: Document,
-  _window: Window,
-): readonly DomObservedElement[] {
-  void _window;
-  const elements: DomObservedElement[] = [];
-  const selector =
-    'a[href],button,input:not([type="hidden"]),textarea,select,[role],[contenteditable="true"],[tabindex]';
-
-  const visit = (root: Document | ShadowRoot, offsetX: number, offsetY: number): void => {
-    for (const element of root.querySelectorAll(selector)) {
-      if (elements.length >= MAX_DOM_ELEMENTS || isHidden(element)) continue;
-      const bounds = element.getBoundingClientRect();
-      if (
-        !Number.isFinite(bounds.x) ||
-        !Number.isFinite(bounds.y) ||
-        bounds.width <= 0 ||
-        bounds.height <= 0
-      ) {
-        continue;
-      }
-      const name = (() => {
-        try {
-          return normalizedText(computeAccessibleName(element)).slice(0, 500);
-        } catch {
-          return '';
-        }
-      })();
-      const state: string[] = [];
-      if ('disabled' in element && element.disabled === true) state.push('disabled');
-      if ('checked' in element && typeof element.checked === 'boolean' && element.checked) {
-        state.push('checked');
-      }
-      const expanded = element.getAttribute('aria-expanded');
-      if (expanded === 'true' || expanded === 'false') state.push(`expanded=${expanded}`);
-      elements.push({
-        role: implicitRole(element).slice(0, 100),
-        name,
-        state,
-        bounds: {
-          x: bounds.x + offsetX,
-          y: bounds.y + offsetY,
-          width: bounds.width,
-          height: bounds.height,
-        },
-      });
-      if (element.shadowRoot) visit(element.shadowRoot, offsetX, offsetY);
-    }
-    for (const frameElement of root.querySelectorAll('iframe')) {
-      try {
-        const frame = frameElement as HTMLIFrameElement;
-        if (!frame.contentDocument) continue;
-        const bounds = frame.getBoundingClientRect();
-        visit(frame.contentDocument, offsetX + bounds.x, offsetY + bounds.y);
-      } catch {
-        // Cross-origin frames are observed through flattened CDP sessions.
-      }
-    }
-  };
-  visit(document_, 0, 0);
-  return elements;
 }

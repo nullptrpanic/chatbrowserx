@@ -6,6 +6,7 @@ const MAX_TOOL_CALL_ID_CHARACTERS = 256;
 const MAX_TOOL_ARGUMENTS_JSON_CHARACTERS = 32 * 1_024;
 const MAX_TAB_ID = 2_147_483_647;
 const MAX_COORDINATE = 1_000_000;
+const MAX_SCROLL_DELTA = 10_000;
 
 const tabIdSchema = z.number().int().min(0).max(MAX_TAB_ID);
 const refSchema = z
@@ -34,21 +35,25 @@ const browserUrlSchema = z
   });
 
 export const browserListTabsSchema = z.object({}).strict();
+export const browserGetCurrentTabSchema = z.object({}).strict();
 export const browserOpenTabSchema = z
   .object({ url: browserUrlSchema, activate: z.boolean() })
   .strict();
 export const browserSwitchTabSchema = z.object({ tabId: tabIdSchema }).strict();
 export const browserCloseTabSchema = z.object({ tabId: tabIdSchema }).strict();
 export const browserNavigateSchema = z
-  .object({ tabId: tabIdSchema, url: browserUrlSchema })
+  .object({ tabId: tabIdSchema.optional(), url: browserUrlSchema })
   .strict();
-export const browserReloadSchema = z.object({ tabId: tabIdSchema }).strict();
+export const browserReloadSchema = z.object({ tabId: tabIdSchema.optional() }).strict();
 export const browserInspectSchema = z
-  .object({ tabId: tabIdSchema, mode: z.enum(['content', 'interactive', 'screenshot']) })
+  .object({
+    tabId: tabIdSchema.optional(),
+    mode: z.enum(['content', 'interactive', 'interactive_deep', 'screenshot']),
+  })
   .strict();
 export const browserClickSchema = z
   .object({
-    tabId: tabIdSchema,
+    tabId: tabIdSchema.optional(),
     ref: refSchema,
     button: z.enum(['left', 'right', 'middle']),
     count: z.union([z.literal(1), z.literal(2)]),
@@ -56,7 +61,7 @@ export const browserClickSchema = z
   .strict();
 export const browserTypeSchema = z
   .object({
-    tabId: tabIdSchema,
+    tabId: tabIdSchema.optional(),
     ref: refSchema,
     text: z.string().max(20_000),
     replace: z.boolean(),
@@ -65,7 +70,7 @@ export const browserTypeSchema = z
   .strict();
 export const browserKeypressSchema = z
   .object({
-    tabId: tabIdSchema,
+    tabId: tabIdSchema.optional(),
     keys: z
       .string()
       .min(1)
@@ -75,29 +80,40 @@ export const browserKeypressSchema = z
   .strict();
 export const browserScrollSchema = z
   .object({
-    tabId: tabIdSchema,
+    tabId: tabIdSchema.optional(),
     target: refSchema,
-    direction: z.enum(['up', 'down', 'left', 'right']),
-    amount: z.enum(['small', 'medium', 'page']),
+    deltaX: z.number().int().min(-MAX_SCROLL_DELTA).max(MAX_SCROLL_DELTA),
+    deltaY: z.number().int().min(-MAX_SCROLL_DELTA).max(MAX_SCROLL_DELTA),
+  })
+  .strict()
+  .refine(({ deltaX, deltaY }) => deltaX !== 0 || deltaY !== 0);
+export const browserHoverSchema = z
+  .object({ tabId: tabIdSchema.optional(), ref: refSchema })
+  .strict();
+export const browserSelectSchema = z
+  .object({
+    tabId: tabIdSchema.optional(),
+    ref: refSchema,
+    value: z.string().max(2_000),
   })
   .strict();
-export const browserHoverSchema = z.object({ tabId: tabIdSchema, ref: refSchema }).strict();
-export const browserSelectSchema = z
-  .object({ tabId: tabIdSchema, ref: refSchema, value: z.string().max(2_000) })
-  .strict();
 export const browserDragSchema = z
-  .object({ tabId: tabIdSchema, fromRef: refSchema, toRef: refSchema })
+  .object({
+    tabId: tabIdSchema.optional(),
+    fromRef: refSchema,
+    toRef: refSchema,
+  })
   .strict();
 export const browserWaitSchema = z
   .object({
-    tabId: tabIdSchema,
+    tabId: tabIdSchema.optional(),
     condition: z.enum(['load', 'network_idle', 'dom_stable', 'delay']),
     timeoutMs: z.number().int().min(250).max(10_000),
   })
   .strict();
 export const browserClickPointSchema = z
   .object({
-    tabId: tabIdSchema,
+    tabId: tabIdSchema.optional(),
     x: coordinateSchema,
     y: coordinateSchema,
     button: z.enum(['left', 'right']),
@@ -106,24 +122,24 @@ export const browserClickPointSchema = z
   .strict();
 export const browserDragPointSchema = z
   .object({
-    tabId: tabIdSchema,
+    tabId: tabIdSchema.optional(),
     fromX: coordinateSchema,
     fromY: coordinateSchema,
     toX: coordinateSchema,
     toY: coordinateSchema,
   })
   .strict();
-export const browserNetworkStartSchema = z.object({ tabId: tabIdSchema }).strict();
+export const browserNetworkStartSchema = z.object({ tabId: tabIdSchema.optional() }).strict();
 export const browserNetworkListSchema = z
   .object({
-    tabId: tabIdSchema,
+    tabId: tabIdSchema.optional(),
     urlPattern: z.string().max(500),
     limit: z.number().int().min(1).max(100),
   })
   .strict();
 export const browserNetworkGetSchema = z
   .object({
-    tabId: tabIdSchema,
+    tabId: tabIdSchema.optional(),
     requestId: z
       .string()
       .min(1)
@@ -132,9 +148,10 @@ export const browserNetworkGetSchema = z
     includeBody: z.boolean(),
   })
   .strict();
-export const browserNetworkStopSchema = z.object({ tabId: tabIdSchema }).strict();
+export const browserNetworkStopSchema = z.object({ tabId: tabIdSchema.optional() }).strict();
 
 const BROWSER_SCHEMAS = {
+  browser_get_current_tab: browserGetCurrentTabSchema,
   browser_list_tabs: browserListTabsSchema,
   browser_open_tab: browserOpenTabSchema,
   browser_switch_tab: browserSwitchTabSchema,
@@ -160,6 +177,7 @@ const BROWSER_SCHEMAS = {
 
 export type BrowserToolName = keyof typeof BROWSER_SCHEMAS;
 export type BrowserOperation =
+  | 'get_current_tab'
   | 'list_tabs'
   | 'open_tab'
   | 'switch_tab'
@@ -201,6 +219,7 @@ export interface ParsedBrowserToolCall {
 }
 
 const OPERATIONS: Readonly<Record<BrowserToolName, BrowserOperation>> = {
+  browser_get_current_tab: 'get_current_tab',
   browser_list_tabs: 'list_tabs',
   browser_open_tab: 'open_tab',
   browser_switch_tab: 'switch_tab',
@@ -225,7 +244,9 @@ const OPERATIONS: Readonly<Record<BrowserToolName, BrowserOperation>> = {
 };
 
 const SAFE_TO_REPLAY = new Set<BrowserToolName>([
+  'browser_get_current_tab',
   'browser_list_tabs',
+  'browser_switch_tab',
   'browser_inspect',
   'browser_wait',
   'browser_network_list',
@@ -253,135 +274,180 @@ function toolDefinition(
   };
 }
 
-const TAB_ID_PROPERTY = { type: 'integer', minimum: 0, maximum: MAX_TAB_ID } as const;
-const URL_PROPERTY = { type: 'string', minLength: 1, maxLength: 4_096 } as const;
+const TAB_ID_PROPERTY = {
+  type: 'integer',
+  minimum: 0,
+  maximum: MAX_TAB_ID,
+} as const;
+const TASK_TAB_ID_PROPERTY = {
+  ...TAB_ID_PROPERTY,
+  description: 'Use 0 for the task current tab; a nonzero ID targets that background tab.',
+} as const;
+const URL_PROPERTY = {
+  type: 'string',
+  minLength: 1,
+  maxLength: 4_096,
+} as const;
 const REF_PROPERTY = { type: 'string', minLength: 1, maxLength: 128 } as const;
-const COORDINATE_PROPERTY = { type: 'number', minimum: 0, maximum: MAX_COORDINATE } as const;
+const COORDINATE_PROPERTY = {
+  type: 'number',
+  minimum: 0,
+  maximum: MAX_COORDINATE,
+} as const;
+
+function taskToolDefinition(
+  name: BrowserToolName,
+  description: string,
+  properties: Readonly<Record<string, FlatProperty>>,
+): ModelToolDefinition {
+  return toolDefinition(name, description, { tabId: TASK_TAB_ID_PROPERTY, ...properties });
+}
 
 export const BROWSER_TOOL_DEFINITIONS: readonly ModelToolDefinition[] = [
+  toolDefinition(
+    'browser_get_current_tab',
+    'Return the browser tab currently bound to this task. Use it for requests about this or the current page.',
+    {},
+  ),
   toolDefinition(
     'browser_list_tabs',
     'List browser tabs with IDs, titles, URLs, and active state.',
     {},
   ),
-  toolDefinition('browser_open_tab', 'Open one HTTP(S) URL or about:blank in a browser tab.', {
-    url: URL_PROPERTY,
-    activate: { type: 'boolean' },
-  }),
-  toolDefinition('browser_switch_tab', 'Activate one existing browser tab by ID.', {
+  toolDefinition(
+    'browser_open_tab',
+    'Open one HTTP(S) URL or about:blank and make it the task current tab. Keep activate false for background work; use true only when the user asks to foreground it.',
+    {
+      url: URL_PROPERTY,
+      activate: { type: 'boolean' },
+    },
+  ),
+  toolDefinition('browser_switch_tab', 'Set the task current tab without activating it.', {
     tabId: TAB_ID_PROPERTY,
   }),
   toolDefinition('browser_close_tab', 'Close one existing browser tab by ID.', {
     tabId: TAB_ID_PROPERTY,
   }),
-  toolDefinition('browser_navigate', 'Navigate one browser tab to an HTTP(S) URL or about:blank.', {
-    tabId: TAB_ID_PROPERTY,
+  taskToolDefinition('browser_navigate', 'Navigate one task page to an HTTP(S) URL.', {
     url: URL_PROPERTY,
   }),
-  toolDefinition('browser_reload', 'Reload one browser tab and wait for bounded page stability.', {
-    tabId: TAB_ID_PROPERTY,
-  }),
-  toolDefinition(
+  taskToolDefinition('browser_reload', 'Reload one task page and wait for stability.', {}),
+  taskToolDefinition(
     'browser_inspect',
-    'Inspect readable content, semantic interactive elements, or a viewport screenshot.',
+    'Inspect readable content, a compact native accessibility tree with actionable refs across frames, or a viewport screenshot. Use interactive for page understanding and controls; use screenshot only when the page is visual or canvas-based.',
     {
-      tabId: TAB_ID_PROPERTY,
-      mode: { type: 'string', enum: ['content', 'interactive', 'screenshot'] },
+      mode: {
+        type: 'string',
+        enum: ['content', 'interactive', 'screenshot'],
+      },
     },
   ),
-  toolDefinition('browser_click', 'Click a recent semantic element ref and verify page state.', {
-    tabId: TAB_ID_PROPERTY,
-    ref: REF_PROPERTY,
-    button: { type: 'string', enum: ['left', 'right', 'middle'] },
-    count: { type: 'integer', enum: [1, 2] },
-  }),
-  toolDefinition('browser_type', 'Type into a recent semantic element ref.', {
-    tabId: TAB_ID_PROPERTY,
+  taskToolDefinition(
+    'browser_click',
+    'Automatically scroll a recent semantic element ref into view, then click it.',
+    {
+      ref: REF_PROPERTY,
+      button: { type: 'string', enum: ['left', 'right', 'middle'] },
+      count: { type: 'integer', enum: [1, 2] },
+    },
+  ),
+  taskToolDefinition('browser_type', 'Automatically reveal and type into a recent semantic ref.', {
     ref: REF_PROPERTY,
     text: { type: 'string', maxLength: 20_000 },
     replace: { type: 'boolean' },
     submit: { type: 'boolean' },
   }),
-  toolDefinition(
+  taskToolDefinition(
     'browser_keypress',
     'Send a normalized key or chord, including BROWSER_BACK and BROWSER_FORWARD.',
     {
-      tabId: TAB_ID_PROPERTY,
       keys: { type: 'string', minLength: 1, maxLength: 100 },
     },
   ),
-  toolDefinition('browser_scroll', 'Scroll the viewport or a recent semantic element ref.', {
-    tabId: TAB_ID_PROPERTY,
-    target: REF_PROPERTY,
-    direction: { type: 'string', enum: ['up', 'down', 'left', 'right'] },
-    amount: { type: 'string', enum: ['small', 'medium', 'page'] },
-  }),
-  toolDefinition('browser_hover', 'Move the virtual pointer over a recent semantic element ref.', {
-    tabId: TAB_ID_PROPERTY,
-    ref: REF_PROPERTY,
-  }),
-  toolDefinition('browser_select', 'Choose an option value in a recent semantic select ref.', {
-    tabId: TAB_ID_PROPERTY,
+  taskToolDefinition(
+    'browser_scroll',
+    'Scroll the viewport or a recent semantic element ref by exact CSS-pixel deltas.',
+    {
+      target: REF_PROPERTY,
+      deltaX: {
+        type: 'integer',
+        minimum: -MAX_SCROLL_DELTA,
+        maximum: MAX_SCROLL_DELTA,
+      },
+      deltaY: {
+        type: 'integer',
+        minimum: -MAX_SCROLL_DELTA,
+        maximum: MAX_SCROLL_DELTA,
+      },
+    },
+  ),
+  taskToolDefinition(
+    'browser_hover',
+    'Move the virtual pointer over a recent semantic element ref.',
+    {
+      ref: REF_PROPERTY,
+    },
+  ),
+  taskToolDefinition('browser_select', 'Choose an option value in a recent semantic select ref.', {
     ref: REF_PROPERTY,
     value: { type: 'string', maxLength: 2_000 },
   }),
-  toolDefinition('browser_drag', 'Drag from one recent semantic ref to another.', {
-    tabId: TAB_ID_PROPERTY,
+  taskToolDefinition('browser_drag', 'Drag from one recent semantic ref to another.', {
     fromRef: REF_PROPERTY,
     toRef: REF_PROPERTY,
   }),
-  toolDefinition(
+  taskToolDefinition(
     'browser_wait',
     'Wait for load, network idle, DOM stability, or a bounded delay.',
     {
-      tabId: TAB_ID_PROPERTY,
-      condition: { type: 'string', enum: ['load', 'network_idle', 'dom_stable', 'delay'] },
+      condition: {
+        type: 'string',
+        enum: ['load', 'network_idle', 'dom_stable', 'delay'],
+      },
       timeoutMs: { type: 'integer', minimum: 250, maximum: 10_000 },
     },
   ),
-  toolDefinition(
+  taskToolDefinition(
     'browser_click_point',
     'Click screenshot coordinates only after inspecting a current viewport screenshot.',
     {
-      tabId: TAB_ID_PROPERTY,
       x: COORDINATE_PROPERTY,
       y: COORDINATE_PROPERTY,
       button: { type: 'string', enum: ['left', 'right'] },
       count: { type: 'integer', enum: [1, 2] },
     },
   ),
-  toolDefinition(
+  taskToolDefinition(
     'browser_drag_point',
     'Drag between screenshot coordinates only after inspecting a current viewport screenshot.',
     {
-      tabId: TAB_ID_PROPERTY,
       fromX: COORDINATE_PROPERTY,
       fromY: COORDINATE_PROPERTY,
       toX: COORDINATE_PROPERTY,
       toY: COORDINATE_PROPERTY,
     },
   ),
-  toolDefinition(
+  taskToolDefinition(
     'browser_network_start',
     'Start capturing future traffic only. For initial-load traffic, then reload, wait for network_idle, and list requests.',
-    { tabId: TAB_ID_PROPERTY },
+    {},
   ),
-  toolDefinition('browser_network_list', 'List bounded captured request metadata for one tab.', {
-    tabId: TAB_ID_PROPERTY,
-    urlPattern: { type: 'string', maxLength: 500 },
-    limit: { type: 'integer', minimum: 1, maximum: 100 },
-  }),
-  toolDefinition('browser_network_get', 'Read sanitized details for one captured request.', {
-    tabId: TAB_ID_PROPERTY,
+  taskToolDefinition(
+    'browser_network_list',
+    'List bounded captured request metadata for one tab.',
+    {
+      urlPattern: { type: 'string', maxLength: 500 },
+      limit: { type: 'integer', minimum: 1, maximum: 100 },
+    },
+  ),
+  taskToolDefinition('browser_network_get', 'Read sanitized details for one captured request.', {
     requestId: { type: 'string', minLength: 1, maxLength: 512 },
     includeBody: { type: 'boolean' },
   }),
-  toolDefinition(
+  taskToolDefinition(
     'browser_network_stop',
     'Stop capturing traffic for one tab and release its buffer.',
-    {
-      tabId: TAB_ID_PROPERTY,
-    },
+    {},
   ),
 ];
 

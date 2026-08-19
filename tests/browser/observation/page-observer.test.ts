@@ -1,4 +1,4 @@
-import { describe, expect, it, vi } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import type {
   DebuggerSession,
   DebuggerTransport,
@@ -41,19 +41,364 @@ const CONTENT: PageObservationContentPort = {
     links: [],
     truncated: false,
   })),
-  observeElements: vi.fn(async () => [
-    {
-      role: 'button',
-      name: 'Fallback name',
-      state: [],
-      bounds: { x: 10, y: 20, width: 100, height: 30 },
-    },
-  ]),
   setOverlaysHidden: vi.fn(async () => undefined),
 };
 
+function buttonDomSnapshot(frameId = 'frame-main', backendNodeId = 11) {
+  const strings = [
+    'https://top.test/',
+    'Top page',
+    '',
+    frameId,
+    '#document',
+    'BUTTON',
+    'auto',
+    'block',
+    'visible',
+    'pointer',
+  ];
+  return {
+    strings,
+    documents: [
+      {
+        documentURL: 0,
+        title: 1,
+        baseURL: 0,
+        contentLanguage: 2,
+        encodingName: 2,
+        publicId: 2,
+        systemId: 2,
+        frameId: 3,
+        nodes: {
+          parentIndex: [-1, 0],
+          nodeType: [9, 1],
+          nodeName: [4, 5],
+          nodeValue: [2, 2],
+          backendNodeId: [1, backendNodeId],
+          attributes: [[], []],
+          isClickable: { index: [1] },
+        },
+        layout: {
+          nodeIndex: [1],
+          styles: [[9, 7, 8, 6]],
+          bounds: [[10, 20, 100, 30]],
+          text: [2],
+          stackingContexts: { index: [] },
+        },
+        textBoxes: { layoutIndex: [], bounds: [], start: [], length: [] },
+      },
+    ],
+  };
+}
+
+function mainFrameTree(
+  loaderId = 'loader-main',
+  frameId = 'frame-main',
+  url = 'https://top.test/',
+) {
+  return {
+    frameTree: {
+      frame: {
+        id: frameId,
+        loaderId,
+        url,
+        domainAndRegistry: new URL(url).hostname,
+        securityOrigin: new URL(url).origin,
+        mimeType: 'text/html',
+      },
+    },
+  };
+}
+
 describe('PageObserver', () => {
-  it('hides overlays, captures one bounded PNG, persists it once, and restores overlays', async () => {
+  afterEach(() => vi.unstubAllGlobals());
+
+  it('uses compact native AX semantics on ordinary pages and keeps debugger details internal', async () => {
+    const snapshot: BrowserSessionSnapshot = {
+      tabId: 7,
+      generation: 1,
+      root: { tabId: 7 },
+      children: new Map(),
+    };
+    const sessionPort = sessions(snapshot);
+    const transport = debuggerTransport((_session, method) => {
+      if (method === 'Accessibility.getFullAXTree') {
+        return {
+          nodes: [
+            {
+              nodeId: 'root',
+              backendDOMNodeId: 1,
+              ignored: false,
+              role: { value: 'RootWebArea' },
+              name: { value: 'Top page' },
+              childIds: ['button'],
+            },
+            {
+              nodeId: 'button',
+              parentId: 'root',
+              backendDOMNodeId: 11,
+              ignored: false,
+              role: { value: 'button' },
+              name: { value: 'Submit' },
+              properties: [{ name: 'focusable', value: { value: true } }],
+            },
+          ],
+        };
+      }
+      if (method === 'DOMSnapshot.captureSnapshot') return buttonDomSnapshot();
+      if (method === 'Page.getFrameTree') return mainFrameTree();
+      if (method === 'Page.getNavigationHistory') {
+        return {
+          currentIndex: 0,
+          entries: [
+            { id: 1, url: 'https://top.test/', title: 'Top page', transitionType: 'typed' },
+          ],
+        };
+      }
+      return {};
+    });
+    const refs = new ElementRefStore({ create: () => 'ref_1' });
+    const observer = new PageObserver({
+      sessions: sessionPort,
+      transport,
+      content: CONTENT,
+      refs,
+    });
+
+    const result = await observer.inspect(7, 'interactive', new AbortController().signal);
+
+    expect(sessionPort.ensure).toHaveBeenCalledOnce();
+    expect(result).toMatchObject({
+      url: 'https://top.test/',
+      debuggerSession: 'ephemeral',
+      data: {
+        mode: 'interactive',
+        keys: 'd=depth,r=role(default generic),n=name,s=state,a=extra actions(ref defaults click),f=frame',
+        elements: [
+          {
+            d: 1,
+            r: 'button',
+            n: 'Submit',
+            ref: 'ref_1',
+          },
+        ],
+      },
+    });
+    const [element] = result.data.elements as Readonly<Record<string, unknown>>[];
+    expect(element).not.toHaveProperty('a');
+    expect(result.data).not.toHaveProperty('truncated');
+    expect(result.data).not.toHaveProperty('generation');
+    expect(JSON.stringify(result.data)).not.toContain('bounds');
+    expect(refs.resolve('ref_1', 7)).toMatchObject({
+      documentFrameId: 'frame-main',
+      loaderId: 'loader-main',
+      backendNodeId: 11,
+    });
+  });
+
+  it('keeps interactive_deep as a compatibility alias for native interactive inspection', async () => {
+    const snapshot: BrowserSessionSnapshot = {
+      tabId: 7,
+      generation: 1,
+      root: { tabId: 7 },
+      children: new Map(),
+    };
+    const sessionPort = sessions(snapshot);
+    const transport = debuggerTransport((_session, method) => {
+      if (method === 'Accessibility.getFullAXTree') {
+        return {
+          nodes: [
+            {
+              nodeId: 'button',
+              backendDOMNodeId: 11,
+              ignored: false,
+              role: { value: 'button' },
+              name: { value: 'Submit' },
+            },
+          ],
+        };
+      }
+      if (method === 'DOMSnapshot.captureSnapshot') return buttonDomSnapshot();
+      if (method === 'Page.getFrameTree') return mainFrameTree();
+      if (method === 'Page.getNavigationHistory') {
+        return {
+          currentIndex: 0,
+          entries: [
+            { id: 1, url: 'https://top.test/', title: 'Top page', transitionType: 'typed' },
+          ],
+        };
+      }
+      return {};
+    });
+    const observer = new PageObserver({
+      sessions: sessionPort,
+      transport,
+      content: CONTENT,
+      refs: new ElementRefStore({ create: () => 'ref_1' }),
+    });
+
+    const result = await observer.inspect(7, 'interactive_deep', new AbortController().signal);
+
+    expect(sessionPort.ensure).toHaveBeenCalledOnce();
+    expect(result).toMatchObject({
+      debuggerSession: 'ephemeral',
+      data: {
+        mode: 'interactive',
+        elements: [expect.objectContaining({ ref: 'ref_1', n: 'Submit' })],
+      },
+    });
+  });
+
+  it('omits the default generic role and does not expose long semantic field names', async () => {
+    const snapshot: BrowserSessionSnapshot = {
+      tabId: 7,
+      generation: 1,
+      root: { tabId: 7 },
+      children: new Map(),
+    };
+    const transport = debuggerTransport((_session, method) => {
+      if (method === 'Accessibility.getFullAXTree') {
+        return {
+          nodes: [
+            {
+              nodeId: 'custom',
+              backendDOMNodeId: 11,
+              ignored: false,
+              role: { value: 'generic' },
+              name: { value: 'Custom option' },
+            },
+          ],
+        };
+      }
+      if (method === 'DOMSnapshot.captureSnapshot') return buttonDomSnapshot();
+      if (method === 'Page.getFrameTree') return mainFrameTree();
+      if (method === 'Page.getNavigationHistory') {
+        return {
+          currentIndex: 0,
+          entries: [
+            { id: 1, url: 'https://top.test/', title: 'Top page', transitionType: 'typed' },
+          ],
+        };
+      }
+      return {};
+    });
+    const observer = new PageObserver({
+      sessions: sessions(snapshot),
+      transport,
+      content: CONTENT,
+      refs: new ElementRefStore({ create: () => 'ref_generic' }),
+    });
+
+    const result = await observer.inspect(7, 'interactive', new AbortController().signal);
+
+    expect(result.data).toMatchObject({
+      keys: 'd=depth,r=role(default generic),n=name,s=state,a=extra actions(ref defaults click),f=frame',
+      elements: [{ d: 0, n: 'Custom option', ref: 'ref_generic' }],
+    });
+    const [element] = result.data.elements as Readonly<Record<string, unknown>>[];
+    expect(element).not.toHaveProperty('r');
+    expect(element).not.toHaveProperty('a');
+    expect(element).not.toHaveProperty('depth');
+    expect(element).not.toHaveProperty('role');
+    expect(element).not.toHaveProperty('name');
+    expect(element).not.toHaveProperty('state');
+    expect(element).not.toHaveProperty('actions');
+    expect(element).not.toHaveProperty('frame');
+  });
+
+  it('keeps non-default actions while treating click as implicit for refs', async () => {
+    const snapshot: BrowserSessionSnapshot = {
+      tabId: 7,
+      generation: 1,
+      root: { tabId: 7 },
+      children: new Map(),
+    };
+    const transport = debuggerTransport((_session, method) => {
+      if (method === 'Accessibility.getFullAXTree') {
+        return {
+          nodes: [
+            {
+              nodeId: 'query',
+              backendDOMNodeId: 11,
+              ignored: false,
+              role: { value: 'textbox' },
+              name: { value: 'Query' },
+            },
+          ],
+        };
+      }
+      if (method === 'DOMSnapshot.captureSnapshot') return buttonDomSnapshot();
+      if (method === 'Page.getFrameTree') return mainFrameTree();
+      if (method === 'Page.getNavigationHistory') {
+        return {
+          currentIndex: 0,
+          entries: [
+            { id: 1, url: 'https://top.test/', title: 'Top page', transitionType: 'typed' },
+          ],
+        };
+      }
+      return {};
+    });
+    const observer = new PageObserver({
+      sessions: sessions(snapshot),
+      transport,
+      content: CONTENT,
+      refs: new ElementRefStore({ create: () => 'ref_query' }),
+    });
+
+    const result = await observer.inspect(7, 'interactive', new AbortController().signal);
+
+    expect(result.data).toEqual({
+      mode: 'interactive',
+      keys: 'd=depth,r=role(default generic),n=name,s=state,a=extra actions(ref defaults click),f=frame',
+      elements: [{ d: 0, r: 'textbox', n: 'Query', a: ['type'], ref: 'ref_query' }],
+    });
+  });
+
+  it('retains the truncation marker when interactive elements were omitted', async () => {
+    const snapshot: BrowserSessionSnapshot = {
+      tabId: 7,
+      generation: 1,
+      root: { tabId: 7 },
+      children: new Map(),
+    };
+    const transport = debuggerTransport((_session, method) => {
+      if (method === 'Accessibility.getFullAXTree') {
+        return {
+          nodes: Array.from({ length: 501 }, (_, index) => ({
+            nodeId: `text-${String(index)}`,
+            ignored: false,
+            role: { value: 'StaticText' },
+            name: { value: `Text ${String(index)}` },
+          })),
+        };
+      }
+      if (method === 'DOMSnapshot.captureSnapshot') return buttonDomSnapshot();
+      if (method === 'Page.getFrameTree') return mainFrameTree();
+      if (method === 'Page.getNavigationHistory') {
+        return {
+          currentIndex: 0,
+          entries: [
+            { id: 1, url: 'https://top.test/', title: 'Top page', transitionType: 'typed' },
+          ],
+        };
+      }
+      return {};
+    });
+    const observer = new PageObserver({
+      sessions: sessions(snapshot),
+      transport,
+      content: CONTENT,
+      refs: new ElementRefStore({ create: () => 'unused' }),
+    });
+
+    const result = await observer.inspect(7, 'interactive', new AbortController().signal);
+
+    expect(result.data).toMatchObject({ truncated: true });
+    expect(result.data.elements).toHaveLength(500);
+  });
+
+  it('prepares a bounded model image while preserving CSS viewport dimensions', async () => {
     const snapshot: BrowserSessionSnapshot = {
       tabId: 7,
       generation: 1,
@@ -70,8 +415,8 @@ describe('PageObserver', () => {
           visualViewport: {
             pageX: 0,
             pageY: 0,
-            clientWidth: 800,
-            clientHeight: 600,
+            clientWidth: 1255,
+            clientHeight: 800,
           },
         };
       }
@@ -94,6 +439,30 @@ describe('PageObserver', () => {
     const setOverlaysHidden = vi.fn(async (tabId: number, hidden: boolean) => {
       calls.push(`overlay:${String(tabId)}:${String(hidden)}`);
     });
+    const preparedBlob = new Blob(['prepared'], { type: 'image/png' });
+    const close = vi.fn();
+    const drawImage = vi.fn();
+    const canvases: { width: number; height: number }[] = [];
+    vi.stubGlobal(
+      'createImageBitmap',
+      vi.fn(async () => ({ width: 2510, height: 1600, close })),
+    );
+    vi.stubGlobal(
+      'OffscreenCanvas',
+      class {
+        constructor(width: number, height: number) {
+          canvases.push({ width, height });
+        }
+
+        getContext() {
+          return { drawImage };
+        }
+
+        async convertToBlob() {
+          return preparedBlob;
+        }
+      },
+    );
     const persistScreenshot = vi.fn(async (blob: Blob) => {
       calls.push(`persist:${blob.type}:${String(blob.size)}`);
       return { id: 'attachment_screenshot' };
@@ -114,110 +483,28 @@ describe('PageObserver', () => {
       data: {
         mode: 'screenshot',
         mimeType: 'image/png',
-        width: 800,
-        height: 600,
+        width: 1440,
+        height: 918,
+        viewportWidth: 1255,
+        viewportHeight: 800,
         attachmentId: 'attachment_screenshot',
       },
       observation: null,
       attachmentIds: ['attachment_screenshot'],
+      debuggerSession: 'ephemeral',
     });
     expect(calls.indexOf('overlay:7:true')).toBeLessThan(calls.indexOf('Page.captureScreenshot'));
     expect(calls.indexOf('Page.captureScreenshot')).toBeLessThan(
       calls.findIndex((call) => call.startsWith('persist:image/png:')),
     );
     expect(calls.at(-1)).toBe('overlay:7:false');
+    expect(persistScreenshot).toHaveBeenCalledWith(preparedBlob);
     expect(persistScreenshot).toHaveBeenCalledOnce();
+    expect(canvases).toEqual([{ width: 1440, height: 918 }]);
+    expect(close).toHaveBeenCalledOnce();
   });
 
-  it('uses AX backend nodes, ignores unusable nodes, and fills a missing name from DOM', async () => {
-    const snapshot: BrowserSessionSnapshot = {
-      tabId: 7,
-      generation: 4,
-      root: { tabId: 7 },
-      children: new Map(),
-    };
-    const transport = debuggerTransport((_session, method, params) => {
-      if (method === 'Accessibility.getFullAXTree') {
-        return {
-          nodes: [
-            {
-              nodeId: '1',
-              backendDOMNodeId: 11,
-              ignored: false,
-              role: { value: 'button' },
-              name: { value: 'Submit' },
-              properties: [{ name: 'focusable', value: { value: true } }],
-            },
-            {
-              nodeId: '2',
-              backendDOMNodeId: 12,
-              ignored: true,
-              role: { value: 'button' },
-              name: { value: 'Ignored' },
-            },
-            {
-              nodeId: '3',
-              backendDOMNodeId: 13,
-              ignored: false,
-              role: { value: 'button' },
-              name: { value: 'Zero' },
-            },
-            {
-              nodeId: '4',
-              backendDOMNodeId: 14,
-              ignored: false,
-              role: { value: 'button' },
-              name: { value: '' },
-            },
-          ],
-        };
-      }
-      if (method === 'DOM.getBoxModel') {
-        const backendNodeId = (params as { backendNodeId: number }).backendNodeId;
-        if (backendNodeId === 13) return { model: { border: [0, 0, 0, 0, 0, 0, 0, 0] } };
-        return { model: { border: [10, 20, 110, 20, 110, 50, 10, 50] } };
-      }
-      if (method === 'Page.getLayoutMetrics') {
-        return { visualViewport: { pageX: 0, pageY: 0, clientWidth: 1280, clientHeight: 720 } };
-      }
-      if (method === 'Page.getNavigationHistory') {
-        return {
-          currentIndex: 0,
-          entries: [
-            { id: 1, url: 'https://top.test/', title: 'Top page', transitionType: 'typed' },
-          ],
-        };
-      }
-      return {};
-    });
-    let id = 0;
-    const refs = new ElementRefStore({ create: () => `ref_${++id}` });
-    const observer = new PageObserver({
-      sessions: sessions(snapshot),
-      transport,
-      content: CONTENT,
-      refs,
-    });
-
-    const result = await observer.inspect(7, 'interactive', new AbortController().signal);
-
-    expect(result.data).toMatchObject({
-      mode: 'interactive',
-      truncated: false,
-      elements: [
-        expect.objectContaining({
-          ref: 'ref_1',
-          role: 'button',
-          name: 'Submit',
-          state: ['focusable'],
-        }),
-        expect.objectContaining({ ref: 'ref_2', role: 'button', name: 'Fallback name' }),
-      ],
-    });
-    expect(refs.resolve('ref_2', 7, 4)).toMatchObject({ backendNodeId: 14 });
-  });
-
-  it('accumulates parent frame-owner offsets for nested OOPIF bounds', async () => {
+  it('includes OOPIF semantics while keeping a stable frame target and loader in the ref', async () => {
     const child = {
       targetId: 'frame_child',
       type: 'iframe',
@@ -231,7 +518,7 @@ describe('PageObserver', () => {
       root: { tabId: 7 },
       children: new Map([[child.targetId, child]]),
     };
-    const transport = debuggerTransport((session, method, params) => {
+    const transport = debuggerTransport((session, method) => {
       if (method === 'Accessibility.getFullAXTree') {
         return session.sessionId
           ? {
@@ -247,15 +534,16 @@ describe('PageObserver', () => {
             }
           : { nodes: [] };
       }
-      if (method === 'DOM.getFrameOwner') return { backendNodeId: 99 };
-      if (method === 'DOM.getBoxModel') {
-        const id = (params as { backendNodeId: number }).backendNodeId;
-        return id === 99
-          ? { model: { border: [100, 200, 500, 200, 500, 500, 100, 500] } }
-          : { model: { border: [10, 20, 60, 20, 60, 40, 10, 40] } };
+      if (method === 'DOMSnapshot.captureSnapshot') {
+        return session.sessionId
+          ? buttonDomSnapshot('frame-child-document', 21)
+          : buttonDomSnapshot();
       }
-      if (method === 'Page.getLayoutMetrics')
-        return { visualViewport: { pageX: 0, pageY: 0, clientWidth: 800, clientHeight: 600 } };
+      if (method === 'Page.getFrameTree') {
+        return session.sessionId
+          ? mainFrameTree('loader-child', 'frame-child-document', 'https://child.test/')
+          : mainFrameTree();
+      }
       if (method === 'Page.getNavigationHistory')
         return {
           currentIndex: 0,
@@ -263,27 +551,34 @@ describe('PageObserver', () => {
         };
       return {};
     });
+    const refs = new ElementRefStore({ create: () => 'ref_child' });
     const observer = new PageObserver({
       sessions: sessions(snapshot),
       transport,
-      content: { ...CONTENT, observeElements: vi.fn(async () => []) },
-      refs: new ElementRefStore({ create: () => 'ref_child' }),
+      content: CONTENT,
+      refs,
     });
 
-    const result = await observer.inspect(7, 'interactive', new AbortController().signal);
+    const result = await observer.inspect(7, 'interactive_deep', new AbortController().signal);
 
     expect(result.data).toMatchObject({
       elements: [
         expect.objectContaining({
-          name: 'Child link',
-          frame: 'frame_child',
-          bounds: { x: 110, y: 220, width: 50, height: 20 },
+          n: 'Child link',
+          f: 'frame_child',
+          ref: 'ref_child',
         }),
       ],
     });
+    expect(refs.resolve('ref_child', 7)).toMatchObject({
+      frameTargetId: 'frame_child',
+      documentFrameId: 'frame-child-document',
+      loaderId: 'loader-child',
+      backendNodeId: 21,
+    });
   });
 
-  it('combines top-page content with bounded OOPIF accessibility text', async () => {
+  it('reads ordinary page content without attaching the debugger', async () => {
     const child = {
       targetId: 'frame_child',
       type: 'iframe',
@@ -311,8 +606,9 @@ describe('PageObserver', () => {
           }
         : {},
     );
+    const sessionPort = sessions(snapshot);
     const observer = new PageObserver({
-      sessions: sessions(snapshot),
+      sessions: sessionPort,
       transport,
       content: CONTENT,
       refs: new ElementRefStore({ create: () => 'unused' }),
@@ -320,7 +616,14 @@ describe('PageObserver', () => {
 
     const result = await observer.inspect(7, 'content', new AbortController().signal);
 
-    expect(result.data).toMatchObject({ mode: 'content', title: 'Top page' });
-    expect(JSON.stringify(result.data)).toContain('Cross-origin frame text');
+    expect(result.data).toMatchObject({
+      mode: 'content',
+      title: 'Top page',
+      text: 'Top text',
+      frames: [],
+    });
+    expect(result.debuggerSession).toBe('none');
+    expect(sessionPort.ensure).not.toHaveBeenCalled();
+    expect(transport.send).not.toHaveBeenCalled();
   });
 });

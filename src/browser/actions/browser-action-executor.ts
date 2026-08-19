@@ -1,8 +1,17 @@
 import type { Protocol } from 'devtools-protocol';
 import type { ParsedBrowserToolCall } from '../../agent/tools/browser-tool-schema';
+import type { PageCommand } from '../../shared/protocol/message-types';
 import type { DebuggerSession, DebuggerTransport } from '../debugger/debugger-transport';
-import type { TargetSessionRegistry } from '../debugger/target-session-registry';
-import type { ElementRefStore, ResolvedElementRef } from '../observation/element-ref-store';
+import type {
+  BrowserSessionSnapshot,
+  TargetSessionRegistry,
+} from '../debugger/target-session-registry';
+import {
+  ElementRefStoreError,
+  type ElementRefStore,
+  type ResolvedElementRef,
+  type ViewportRect,
+} from '../observation/element-ref-store';
 import { parseKeyChord, type ParsedKeyChord } from './key-chords';
 
 const SELECT_FUNCTION = `function(value) {
@@ -11,6 +20,92 @@ const SELECT_FUNCTION = `function(value) {
   this.dispatchEvent(new Event('input', { bubbles: true }));
   this.dispatchEvent(new Event('change', { bubbles: true }));
   return { ok: true, value: this.value };
+}`;
+
+const FOCUSED_EDITABLE_VALUE_EXPRESSION = `(() => {
+  let element = document.activeElement;
+  while (element?.shadowRoot?.activeElement) element = element.shadowRoot.activeElement;
+  if (!element) return null;
+  if ('value' in element && typeof element.value === 'string') return element.value;
+  if (element instanceof HTMLElement && element.isContentEditable) {
+    return element.innerText ?? element.textContent ?? '';
+  }
+  return null;
+})()`;
+
+const INSERT_FOCUSED_TEXT_FUNCTION = `function(text) {
+  let element = this.document?.activeElement;
+  while (element?.shadowRoot?.activeElement) element = element.shadowRoot.activeElement;
+  const window_ = element?.ownerDocument?.defaultView;
+  if (
+    element &&
+    typeof window_?.HTMLTextAreaElement === 'function' &&
+    element instanceof window_.HTMLTextAreaElement &&
+    typeof window_.InputEvent === 'function'
+  ) {
+    element.value = text;
+    const event = new window_.InputEvent('input', {
+      bubbles: true,
+      composed: true,
+      inputType: 'insertFromPaste',
+      data: text,
+    });
+    element.dispatchEvent(event);
+    return {
+      dispatched: true,
+      strategy: 'input_from_paste',
+      defaultPrevented: event.defaultPrevented,
+    };
+  }
+  if (!element || !window_?.DataTransfer || !window_.ClipboardEvent) {
+    return { dispatched: false };
+  }
+  const clipboardData = new window_.DataTransfer();
+  clipboardData.setData('text/plain', text);
+  const event = new window_.ClipboardEvent('paste', {
+    bubbles: true,
+    cancelable: true,
+    composed: true,
+    clipboardData,
+  });
+  element.dispatchEvent(event);
+  return { dispatched: true, strategy: 'synthetic_paste', defaultPrevented: event.defaultPrevented };
+}`;
+
+const EDITOR_TARGET_INFO_FUNCTION = `function() {
+  const element = this;
+  const window_ = element?.ownerDocument?.defaultView;
+  if (!window_?.Element || !(element instanceof window_.Element)) {
+    return { editor: false, value: '' };
+  }
+  let current = element;
+  let editor = false;
+  for (let depth = 0; current && depth < 8; depth += 1) {
+    const role = (current.getAttribute('role') || '').trim().toLowerCase();
+    const roleDescription = (current.getAttribute('aria-roledescription') || '')
+      .trim()
+      .toLowerCase();
+    const classHint = current.getAttribute('class') || '';
+    if (
+      role === 'code' ||
+      role === 'application' ||
+      roleDescription.includes('editor') ||
+      classHint.split(/\\s+/).some((token) =>
+        /(?:^|[-_])(editor|monaco|codemirror|ace)(?:$|[-_])/i.test(token)
+      )
+    ) {
+      editor = true;
+      break;
+    }
+    const root = current.getRootNode();
+    current = current.parentElement || (window_.ShadowRoot && root instanceof window_.ShadowRoot
+      ? root.host
+      : null);
+  }
+  const value = typeof element.value === 'string'
+    ? element.value
+    : (element.innerText || element.textContent || '');
+  return { editor, value };
 }`;
 
 export type PointerEffect = 'move' | 'click' | 'double_click' | 'drag';
@@ -28,6 +123,10 @@ export interface PointerPagePort {
   ): Promise<void>;
 }
 
+export interface BrowserPlatformPort {
+  getOs(): Promise<string>;
+}
+
 export interface BrowserActionResult {
   readonly tabId: number;
   readonly url: string | null;
@@ -39,8 +138,27 @@ export interface BrowserActionPort {
   execute(call: ParsedBrowserToolCall, signal: AbortSignal): Promise<BrowserActionResult>;
 }
 
+type PageActionInput = Extract<PageCommand, { readonly type: 'page.action.perform' }>['payload'];
+
+export interface BrowserPageActionPort {
+  performAction(
+    tabId: number,
+    action: PageActionInput,
+  ): Promise<
+    Readonly<Record<string, unknown>> & {
+      readonly action: PageActionInput['action'];
+      readonly applied: boolean;
+      readonly url: string;
+    }
+  >;
+}
+
 export type BrowserActionErrorCode =
-  'UNSUPPORTED_ACTION' | 'POINT_OUT_OF_VIEWPORT' | 'HISTORY_UNAVAILABLE' | 'WAIT_TIMEOUT';
+  | 'UNSUPPORTED_ACTION'
+  | 'POINT_OUT_OF_VIEWPORT'
+  | 'HISTORY_UNAVAILABLE'
+  | 'WAIT_TIMEOUT'
+  | 'TYPE_VERIFICATION_FAILED';
 
 export class BrowserActionError extends Error {
   readonly code: BrowserActionErrorCode;
@@ -57,6 +175,8 @@ export interface BrowserActionExecutorDependencies {
   readonly transport: DebuggerTransport;
   readonly refs: ElementRefStore;
   readonly pointer: PointerPagePort;
+  readonly platform: BrowserPlatformPort;
+  readonly page?: BrowserPageActionPort;
 }
 
 interface Point {
@@ -68,20 +188,103 @@ function throwIfAborted(signal: AbortSignal): void {
   if (signal.aborted) throw new DOMException('Browser action was aborted.', 'AbortError');
 }
 
-function center(target: ResolvedElementRef): Point {
-  return {
-    x: target.bounds.x + target.bounds.width / 2,
-    y: target.bounds.y + target.bounds.height / 2,
-  };
+function quadRect(quad: readonly number[] | undefined): ViewportRect | undefined {
+  if (!quad || quad.length < 8 || quad.some((coordinate) => !Number.isFinite(coordinate))) {
+    return undefined;
+  }
+  const xs = [quad[0], quad[2], quad[4], quad[6]].filter(
+    (value): value is number => value !== undefined,
+  );
+  const ys = [quad[1], quad[3], quad[5], quad[7]].filter(
+    (value): value is number => value !== undefined,
+  );
+  const x = Math.min(...xs);
+  const y = Math.min(...ys);
+  const width = Math.max(...xs) - x;
+  const height = Math.max(...ys) - y;
+  return width > 0 && height > 0 ? { x, y, width, height } : undefined;
+}
+
+interface PreparedElementTarget {
+  readonly reference: ResolvedElementRef;
+  readonly session: DebuggerSession;
+  readonly point: Point;
+}
+
+interface EditorTargetInfo {
+  readonly editor: boolean;
+  readonly value: string;
 }
 
 function input<T>(call: ParsedBrowserToolCall): T {
   return call.arguments as T;
 }
 
+function trustedInputPoint(
+  pageResult: Awaited<ReturnType<BrowserPageActionPort['performAction']>> | null,
+): Point | null {
+  if (
+    pageResult?.action !== 'type' ||
+    pageResult.applied ||
+    pageResult.reason !== 'trusted_input_required' ||
+    typeof pageResult.target !== 'object' ||
+    pageResult.target === null
+  ) {
+    return null;
+  }
+  const target = pageResult.target as Readonly<Record<string, unknown>>;
+  return typeof target.x === 'number' &&
+    Number.isFinite(target.x) &&
+    typeof target.y === 'number' &&
+    Number.isFinite(target.y)
+    ? { x: target.x, y: target.y }
+    : null;
+}
+
+function axValue(value: Protocol.Accessibility.AXValue | undefined): string | null {
+  return typeof value?.value === 'string' ? value.value.replace(/\r\n?/g, '\n') : null;
+}
+
+function axBoolean(value: Protocol.Accessibility.AXValue | undefined): boolean {
+  return value?.value === true;
+}
+
+function focusedEditableValue(nodes: readonly Protocol.Accessibility.AXNode[]): string | null {
+  const editable = nodes.filter((node) => {
+    if (node.ignored) return false;
+    const role = axValue(node.role)?.toLowerCase();
+    return (
+      role === 'textbox' ||
+      role === 'searchbox' ||
+      (node.properties ?? []).some(
+        (property) => property.name === 'editable' && axBoolean(property.value),
+      )
+    );
+  });
+  const focused = editable.find((node) =>
+    (node.properties ?? []).some(
+      (property) => property.name === 'focused' && axBoolean(property.value),
+    ),
+  );
+  return axValue(focused?.value);
+}
+
+function evaluatedEditableValue(response: Protocol.Runtime.EvaluateResponse): string | null {
+  return response.exceptionDetails === undefined && typeof response.result.value === 'string'
+    ? response.result.value.replace(/\r\n?/g, '\n')
+    : null;
+}
+
+function verifiesInput(actual: string | null, expected: string, replace: boolean, before: string) {
+  return replace
+    ? actual === expected
+    : expected.length === 0 || (actual !== null && actual !== before && actual.includes(expected));
+}
+
 /** Executes already-checkpointed browser actions through semantic refs or validated viewport points. */
 export class BrowserActionExecutor implements BrowserActionPort {
   readonly #dependencies: BrowserActionExecutorDependencies;
+  #primaryModifier: Promise<number> | undefined;
 
   constructor(dependencies: BrowserActionExecutorDependencies) {
     this.#dependencies = dependencies;
@@ -90,6 +293,46 @@ export class BrowserActionExecutor implements BrowserActionPort {
   async execute(call: ParsedBrowserToolCall, signal: AbortSignal): Promise<BrowserActionResult> {
     throwIfAborted(signal);
     const tabId = (call.arguments as { readonly tabId: number }).tabId;
+    const pageResult = await this.#performPageAction(call, tabId);
+    if (pageResult?.applied) {
+      const { url, ...rawData } = pageResult;
+      const data =
+        pageResult.action === 'type'
+          ? {
+              action: 'type',
+              applied: true,
+              dispatched: pageResult.dispatched,
+              strategy: 'dom',
+              verified: true,
+              replaced: input<{ readonly replace: boolean }>(call).replace,
+              submitted: pageResult.submitted,
+              valueLength: typeof pageResult.value === 'string' ? pageResult.value.length : 0,
+            }
+          : rawData;
+      return {
+        tabId,
+        url,
+        data,
+        observation: {
+          targetPresent: call.operation === 'scroll' ? null : true,
+        },
+      };
+    }
+    if (call.operation === 'wait') {
+      const value = input<{
+        condition: 'load' | 'network_idle' | 'dom_stable' | 'delay';
+        timeoutMs: number;
+      }>(call);
+      if (value.condition === 'delay') {
+        await this.#delay(value.timeoutMs, signal);
+        return {
+          tabId,
+          url: null,
+          data: { action: 'wait', condition: 'delay', completed: true },
+          observation: { targetPresent: null },
+        };
+      }
+    }
     const snapshot = await this.#dependencies.sessions.ensure(tabId, signal);
     let data: Readonly<Record<string, unknown>>;
     let targetPresent: boolean | null = null;
@@ -102,11 +345,21 @@ export class BrowserActionExecutor implements BrowserActionPort {
           button: 'left' | 'right' | 'middle';
           count: 1 | 2;
         }>(call);
-        const target = this.#dependencies.refs.resolve(value.ref, tabId, snapshot.generation);
-        const point = center(target);
-        await this.#showPointer(tabId, point, point, value.count === 2 ? 'double_click' : 'click');
-        await this.#click(snapshot.root, point, value.button, value.count);
-        data = { action: 'click', dispatched: true, button: value.button, count: value.count };
+        const target = await this.#prepareElementTarget(snapshot, value.ref, tabId);
+        await this.#showPointer(
+          tabId,
+          target.point,
+          target.point,
+          value.count === 2 ? 'double_click' : 'click',
+        );
+        await this.#click(target.session, target.point, value.button, value.count);
+        data = {
+          action: 'click',
+          dispatched: true,
+          button: value.button,
+          count: value.count,
+          verified: 'target_remeasured',
+        };
         targetPresent = true;
         break;
       }
@@ -118,31 +371,57 @@ export class BrowserActionExecutor implements BrowserActionPort {
           replace: boolean;
           submit: boolean;
         }>(call);
-        const target = this.#dependencies.refs.resolve(value.ref, tabId, snapshot.generation);
-        await this.#dependencies.transport.send(target.session, 'DOM.focus', {
-          backendNodeId: target.backendNodeId,
-        });
+        const fallbackPoint = trustedInputPoint(pageResult);
+        const target = fallbackPoint
+          ? null
+          : await this.#prepareElementTarget(snapshot, value.ref, tabId);
+        const targetSession = target?.session ?? snapshot.root;
+        const editorInfo = target ? await this.#editorTargetInfo(target) : null;
+        const trustedInput = fallbackPoint !== null || editorInfo?.editor === true;
+        if (fallbackPoint) {
+          await this.#validatePoint(snapshot.root, fallbackPoint);
+          await this.#showPointer(tabId, fallbackPoint, fallbackPoint, 'click');
+          await this.#click(snapshot.root, fallbackPoint, 'left', 1);
+        } else if (target) {
+          await this.#showPointer(tabId, target.point, target.point, 'click');
+          await this.#dependencies.transport.send(target.session, 'DOM.focus', {
+            backendNodeId: target.reference.backendNodeId,
+          });
+        }
         if (value.replace) {
-          await this.#dispatchKey(target.session, {
-            kind: 'key',
-            key: 'a',
-            code: 'KeyA',
-            modifiers: 2,
-          });
-          await this.#dispatchKey(target.session, {
-            kind: 'key',
-            key: 'Backspace',
-            code: 'Backspace',
-            modifiers: 0,
-          });
+          await this.#selectAll(targetSession);
+          if (value.text.length === 0) {
+            await this.#dispatchKey(targetSession, {
+              kind: 'key',
+              key: 'Backspace',
+              code: 'Backspace',
+              modifiers: 0,
+            });
+          }
         }
         if (value.text.length > 0) {
-          await this.#dependencies.transport.send(target.session, 'Input.insertText', {
-            text: value.text,
-          });
+          if (trustedInput) await this.#insertFocusedText(targetSession, value.text);
+          else {
+            await this.#dependencies.transport.send(targetSession, 'Input.insertText', {
+              text: value.text,
+            });
+          }
+        }
+        if (trustedInput) {
+          const before = fallbackPoint
+            ? typeof pageResult?.value === 'string'
+              ? pageResult.value
+              : ''
+            : (editorInfo?.value ?? '');
+          await this.#verifyTrustedInput(
+            targetSession,
+            value.text,
+            value.replace,
+            before.replace(/\r\n?/g, '\n'),
+          );
         }
         if (value.submit) {
-          await this.#dispatchKey(target.session, {
+          await this.#dispatchKey(targetSession, {
             kind: 'key',
             key: 'Enter',
             code: 'Enter',
@@ -154,6 +433,8 @@ export class BrowserActionExecutor implements BrowserActionPort {
           dispatched: true,
           replaced: value.replace,
           submitted: value.submit,
+          strategy: trustedInput ? 'trusted_input' : 'cdp_ref',
+          ...(trustedInput ? { verified: true } : {}),
         };
         targetPresent = true;
         break;
@@ -170,47 +451,43 @@ export class BrowserActionExecutor implements BrowserActionPort {
         const value = input<{
           tabId: number;
           target: string;
-          direction: 'up' | 'down' | 'left' | 'right';
-          amount: 'small' | 'medium' | 'page';
+          deltaX: number;
+          deltaY: number;
         }>(call);
         const viewport = await this.#viewport(snapshot.root);
-        const point =
+        const prepared =
           value.target === 'viewport'
-            ? { x: viewport.width / 2, y: viewport.height / 2 }
-            : center(this.#dependencies.refs.resolve(value.target, tabId, snapshot.generation));
-        const magnitude =
-          value.amount === 'small'
-            ? 280
-            : value.amount === 'medium'
-              ? 600
-              : Math.max(300, viewport.height * 0.85);
-        const horizontal = value.direction === 'left' || value.direction === 'right';
-        const sign = value.direction === 'up' || value.direction === 'left' ? -1 : 1;
+            ? null
+            : await this.#prepareElementTarget(snapshot, value.target, tabId);
+        const point = prepared?.point ?? { x: viewport.width / 2, y: viewport.height / 2 };
         await this.#showPointer(tabId, point, point, 'move');
-        await this.#dependencies.transport.send(snapshot.root, 'Input.dispatchMouseEvent', {
-          type: 'mouseWheel',
-          x: point.x,
-          y: point.y,
-          deltaX: horizontal ? magnitude * sign : 0,
-          deltaY: horizontal ? 0 : magnitude * sign,
-        });
+        await this.#dependencies.transport.send(
+          prepared?.session ?? snapshot.root,
+          'Input.dispatchMouseEvent',
+          {
+            type: 'mouseWheel',
+            x: point.x,
+            y: point.y,
+            deltaX: value.deltaX,
+            deltaY: value.deltaY,
+          },
+        );
         data = {
           action: 'scroll',
           dispatched: true,
-          direction: value.direction,
-          amount: value.amount,
+          deltaX: value.deltaX,
+          deltaY: value.deltaY,
         };
         break;
       }
       case 'hover': {
         const value = input<{ tabId: number; ref: string }>(call);
-        const target = this.#dependencies.refs.resolve(value.ref, tabId, snapshot.generation);
-        const point = center(target);
-        await this.#showPointer(tabId, point, point, 'move');
-        await this.#dependencies.transport.send(snapshot.root, 'Input.dispatchMouseEvent', {
+        const target = await this.#prepareElementTarget(snapshot, value.ref, tabId);
+        await this.#showPointer(tabId, target.point, target.point, 'move');
+        await this.#dependencies.transport.send(target.session, 'Input.dispatchMouseEvent', {
           type: 'mouseMoved',
-          x: point.x,
-          y: point.y,
+          x: target.point.x,
+          y: target.point.y,
           button: 'none',
         });
         data = { action: 'hover', dispatched: true };
@@ -219,11 +496,11 @@ export class BrowserActionExecutor implements BrowserActionPort {
       }
       case 'select': {
         const value = input<{ tabId: number; ref: string; value: string }>(call);
-        const target = this.#dependencies.refs.resolve(value.ref, tabId, snapshot.generation);
+        const target = await this.#prepareElementTarget(snapshot, value.ref, tabId);
         const resolved = await this.#dependencies.transport.send<Protocol.DOM.ResolveNodeResponse>(
           target.session,
           'DOM.resolveNode',
-          { backendNodeId: target.backendNodeId },
+          { backendNodeId: target.reference.backendNodeId },
         );
         if (!resolved.object.objectId) {
           throw new BrowserActionError('UNSUPPORTED_ACTION', 'The select target is unavailable.');
@@ -242,12 +519,16 @@ export class BrowserActionExecutor implements BrowserActionPort {
       }
       case 'drag': {
         const value = input<{ tabId: number; fromRef: string; toRef: string }>(call);
-        const from = center(
-          this.#dependencies.refs.resolve(value.fromRef, tabId, snapshot.generation),
-        );
-        const to = center(this.#dependencies.refs.resolve(value.toRef, tabId, snapshot.generation));
-        await this.#showPointer(tabId, to, from, 'drag');
-        await this.#drag(snapshot.root, from, to);
+        const from = await this.#prepareElementTarget(snapshot, value.fromRef, tabId);
+        const to = await this.#prepareElementTarget(snapshot, value.toRef, tabId);
+        if (from.session.sessionId !== to.session.sessionId) {
+          throw new BrowserActionError(
+            'UNSUPPORTED_ACTION',
+            'A drag cannot cross browser frame targets.',
+          );
+        }
+        await this.#showPointer(tabId, to.point, from.point, 'drag');
+        await this.#drag(from.session, from.point, to.point);
         data = { action: 'drag', dispatched: true };
         targetPresent = true;
         break;
@@ -313,6 +594,180 @@ export class BrowserActionExecutor implements BrowserActionPort {
     };
   }
 
+  async #prepareElementTarget(
+    snapshot: BrowserSessionSnapshot,
+    ref: string,
+    tabId: number,
+  ): Promise<PreparedElementTarget> {
+    const reference = this.#dependencies.refs.resolve(ref, tabId);
+    const session = this.#sessionForReference(snapshot, reference);
+    let frameTree: Protocol.Page.GetFrameTreeResponse;
+    try {
+      frameTree = await this.#dependencies.transport.send<Protocol.Page.GetFrameTreeResponse>(
+        session,
+        'Page.getFrameTree',
+      );
+    } catch {
+      throw new ElementRefStoreError('STALE_REF', 'The element ref is stale.');
+    }
+    const loaderId = this.#loaderForFrame(frameTree.frameTree, reference.documentFrameId);
+    if (loaderId !== reference.loaderId) {
+      throw new ElementRefStoreError('STALE_REF', 'The element ref is stale.');
+    }
+    try {
+      await this.#dependencies.transport.send(session, 'DOM.scrollIntoViewIfNeeded', {
+        backendNodeId: reference.backendNodeId,
+      });
+      const [model, metrics] = await Promise.all([
+        this.#dependencies.transport.send<Protocol.DOM.GetBoxModelResponse>(
+          session,
+          'DOM.getBoxModel',
+          { backendNodeId: reference.backendNodeId },
+        ),
+        this.#dependencies.transport.send<Protocol.Page.GetLayoutMetricsResponse>(
+          session,
+          'Page.getLayoutMetrics',
+        ),
+      ]);
+      const pageBounds = quadRect(model.model.border);
+      if (!pageBounds) throw new Error('The element has no visible box.');
+      const point = {
+        x: pageBounds.x + pageBounds.width / 2 - metrics.visualViewport.pageX,
+        y: pageBounds.y + pageBounds.height / 2 - metrics.visualViewport.pageY,
+      };
+      if (
+        point.x < 0 ||
+        point.y < 0 ||
+        point.x > metrics.visualViewport.clientWidth ||
+        point.y > metrics.visualViewport.clientHeight
+      ) {
+        throw new Error('The element is outside the frame viewport.');
+      }
+      return { reference, session, point };
+    } catch (error) {
+      if (error instanceof ElementRefStoreError) throw error;
+      throw new ElementRefStoreError('STALE_REF', 'The element ref is stale.');
+    }
+  }
+
+  #sessionForReference(
+    snapshot: BrowserSessionSnapshot,
+    reference: ResolvedElementRef,
+  ): DebuggerSession {
+    if (reference.frameTargetId === null) return snapshot.root;
+    const session = snapshot.children.get(reference.frameTargetId)?.session;
+    if (!session) throw new ElementRefStoreError('STALE_REF', 'The element ref is stale.');
+    return session;
+  }
+
+  #loaderForFrame(frameTree: Protocol.Page.FrameTree, frameId: string): string | undefined {
+    if (frameTree.frame.id === frameId) return frameTree.frame.loaderId;
+    for (const child of frameTree.childFrames ?? []) {
+      const loaderId = this.#loaderForFrame(child, frameId);
+      if (loaderId) return loaderId;
+    }
+    return undefined;
+  }
+
+  async #editorTargetInfo(target: PreparedElementTarget): Promise<EditorTargetInfo> {
+    let objectId: string | undefined;
+    try {
+      const resolved = await this.#dependencies.transport.send<Protocol.DOM.ResolveNodeResponse>(
+        target.session,
+        'DOM.resolveNode',
+        { backendNodeId: target.reference.backendNodeId },
+      );
+      objectId = resolved.object.objectId;
+      if (!objectId) return { editor: false, value: '' };
+      const response =
+        await this.#dependencies.transport.send<Protocol.Runtime.CallFunctionOnResponse>(
+          target.session,
+          'Runtime.callFunctionOn',
+          {
+            objectId,
+            functionDeclaration: EDITOR_TARGET_INFO_FUNCTION,
+            awaitPromise: false,
+            returnByValue: true,
+          },
+        );
+      const value = response.result.value as
+        { readonly editor?: unknown; readonly value?: unknown } | undefined;
+      return {
+        editor: response.exceptionDetails === undefined && value?.editor === true,
+        value: typeof value?.value === 'string' ? value.value.slice(0, 20_000) : '',
+      };
+    } catch {
+      return { editor: false, value: '' };
+    } finally {
+      if (objectId) {
+        await this.#dependencies.transport
+          .send(target.session, 'Runtime.releaseObject', { objectId })
+          .catch(() => undefined);
+      }
+    }
+  }
+
+  async #performPageAction(
+    call: ParsedBrowserToolCall,
+    tabId: number,
+  ): Promise<Awaited<ReturnType<BrowserPageActionPort['performAction']>> | null> {
+    const page = this.#dependencies.page;
+    if (!page) return null;
+    switch (call.operation) {
+      case 'click': {
+        const { ref, button, count } = input<{
+          ref: string;
+          button: 'left' | 'right' | 'middle';
+          count: 1 | 2;
+        }>(call);
+        if (!ref.startsWith('page_')) return null;
+        return page.performAction(tabId, {
+          action: 'click',
+          ref,
+          button,
+          count,
+        });
+      }
+      case 'type': {
+        const { ref, text, replace, submit } = input<{
+          ref: string;
+          text: string;
+          replace: boolean;
+          submit: boolean;
+        }>(call);
+        if (!ref.startsWith('page_')) return null;
+        return page.performAction(tabId, {
+          action: 'type',
+          ref,
+          text,
+          replace,
+          submit,
+        });
+      }
+      case 'scroll': {
+        const { target, deltaX, deltaY } = input<{
+          target: string;
+          deltaX: number;
+          deltaY: number;
+        }>(call);
+        if (target !== 'viewport' && !target.startsWith('page_')) return null;
+        return page.performAction(tabId, {
+          action: 'scroll',
+          target,
+          deltaX,
+          deltaY,
+        });
+      }
+      case 'select': {
+        const { ref, value } = input<{ ref: string; value: string }>(call);
+        if (!ref.startsWith('page_')) return null;
+        return page.performAction(tabId, { action: 'select', ref, value });
+      }
+      default:
+        return null;
+    }
+  }
+
   async #showPointer(tabId: number, to: Point, from: Point, effect: PointerEffect): Promise<void> {
     try {
       await this.#dependencies.pointer.show(tabId, {
@@ -324,6 +779,120 @@ export class BrowserActionExecutor implements BrowserActionPort {
       });
     } catch {
       // Pointer feedback is best-effort and must never cause an action retry.
+    }
+  }
+
+  #getPrimaryModifier(): Promise<number> {
+    this.#primaryModifier ??= this.#dependencies.platform
+      .getOs()
+      .then((os) => (os === 'mac' ? 4 : 2));
+    return this.#primaryModifier;
+  }
+
+  async #selectAll(session: DebuggerSession): Promise<void> {
+    const modifiers = await this.#getPrimaryModifier();
+    await this.#dependencies.transport.send(session, 'Input.dispatchKeyEvent', {
+      type: 'rawKeyDown',
+      key: 'a',
+      code: 'KeyA',
+      modifiers,
+      windowsVirtualKeyCode: 65,
+      commands: ['selectAll'],
+    });
+    await this.#dependencies.transport.send(session, 'Input.dispatchKeyEvent', {
+      type: 'keyUp',
+      key: 'a',
+      code: 'KeyA',
+      modifiers,
+      windowsVirtualKeyCode: 65,
+    });
+  }
+
+  async #insertFocusedText(session: DebuggerSession, text: string): Promise<void> {
+    const global = await this.#dependencies.transport.send<Protocol.Runtime.EvaluateResponse>(
+      session,
+      'Runtime.evaluate',
+      { expression: 'globalThis' },
+    );
+    const objectId = global.result.objectId;
+    if (!objectId) {
+      throw new BrowserActionError(
+        'TYPE_VERIFICATION_FAILED',
+        'The focused editor could not receive the requested text.',
+      );
+    }
+    try {
+      const response =
+        await this.#dependencies.transport.send<Protocol.Runtime.CallFunctionOnResponse>(
+          session,
+          'Runtime.callFunctionOn',
+          {
+            objectId,
+            functionDeclaration: INSERT_FOCUSED_TEXT_FUNCTION,
+            arguments: [{ value: text }],
+            awaitPromise: false,
+            returnByValue: true,
+            userGesture: true,
+          },
+        );
+      const result = response.result.value as { readonly dispatched?: unknown } | undefined;
+      if (response.exceptionDetails || result?.dispatched !== true) {
+        throw new BrowserActionError(
+          'TYPE_VERIFICATION_FAILED',
+          'The focused editor could not receive the requested text.',
+        );
+      }
+    } finally {
+      await this.#dependencies.transport
+        .send(session, 'Runtime.releaseObject', { objectId })
+        .catch(() => undefined);
+    }
+  }
+
+  async #verifyTrustedInput(
+    session: DebuggerSession,
+    text: string,
+    replace: boolean,
+    before: string,
+  ): Promise<void> {
+    await this.#selectAll(session);
+    const expected = text.replace(/\r\n?/g, '\n');
+    let verified = false;
+    try {
+      try {
+        const response = await this.#dependencies.transport.send<Protocol.Runtime.EvaluateResponse>(
+          session,
+          'Runtime.evaluate',
+          {
+            expression: FOCUSED_EDITABLE_VALUE_EXPRESSION,
+            returnByValue: true,
+          },
+        );
+        verified = verifiesInput(evaluatedEditableValue(response), expected, replace, before);
+      } catch {
+        // Some targets do not expose a usable main execution context; AX remains the fallback.
+      }
+      if (!verified) {
+        const tree =
+          await this.#dependencies.transport.send<Protocol.Accessibility.GetFullAXTreeResponse>(
+            session,
+            'Accessibility.getFullAXTree',
+          );
+        verified = verifiesInput(focusedEditableValue(tree.nodes), expected, replace, before);
+      }
+    } finally {
+      await this.#dispatchKey(session, {
+        kind: 'key',
+        key: 'ArrowRight',
+        code: 'ArrowRight',
+        modifiers: 0,
+      });
+    }
+    if (!verified) {
+      throw new BrowserActionError(
+        'TYPE_VERIFICATION_FAILED',
+        'The focused editable value did not contain the requested input.',
+      );
     }
   }
 

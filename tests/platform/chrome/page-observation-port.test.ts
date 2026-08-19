@@ -29,14 +29,16 @@ function dependencies(): ChromePageObservationDependencies {
                 links: [],
                 truncated: false,
               }
-            : [
-                {
-                  role: 'button',
-                  name: 'Continue',
-                  state: [],
-                  bounds: { x: 1, y: 2, width: 3, height: 4 },
-                },
-              ],
+            : message.type === 'page.action.perform'
+              ? {
+                  action: 'scroll',
+                  applied: true,
+                  moved: true,
+                  actualDeltaX: 0,
+                  actualDeltaY: 100,
+                  url: 'https://example.test/page',
+                }
+              : {},
       })),
     },
     ids: { create: (prefix: string) => `${prefix}_1` },
@@ -44,6 +46,28 @@ function dependencies(): ChromePageObservationDependencies {
 }
 
 describe('ChromePageObservationPort', () => {
+  it('performs a validated page action through the same isolated bridge', async () => {
+    const ports = dependencies();
+    const port = new ChromePageObservationPort(ports);
+
+    await expect(
+      port.performAction(7, {
+        action: 'scroll',
+        target: 'viewport',
+        deltaX: 0,
+        deltaY: 100,
+      }),
+    ).resolves.toMatchObject({ moved: true, actualDeltaY: 100 });
+    expect(ports.tabs.sendMessage).toHaveBeenCalledWith(
+      7,
+      expect.objectContaining({
+        type: 'page.action.perform',
+        payload: { action: 'scroll', target: 'viewport', deltaX: 0, deltaY: 100 },
+      }),
+      { frameId: 0 },
+    );
+  });
+
   it('installs the page bundle and reads validated content from the top frame only', async () => {
     const ports = dependencies();
     const port = new ChromePageObservationPort(ports);
@@ -75,13 +99,9 @@ describe('ChromePageObservationPort', () => {
     );
   });
 
-  it('reads bounded DOM fallback elements and redacts malformed page responses', async () => {
+  it('redacts malformed page responses', async () => {
     const ports = dependencies();
     const port = new ChromePageObservationPort(ports);
-
-    await expect(port.observeElements(7)).resolves.toEqual([
-      { role: 'button', name: 'Continue', state: [], bounds: { x: 1, y: 2, width: 3, height: 4 } },
-    ]);
 
     vi.mocked(ports.tabs.sendMessage).mockResolvedValueOnce({
       version: 1,

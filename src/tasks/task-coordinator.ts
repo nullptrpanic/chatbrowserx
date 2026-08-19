@@ -1,5 +1,5 @@
 import type { TaskId } from '../shared/ids';
-import type { TaskSnapshot } from './task-command-service';
+import { TaskCommandError, type TaskSnapshot } from './task-command-service';
 
 export interface CoordinatedTaskExecutor {
   run(taskId: TaskId, signal: AbortSignal): Promise<unknown>;
@@ -36,6 +36,9 @@ export class TaskCoordinator {
   start(taskId: TaskId): Promise<void> {
     const existing = this.#active.get(taskId);
     if (existing !== undefined) return existing.completion;
+    if (this.#active.size > 0) {
+      return Promise.reject(new TaskCommandError('TASK_ALREADY_RUNNING', '已有任务运行中'));
+    }
 
     const controller = new AbortController();
     const execution = this.#dependencies.executor.run(taskId, controller.signal);
@@ -56,6 +59,7 @@ export class TaskCoordinator {
 
   /** Persists a resume boundary, schedules fresh work, and returns without awaiting the run. */
   async resume(taskId: TaskId): Promise<TaskSnapshot> {
+    this.#assertAvailable(taskId);
     await this.#stop(taskId);
     const snapshot = await this.#dependencies.commands.resume(taskId);
     this.#schedule(taskId);
@@ -64,6 +68,7 @@ export class TaskCoordinator {
 
   /** Stops any stale runner, persists a retry boundary, and schedules the same task ID again. */
   async retry(taskId: TaskId): Promise<TaskSnapshot> {
+    this.#assertAvailable(taskId);
     await this.#stop(taskId);
     const snapshot = await this.#dependencies.commands.retry(taskId);
     this.#schedule(taskId);
@@ -87,6 +92,13 @@ export class TaskCoordinator {
   /** Signals one runner without delaying the durable pause or cancellation command. */
   #abort(taskId: TaskId): void {
     this.#active.get(taskId)?.controller.abort();
+  }
+
+  /** Preserves the single global executor slot while allowing same-task restarts. */
+  #assertAvailable(taskId: TaskId): void {
+    if ([...this.#active.keys()].some((activeTaskId) => activeTaskId !== taskId)) {
+      throw new TaskCommandError('TASK_ALREADY_RUNNING', '已有任务运行中');
+    }
   }
 
   /** Starts one detached run and reports any terminal scheduler failure through a safe boundary. */
