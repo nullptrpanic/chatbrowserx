@@ -14,6 +14,7 @@ import {
 const MAX_INTERACTIVE_ELEMENTS = 500;
 const MAX_INTERACTIVE_TARGETS = 200;
 const MAX_INTERACTIVE_JSON_CHARACTERS = 60_000;
+const MAX_INTERACTIVE_SNAPSHOT_TABS = 50;
 const INTERACTIVE_ENTRY_KEYS =
   'd=depth,r=role(default generic),n=name,s=state,a=extra actions(ref defaults click),f=frame';
 const MAX_CONTENT_CHARACTERS = 40_000;
@@ -32,6 +33,8 @@ export interface PageObservationResult {
   readonly observation: null;
   readonly attachmentIds: readonly string[];
   readonly debuggerSession: 'none' | 'ephemeral';
+  /** Internal AX-first policy signal; it is not serialized into the model-visible result. */
+  readonly visualFallbackAllowed?: boolean;
 }
 
 export interface PageObserverDependencies {
@@ -52,6 +55,16 @@ interface CompactSemanticPageEntry {
   readonly ref?: string;
 }
 
+export interface PageInspectionOptions {
+  readonly since?: string;
+}
+
+interface InteractiveSnapshot {
+  readonly id: string;
+  readonly structure: string;
+  readonly elements: readonly CompactSemanticPageEntry[];
+}
+
 function compactSemanticEntry(entry: SemanticPageEntry, ref?: string): CompactSemanticPageEntry {
   const extraActions = entry.actions?.filter((action) => action !== 'click');
   return {
@@ -63,6 +76,38 @@ function compactSemanticEntry(entry: SemanticPageEntry, ref?: string): CompactSe
     ...(entry.frame === undefined ? {} : { f: entry.frame }),
     ...(ref === undefined ? {} : { ref }),
   };
+}
+
+function createInteractiveSnapshotId(): string {
+  return `s${crypto.randomUUID().replaceAll('-', '').slice(0, 20)}`;
+}
+
+function interactiveStructure(
+  elements: readonly CompactSemanticPageEntry[],
+  truncated: boolean,
+): string {
+  return JSON.stringify({
+    elements: elements.map((entry) => {
+      const structure: Record<string, unknown> = { ...entry };
+      delete structure.s;
+      return structure;
+    }),
+    ...(truncated ? { truncated: true } : {}),
+  });
+}
+
+function interactiveStateChanges(
+  previous: readonly CompactSemanticPageEntry[],
+  current: readonly CompactSemanticPageEntry[],
+): readonly Readonly<{ i: number; s: readonly string[] | null }>[] {
+  const changes: Readonly<{ i: number; s: readonly string[] | null }>[] = [];
+  current.forEach((entry, index) => {
+    const prior = previous[index];
+    const before = prior?.s ?? null;
+    const after = entry.s ?? null;
+    if (JSON.stringify(before) !== JSON.stringify(after)) changes.push({ i: index, s: after });
+  });
+  return changes;
 }
 
 function throwIfAborted(signal: AbortSignal): void {
@@ -94,20 +139,27 @@ function screenshotPng(base64: string): Blob {
 /** Builds lightweight content or compact native AX snapshots across flattened CDP sessions. */
 export class PageObserver {
   readonly #dependencies: PageObserverDependencies;
+  readonly #interactiveSnapshots = new Map<number, InteractiveSnapshot>();
 
   constructor(dependencies: PageObserverDependencies) {
     this.#dependencies = dependencies;
+  }
+
+  /** Drops model-visible delta bases so the next interactive inspection returns a full tree. */
+  invalidateInteractiveSnapshots(): void {
+    this.#interactiveSnapshots.clear();
   }
 
   async inspect(
     tabId: number,
     mode: 'content' | 'interactive' | 'interactive_deep' | 'screenshot',
     signal: AbortSignal,
+    options: PageInspectionOptions = {},
   ): Promise<PageObservationResult> {
     throwIfAborted(signal);
     if (mode === 'content') return this.#inspectContent(tabId, signal);
     if (mode === 'interactive' || mode === 'interactive_deep') {
-      return this.#inspectInteractive(tabId, mode === 'interactive_deep', signal);
+      return this.#inspectInteractive(tabId, mode === 'interactive_deep', signal, options);
     }
     return this.#inspectScreenshot(tabId, signal);
   }
@@ -117,10 +169,14 @@ export class PageObserver {
     if (!persist) throw new Error('Screenshot persistence is unavailable.');
     const browserSession = await this.#dependencies.sessions.ensure(tabId, signal);
     throwIfAborted(signal);
-    let overlaysHidden = false;
+    let overlayHideAttempted = false;
     try {
-      await this.#dependencies.content.setOverlaysHidden(tabId, true);
-      overlaysHidden = true;
+      overlayHideAttempted = true;
+      try {
+        await this.#dependencies.content.setOverlaysHidden(tabId, true);
+      } catch {
+        // Extension-owned visual feedback is best-effort and must not block CDP capture.
+      }
       throwIfAborted(signal);
       const [metrics, captured, metadata] = await Promise.all([
         this.#dependencies.transport.send<Protocol.Page.GetLayoutMetricsResponse>(
@@ -165,7 +221,7 @@ export class PageObserver {
         debuggerSession: 'ephemeral',
       };
     } finally {
-      if (overlaysHidden) {
+      if (overlayHideAttempted) {
         await this.#dependencies.content.setOverlaysHidden(tabId, false).catch(() => undefined);
       }
     }
@@ -197,11 +253,13 @@ export class PageObserver {
     tabId: number,
     _deep: boolean,
     signal: AbortSignal,
+    options: PageInspectionOptions,
   ): Promise<PageObservationResult> {
     const browserSession = await this.#dependencies.sessions.ensure(tabId, signal);
     throwIfAborted(signal);
     const targets: ObservedElementTarget[] = [];
     const entries: SemanticPageEntry[] = [];
+    let hasVisualSurface = false;
     const sessionTargets: readonly {
       session: DebuggerSession;
       frame: string;
@@ -240,6 +298,7 @@ export class PageObserver {
         domSnapshot,
         frame: sessionTarget.frame,
       });
+      hasVisualSurface ||= semantic.hasVisualSurface;
       const localTargetIndexes = new Map<number, number>();
       semantic.targets.forEach((target, localIndex) => {
         const loaderId = loaders.get(target.documentFrameId);
@@ -301,7 +360,7 @@ export class PageObserver {
       selectedTargetIndexes.push(targetIndex);
       selectedTargets.push(target);
     }
-    const refs = this.#dependencies.refs.replaceSnapshot(tabId, selectedTargets);
+    const refs = this.#dependencies.refs.reconcileSnapshot(tabId, selectedTargets);
     const refByTargetIndex = new Map(
       selectedTargetIndexes.map((targetIndex, index) => [targetIndex, refs[index] ?? '']),
     );
@@ -311,19 +370,61 @@ export class PageObserver {
       return compactSemanticEntry(entry, ref || undefined);
     });
     const metadata = await this.#pageMetadata(browserSession.root);
+    const snapshotId = createInteractiveSnapshotId();
+    const truncated = boundedEntries.length < originalCount;
+    const previous = this.#interactiveSnapshots.get(tabId);
+    const current: InteractiveSnapshot = {
+      id: snapshotId,
+      structure: interactiveStructure(elements, truncated),
+      elements,
+    };
+    const visualFallbackAllowed = selectedTargets.length === 0 || hasVisualSurface;
+    this.#rememberInteractiveSnapshot(tabId, current);
+    const canReturnDelta =
+      options.since !== undefined &&
+      options.since.length > 0 &&
+      previous?.id === options.since &&
+      previous.structure === current.structure;
+    if (canReturnDelta) {
+      const changes = interactiveStateChanges(previous.elements, elements);
+      return {
+        tabId,
+        url: metadata.url,
+        data: {
+          mode: 'interactive',
+          snapshot: snapshotId,
+          base: previous.id,
+          ...(changes.length === 0 ? { unchanged: true } : { changes }),
+        },
+        observation: null,
+        attachmentIds: [],
+        debuggerSession: 'ephemeral',
+        visualFallbackAllowed,
+      };
+    }
     return {
       tabId,
       url: metadata.url,
       data: {
         mode: 'interactive',
+        snapshot: snapshotId,
         keys: INTERACTIVE_ENTRY_KEYS,
         elements,
-        ...(boundedEntries.length < originalCount ? { truncated: true } : {}),
+        ...(truncated ? { truncated: true } : {}),
       },
       observation: null,
       attachmentIds: [],
       debuggerSession: 'ephemeral',
+      visualFallbackAllowed,
     };
+  }
+
+  #rememberInteractiveSnapshot(tabId: number, snapshot: InteractiveSnapshot): void {
+    this.#interactiveSnapshots.delete(tabId);
+    this.#interactiveSnapshots.set(tabId, snapshot);
+    if (this.#interactiveSnapshots.size <= MAX_INTERACTIVE_SNAPSHOT_TABS) return;
+    const oldestTabId = this.#interactiveSnapshots.keys().next().value as number | undefined;
+    if (oldestTabId !== undefined) this.#interactiveSnapshots.delete(oldestTabId);
   }
 
   #frameLoaders(frameTree: Protocol.Page.FrameTree): ReadonlyMap<string, string> {

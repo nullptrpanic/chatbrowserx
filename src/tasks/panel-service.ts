@@ -21,7 +21,6 @@ import type { TaskRun } from './task-types';
 const ATTACHMENT_GC_GRACE_MS = 24 * 60 * 60 * 1_000;
 const MAX_PANEL_MESSAGES = 500;
 const MAX_PANEL_EVENTS = 100;
-const MAX_PANEL_TOOL_RESULTS = 20;
 const MAX_PANEL_TOOL_ARGUMENTS = 20_000;
 const MAX_PANEL_TOOL_OUTPUT = 100_000;
 const MAX_PANEL_REASONING_SUMMARY = 20_000;
@@ -263,6 +262,18 @@ export class PanelService {
     };
   }
 
+  /** Loads result bodies aligned with the retained event window for one expanded task. */
+  async getTaskDetails(taskId: string): Promise<PanelTask> {
+    const normalizedTaskId = taskId.trim();
+    if (normalizedTaskId.length === 0 || normalizedTaskId.length > 256) {
+      throw new Error('Task detail request is invalid.');
+    }
+    const task = await this.#dependencies.tasks.get(normalizedTaskId);
+    if (task === undefined) throw new Error('Task details are unavailable.');
+    const messages = await this.#dependencies.conversations.listMessages(task.conversationId);
+    return this.#readTask(task, messages, 'full');
+  }
+
   /** Persists a user message before creating and scheduling its recoverable browser task. */
   async submit(input: SubmitPanelMessageInput): Promise<TaskSnapshot> {
     if (!Number.isInteger(input.tabId) || input.tabId < 0) throw new Error('Tab is invalid.');
@@ -475,22 +486,42 @@ export class PanelService {
     };
   }
 
-  /** Reads a bounded task projection with its current checkpoint and latest audit events. */
-  async #readTask(task: TaskRun, messages: readonly MessageRecord[] = []): Promise<PanelTask> {
+  /** Keeps summaries light and returns only completed tools plus supplements in full mode. */
+  async #readTask(
+    task: TaskRun,
+    messages: readonly MessageRecord[] = [],
+    detailLevel: 'summary' | 'full' = 'summary',
+  ): Promise<PanelTask> {
     const [checkpoint, events] = await Promise.all([
       task.checkpointId === null
         ? Promise.resolve(undefined)
         : this.#dependencies.tasks.getCheckpoint(task.checkpointId),
       this.#dependencies.tasks.listEvents(task.id),
     ]);
+    const completedResults = checkpoint?.completedToolResults ?? [];
+    const projectedEvents =
+      detailLevel === 'full'
+        ? [
+            ...events
+              .filter((event) => event.type === 'tool.result-recorded')
+              .slice(-MAX_PANEL_EVENTS),
+            ...events
+              .filter((event) => event.type === 'task.supplements-applied')
+              .slice(-MAX_PANEL_SUPPLEMENTS),
+          ].sort((left, right) => left.sequence - right.sequence)
+        : events.slice(-MAX_PANEL_EVENTS);
+    const completedToolResults =
+      detailLevel === 'full' ? completedResults.slice(-MAX_PANEL_EVENTS) : [];
     return {
       id: task.id,
+      detailLevel,
       status: task.status,
       goal: task.goal,
       tabId: task.tabId,
       createdAt: task.createdAt,
       updatedAt: task.updatedAt,
       sequence: checkpoint?.sequence ?? events.at(-1)?.sequence ?? 0,
+      completedToolCallCount: completedResults.length,
       lastError:
         task.lastError === null
           ? null
@@ -499,7 +530,7 @@ export class PanelService {
               retryable: task.lastError.retryable,
               userMessage: task.lastError.userMessage,
             },
-      events: events.slice(-MAX_PANEL_EVENTS).map((event) => ({
+      events: projectedEvents.map((event) => ({
         sequence: event.sequence,
         type: event.type,
         reason: event.reason,
@@ -515,16 +546,14 @@ export class PanelService {
                 .map((id) => id.slice(0, 256)),
             }),
       })),
-      completedToolResults: (checkpoint?.completedToolResults ?? [])
-        .slice(-MAX_PANEL_TOOL_RESULTS)
-        .map((result) => ({
-          callId: result.callId.slice(0, 256),
-          toolName: result.toolName.slice(0, 128),
-          argumentsJson: result.argumentsJson.slice(0, MAX_PANEL_TOOL_ARGUMENTS),
-          output: result.output.slice(0, MAX_PANEL_TOOL_OUTPUT),
-          resultRef: result.resultRef.slice(0, 512),
-          attachmentIds: [...(result.attachmentIds ?? [])].slice(0, 8),
-        })),
+      completedToolResults: completedToolResults.map((result) => ({
+        callId: result.callId.slice(0, 256),
+        toolName: result.toolName.slice(0, 128),
+        argumentsJson: result.argumentsJson.slice(0, MAX_PANEL_TOOL_ARGUMENTS),
+        output: result.output.slice(0, MAX_PANEL_TOOL_OUTPUT),
+        resultRef: result.resultRef.slice(0, 512),
+        attachmentIds: [...(result.attachmentIds ?? [])].slice(0, 8),
+      })),
       supplements: messages
         .filter((message) => message.kind === 'supplement' && message.taskId === task.id)
         .slice(-MAX_PANEL_SUPPLEMENTS)

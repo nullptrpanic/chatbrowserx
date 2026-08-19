@@ -23,6 +23,8 @@ export interface BrowserExecutionPort {
     signal: AbortSignal,
     context?: BrowserExecutionContext,
   ): Promise<BrowserToolExecutionResult>;
+  /** Invalidates model-facing screenshot and interactive-delta baselines after compaction. */
+  resetObservationBaselines(): void;
   /** Releases every debugger attachment retained by one task runner. */
   release(sessionOwnerId: string): Promise<void>;
 }
@@ -37,6 +39,11 @@ export type BrowserToolFailureCode =
   | 'LOAD_TIMEOUT'
   | 'PAGE_UNAVAILABLE'
   | 'INVALID_PAGE_RESPONSE'
+  | 'INTERACTIVE_INSPECTION_REQUIRED'
+  | 'SEMANTIC_INSPECTION_AVAILABLE'
+  | 'SELECTABLE_ACTION_REQUIRED'
+  | 'ACTION_STATE_MISMATCH'
+  | 'REPEATED_RECOVERY_BLOCKED'
   | 'NETWORK_CAPTURE_LOST'
   | 'NETWORK_REQUEST_NOT_FOUND'
   | 'STALE_REF'

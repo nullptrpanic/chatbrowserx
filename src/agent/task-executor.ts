@@ -15,12 +15,14 @@ import { retainTaskReply } from '../tasks/task-reply-retention';
 import { transitionTask } from '../tasks/task-transition';
 import type { TaskEvent, TaskEventType, TaskModelTurnMetrics, TaskRun } from '../tasks/task-types';
 import type { AgentEvent, AgentModelTurn, AgentPlanner } from './execution-types';
-import { compactContextAtCommit } from './context/context-commit';
-import { parseBrowserToolCall } from './tools/browser-tool-schema';
 import {
-  CONTEXT_COMMIT_TOOL_NAME,
-  parseContextCommitToolCall,
-} from './tools/context-commit-tool-schema';
+  compactContextAtCommit,
+  contextCommitCandidateCallIds,
+  ContextCommitCursorError,
+  INVALID_CONTEXT_COMMIT_CURSOR,
+} from './context/context-commit';
+import { parseBrowserToolCall } from './tools/browser-tool-schema';
+import { CONTEXT_COMMIT_TOOL_NAME } from './tools/context-commit-tool-schema';
 import { parseTavilyToolCall } from './tools/tavily-tool-schema';
 
 export type TaskExecutorErrorCode =
@@ -63,6 +65,7 @@ interface BoundaryInput {
   readonly pendingToolCall?: PendingToolCall | null;
   readonly reasoningSummary?: string;
   readonly modelTurn?: TaskModelTurnMetrics;
+  readonly browserToolCallsInAttempt?: number;
   readonly browserTargetTabId?: number | null;
   readonly supplementIds?: readonly string[];
 }
@@ -71,13 +74,14 @@ type AgentOutcome = Exclude<AgentEvent, { readonly type: 'reasoning.summary' }>;
 
 const runnableStatuses = new Set<TaskRun['status']>(['queued', 'planning']);
 const TAVILY_TOOL_CALL_LIMIT = 8;
-const BROWSER_TOOL_CALL_LIMIT = 64;
+const BROWSER_TOOL_CALL_LIMIT = 256;
 const tavilyToolNames = new Set(['tavily_search', 'tavily_extract', 'tavily_crawl']);
 const taskScopedBrowserOperations = new Set<ReturnType<typeof parseBrowserToolCall>['operation']>([
   'navigate',
   'reload',
   'inspect',
   'click',
+  'set_checked',
   'type',
   'keypress',
   'scroll',
@@ -412,12 +416,11 @@ export class TaskExecutor {
         }
         if (result.type !== 'context.commit') {
           const isBrowserCall = result.type === 'browser.call';
-          const completedFamilyCalls = snapshot.checkpoint.completedToolResults.filter(
-            (completed) =>
-              isBrowserCall
-                ? completed.toolName.startsWith('browser_')
-                : tavilyToolNames.has(completed.toolName),
-          ).length;
+          const completedFamilyCalls = isBrowserCall
+            ? (snapshot.checkpoint.browserToolCallsInAttempt ?? 0)
+            : snapshot.checkpoint.completedToolResults.filter((completed) =>
+                tavilyToolNames.has(completed.toolName),
+              ).length;
           const familyLimit = isBrowserCall ? BROWSER_TOOL_CALL_LIMIT : TAVILY_TOOL_CALL_LIMIT;
           if (completedFamilyCalls >= familyLimit) {
             return this.#saveBoundary(snapshot, ownerId, signal, {
@@ -514,13 +517,32 @@ export class TaskExecutor {
     const resultRef = this.#createId('toolResult');
     let compaction: ReturnType<typeof compactContextAtCommit>;
     try {
-      parseContextCommitToolCall(pending);
       compaction = compactContextAtCommit(
         snapshot.checkpoint.continuationItems,
         pending,
         resultRef,
       );
     } catch (error) {
+      if (error instanceof ContextCommitCursorError) {
+        const currentCommit = snapshot.checkpoint.continuationItems.at(-1);
+        const candidateItems =
+          currentCommit?.type === 'function_call' && currentCommit.callId === pending.callId
+            ? snapshot.checkpoint.continuationItems.slice(0, -1)
+            : snapshot.checkpoint.continuationItems;
+        return this.#recordToolResult(
+          snapshot,
+          ownerId,
+          signal,
+          pending,
+          JSON.stringify({
+            ok: false,
+            code: INVALID_CONTEXT_COMMIT_CURSOR,
+            message:
+              'throughCallId did not match a current completed non-commit tool call. Retry commit_context with one of validThroughCallIds.',
+            validThroughCallIds: contextCommitCandidateCallIds(candidateItems),
+          }),
+        );
+      }
       return this.#handleFailure(snapshot, ownerId, signal, error, 'model');
     }
 
@@ -532,6 +554,7 @@ export class TaskExecutor {
       resultRef,
       attachmentIds: [],
     };
+    this.#dependencies.browser.resetObservationBaselines();
     return this.#saveBoundary(snapshot, ownerId, signal, {
       type: 'tool.result-recorded',
       reason: `${pending.name}_result_recorded`,
@@ -655,6 +678,9 @@ export class TaskExecutor {
           },
         ],
         pendingToolCall: null,
+        browserToolCallsInAttempt:
+          (snapshot.checkpoint.browserToolCallsInAttempt ?? 0) +
+          (pending.name.startsWith('browser_') ? 1 : 0),
         ...(browserTargetTabId === undefined ? {} : { browserTargetTabId }),
       });
     } catch (error) {
@@ -906,6 +932,8 @@ export class TaskExecutor {
         input.pendingToolCall === undefined
           ? snapshot.checkpoint.pendingToolCall
           : input.pendingToolCall,
+      browserToolCallsInAttempt:
+        input.browserToolCallsInAttempt ?? snapshot.checkpoint.browserToolCallsInAttempt ?? 0,
       ...(input.browserTargetTabId === undefined
         ? {}
         : { browserTargetTabId: input.browserTargetTabId }),

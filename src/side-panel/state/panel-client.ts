@@ -7,7 +7,12 @@ import type {
 } from '../../shared/protocol/panel-types';
 import { PROTOCOL_VERSION, type ExtensionMessage } from '../../shared/protocol/message-types';
 import type { SavePanelSettingsInput } from '../../tasks/panel-service';
-import { parsePanelEditableSettings, parsePanelSettings, parsePanelSnapshot } from './panel-state';
+import {
+  parsePanelEditableSettings,
+  parsePanelSettings,
+  parsePanelSnapshot,
+  parsePanelTaskDetails,
+} from './panel-state';
 
 export type PanelConnectionStatus = 'idle' | 'loading' | 'ready' | 'error';
 
@@ -63,6 +68,8 @@ export class PanelClient {
   #timer: ReturnType<typeof setTimeout> | null = null;
   #disposed = false;
   #featuresEnsuredKey: string | null = null;
+  readonly #detailedTasks = new Map<string, NonNullable<PanelSnapshot['task']>>();
+  readonly #taskDetailLoads = new Map<string, Promise<void>>();
 
   /** Creates a full-snapshot polling client resilient to MV3 worker and UI reconnection. */
   constructor(
@@ -120,7 +127,7 @@ export class PanelClient {
         },
       });
       if (this.#disposed || generation !== this.#generation) return;
-      let snapshot = parsePanelSnapshot(data);
+      let snapshot = this.#mergeDetailedTasks(parsePanelSnapshot(data));
       if (activeConversationId === null) {
         snapshot = {
           ...snapshot,
@@ -161,8 +168,20 @@ export class PanelClient {
     await this.refresh();
   }
 
+  /** Loads and caches the complete persisted execution detail for one expanded task card. */
+  loadTaskDetails(taskId: string): Promise<void> {
+    const existing = this.#taskDetailLoads.get(taskId);
+    if (existing !== undefined) return existing;
+    const loading = this.#loadTaskDetails(taskId).finally(() => {
+      if (this.#taskDetailLoads.get(taskId) === loading) this.#taskDetailLoads.delete(taskId);
+    });
+    this.#taskDetailLoads.set(taskId, loading);
+    return loading;
+  }
+
   /** Starts a clean local draft while retaining the history list from the latest snapshot. */
   newConversation(): void {
+    this.#detailedTasks.clear();
     const snapshot = this.#state.snapshot;
     this.#setState({
       ...this.#state,
@@ -348,6 +367,60 @@ export class PanelClient {
     if (this.#timer !== null) clearTimeout(this.#timer);
     this.#timer = null;
     this.#listeners.clear();
+    this.#detailedTasks.clear();
+    this.#taskDetailLoads.clear();
+  }
+
+  /** Fetches one detail projection and applies it only while that task remains visible. */
+  async #loadTaskDetails(taskId: string): Promise<void> {
+    const data = await this.#send({
+      version: PROTOCOL_VERSION,
+      requestId: requestId(),
+      type: 'panel.getTaskDetails',
+      payload: { taskId },
+    });
+    const detailedTask = parsePanelTaskDetails(data);
+    if (detailedTask.id !== taskId) throw new Error('Panel task detail identifier is invalid.');
+    const snapshot = this.#state.snapshot;
+    const current = snapshot?.tasks.find((task) => task.id === taskId);
+    if (snapshot === null || current === undefined || detailedTask.sequence < current.sequence) {
+      return;
+    }
+    this.#detailedTasks.set(taskId, detailedTask);
+    const tasks = snapshot.tasks.map((task) => (task.id === taskId ? detailedTask : task));
+    this.#setState({
+      ...this.#state,
+      snapshot: {
+        ...snapshot,
+        tasks,
+        task: snapshot.task?.id === taskId ? detailedTask : snapshot.task,
+      },
+    });
+  }
+
+  /** Preserves already-loaded details while polling the same or an older task boundary. */
+  #mergeDetailedTasks(snapshot: PanelSnapshot): PanelSnapshot {
+    const visibleIds = new Set(snapshot.tasks.map(({ id }) => id));
+    for (const taskId of this.#detailedTasks.keys()) {
+      if (!visibleIds.has(taskId)) this.#detailedTasks.delete(taskId);
+    }
+    const tasks = snapshot.tasks.map((task) => {
+      const detailed = this.#detailedTasks.get(task.id);
+      if (
+        detailed === undefined ||
+        detailed.sequence < task.sequence ||
+        detailed.updatedAt < task.updatedAt
+      ) {
+        if (detailed !== undefined) this.#detailedTasks.delete(task.id);
+        return task;
+      }
+      return detailed;
+    });
+    const task =
+      snapshot.task === null
+        ? null
+        : (tasks.find(({ id }) => id === snapshot.task?.id) ?? snapshot.task);
+    return { ...snapshot, tasks, task };
   }
 
   /** Sends one task command for the current snapshot and reloads its resulting boundary. */

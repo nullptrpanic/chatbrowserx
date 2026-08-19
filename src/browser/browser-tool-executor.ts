@@ -8,16 +8,23 @@ import type {
   BrowserToolFailureCode,
 } from './browser-execution-types';
 import { BrowserTabError, type BrowserTabPort, type BrowserTabState } from './tab-service';
-import type { PageObservationResult } from './observation/page-observer';
+import type { PageInspectionOptions, PageObservationResult } from './observation/page-observer';
 import type { BrowserActionPort } from './actions/browser-action-executor';
 import type { NetworkCapturePort } from './network/network-capture-registry';
 
 const MAX_OUTPUT_CHARACTERS = 100 * 1_024;
+const RELOAD_RECOVERY_FAILURES = new Set<BrowserToolFailureCode>([
+  'LOAD_TIMEOUT',
+  'PAGE_UNAVAILABLE',
+  'INVALID_PAGE_RESPONSE',
+  'BROWSER_OPERATION_FAILED',
+]);
 const TASK_SCOPED_OPERATIONS = new Set<ParsedBrowserToolCall['operation']>([
   'navigate',
   'reload',
   'inspect',
   'click',
+  'set_checked',
   'type',
   'keypress',
   'scroll',
@@ -34,6 +41,12 @@ const TASK_SCOPED_OPERATIONS = new Set<ParsedBrowserToolCall['operation']>([
 ]);
 type SessionPurpose = 'action' | 'operation' | 'network';
 
+interface ReloadRecoveryState {
+  readonly operation: ParsedBrowserToolCall['operation'];
+  readonly code: BrowserToolFailureCode;
+  readonly reloadAttempted: boolean;
+}
+
 export interface BrowserToolExecutorDependencies {
   readonly tabs: BrowserTabPort;
   readonly observer?: {
@@ -41,7 +54,9 @@ export interface BrowserToolExecutorDependencies {
       tabId: number,
       mode: 'content' | 'interactive' | 'interactive_deep' | 'screenshot',
       signal: AbortSignal,
+      options?: PageInspectionOptions,
     ): Promise<PageObservationResult>;
+    invalidateInteractiveSnapshots?(): void;
   };
   readonly actions?: BrowserActionPort;
   readonly network?: NetworkCapturePort;
@@ -85,16 +100,16 @@ function failureFor(error: unknown): BrowserToolFailure {
     case 'PAGE_UNAVAILABLE':
       return failure(
         'PAGE_UNAVAILABLE',
-        'The page observation bridge is unavailable. Reload the page and inspect again.',
-        true,
+        'The page content bridge is unavailable. Continue with mode interactive; do not reload solely for this error.',
         false,
+        true,
       );
     case 'INVALID_PAGE_RESPONSE':
       return failure(
         'INVALID_PAGE_RESPONSE',
-        'The page returned an invalid observation. Reload the page and inspect again.',
-        true,
+        'The page content bridge returned an invalid response. Continue with mode interactive; do not reload solely for this error.',
         false,
+        true,
       );
     case 'NETWORK_CAPTURE_LOST':
       return failure(
@@ -134,6 +149,13 @@ function failureFor(error: unknown): BrowserToolFailure {
         true,
         true,
       );
+    case 'ACTION_STATE_MISMATCH':
+      return failure(
+        'ACTION_STATE_MISMATCH',
+        'The page did not retain the requested selection. Inspect fresh refs before another action.',
+        false,
+        true,
+      );
     case 'WAIT_TIMEOUT':
       return failure(
         'WAIT_TIMEOUT',
@@ -161,6 +183,13 @@ function failureFor(error: unknown): BrowserToolFailure {
         'This browser action is unsupported for the selected target.',
         false,
         true,
+      );
+    case 'SELECTABLE_ACTION_REQUIRED':
+      return failure(
+        'SELECTABLE_ACTION_REQUIRED',
+        'This ref advertises set_checked; use browser_set_checked instead of browser_click.',
+        true,
+        false,
       );
     default:
       return failure(
@@ -201,6 +230,132 @@ function result(
     ),
     attachmentIds: [],
   };
+}
+
+function browserFailure(value: unknown): BrowserToolFailure | null {
+  if (
+    typeof value !== 'object' ||
+    value === null ||
+    !('ok' in value) ||
+    value.ok !== false ||
+    !('code' in value) ||
+    typeof value.code !== 'string'
+  ) {
+    return null;
+  }
+  return value as BrowserToolFailure;
+}
+
+function hasSelectableRef(data: Readonly<Record<string, unknown>>): boolean {
+  if (!Array.isArray(data.elements)) return false;
+  return data.elements.some((element) => {
+    if (typeof element !== 'object' || element === null) return false;
+    const value = element as {
+      readonly ref?: unknown;
+      readonly a?: unknown;
+      readonly actions?: unknown;
+    };
+    const actions = Array.isArray(value.a)
+      ? value.a
+      : Array.isArray(value.actions)
+        ? value.actions
+        : [];
+    return typeof value.ref === 'string' && value.ref.length > 0 && actions.includes('set_checked');
+  });
+}
+
+function interactiveSnapshotId(data: Readonly<Record<string, unknown>>): string | null {
+  return typeof data.snapshot === 'string' && data.snapshot.length > 0 ? data.snapshot : null;
+}
+
+interface SelectableRefIdentity {
+  readonly semanticKey: string;
+  readonly selected: boolean | undefined;
+}
+
+function selectedState(state: unknown): boolean | undefined {
+  if (!Array.isArray(state)) return undefined;
+  for (const property of ['checked', 'selected'] as const) {
+    if (state.includes(property)) return true;
+    if (state.includes(`${property}=false`)) return false;
+  }
+  return undefined;
+}
+
+function selectableRefs(
+  data: Readonly<Record<string, unknown>>,
+): ReadonlyMap<string, SelectableRefIdentity> | null {
+  if (!Array.isArray(data.elements)) return null;
+  const candidates: Array<{
+    readonly ref: string;
+    readonly semanticKey: string;
+    readonly selected: boolean | undefined;
+  }> = [];
+  const counts = new Map<string, number>();
+  for (const element of data.elements) {
+    if (typeof element !== 'object' || element === null) continue;
+    const value = element as {
+      readonly ref?: unknown;
+      readonly r?: unknown;
+      readonly n?: unknown;
+      readonly s?: unknown;
+      readonly a?: unknown;
+      readonly actions?: unknown;
+    };
+    const actions = Array.isArray(value.a)
+      ? value.a
+      : Array.isArray(value.actions)
+        ? value.actions
+        : [];
+    if (
+      typeof value.ref !== 'string' ||
+      value.ref.length === 0 ||
+      typeof value.n !== 'string' ||
+      value.n.length === 0 ||
+      !actions.includes('set_checked')
+    ) {
+      continue;
+    }
+    const semanticKey = JSON.stringify([
+      typeof value.r === 'string' ? value.r : 'generic',
+      value.n,
+    ]);
+    candidates.push({
+      ref: value.ref,
+      semanticKey,
+      selected: selectedState(value.s),
+    });
+    counts.set(semanticKey, (counts.get(semanticKey) ?? 0) + 1);
+  }
+  return new Map(
+    candidates
+      .filter(({ semanticKey }) => counts.get(semanticKey) === 1)
+      .map(({ ref, semanticKey, selected }) => [ref, { semanticKey, selected }]),
+  );
+}
+
+function semanticStructure(data: Readonly<Record<string, unknown>>): string | null {
+  if (!Array.isArray(data.elements)) return null;
+  return JSON.stringify(
+    data.elements.map((element) => {
+      if (typeof element !== 'object' || element === null) return null;
+      const value = element as {
+        readonly d?: unknown;
+        readonly r?: unknown;
+        readonly n?: unknown;
+        readonly a?: unknown;
+        readonly actions?: unknown;
+        readonly f?: unknown;
+      };
+      return [
+        typeof value.d === 'number' ? value.d : null,
+        typeof value.r === 'string' ? value.r : 'generic',
+        typeof value.n === 'string' ? value.n : '',
+        Array.isArray(value.a) ? value.a : Array.isArray(value.actions) ? value.actions : [],
+        typeof value.f === 'string' ? value.f : null,
+      ];
+    }),
+  );
 }
 
 function tabId(arguments_: unknown): number {
@@ -327,13 +482,38 @@ export class BrowserToolExecutor implements BrowserExecutionPort {
   readonly #dependencies: BrowserToolExecutorDependencies;
   readonly #ownersByRunner = new Map<string, Set<string>>();
   readonly #screenshotScales = new Map<number, ScreenshotCoordinateScale>();
+  readonly #visualFallbackByTab = new Map<number, boolean>();
+  readonly #stateMismatchFallbackByTab = new Set<number>();
+  readonly #interactiveSnapshotByTab = new Map<number, string>();
+  readonly #selectableRefsByTab = new Map<number, ReadonlyMap<string, SelectableRefIdentity>>();
+  readonly #semanticStructureByTab = new Map<number, string>();
+  readonly #failedSelectionsByTab = new Map<number, Map<string, boolean>>();
+  readonly #reloadRecoveryByTab = new Map<number, ReloadRecoveryState>();
 
   constructor(dependencies: BrowserToolExecutorDependencies) {
     this.#dependencies = dependencies;
   }
 
+  resetObservationBaselines(): void {
+    this.#screenshotScales.clear();
+    this.#visualFallbackByTab.clear();
+    this.#stateMismatchFallbackByTab.clear();
+    this.#interactiveSnapshotByTab.clear();
+    this.#selectableRefsByTab.clear();
+    this.#semanticStructureByTab.clear();
+    this.#failedSelectionsByTab.clear();
+    this.#dependencies.observer?.invalidateInteractiveSnapshots?.();
+  }
+
   async release(sessionOwnerId: string): Promise<void> {
     this.#screenshotScales.clear();
+    this.#visualFallbackByTab.clear();
+    this.#stateMismatchFallbackByTab.clear();
+    this.#interactiveSnapshotByTab.clear();
+    this.#selectableRefsByTab.clear();
+    this.#semanticStructureByTab.clear();
+    this.#failedSelectionsByTab.clear();
+    this.#reloadRecoveryByTab.clear();
     const sessions = this.#dependencies.sessions;
     if (!sessions) return;
     const owners = [...(this.#ownersByRunner.get(sessionOwnerId) ?? [])];
@@ -350,9 +530,11 @@ export class BrowserToolExecutor implements BrowserExecutionPort {
     context?: BrowserExecutionContext,
   ): Promise<BrowserToolExecutionResult> {
     throwIfAborted(signal);
+    let recoveryTabId: number | null = null;
     try {
       const taskTarget = resolveTaskTarget(call, context);
       if (taskTarget.failure !== null) return result(taskTarget.failure);
+      recoveryTabId = taskTarget.tabId;
       let output: unknown;
       let attachmentIds: readonly string[] = [];
       switch (call.operation) {
@@ -402,6 +584,14 @@ export class BrowserToolExecutor implements BrowserExecutionPort {
         case 'close_tab': {
           const targetTabId = tabId(call.arguments);
           await this.#dependencies.tabs.close(targetTabId);
+          this.#screenshotScales.delete(targetTabId);
+          this.#visualFallbackByTab.delete(targetTabId);
+          this.#stateMismatchFallbackByTab.delete(targetTabId);
+          this.#interactiveSnapshotByTab.delete(targetTabId);
+          this.#selectableRefsByTab.delete(targetTabId);
+          this.#semanticStructureByTab.delete(targetTabId);
+          this.#failedSelectionsByTab.delete(targetTabId);
+          this.#reloadRecoveryByTab.delete(targetTabId);
           output = {
             ok: true,
             tabId: targetTabId,
@@ -416,13 +606,41 @@ export class BrowserToolExecutor implements BrowserExecutionPort {
           const targetTabId = requiredTaskTabId(taskTarget);
           const tab = await this.#dependencies.tabs.navigate(targetTabId, input.url);
           this.#screenshotScales.delete(targetTabId);
+          this.#visualFallbackByTab.delete(targetTabId);
+          this.#stateMismatchFallbackByTab.delete(targetTabId);
+          this.#interactiveSnapshotByTab.delete(targetTabId);
+          this.#selectableRefsByTab.delete(targetTabId);
+          this.#semanticStructureByTab.delete(targetTabId);
+          this.#failedSelectionsByTab.delete(targetTabId);
           output = success(tab, { title: tab.title, active: tab.active });
           break;
         }
         case 'reload': {
           const targetTabId = requiredTaskTabId(taskTarget);
+          const recovery = this.#reloadRecoveryByTab.get(targetTabId);
+          if (recovery?.reloadAttempted) {
+            output = failure(
+              'REPEATED_RECOVERY_BLOCKED',
+              'Reload already failed to recover this browser error. Continue with another inspection or action strategy.',
+              false,
+              true,
+            );
+            break;
+          }
           const tab = await this.#dependencies.tabs.reload(targetTabId);
           this.#screenshotScales.delete(targetTabId);
+          this.#visualFallbackByTab.delete(targetTabId);
+          this.#stateMismatchFallbackByTab.delete(targetTabId);
+          this.#interactiveSnapshotByTab.delete(targetTabId);
+          this.#selectableRefsByTab.delete(targetTabId);
+          this.#semanticStructureByTab.delete(targetTabId);
+          this.#failedSelectionsByTab.delete(targetTabId);
+          if (recovery) {
+            this.#reloadRecoveryByTab.set(targetTabId, {
+              ...recovery,
+              reloadAttempted: true,
+            });
+          }
           output = success(tab, {
             title: tab.title,
             active: tab.active,
@@ -442,24 +660,66 @@ export class BrowserToolExecutor implements BrowserExecutionPort {
           }
           const input = call.arguments as {
             readonly mode: 'content' | 'interactive' | 'interactive_deep' | 'screenshot';
+            readonly since?: string;
           };
           const targetTabId = requiredTaskTabId(taskTarget);
+          if (input.mode === 'screenshot') {
+            const allowed = this.#visualFallbackByTab.get(targetTabId);
+            const mismatchFallback = this.#stateMismatchFallbackByTab.has(targetTabId);
+            if (allowed === undefined && !mismatchFallback) {
+              output = failure(
+                'INTERACTIVE_INSPECTION_REQUIRED',
+                'Inspect the page with mode interactive before requesting a screenshot.',
+                true,
+                true,
+              );
+              break;
+            }
+            if (!allowed && !mismatchFallback) {
+              output = failure(
+                'SEMANTIC_INSPECTION_AVAILABLE',
+                'The current accessibility tree already contains sufficient semantic targets. Continue with refs and verify state with mode interactive.',
+                false,
+                false,
+              );
+              break;
+            }
+          }
           const purpose = 'operation' as const;
           if (input.mode !== 'content') {
             await this.#retainPurpose(targetTabId, context?.sessionOwnerId, purpose);
           }
           let observed: PageObservationResult;
           try {
-            observed = await this.#dependencies.observer.inspect(targetTabId, input.mode, signal);
+            observed =
+              input.since === undefined
+                ? await this.#dependencies.observer.inspect(targetTabId, input.mode, signal)
+                : await this.#dependencies.observer.inspect(targetTabId, input.mode, signal, {
+                    since: input.since,
+                  });
           } catch (error) {
             await this.#releasePurpose(context?.sessionOwnerId, purpose);
             throw error;
           }
           await this.#releasePurpose(context?.sessionOwnerId, purpose);
+          if (input.mode === 'interactive' || input.mode === 'interactive_deep') {
+            this.#rememberSelectableRefs(targetTabId, observed.data);
+            const snapshotId = interactiveSnapshotId(observed.data);
+            if (snapshotId === null) this.#interactiveSnapshotByTab.delete(targetTabId);
+            else this.#interactiveSnapshotByTab.set(targetTabId, snapshotId);
+            this.#visualFallbackByTab.set(
+              targetTabId,
+              observed.visualFallbackAllowed ?? this.#fallbackFromElements(observed.data),
+            );
+            if (hasSelectableRef(observed.data)) {
+              this.#stateMismatchFallbackByTab.delete(targetTabId);
+            }
+          }
           if (input.mode === 'screenshot') {
             const scale = screenshotCoordinateScale(observed.data);
             if (scale === null) this.#screenshotScales.delete(targetTabId);
             else this.#screenshotScales.set(targetTabId, scale);
+            this.#stateMismatchFallbackByTab.delete(targetTabId);
           }
           output = {
             ok: true,
@@ -472,6 +732,7 @@ export class BrowserToolExecutor implements BrowserExecutionPort {
           break;
         }
         case 'click':
+        case 'set_checked':
         case 'type':
         case 'keypress':
         case 'scroll':
@@ -491,6 +752,15 @@ export class BrowserToolExecutor implements BrowserExecutionPort {
             break;
           }
           const targetTabId = requiredTaskTabId(taskTarget);
+          if (this.#isDuplicateFailedSelection(call, targetTabId)) {
+            output = failure(
+              'DUPLICATE_FAILED_ACTION',
+              'The same selection already failed on this unchanged page state. Use another target or action strategy.',
+              false,
+              true,
+            );
+            break;
+          }
           const boundCall = bindTaskTarget(
             mapScreenshotCoordinates(call, this.#screenshotScales.get(targetTabId)),
             targetTabId,
@@ -503,11 +773,42 @@ export class BrowserToolExecutor implements BrowserExecutionPort {
           } finally {
             await this.#releasePurpose(context?.sessionOwnerId, 'action');
           }
+          this.#clearFailedSelection(call, targetTabId);
+          this.#stateMismatchFallbackByTab.delete(targetTabId);
+          let verification: Readonly<Record<string, unknown>> | undefined;
+          const baseSnapshot = this.#interactiveSnapshotByTab.get(targetTabId);
+          if (
+            call.operation === 'click_point' &&
+            baseSnapshot !== undefined &&
+            this.#dependencies.observer
+          ) {
+            await this.#retainPurpose(targetTabId, context?.sessionOwnerId, 'operation');
+            try {
+              const observed = await this.#dependencies.observer.inspect(
+                targetTabId,
+                'interactive',
+                signal,
+                { since: baseSnapshot },
+              );
+              verification = observed.data;
+              const snapshotId = interactiveSnapshotId(observed.data);
+              if (snapshotId === null) this.#interactiveSnapshotByTab.delete(targetTabId);
+              else this.#interactiveSnapshotByTab.set(targetTabId, snapshotId);
+              this.#visualFallbackByTab.set(
+                targetTabId,
+                observed.visualFallbackAllowed ?? this.#fallbackFromElements(observed.data),
+              );
+            } catch {
+              // The coordinate action already completed; a failed best-effort recheck must not replay it.
+            } finally {
+              await this.#releasePurpose(context?.sessionOwnerId, 'operation');
+            }
+          }
           output = {
             ok: true,
             tabId: action.tabId,
             url: action.url,
-            data: action.data,
+            data: verification === undefined ? action.data : { ...action.data, verification },
             observation: action.observation,
           };
           break;
@@ -632,10 +933,125 @@ export class BrowserToolExecutor implements BrowserExecutionPort {
           );
       }
       throwIfAborted(signal);
+      this.#recordRecoveryOutcome(call.operation, recoveryTabId, output);
       return result(output, attachmentIds);
     } catch (error) {
       if (signal.aborted || (error instanceof Error && error.name === 'AbortError')) throw error;
-      return result(failureFor(error));
+      const normalized = failureFor(error);
+      if (normalized.code === 'ACTION_STATE_MISMATCH' && recoveryTabId !== null) {
+        this.#stateMismatchFallbackByTab.add(recoveryTabId);
+        this.#rememberFailedSelection(call, recoveryTabId);
+      }
+      this.#recordRecoveryOutcome(call.operation, recoveryTabId, normalized);
+      return result(normalized);
+    }
+  }
+
+  #fallbackFromElements(data: Readonly<Record<string, unknown>>): boolean {
+    if (!Array.isArray(data.elements)) return false;
+    return !data.elements.some(
+      (element) =>
+        typeof element === 'object' &&
+        element !== null &&
+        'ref' in element &&
+        typeof element.ref === 'string' &&
+        element.ref.length > 0,
+    );
+  }
+
+  #selectionIntent(
+    call: ParsedBrowserToolCall,
+    tabId_: number,
+  ): { readonly semanticKey: string; readonly selected: boolean } | null {
+    if (call.operation !== 'set_checked' && call.operation !== 'click') return null;
+    const arguments_ = call.arguments as {
+      readonly ref?: unknown;
+      readonly checked?: unknown;
+      readonly button?: unknown;
+      readonly count?: unknown;
+    };
+    if (typeof arguments_.ref !== 'string') return null;
+    const identity = this.#selectableRefsByTab.get(tabId_)?.get(arguments_.ref);
+    if (!identity) return null;
+    if (call.operation === 'set_checked') {
+      return typeof arguments_.checked === 'boolean'
+        ? { semanticKey: identity.semanticKey, selected: arguments_.checked }
+        : null;
+    }
+    if (arguments_.button !== 'left' || arguments_.count !== 1 || identity.selected === undefined) {
+      return null;
+    }
+    return { semanticKey: identity.semanticKey, selected: !identity.selected };
+  }
+
+  #isDuplicateFailedSelection(call: ParsedBrowserToolCall, tabId_: number): boolean {
+    const intent = this.#selectionIntent(call, tabId_);
+    if (!intent) return false;
+    return this.#failedSelectionsByTab.get(tabId_)?.get(intent.semanticKey) === intent.selected;
+  }
+
+  #rememberFailedSelection(call: ParsedBrowserToolCall, tabId_: number): void {
+    const intent = this.#selectionIntent(call, tabId_);
+    if (!intent) return;
+    const failures = this.#failedSelectionsByTab.get(tabId_) ?? new Map<string, boolean>();
+    failures.set(intent.semanticKey, intent.selected);
+    this.#failedSelectionsByTab.set(tabId_, failures);
+  }
+
+  #clearFailedSelection(call: ParsedBrowserToolCall, tabId_: number): void {
+    const intent = this.#selectionIntent(call, tabId_);
+    if (!intent) return;
+    this.#failedSelectionsByTab.get(tabId_)?.delete(intent.semanticKey);
+  }
+
+  #rememberSelectableRefs(tabId_: number, data: Readonly<Record<string, unknown>>): void {
+    const refs = selectableRefs(data);
+    if (refs === null) return;
+    const structure = semanticStructure(data);
+    const previousStructure = this.#semanticStructureByTab.get(tabId_);
+    if (structure !== null) {
+      this.#semanticStructureByTab.set(tabId_, structure);
+      if (previousStructure !== undefined && previousStructure !== structure) {
+        this.#failedSelectionsByTab.delete(tabId_);
+      }
+    }
+    this.#selectableRefsByTab.set(tabId_, refs);
+    const failures = this.#failedSelectionsByTab.get(tabId_);
+    if (!failures) return;
+    for (const identity of refs.values()) {
+      if (identity.selected === failures.get(identity.semanticKey)) {
+        failures.delete(identity.semanticKey);
+      }
+    }
+    if (failures.size === 0) this.#failedSelectionsByTab.delete(tabId_);
+  }
+
+  #recordRecoveryOutcome(
+    operation: ParsedBrowserToolCall['operation'],
+    tabId_: number | null,
+    output: unknown,
+  ): void {
+    if (tabId_ === null || operation === 'reload') return;
+    const failed = browserFailure(output);
+    if (failed && RELOAD_RECOVERY_FAILURES.has(failed.code)) {
+      const current = this.#reloadRecoveryByTab.get(tabId_);
+      this.#reloadRecoveryByTab.set(tabId_, {
+        operation,
+        code: failed.code,
+        reloadAttempted:
+          current?.operation === operation && current.code === failed.code
+            ? current.reloadAttempted
+            : false,
+      });
+      return;
+    }
+    if (
+      failed === null &&
+      (operation === 'inspect' ||
+        operation === 'navigate' ||
+        this.#reloadRecoveryByTab.get(tabId_)?.operation === operation)
+    ) {
+      this.#reloadRecoveryByTab.delete(tabId_);
     }
   }
 

@@ -20,6 +20,8 @@ export interface Checkpoint {
   readonly completedToolResults: readonly CompletedToolResult[];
   readonly continuationItems: readonly ContinuationItem[];
   readonly pendingToolCall: PendingToolCall | null;
+  /** Browser calls charged to the current run attempt; absent only on legacy checkpoints. */
+  readonly browserToolCallsInAttempt?: number;
   /** Durable browser target for this task; absent only on checkpoints written before this field. */
   readonly browserTargetTabId?: number | null;
   readonly createdAt: number;

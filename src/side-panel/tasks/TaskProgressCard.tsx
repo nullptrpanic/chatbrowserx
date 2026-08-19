@@ -1,5 +1,5 @@
 import { ChevronDown, ChevronUp, CircleStop, Pause, Play, RotateCcw } from 'lucide-react';
-import { useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import type { Translator } from '../../shared/i18n/i18n';
 import type {
   PanelCompletedToolResult,
@@ -8,7 +8,6 @@ import type {
 } from '../../shared/protocol/panel-types';
 import type { AttachmentDraftClient } from '../chat/use-image-draft';
 import { isTerminalToolName, TerminalToolResult } from './TerminalToolResult';
-import { ReasoningSummary } from './ReasoningSummary';
 import { TaskStatusLabel, taskEventLabel, taskStatusLabel } from './TaskStatusLabel';
 import { TaskSupplement } from './TaskSupplement';
 import { ToolResult } from './ToolResult';
@@ -22,6 +21,7 @@ export interface TaskProgressCardProps {
   readonly attachments: AttachmentDraftClient;
   readonly t: Translator;
   readonly onOpenImagePreview?: ((attachmentId: string) => Promise<boolean>) | undefined;
+  readonly onLoadTaskDetails?: ((taskId: string) => Promise<void>) | undefined;
   readonly onPause: () => void;
   readonly onResume: () => void;
   readonly onRetry: () => void;
@@ -30,12 +30,13 @@ export interface TaskProgressCardProps {
   readonly interactive?: boolean;
 }
 
-/** Renders compact durable progress with expandable audit events and recovery controls. */
+/** Renders durable progress with completed tools, user supplements, and recovery controls. */
 export function TaskProgressCard({
   task,
   attachments,
   t,
   onOpenImagePreview,
+  onLoadTaskDetails,
   onPause,
   onResume,
   onRetry,
@@ -44,11 +45,23 @@ export function TaskProgressCard({
   interactive = true,
 }: TaskProgressCardProps) {
   const [expanded, setExpanded] = useState(false);
-  const latestEvent = task.events.at(-1);
+  const requestedDetailKey = useRef<string | null>(null);
+  const latestEvent = task.detailLevel === 'full' ? undefined : task.events.at(-1);
+  const completedToolCallCount = taskToolCallCount(task);
+
+  useEffect(() => {
+    if (!expanded || task.detailLevel === 'full' || onLoadTaskDetails === undefined) return;
+    const detailKey = `${task.id}:${String(task.sequence)}`;
+    if (requestedDetailKey.current === detailKey) return;
+    requestedDetailKey.current = detailKey;
+    void onLoadTaskDetails(task.id).catch(() => {
+      if (requestedDetailKey.current === detailKey) requestedDetailKey.current = null;
+    });
+  }, [expanded, onLoadTaskDetails, task.detailLevel, task.id, task.sequence]);
 
   if (embedded) {
     const summaryMeta = t('taskSummaryMeta', {
-      steps: task.sequence,
+      toolCalls: completedToolCallCount,
       duration: formatTaskDuration(task),
     });
     return (
@@ -105,7 +118,11 @@ export function TaskProgressCard({
         </span>
       </div>
       <p className="task-current-step">
-        {latestEvent === undefined ? task.goal : taskEventLabel(latestEvent.type, t)}
+        {task.detailLevel === 'full'
+          ? taskStatusLabel(task.status, t)
+          : latestEvent === undefined
+            ? task.goal
+            : taskEventLabel(latestEvent.type, t)}
       </p>
       <div className="task-progress-row">
         <button
@@ -114,7 +131,7 @@ export function TaskProgressCard({
           onClick={() => setExpanded((value) => !value)}
         >
           {expanded ? <ChevronUp size={14} /> : <ChevronDown size={14} />}
-          {expanded ? t('hideTaskDetails') : t('taskDetails')}
+          {expanded ? t('hideTaskDetails') : t('taskDetails')}({completedToolCallCount})
         </button>
       </div>
       {task.lastError === null ? null : (
@@ -154,88 +171,116 @@ function TaskDetailContent({
   readonly t: Translator;
   readonly onOpenImagePreview?: ((attachmentId: string) => Promise<boolean>) | undefined;
 }) {
-  const toolResultsByEvent = groupToolResultsByEvent(task);
+  const toolResultGroups = groupToolResultsByEvent(task);
   const supplementsByEvent = groupSupplementsByEvent(task);
+  const toolResultIndexes = new Map(
+    task.completedToolResults.map((result, index) => [result.callId, index]),
+  );
+  const firstVisibleToolCall = Math.max(
+    0,
+    taskToolCallCount(task) - task.completedToolResults.length,
+  );
+  const toolCallNumber = (result: PanelCompletedToolResult) =>
+    firstVisibleToolCall + (toolResultIndexes.get(result.callId) ?? 0) + 1;
   return (
     <div className="task-detail-content">
-      {task.events.length === 0 &&
-      task.completedToolResults.length === 0 &&
-      task.supplements.length === 0 ? (
+      {task.completedToolResults.length === 0 && task.supplements.length === 0 ? (
         <p className="task-detail-empty">{t('noEvents')}</p>
       ) : null}
-      {task.events.length === 0 ? null : (
+      {task.completedToolResults.length === 0 && task.supplements.length === 0 ? null : (
         <ol className="task-event-list">
-          {task.events.map((event, eventIndex) => {
-            const toolResults = toolResultsByEvent.get(eventIndex) ?? [];
-            const supplements = supplementsByEvent.grouped.get(eventIndex) ?? [];
-            return (
-              <li key={`${event.sequence}:${event.type}`}>
-                <span className="task-event-index">{event.sequence}</span>
-                <span>
-                  {event.type === 'tool.result-recorded' && toolResults[0] !== undefined
-                    ? toolResultEventLabel(toolResults[0].toolName, t)
-                    : taskEventLabel(event.type, t)}
-                </span>
-                <time dateTime={new Date(event.at).toISOString()}>
-                  {new Intl.DateTimeFormat(undefined, {
-                    hour: '2-digit',
-                    minute: '2-digit',
-                    second: '2-digit',
-                  }).format(event.at)}
-                </time>
-                {toolResults.length === 0 ? null : (
-                  <div className="task-event-tool-results">
-                    {toolResults.map((result) => (
-                      <CompletedToolResult
-                        key={result.callId}
-                        result={result}
-                        attachments={attachments}
-                        t={t}
-                        onOpenImagePreview={onOpenImagePreview}
-                      />
-                    ))}
-                  </div>
-                )}
-                {event.reasoningSummary === undefined ? null : (
-                  <ReasoningSummary summary={event.reasoningSummary} t={t} />
-                )}
-                {supplements.map((supplement) => (
-                  <TaskSupplement
-                    key={supplement.id}
-                    supplement={supplement}
-                    attachments={attachments}
-                    t={t}
-                    onOpenImagePreview={onOpenImagePreview}
-                  />
-                ))}
-              </li>
-            );
-          })}
-        </ol>
-      )}
-      {task.events.length !== 0 || task.completedToolResults.length === 0 ? null : (
-        <div className="task-event-tool-results">
-          {task.completedToolResults.map((result) => (
-            <CompletedToolResult
+          {toolResultGroups.unmatched.map((result) => (
+            <CompletedToolEvent
               key={result.callId}
               result={result}
+              number={toolCallNumber(result)}
               attachments={attachments}
               t={t}
               onOpenImagePreview={onOpenImagePreview}
             />
           ))}
-        </div>
+          {task.events.map((event, eventIndex) => {
+            const toolResults = toolResultGroups.grouped.get(eventIndex) ?? [];
+            const supplements = supplementsByEvent.grouped.get(eventIndex) ?? [];
+            return [
+              ...toolResults.map((result) => (
+                <CompletedToolEvent
+                  key={result.callId}
+                  result={result}
+                  number={toolCallNumber(result)}
+                  at={event.at}
+                  attachments={attachments}
+                  t={t}
+                  onOpenImagePreview={onOpenImagePreview}
+                />
+              )),
+              ...supplements.map((supplement) => (
+                <li className="task-supplement-entry" key={supplement.id}>
+                  <TaskSupplement
+                    supplement={supplement}
+                    attachments={attachments}
+                    t={t}
+                    onOpenImagePreview={onOpenImagePreview}
+                  />
+                </li>
+              )),
+            ];
+          })}
+          {supplementsByEvent.unmatched.map((supplement) => (
+            <li className="task-supplement-entry" key={supplement.id}>
+              <TaskSupplement
+                supplement={supplement}
+                attachments={attachments}
+                t={t}
+                onOpenImagePreview={onOpenImagePreview}
+              />
+            </li>
+          ))}
+        </ol>
       )}
-      {supplementsByEvent.unmatched.map((supplement) => (
-        <TaskSupplement
-          key={supplement.id}
-          supplement={supplement}
+    </div>
+  );
+}
+
+function CompletedToolEvent({
+  result,
+  number,
+  at,
+  attachments,
+  t,
+  onOpenImagePreview,
+}: {
+  readonly result: PanelCompletedToolResult;
+  readonly number: number;
+  readonly at?: number | undefined;
+  readonly attachments: AttachmentDraftClient;
+  readonly t: Translator;
+  readonly onOpenImagePreview?: ((attachmentId: string) => Promise<boolean>) | undefined;
+}) {
+  return (
+    <li>
+      <span className="task-event-index">{number}</span>
+      <span>{toolResultEventLabel(result.toolName, t)}</span>
+      {at === undefined ? (
+        <span />
+      ) : (
+        <time dateTime={new Date(at).toISOString()}>
+          {new Intl.DateTimeFormat(undefined, {
+            hour: '2-digit',
+            minute: '2-digit',
+            second: '2-digit',
+          }).format(at)}
+        </time>
+      )}
+      <div className="task-event-tool-results">
+        <CompletedToolResult
+          result={result}
           attachments={attachments}
           t={t}
           onOpenImagePreview={onOpenImagePreview}
         />
-      ))}
-    </div>
+      </div>
+    </li>
   );
 }
 
@@ -297,12 +342,17 @@ function CompletedToolResult({
   );
 }
 
-/** Associates retained result tails with the matching retained tool events in chronological order. */
-function groupToolResultsByEvent(
-  task: PanelTask,
-): ReadonlyMap<number, readonly PanelCompletedToolResult[]> {
+interface GroupedToolResults {
+  readonly grouped: ReadonlyMap<number, readonly PanelCompletedToolResult[]>;
+  readonly unmatched: readonly PanelCompletedToolResult[];
+}
+
+/** Associates retained result tails with matching retained tool events in chronological order. */
+function groupToolResultsByEvent(task: PanelTask): GroupedToolResults {
   const grouped = new Map<number, PanelCompletedToolResult[]>();
-  if (task.events.length === 0 || task.completedToolResults.length === 0) return grouped;
+  if (task.events.length === 0 || task.completedToolResults.length === 0) {
+    return { grouped, unmatched: task.completedToolResults };
+  }
 
   const resultEventIndexes = task.events.flatMap((event, index) =>
     event.type === 'tool.result-recorded' ? [index] : [],
@@ -310,7 +360,6 @@ function groupToolResultsByEvent(
   const pairedCount = Math.min(resultEventIndexes.length, task.completedToolResults.length);
   const firstPairedEvent = resultEventIndexes.length - pairedCount;
   const firstPairedResult = task.completedToolResults.length - pairedCount;
-  const fallbackEvent = task.events.length - 1;
   const appendResult = (eventIndex: number, result: PanelCompletedToolResult) => {
     const existing = grouped.get(eventIndex);
     if (existing === undefined) {
@@ -320,17 +369,16 @@ function groupToolResultsByEvent(
     existing.push(result);
   };
 
-  for (let resultIndex = 0; resultIndex < firstPairedResult; resultIndex += 1) {
-    const result = task.completedToolResults[resultIndex];
-    if (result !== undefined) appendResult(fallbackEvent, result);
-  }
   for (let pairIndex = 0; pairIndex < pairedCount; pairIndex += 1) {
     const eventIndex = resultEventIndexes[firstPairedEvent + pairIndex];
     const result = task.completedToolResults[firstPairedResult + pairIndex];
     if (eventIndex !== undefined && result !== undefined) appendResult(eventIndex, result);
   }
 
-  return grouped;
+  return {
+    grouped,
+    unmatched: task.completedToolResults.slice(0, firstPairedResult),
+  };
 }
 
 interface TaskControlsProps {
@@ -382,6 +430,17 @@ function TaskControls({
 function formatTaskDuration(task: PanelTask): string {
   const durationMilliseconds = Math.max(0, task.updatedAt - task.createdAt);
   return String(Math.round(durationMilliseconds / 100) / 10);
+}
+
+/** Uses the exact server total while retaining compatibility with an older live panel snapshot. */
+function taskToolCallCount(task: PanelTask): number {
+  return (
+    task.completedToolCallCount ??
+    Math.max(
+      task.completedToolResults.length,
+      task.events.filter((event) => event.type === 'tool.result-recorded').length,
+    )
+  );
 }
 
 /** Creates a concise accessible label for the complete task progress card. */

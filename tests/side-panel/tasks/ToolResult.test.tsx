@@ -11,6 +11,30 @@ const attachments = {
 
 describe('ToolResult reviewed labels', () => {
   it.each([
+    ['zh-CN', '搜索网页'],
+    ['en', 'Search web'],
+    ['ja', 'ウェブを検索'],
+  ] as const)('localizes Tavily tools in %s', (language, label) => {
+    render(
+      <ToolResult
+        result={{
+          callId: 'call_search',
+          toolName: 'tavily_search',
+          argumentsJson: '{"query":"browser reliability"}',
+          output: '{"ok":true}',
+          resultRef: 'result_search',
+          attachmentIds: [],
+        }}
+        attachments={attachments}
+        t={createTranslator(language)}
+      />,
+    );
+
+    expect(screen.getByText(label)).toBeVisible();
+    expect(screen.queryByText('tavily_search')).not.toBeInTheDocument();
+  });
+
+  it.each([
     ['zh-CN', '检查页面'],
     ['en', 'Inspect page'],
     ['ja', 'ページを確認'],

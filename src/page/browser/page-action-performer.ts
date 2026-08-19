@@ -12,6 +12,8 @@ interface PageActionPoint {
   readonly y: number;
 }
 
+const EDITABLE_SETTLE_DEADLINE_MS = 120;
+
 interface PageActionResultBase {
   readonly action: PageAction['action'];
   readonly applied: boolean;
@@ -98,11 +100,38 @@ function editableValue(
     : (element.textContent ?? '');
 }
 
-async function settleEditableValue(window_: Window): Promise<void> {
+async function settleEditableValue(document_: Document, window_: Window): Promise<void> {
   await Promise.resolve();
-  for (let frame = 0; frame < 2; frame += 1) {
-    await new Promise<void>((resolve) => window_.requestAnimationFrame(() => resolve()));
-  }
+  if (document_.visibilityState !== 'visible') return;
+  await new Promise<void>((resolve) => {
+    let animationFrame: number | undefined;
+    let framesRemaining = 2;
+    let finished = false;
+    const finish = (): void => {
+      if (finished) return;
+      finished = true;
+      if (animationFrame !== undefined) window_.cancelAnimationFrame(animationFrame);
+      window_.clearTimeout(deadline);
+      document_.removeEventListener('visibilitychange', handleVisibilityChange);
+      resolve();
+    };
+    const handleVisibilityChange = (): void => {
+      if (document_.visibilityState !== 'visible') finish();
+    };
+    const handleAnimationFrame = (): void => {
+      animationFrame = undefined;
+      framesRemaining -= 1;
+      if (framesRemaining === 0 || document_.visibilityState !== 'visible') {
+        finish();
+        return;
+      }
+      animationFrame = window_.requestAnimationFrame(handleAnimationFrame);
+    };
+    document_.addEventListener('visibilitychange', handleVisibilityChange);
+    animationFrame = window_.requestAnimationFrame(handleAnimationFrame);
+    const deadline = window_.setTimeout(finish, EDITABLE_SETTLE_DEADLINE_MS);
+    handleVisibilityChange();
+  });
 }
 
 function supportsAxis(element: Element, deltaX: number, deltaY: number): boolean {
@@ -322,7 +351,7 @@ export async function performPageAction(
     }
     control.dispatchEvent(inputEvent(control, action.text));
     control.dispatchEvent(bubblingEvent(control, 'change'));
-    await settleEditableValue(window_);
+    await settleEditableValue(document_, window_);
     const appliedValue = editableValue(control, isTextControl);
     if (appliedValue !== nextValue) {
       return {

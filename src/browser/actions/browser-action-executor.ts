@@ -9,10 +9,20 @@ import type {
 import {
   ElementRefStoreError,
   type ElementRefStore,
+  type ObservedElementRefState,
+  type ObservedElementTarget,
   type ResolvedElementRef,
   type ViewportRect,
 } from '../observation/element-ref-store';
+import {
+  SEMANTIC_SNAPSHOT_STYLES,
+  buildSemanticPageSnapshot,
+} from '../observation/semantic-page-snapshot';
 import { parseKeyChord, type ParsedKeyChord } from './key-chords';
+
+const POINTER_FEEDBACK_DEADLINE_MS = 250;
+const SELECTION_SETTLE_TIMEOUT_MS = 1_500;
+const SELECTION_POLL_INTERVAL_MS = 75;
 
 const SELECT_FUNCTION = `function(value) {
   if (!(this instanceof HTMLSelectElement)) return { ok: false };
@@ -20,6 +30,12 @@ const SELECT_FUNCTION = `function(value) {
   this.dispatchEvent(new Event('input', { bubbles: true }));
   this.dispatchEvent(new Event('change', { bubbles: true }));
   return { ok: true, value: this.value };
+}`;
+
+const CLICK_ELEMENT_FUNCTION = `function() {
+  if (!this || typeof this.click !== 'function') return { dispatched: false };
+  this.click();
+  return { dispatched: true };
 }`;
 
 const FOCUSED_EDITABLE_VALUE_EXPRESSION = `(() => {
@@ -155,6 +171,8 @@ export interface BrowserPageActionPort {
 
 export type BrowserActionErrorCode =
   | 'UNSUPPORTED_ACTION'
+  | 'SELECTABLE_ACTION_REQUIRED'
+  | 'ACTION_STATE_MISMATCH'
   | 'POINT_OUT_OF_VIEWPORT'
   | 'HISTORY_UNAVAILABLE'
   | 'WAIT_TIMEOUT'
@@ -214,6 +232,14 @@ interface PreparedElementTarget {
 interface EditorTargetInfo {
   readonly editor: boolean;
   readonly value: string;
+}
+
+interface RefStateObservation {
+  readonly target?: ObservedElementRefState;
+  readonly changes: readonly Readonly<{
+    ref: string;
+    state: readonly string[];
+  }>[];
 }
 
 function input<T>(call: ParsedBrowserToolCall): T {
@@ -281,6 +307,18 @@ function verifiesInput(actual: string | null, expected: string, replace: boolean
     : expected.length === 0 || (actual !== null && actual !== before && actual.includes(expected));
 }
 
+function selectedState(state: readonly string[]): boolean | undefined {
+  for (const property of ['checked', 'selected'] as const) {
+    if (state.includes(property)) return true;
+    if (state.includes(`${property}=false`)) return false;
+  }
+  return undefined;
+}
+
+function expectedSelectionAfterClick(role: string, selected: boolean): boolean {
+  return role === 'radio' || role === 'option' ? true : !selected;
+}
+
 /** Executes already-checkpointed browser actions through semantic refs or validated viewport points. */
 export class BrowserActionExecutor implements BrowserActionPort {
   readonly #dependencies: BrowserActionExecutorDependencies;
@@ -336,6 +374,9 @@ export class BrowserActionExecutor implements BrowserActionPort {
     const snapshot = await this.#dependencies.sessions.ensure(tabId, signal);
     let data: Readonly<Record<string, unknown>>;
     let targetPresent: boolean | null = null;
+    let targetState: readonly string[] | undefined;
+    let observedTarget: ObservedElementRefState | undefined;
+    let stateChanges: readonly Readonly<{ ref: string; state: readonly string[] }>[] | undefined;
 
     switch (call.operation) {
       case 'click': {
@@ -346,6 +387,15 @@ export class BrowserActionExecutor implements BrowserActionPort {
           count: 1 | 2;
         }>(call);
         const target = await this.#prepareElementTarget(snapshot, value.ref, tabId);
+        const selectableBefore =
+          value.button === 'left' &&
+          value.count === 1 &&
+          target.reference.actions.includes('set_checked')
+            ? await this.#readRefStates(target, tabId, value.ref)
+            : undefined;
+        const selectedBefore = selectedState(
+          selectableBefore?.target?.state ?? target.reference.state,
+        );
         await this.#showPointer(
           tabId,
           target.point,
@@ -353,14 +403,142 @@ export class BrowserActionExecutor implements BrowserActionPort {
           value.count === 2 ? 'double_click' : 'click',
         );
         await this.#click(target.session, target.point, value.button, value.count);
+        const expectedSelection =
+          selectableBefore !== undefined && selectedBefore !== undefined
+            ? expectedSelectionAfterClick(
+                selectableBefore.target?.role ?? target.reference.role,
+                selectedBefore,
+              )
+            : undefined;
+        let strategy = 'pointer';
+        let observed =
+          expectedSelection === undefined
+            ? await this.#readRefStates(target, tabId, value.ref)
+            : await this.#waitForSelectionState(
+                target,
+                tabId,
+                value.ref,
+                expectedSelection,
+                signal,
+              );
+        const afterPointerState = selectedState(observed.target?.state ?? []);
+        if (
+          expectedSelection !== undefined &&
+          afterPointerState !== undefined &&
+          afterPointerState !== expectedSelection &&
+          (await this.#clickElementByRef(snapshot, tabId, value.ref))
+        ) {
+          strategy = 'dom_fallback';
+          observed = await this.#waitForSelectionState(
+            target,
+            tabId,
+            value.ref,
+            expectedSelection,
+            signal,
+          );
+        }
+        if (
+          expectedSelection !== undefined &&
+          selectedState(observed.target?.state ?? []) !== expectedSelection
+        ) {
+          this.#dependencies.refs.invalidate(tabId);
+          throw new BrowserActionError(
+            'ACTION_STATE_MISMATCH',
+            'The clicked selection state did not settle.',
+          );
+        }
+        observedTarget = observed.target;
+        stateChanges = observed.changes;
+        targetState = observed.target?.state;
         data = {
           action: 'click',
           dispatched: true,
           button: value.button,
           count: value.count,
           verified: 'target_remeasured',
+          ...(expectedSelection === undefined
+            ? {}
+            : {
+                strategy,
+                selectionVerified:
+                  selectedState(observed.target?.state ?? []) === expectedSelection,
+              }),
         };
         targetPresent = true;
+        break;
+      }
+      case 'set_checked': {
+        const value = input<{ tabId: number; ref: string; checked: boolean }>(call);
+        const target = await this.#prepareElementTarget(snapshot, value.ref, tabId);
+        const before = await this.#readRefStates(target, tabId, value.ref);
+        const beforeTarget = before.target;
+        const role = beforeTarget?.role ?? target.reference.role;
+        if (!target.reference.actions.includes('set_checked')) {
+          throw new BrowserActionError(
+            'UNSUPPORTED_ACTION',
+            'The ref does not advertise set_checked.',
+          );
+        }
+        if (role === 'radio' && !value.checked) {
+          throw new BrowserActionError(
+            'UNSUPPORTED_ACTION',
+            'A radio target can only be selected; choose another radio to clear it.',
+          );
+        }
+        const current = selectedState(beforeTarget?.state ?? target.reference.state);
+        let dispatched = false;
+        let strategy = 'already_set';
+        let after = before;
+        if (current !== value.checked && !(current === undefined && !value.checked)) {
+          await this.#showPointer(tabId, target.point, target.point, 'click');
+          await this.#click(target.session, target.point, 'left', 1);
+          dispatched = true;
+          strategy = 'pointer';
+          after = await this.#waitForSelectionState(
+            target,
+            tabId,
+            value.ref,
+            value.checked,
+            signal,
+          );
+          const afterPointerState = selectedState(after.target?.state ?? []);
+          if (
+            afterPointerState !== undefined &&
+            afterPointerState !== value.checked &&
+            (await this.#clickElementByRef(snapshot, tabId, value.ref))
+          ) {
+            strategy = 'dom_fallback';
+            after = await this.#waitForSelectionState(
+              target,
+              tabId,
+              value.ref,
+              value.checked,
+              signal,
+            );
+          }
+        }
+        observedTarget = after.target ?? beforeTarget;
+        stateChanges = after.changes;
+        targetState = observedTarget?.state;
+        const actual = selectedState(targetState ?? []);
+        const verified = actual === value.checked;
+        if (!verified) {
+          this.#dependencies.refs.invalidate(tabId);
+          throw new BrowserActionError(
+            'ACTION_STATE_MISMATCH',
+            actual === undefined
+              ? 'The requested selection state could not be observed.'
+              : 'The requested selection state did not settle.',
+          );
+        }
+        data = {
+          action: 'set_checked',
+          dispatched,
+          requested: value.checked,
+          verified,
+          strategy,
+        };
+        targetPresent = observedTarget !== undefined;
         break;
       }
       case 'type': {
@@ -459,7 +637,10 @@ export class BrowserActionExecutor implements BrowserActionPort {
           value.target === 'viewport'
             ? null
             : await this.#prepareElementTarget(snapshot, value.target, tabId);
-        const point = prepared?.point ?? { x: viewport.width / 2, y: viewport.height / 2 };
+        const point = prepared?.point ?? {
+          x: viewport.width / 2,
+          y: viewport.height / 2,
+        };
         await this.#showPointer(tabId, point, point, 'move');
         await this.#dependencies.transport.send(
           prepared?.session ?? snapshot.root,
@@ -590,8 +771,130 @@ export class BrowserActionExecutor implements BrowserActionPort {
       tabId,
       url,
       data,
-      observation: { targetPresent },
+      observation: {
+        targetPresent,
+        ...(targetState === undefined ? {} : { state: targetState }),
+        ...(observedTarget === undefined
+          ? {}
+          : {
+              target: {
+                ref: observedTarget.ref,
+                role: observedTarget.role,
+                state: observedTarget.state,
+              },
+            }),
+        ...(stateChanges === undefined ? {} : { changes: stateChanges }),
+      },
     };
+  }
+
+  async #readRefStates(
+    target: PreparedElementTarget,
+    tabId: number,
+    ref: string,
+  ): Promise<RefStateObservation> {
+    try {
+      const [tree, domSnapshot] = await Promise.all([
+        this.#dependencies.transport.send<Protocol.Accessibility.GetFullAXTreeResponse>(
+          target.session,
+          'Accessibility.getFullAXTree',
+        ),
+        this.#dependencies.transport.send<Protocol.DOMSnapshot.CaptureSnapshotResponse>(
+          target.session,
+          'DOMSnapshot.captureSnapshot',
+          { computedStyles: [...SEMANTIC_SNAPSHOT_STYLES] },
+        ),
+      ]);
+      const semantic = buildSemanticPageSnapshot({
+        axNodes: tree.nodes,
+        domSnapshot,
+        frame: target.reference.frameTargetId ?? 'main',
+      });
+      const observedTargets: ObservedElementTarget[] = semantic.targets
+        .filter(({ documentFrameId }) => documentFrameId === target.reference.documentFrameId)
+        .map((observed) => ({
+          frameTargetId: target.reference.frameTargetId,
+          documentFrameId: observed.documentFrameId,
+          loaderId: target.reference.loaderId,
+          backendNodeId: observed.backendNodeId,
+          role: observed.role,
+          name: observed.name,
+          state: observed.state,
+          actions: observed.actions,
+          frame: target.reference.frameTargetId ?? 'main',
+        }));
+      const observations = this.#dependencies.refs.updateObservedStates(tabId, observedTargets);
+      const targetObservation = observations.find((observation) => observation.ref === ref);
+      return {
+        ...(targetObservation === undefined ? {} : { target: targetObservation }),
+        changes: observations
+          .filter(({ changed }) => changed)
+          .map(({ ref: changedRef, state }) => ({ ref: changedRef, state })),
+      };
+    } catch {
+      return { changes: [] };
+    }
+  }
+
+  async #waitForSelectionState(
+    target: PreparedElementTarget,
+    tabId: number,
+    ref: string,
+    expected: boolean,
+    signal: AbortSignal,
+  ): Promise<RefStateObservation> {
+    let observed = await this.#readRefStates(target, tabId, ref);
+    const settleDeadline = Date.now() + SELECTION_SETTLE_TIMEOUT_MS;
+    while (
+      selectedState(observed.target?.state ?? []) !== expected &&
+      Date.now() < settleDeadline
+    ) {
+      await this.#delay(Math.min(SELECTION_POLL_INTERVAL_MS, settleDeadline - Date.now()), signal);
+      observed = await this.#readRefStates(target, tabId, ref);
+    }
+    return observed;
+  }
+
+  async #clickElementByRef(
+    snapshot: BrowserSessionSnapshot,
+    tabId: number,
+    ref: string,
+  ): Promise<boolean> {
+    let objectId: string | undefined;
+    let session: DebuggerSession | undefined;
+    try {
+      const reference = this.#dependencies.refs.resolve(ref, tabId);
+      session = this.#sessionForReference(snapshot, reference);
+      const resolved = await this.#dependencies.transport.send<Protocol.DOM.ResolveNodeResponse>(
+        session,
+        'DOM.resolveNode',
+        { backendNodeId: reference.backendNodeId },
+      );
+      objectId = resolved.object.objectId;
+      if (!objectId) return false;
+      const response =
+        await this.#dependencies.transport.send<Protocol.Runtime.CallFunctionOnResponse>(
+          session,
+          'Runtime.callFunctionOn',
+          {
+            objectId,
+            functionDeclaration: CLICK_ELEMENT_FUNCTION,
+            awaitPromise: false,
+            returnByValue: true,
+            userGesture: true,
+          },
+        );
+      const result = response.result.value as { readonly dispatched?: unknown } | undefined;
+      return response.exceptionDetails === undefined && result?.dispatched === true;
+    } catch {
+      return false;
+    } finally {
+      if (objectId && session) {
+        await this.#dependencies.transport
+          .send(session, 'Runtime.releaseObject', { objectId })
+          .catch(() => undefined);
+      }
+    }
   }
 
   async #prepareElementTarget(
@@ -770,13 +1073,26 @@ export class BrowserActionExecutor implements BrowserActionPort {
 
   async #showPointer(tabId: number, to: Point, from: Point, effect: PointerEffect): Promise<void> {
     try {
-      await this.#dependencies.pointer.show(tabId, {
-        x: to.x,
-        y: to.y,
-        fromX: from.x,
-        fromY: from.y,
-        effect,
-      });
+      const feedback = this.#dependencies.pointer
+        .show(tabId, {
+          x: to.x,
+          y: to.y,
+          fromX: from.x,
+          fromY: from.y,
+          effect,
+        })
+        .catch(() => undefined);
+      let deadline: ReturnType<typeof globalThis.setTimeout> | undefined;
+      try {
+        await Promise.race([
+          feedback,
+          new Promise<void>((resolve) => {
+            deadline = globalThis.setTimeout(resolve, POINTER_FEEDBACK_DEADLINE_MS);
+          }),
+        ]);
+      } finally {
+        if (deadline !== undefined) globalThis.clearTimeout(deadline);
+      }
     } catch {
       // Pointer feedback is best-effort and must never cause an action retry.
     }

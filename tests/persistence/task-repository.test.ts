@@ -23,6 +23,7 @@ function createCheckpoint(task: TaskRun, id = 'checkpoint_1'): Checkpoint {
     completedToolResults: [],
     continuationItems: [],
     pendingToolCall: null,
+    browserToolCallsInAttempt: 0,
     createdAt: task.updatedAt,
   };
 }
@@ -181,7 +182,10 @@ describe('IndexedDbTaskRepository', () => {
       createTestDatabaseName('compacted-context-continuation'),
     );
     const repository = new IndexedDbTaskRepository(database);
-    const commitArguments = JSON.stringify({ state: 'Goal: continue from the checkpoint.' });
+    const commitArguments = JSON.stringify({
+      state: 'Goal: continue from the checkpoint.',
+      throughCallId: 'call_inspect',
+    });
     const commitOutput =
       '{"ok":true,"compactedCalls":1,"releasedTextChars":2048,"releasedImages":1}';
     await database.add('checkpoints', {
@@ -285,6 +289,7 @@ describe('IndexedDbTaskRepository', () => {
       completedToolResults: [],
       continuationItems: [],
       pendingToolCall: null,
+      browserToolCallsInAttempt: 0,
       createdAt: queued.createdAt,
     };
 

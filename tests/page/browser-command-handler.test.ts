@@ -1,6 +1,8 @@
-import { describe, expect, it, vi } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import { handlePageCommand } from '../../src/page/browser-command-handler';
 import { pageElementRefStore } from '../../src/page/browser/page-element-ref-store';
+
+afterEach(() => vi.useRealTimers());
 
 describe('handlePageCommand', () => {
   it('clicks an observed control once without a debugger command', async () => {
@@ -109,6 +111,174 @@ describe('handlePageCommand', () => {
     expect(select.value).toBe('pro');
     expect(inputEvent).toHaveBeenCalledOnce();
     expect(changeEvent).toHaveBeenCalledOnce();
+  });
+
+  it('types into a hidden page without waiting for animation frames', async () => {
+    document.body.innerHTML = '<input aria-label="Search" value="old">';
+    const input = document.querySelector<HTMLInputElement>('input');
+    if (!input) throw new Error('Input fixture is missing.');
+    input.getBoundingClientRect = () => ({
+      x: 10,
+      y: 20,
+      width: 100,
+      height: 30,
+      top: 20,
+      left: 10,
+      right: 110,
+      bottom: 50,
+      toJSON: () => ({}),
+    });
+    const [ref] = pageElementRefStore(document).replace([input]);
+    if (!ref) throw new Error('Input ref is missing.');
+    const previousVisibility = Object.getOwnPropertyDescriptor(document, 'visibilityState');
+    Object.defineProperty(document, 'visibilityState', { configurable: true, value: 'hidden' });
+    vi.spyOn(window, 'requestAnimationFrame').mockImplementation(() => 1);
+
+    try {
+      let settled = false;
+      const operation = handlePageCommand(
+        {
+          version: 1,
+          requestId: 'req_hidden_type',
+          type: 'page.action.perform',
+          payload: {
+            action: 'type',
+            ref,
+            text: 'new value',
+            replace: true,
+            submit: false,
+          },
+        },
+        { document, window },
+      ).then((response) => {
+        settled = true;
+        return response;
+      });
+      for (let turn = 0; turn < 10; turn += 1) await Promise.resolve();
+
+      expect(settled).toBe(true);
+      await expect(operation).resolves.toMatchObject({
+        ok: true,
+        data: { action: 'type', applied: true, value: 'new value' },
+      });
+    } finally {
+      if (previousVisibility) {
+        Object.defineProperty(document, 'visibilityState', previousVisibility);
+      } else {
+        Reflect.deleteProperty(document, 'visibilityState');
+      }
+    }
+  });
+
+  it('finishes typing when the page becomes hidden while waiting for a paint frame', async () => {
+    document.body.innerHTML = '<input aria-label="Search" value="old">';
+    const input = document.querySelector<HTMLInputElement>('input');
+    if (!input) throw new Error('Input fixture is missing.');
+    input.getBoundingClientRect = () => ({
+      x: 10,
+      y: 20,
+      width: 100,
+      height: 30,
+      top: 20,
+      left: 10,
+      right: 110,
+      bottom: 50,
+      toJSON: () => ({}),
+    });
+    const [ref] = pageElementRefStore(document).replace([input]);
+    if (!ref) throw new Error('Input ref is missing.');
+    const previousVisibility = Object.getOwnPropertyDescriptor(document, 'visibilityState');
+    Object.defineProperty(document, 'visibilityState', { configurable: true, value: 'visible' });
+    vi.spyOn(window, 'requestAnimationFrame').mockImplementation(() => 1);
+
+    try {
+      let settled = false;
+      const operation = handlePageCommand(
+        {
+          version: 1,
+          requestId: 'req_type_then_hidden',
+          type: 'page.action.perform',
+          payload: {
+            action: 'type',
+            ref,
+            text: 'new value',
+            replace: true,
+            submit: false,
+          },
+        },
+        { document, window },
+      ).then((response) => {
+        settled = true;
+        return response;
+      });
+      for (let turn = 0; turn < 10; turn += 1) await Promise.resolve();
+      expect(settled).toBe(false);
+
+      Object.defineProperty(document, 'visibilityState', { configurable: true, value: 'hidden' });
+      document.dispatchEvent(new Event('visibilitychange'));
+      for (let turn = 0; turn < 10; turn += 1) await Promise.resolve();
+
+      expect(settled).toBe(true);
+      await expect(operation).resolves.toMatchObject({
+        ok: true,
+        data: { action: 'type', applied: true, value: 'new value' },
+      });
+    } finally {
+      if (previousVisibility) {
+        Object.defineProperty(document, 'visibilityState', previousVisibility);
+      } else {
+        Reflect.deleteProperty(document, 'visibilityState');
+      }
+    }
+  });
+
+  it('bounds value verification when a visible page stops producing paint frames', async () => {
+    vi.useFakeTimers();
+    document.body.innerHTML = '<input aria-label="Search" value="old">';
+    const input = document.querySelector<HTMLInputElement>('input');
+    if (!input) throw new Error('Input fixture is missing.');
+    input.getBoundingClientRect = () => ({
+      x: 10,
+      y: 20,
+      width: 100,
+      height: 30,
+      top: 20,
+      left: 10,
+      right: 110,
+      bottom: 50,
+      toJSON: () => ({}),
+    });
+    const [ref] = pageElementRefStore(document).replace([input]);
+    if (!ref) throw new Error('Input ref is missing.');
+    vi.spyOn(window, 'requestAnimationFrame').mockImplementation(() => 1);
+
+    let settled = false;
+    const operation = handlePageCommand(
+      {
+        version: 1,
+        requestId: 'req_type_without_frames',
+        type: 'page.action.perform',
+        payload: {
+          action: 'type',
+          ref,
+          text: 'new value',
+          replace: true,
+          submit: false,
+        },
+      },
+      { document, window },
+    ).then((response) => {
+      settled = true;
+      return response;
+    });
+    for (let turn = 0; turn < 10; turn += 1) await Promise.resolve();
+    await vi.advanceTimersByTimeAsync(150);
+
+    expect(settled).toBe(true);
+    await expect(operation).resolves.toMatchObject({
+      ok: true,
+      data: { action: 'type', applied: true, value: 'new value' },
+    });
   });
 
   it('defers editor-like text surfaces to trusted browser input without mutating their proxy', async () => {

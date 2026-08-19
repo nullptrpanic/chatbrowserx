@@ -10,13 +10,17 @@ import type { IdGenerator } from '../shared/ids';
 import type { Clock } from '../shared/time';
 import type { MessageRecord } from '../tasks/message-types';
 import { buildAgentContext } from './context/agent-context';
-import { hasContextCommitCandidate } from './context/context-commit';
+import {
+  contextCommitCandidateCallIds,
+  hasContextCommitCandidate,
+  shouldForceContextCommit,
+} from './context/context-commit';
 import type { AgentEvent, AgentModelTurn, AgentPlanInput, AgentPlanner } from './execution-types';
 import { StreamPersistenceBuffer } from './stream-persistence-buffer';
 import { BROWSER_TOOL_DEFINITIONS, parseBrowserToolCall } from './tools/browser-tool-schema';
 import {
-  CONTEXT_COMMIT_TOOL_DEFINITION,
   CONTEXT_COMMIT_TOOL_NAME,
+  createContextCommitToolDefinition,
   parseContextCommitToolCall,
 } from './tools/context-commit-tool-schema';
 import { TAVILY_TOOL_DEFINITIONS, parseTavilyToolCall } from './tools/tavily-tool-schema';
@@ -127,13 +131,16 @@ export class CodexAgentPlanner implements AgentPlanner {
     } catch {
       tavilyConfigured = false;
     }
+    const contextCommitAvailable = hasContextCommitCandidate(input.checkpoint.continuationItems);
+    const contextCommitCallIds = contextCommitAvailable
+      ? contextCommitCandidateCallIds(input.checkpoint.continuationItems)
+      : [];
     const tools = [
       ...BROWSER_TOOL_DEFINITIONS,
       ...(tavilyConfigured ? TAVILY_TOOL_DEFINITIONS : []),
-      ...(hasContextCommitCandidate(input.checkpoint.continuationItems)
-        ? [CONTEXT_COMMIT_TOOL_DEFINITION]
-        : []),
+      ...(contextCommitAvailable ? [createContextCommitToolDefinition(contextCommitCallIds)] : []),
     ];
+    const forceContextCommit = contextCommitAvailable && shouldForceContextCommit(input.checkpoint);
     const availableToolNames = new Set(tools.map(({ name }) => name));
     const context = await buildAgentContext(
       {
@@ -171,6 +178,14 @@ export class CodexAgentPlanner implements AgentPlanner {
           systemPrompt: context.systemPrompt,
           input: context.input,
           tools,
+          ...(forceContextCommit
+            ? {
+                toolChoice: {
+                  type: 'function' as const,
+                  name: CONTEXT_COMMIT_TOOL_NAME,
+                },
+              }
+            : {}),
         },
         signal,
       )) {

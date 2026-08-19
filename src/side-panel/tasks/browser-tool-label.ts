@@ -2,6 +2,9 @@ import type { Translator } from '../../shared/i18n/i18n';
 import type { MessageKey } from '../../shared/i18n/messages.zh-CN';
 
 const reviewedToolKeys: Readonly<Record<string, MessageKey>> = {
+  tavily_search: 'tavilyToolSearch',
+  tavily_extract: 'tavilyToolExtract',
+  tavily_crawl: 'tavilyToolCrawl',
   browser_get_current_tab: 'browserToolGetCurrentTab',
   browser_list_tabs: 'browserToolListTabs',
   browser_open_tab: 'browserToolOpenTab',
@@ -11,6 +14,7 @@ const reviewedToolKeys: Readonly<Record<string, MessageKey>> = {
   browser_reload: 'browserToolReload',
   browser_inspect: 'browserToolInspect',
   browser_click: 'browserToolClick',
+  browser_set_checked: 'browserToolSetChecked',
   browser_type: 'browserToolType',
   browser_keypress: 'browserToolKeypress',
   browser_scroll: 'browserToolScroll',
@@ -33,11 +37,8 @@ export function toolDisplayName(toolName: string, t: Translator): string {
   return key === undefined ? toolName : t(key);
 }
 
-/** Keeps Tavily's existing search wording while making browser result events action-specific. */
+/** Creates one localized completion label for every persisted tool result. */
 export function toolResultEventLabel(toolName: string, t: Translator): string {
   if (toolName === 'commit_context') return t('contextCommitResultRecorded');
-  if (toolName.startsWith('browser_')) {
-    return t('browserToolResultRecorded', { tool: toolDisplayName(toolName, t) });
-  }
-  return t('taskToolResultRecorded');
+  return t('browserToolResultRecorded', { tool: toolDisplayName(toolName, t) });
 }

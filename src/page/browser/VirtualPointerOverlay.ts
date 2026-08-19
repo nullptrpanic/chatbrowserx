@@ -8,9 +8,7 @@ export interface PointerEffect {
   readonly effect: 'move' | 'click' | 'double_click' | 'drag';
 }
 
-function wait(window_: Window, milliseconds: number): Promise<void> {
-  return new Promise((resolve) => window_.setTimeout(resolve, milliseconds));
-}
+const POINTER_RENDER_DEADLINE_MS = 500;
 
 /** Renders an isolated, non-interactive cursor and click feedback over the page. */
 export class VirtualPointerOverlay {
@@ -20,6 +18,11 @@ export class VirtualPointerOverlay {
   readonly #shadow: ShadowRoot;
   readonly #cursor: SVGSVGElement;
   readonly #unregister: () => void;
+  readonly #handleVisibilityChange = (): void => {
+    if (this.#document.visibilityState !== 'visible') this.#hideImmediately();
+  };
+  #animationFrame: number | undefined;
+  #motionTimer: number | undefined;
   #hideTimer: number | undefined;
   #showSequence = 0;
 
@@ -87,6 +90,7 @@ export class VirtualPointerOverlay {
     this.#shadow.append(style, this.#cursor);
     (document_.documentElement ?? document_.body).append(this.#host);
     this.#unregister = registerPageOverlayHost(this.#host);
+    document_.addEventListener('visibilitychange', this.#handleVisibilityChange);
   }
 
   get connected(): boolean {
@@ -103,28 +107,70 @@ export class VirtualPointerOverlay {
 
   async show(effect: PointerEffect): Promise<void> {
     const sequence = ++this.#showSequence;
+    const requestedAt = this.#window.performance.now();
+    this.#cancelMotion();
     this.#cancelHide();
     this.#shadow.querySelectorAll('[data-part="ripple"]').forEach((node) => node.remove());
-    this.#cursor.style.transitionDuration = '0ms';
-    this.#cursor.style.opacity = '1';
-    this.#cursor.style.transform = `translate3d(${effect.fromX}px, ${effect.fromY}px, 0)`;
-    await new Promise<void>((resolve) => this.#window.requestAnimationFrame(() => resolve()));
-    this.#cursor.style.transitionDuration = effect.effect === 'drag' ? '260ms' : '180ms';
-    this.#cursor.style.transform = `translate3d(${effect.x}px, ${effect.y}px, 0)`;
-    await wait(this.#window, effect.effect === 'drag' ? 260 : 180);
-    if (sequence !== this.#showSequence) return;
-    if (effect.effect === 'click' || effect.effect === 'double_click') {
-      this.#addRipple(effect.x, effect.y);
-      if (effect.effect === 'double_click') this.#addRipple(effect.x, effect.y, 90);
+    if (this.#document.visibilityState !== 'visible') {
+      this.#cursor.style.transitionDuration = '0ms';
+      this.#cursor.style.opacity = '0';
+      return;
     }
-    this.#scheduleHide(effect.effect, sequence);
+    this.#cursor.style.transitionDuration = '0ms';
+    this.#cursor.style.opacity = '0';
+    this.#cursor.style.transform = `translate3d(${effect.fromX}px, ${effect.fromY}px, 0)`;
+    this.#animationFrame = this.#window.requestAnimationFrame((timestamp) => {
+      this.#animationFrame = undefined;
+      if (
+        sequence !== this.#showSequence ||
+        this.#document.visibilityState !== 'visible' ||
+        timestamp - requestedAt > POINTER_RENDER_DEADLINE_MS
+      ) {
+        return;
+      }
+      const duration = effect.effect === 'drag' ? 260 : 180;
+      this.#cursor.style.transitionDuration = `${duration}ms`;
+      this.#cursor.style.opacity = '1';
+      this.#cursor.style.transform = `translate3d(${effect.x}px, ${effect.y}px, 0)`;
+      this.#motionTimer = this.#window.setTimeout(() => {
+        this.#motionTimer = undefined;
+        if (sequence !== this.#showSequence || this.#document.visibilityState !== 'visible') return;
+        if (effect.effect === 'click' || effect.effect === 'double_click') {
+          this.#addRipple(effect.x, effect.y);
+          if (effect.effect === 'double_click') this.#addRipple(effect.x, effect.y, 90);
+        }
+        this.#scheduleHide(effect.effect, sequence);
+      }, duration);
+    });
   }
 
   destroy(): void {
     this.#showSequence += 1;
+    this.#cancelMotion();
     this.#cancelHide();
+    this.#document.removeEventListener('visibilitychange', this.#handleVisibilityChange);
     this.#unregister();
     this.#host.remove();
+  }
+
+  #cancelMotion(): void {
+    if (this.#animationFrame !== undefined) {
+      this.#window.cancelAnimationFrame(this.#animationFrame);
+      this.#animationFrame = undefined;
+    }
+    if (this.#motionTimer !== undefined) {
+      this.#window.clearTimeout(this.#motionTimer);
+      this.#motionTimer = undefined;
+    }
+  }
+
+  #hideImmediately(): void {
+    this.#showSequence += 1;
+    this.#cancelMotion();
+    this.#cancelHide();
+    this.#shadow.querySelectorAll('[data-part="ripple"]').forEach((node) => node.remove());
+    this.#cursor.style.transitionDuration = '0ms';
+    this.#cursor.style.opacity = '0';
   }
 
   #cancelHide(): void {

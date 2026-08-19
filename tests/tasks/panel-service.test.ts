@@ -85,7 +85,10 @@ function buildFixture() {
         void arguments_;
         return checkpoint;
       }),
-      get: vi.fn(async () => task),
+      get: vi.fn(async (...arguments_: [string]) => {
+        void arguments_;
+        return task;
+      }),
     },
     attachments: {
       get: vi.fn(async () => ({
@@ -140,7 +143,7 @@ function buildFixture() {
       void arguments_;
     }),
   };
-  return { conversation, dependencies, task };
+  return { conversation, dependencies, task, checkpoint };
 }
 
 describe('PanelService', () => {
@@ -514,27 +517,53 @@ describe('PanelService', () => {
       },
     ]);
     fixture.dependencies.tasks.listByConversation.mockResolvedValue([fixture.task, secondTask]);
-    fixture.dependencies.tasks.listEvents.mockImplementation(async (taskId) => [
-      {
-        id: `event_${taskId}`,
-        taskId,
-        sequence: 1,
-        type: 'task.completed',
-        reason: 'done',
-        at: taskId === secondTask.id ? 1_300 : 1_190,
-        error: null,
-      },
-    ]);
+    fixture.dependencies.tasks.listEvents.mockImplementation(async (taskId) =>
+      taskId === secondTask.id
+        ? [
+            ...completedToolResults.map((_, index): TaskEvent => ({
+              id: `event_tool_${index}`,
+              taskId,
+              sequence: index + 1,
+              type: 'tool.result-recorded',
+              reason: 'tool_result_recorded',
+              at: 1_200 + index,
+              error: null,
+            })),
+            {
+              id: `event_${taskId}`,
+              taskId,
+              sequence: 23,
+              type: 'task.completed',
+              reason: 'done',
+              at: 1_300,
+              error: null,
+            },
+          ]
+        : [
+            {
+              id: `event_${taskId}`,
+              taskId,
+              sequence: 1,
+              type: 'task.completed',
+              reason: 'done',
+              at: 1_190,
+              error: null,
+            },
+          ],
+    );
     fixture.dependencies.tasks.getCheckpoint.mockImplementation(async (checkpointId) => ({
       id: checkpointId,
       taskId: checkpointId === 'checkpoint_2' ? secondTask.id : fixture.task.id,
-      sequence: 1,
+      sequence: checkpointId === 'checkpoint_2' ? 23 : 1,
       taskStatus: 'completed',
       completedToolResults: checkpointId === 'checkpoint_2' ? completedToolResults : [],
       continuationItems: [],
       pendingToolCall: null,
       createdAt: checkpointId === 'checkpoint_2' ? 1_300 : 1_190,
     }));
+    fixture.dependencies.tasks.get.mockImplementation(async (taskId) =>
+      taskId === secondTask.id ? secondTask : fixture.task,
+    );
     const service = new PanelService(fixture.dependencies);
 
     const snapshot = await service.getSnapshot(7);
@@ -546,15 +575,107 @@ describe('PanelService', () => {
     ]);
     expect(snapshot.tasks.map(({ id }) => id)).toEqual([fixture.task.id, secondTask.id]);
     const bashTask = snapshot.tasks.find(({ id }) => id === secondTask.id);
-    expect(bashTask?.completedToolResults).toHaveLength(20);
-    expect(bashTask?.completedToolResults[0]?.callId).toBe('call_2');
-    expect(bashTask?.completedToolResults.at(-1)).toMatchObject({
+    expect(bashTask?.completedToolResults).toEqual([]);
+
+    const details = await service.getTaskDetails(secondTask.id);
+
+    expect(details.detailLevel).toBe('full');
+    expect(details.completedToolResults).toHaveLength(22);
+    expect(details.completedToolResults[0]?.callId).toBe('call_0');
+    expect(details.completedToolResults.at(-1)).toMatchObject({
       callId: 'call_21',
       toolName: 'bash',
     });
-    expect(bashTask?.completedToolResults.at(-1)?.argumentsJson).toHaveLength(20_000);
-    expect(bashTask?.completedToolResults.at(-1)?.output).toHaveLength(100_000);
-    expect(bashTask?.completedToolResults.at(-1)?.attachmentIds).toEqual(['attachment_tool']);
+    expect(details.completedToolResults.at(-1)?.argumentsJson).toHaveLength(20_000);
+    expect(details.completedToolResults.at(-1)?.output).toHaveLength(100_000);
+    expect(details.completedToolResults.at(-1)?.attachmentIds).toEqual(['attachment_tool']);
+    expect(fixture.dependencies.tasks.get).toHaveBeenCalledWith(secondTask.id);
+  });
+
+  it('omits historical audit noise while retaining a legacy tool result', async () => {
+    const fixture = buildFixture();
+    const events = Array.from({ length: 442 }, (_, index): TaskEvent => ({
+      id: `event_${index + 1}`,
+      taskId: fixture.task.id,
+      sequence: index + 1,
+      type: index === 441 ? 'task.completed' : 'reasoning.summary-recorded',
+      reason: index === 441 ? 'done' : 'progress',
+      at: 1_000 + index,
+      error: null,
+    }));
+    fixture.dependencies.tasks.listEvents.mockResolvedValue(events);
+    fixture.dependencies.tasks.getCheckpoint.mockResolvedValue({
+      ...fixture.checkpoint,
+      sequence: 442,
+      completedToolResults: [
+        {
+          callId: 'call_before_window',
+          toolName: 'browser_inspect',
+          argumentsJson: '{}',
+          output: 'old output',
+          resultRef: 'result_before_window',
+          attachmentIds: [],
+        },
+      ],
+    });
+    const service = new PanelService(fixture.dependencies);
+
+    const summary = await service.getSnapshot(7);
+    const details = await service.getTaskDetails(fixture.task.id);
+
+    expect(summary.task?.events).toHaveLength(100);
+    expect(summary.task?.events[0]?.sequence).toBe(343);
+    expect(summary.task?.completedToolCallCount).toBe(1);
+    expect(details.events).toEqual([]);
+    expect(details.completedToolResults).toHaveLength(1);
+    expect(details.completedToolResults[0]?.callId).toBe('call_before_window');
+  });
+
+  it('returns the latest 100 tool results even when audit events surround every call', async () => {
+    const fixture = buildFixture();
+    const events = Array.from({ length: 120 }, (_, index) =>
+      [
+        ['reasoning.summary-recorded', 'model_reasoning_summary_recorded'],
+        ['tool.call-recorded', 'browser_inspect_call_recorded'],
+        ['tool.execution-started', 'browser_inspect_execution_started'],
+        ['tool.result-recorded', 'browser_inspect_result_recorded'],
+      ].map(([type, reason], eventIndex): TaskEvent => ({
+        id: `event_${index + 1}_${eventIndex + 1}`,
+        taskId: fixture.task.id,
+        sequence: index * 4 + eventIndex + 1,
+        type: type as TaskEvent['type'],
+        reason: reason ?? 'progress',
+        at: 1_000 + index * 4 + eventIndex,
+        error: null,
+      })),
+    ).flat();
+    const completedToolResults = Array.from({ length: 120 }, (_, index) => ({
+      callId: `call_${index + 1}`,
+      toolName: 'browser_inspect',
+      argumentsJson: '{}',
+      output: `output_${index + 1}`,
+      resultRef: `result_${index + 1}`,
+      attachmentIds: [],
+    }));
+    fixture.dependencies.tasks.listEvents.mockResolvedValue(events);
+    fixture.dependencies.tasks.getCheckpoint.mockResolvedValue({
+      ...fixture.checkpoint,
+      sequence: 480,
+      completedToolResults,
+    });
+    const service = new PanelService(fixture.dependencies);
+
+    const summary = await service.getSnapshot(7);
+    const details = await service.getTaskDetails(fixture.task.id);
+
+    expect(summary.task?.completedToolResults).toEqual([]);
+    expect(summary.task?.completedToolCallCount).toBe(120);
+    expect(details.events).toHaveLength(100);
+    expect(details.events[0]?.sequence).toBe(84);
+    expect(details.events.every(({ type }) => type === 'tool.result-recorded')).toBe(true);
+    expect(details.completedToolResults).toHaveLength(100);
+    expect(details.completedToolResults[0]?.callId).toBe('call_21');
+    expect(details.completedToolResults.at(-1)?.callId).toBe('call_120');
   });
 
   it('returns persisted credentials only from the explicit settings query', async () => {

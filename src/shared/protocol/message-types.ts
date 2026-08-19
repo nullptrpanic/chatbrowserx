@@ -10,6 +10,7 @@ export interface Message<TType extends string, TPayload> {
 export type ExtensionMessage =
   | Message<'system.ping', Record<string, never>>
   | Message<'panel.getSnapshot', { tabId: number; conversationId?: string | undefined }>
+  | Message<'panel.getTaskDetails', { taskId: string }>
   | Message<
       'chat.submit',
       {

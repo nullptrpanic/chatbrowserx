@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 import {
   compactContextAtCommit,
   hasContextCommitCandidate,
+  shouldForceContextCommit,
 } from '../../../src/agent/context/context-commit';
 import type { ContinuationItem, PendingToolCall } from '../../../src/tasks/continuation-types';
 
@@ -37,11 +38,14 @@ const shortOutput: ContinuationItem = {
   attachmentIds: [],
 };
 
-function currentCommit(): {
+function currentCommit(throughCallId: string): {
   readonly call: Extract<ContinuationItem, { readonly type: 'function_call' }>;
   readonly pending: PendingToolCall;
 } {
-  const argumentsJson = JSON.stringify({ state: 'Goal: continue from the saved state.' });
+  const argumentsJson = JSON.stringify({
+    state: 'Goal: continue from the saved state.',
+    throughCallId,
+  });
   return {
     call: {
       type: 'function_call',
@@ -75,9 +79,75 @@ describe('hasContextCommitCandidate', () => {
   });
 });
 
+describe('shouldForceContextCommit', () => {
+  const toolPairs = (count: number): ContinuationItem[] =>
+    Array.from({ length: count }, (_, index) => {
+      const callId = `call_${String(index + 1)}`;
+      return [
+        {
+          type: 'function_call' as const,
+          callId,
+          name: 'browser_click',
+          argumentsJson: '{}',
+        },
+        {
+          type: 'function_call_output' as const,
+          callId,
+          output: '{}',
+          resultRef: `result_${String(index + 1)}`,
+          attachmentIds: [],
+        },
+      ];
+    }).flat();
+
+  it('forces at sixteen raw tool pairs but not before the boundary', () => {
+    expect(
+      shouldForceContextCommit({
+        continuationItems: [userMessage, ...toolPairs(15)],
+        completedToolResults: [],
+      }),
+    ).toBe(false);
+    expect(
+      shouldForceContextCommit({
+        continuationItems: [userMessage, ...toolPairs(16)],
+        completedToolResults: [],
+      }),
+    ).toBe(true);
+  });
+
+  it('forces when raw tool text reaches 32 KiB', () => {
+    expect(
+      shouldForceContextCommit({
+        continuationItems: [
+          userMessage,
+          shortCall,
+          { ...shortOutput, output: 'x'.repeat(32 * 1024) },
+        ],
+        completedToolResults: [],
+      }),
+    ).toBe(true);
+  });
+
+  it('ignores retained audit results when the active continuation is already compact', () => {
+    const browserResults = Array.from({ length: 256 }, (_, index) => ({
+      callId: `call_browser_${String(index + 1)}`,
+      toolName: 'browser_click',
+      argumentsJson: '{}',
+      output: '{}',
+      resultRef: `result_browser_${String(index + 1)}`,
+      attachmentIds: [],
+    }));
+    const continuationItems = [userMessage, shortCall, shortOutput];
+
+    expect(
+      shouldForceContextCommit({ continuationItems, completedToolResults: browserResults }),
+    ).toBe(false);
+  });
+});
+
 describe('compactContextAtCommit', () => {
   it('replaces prior tool pairs with the current commit while retaining every message ref', () => {
-    const current = currentCommit();
+    const current = currentCommit('call_click');
     const items: ContinuationItem[] = [
       userMessage,
       {
@@ -134,8 +204,74 @@ describe('compactContextAtCommit', () => {
     ]);
   });
 
+  it('compacts through the cursor and keeps later tool pairs after the commit boundary', () => {
+    const current = currentCommit('call_inspect');
+    const laterCall: ContinuationItem = {
+      type: 'function_call',
+      callId: 'call_click',
+      name: 'browser_click',
+      argumentsJson: 'DEF',
+    };
+    const laterOutput: ContinuationItem = {
+      type: 'function_call_output',
+      callId: 'call_click',
+      output: 'G',
+      resultRef: 'result_click',
+      attachmentIds: ['image_2'],
+    };
+    const afterCursorMessage: ContinuationItem = {
+      type: 'message_ref',
+      messageId: 'message_after_cursor',
+    };
+    const items: ContinuationItem[] = [
+      userMessage,
+      {
+        type: 'function_call',
+        callId: 'call_inspect',
+        name: 'browser_inspect',
+        argumentsJson: 'A',
+      },
+      {
+        type: 'function_call_output',
+        callId: 'call_inspect',
+        output: 'BC',
+        resultRef: 'result_inspect',
+        attachmentIds: ['image_1'],
+      },
+      supplement,
+      laterCall,
+      laterOutput,
+      afterCursorMessage,
+      current.call,
+    ];
+
+    const compacted = compactContextAtCommit(items, current.pending, 'result_commit');
+
+    expect(compacted.stats).toEqual({
+      compactedCalls: 1,
+      releasedTextChars: 3,
+      releasedImages: 1,
+    });
+    expect(compacted.continuationItems).toEqual([
+      userMessage,
+      current.call,
+      {
+        type: 'function_call_output',
+        callId: 'call_commit',
+        output: '{"ok":true,"compactedCalls":1,"releasedTextChars":3,"releasedImages":1}',
+        resultRef: 'result_commit',
+        attachmentIds: [],
+      },
+      supplement,
+      laterCall,
+      laterOutput,
+      afterCursorMessage,
+    ]);
+    expect(hasContextCommitCandidate(compacted.continuationItems)).toBe(true);
+  });
+
   it('lets a later commit replace an older commit and the raw results after it', () => {
-    const current = currentCommit();
+    const current = currentCommit('call_short');
     const compacted = compactContextAtCommit(
       [userMessage, commitCall, commitOutput, shortCall, shortOutput, current.call],
       current.pending,
@@ -155,7 +291,7 @@ describe('compactContextAtCommit', () => {
   });
 
   it('rejects malformed or empty commit boundaries', () => {
-    const current = currentCommit();
+    const current = currentCommit('call_short');
     const wrongPending: PendingToolCall = { ...current.pending, callId: 'call_wrong' };
 
     expect(() =>
@@ -167,7 +303,7 @@ describe('compactContextAtCommit', () => {
     ).toThrow('Context continuation is invalid.');
     expect(() =>
       compactContextAtCommit([userMessage, current.call], current.pending, 'result_commit'),
-    ).toThrow('There are no new tool results to commit.');
+    ).toThrow();
     expect(() =>
       compactContextAtCommit(
         [userMessage, shortCall, shortOutput, current.call],
@@ -175,5 +311,33 @@ describe('compactContextAtCommit', () => {
         'result_commit',
       ),
     ).toThrow('Pending context commit is invalid.');
+  });
+
+  it('rejects a cursor that is unknown, points to a commit, or precedes the latest commit', () => {
+    const unknown = currentCommit('call_unknown');
+    const pointsToCommit = currentCommit('call_old_commit');
+    const beforeLatestCommit = currentCommit('call_short');
+
+    expect(() =>
+      compactContextAtCommit(
+        [userMessage, shortCall, shortOutput, unknown.call],
+        unknown.pending,
+        'result_commit',
+      ),
+    ).toThrow();
+    expect(() =>
+      compactContextAtCommit(
+        [userMessage, commitCall, commitOutput, pointsToCommit.call],
+        pointsToCommit.pending,
+        'result_commit',
+      ),
+    ).toThrow();
+    expect(() =>
+      compactContextAtCommit(
+        [userMessage, shortCall, shortOutput, commitCall, commitOutput, beforeLatestCommit.call],
+        beforeLatestCommit.pending,
+        'result_commit',
+      ),
+    ).toThrow();
   });
 });

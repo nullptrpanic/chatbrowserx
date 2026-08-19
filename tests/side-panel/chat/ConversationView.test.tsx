@@ -42,6 +42,47 @@ function completedTask(id: string, goal: string, updatedAt: number): PanelTask {
 }
 
 describe('ConversationView answer execution details', () => {
+  it('requests complete persisted details when a historical answer is expanded', async () => {
+    const user = userEvent.setup();
+    const task: PanelTask = {
+      ...completedTask('task_history', 'Historical request', 1_300),
+      detailLevel: 'summary',
+    };
+    const loadTaskDetails = vi.fn(async () => undefined);
+
+    render(
+      <ConversationView
+        messages={[
+          {
+            id: 'assistant_history',
+            taskId: task.id,
+            role: 'assistant',
+            status: 'complete',
+            text: 'Historical answer',
+            attachmentIds: [],
+            createdAt: 1_300,
+            updatedAt: 1_300,
+          },
+        ]}
+        tasks={[task]}
+        task={task}
+        attachments={attachments}
+        t={t}
+        onSuggestion={vi.fn()}
+        onLoadTaskDetails={loadTaskDetails}
+        onPause={vi.fn()}
+        onResume={vi.fn()}
+        onRetry={vi.fn()}
+        onCancel={vi.fn()}
+      />,
+    );
+
+    await user.click(screen.getByRole('button', { name: '任务已完成 0 次调用 · 4.6 秒' }));
+
+    expect(loadTaskDetails).toHaveBeenCalledOnce();
+    expect(loadTaskDetails).toHaveBeenCalledWith(task.id);
+  });
+
   it('attaches independently expandable task details to each assistant answer', async () => {
     const user = userEvent.setup();
     const firstTask = completedTask('task_1', 'First request', 1_100);
@@ -133,15 +174,14 @@ describe('ConversationView answer execution details', () => {
     expect(secondAnswer).not.toBeNull();
     expect(
       within(firstAnswer as HTMLElement).getByRole('button', {
-        name: '任务已完成 3 步 · 4.6 秒',
+        name: '任务已完成 0 次调用 · 4.6 秒',
       }),
     ).toBeVisible();
     expect(
       within(secondAnswer as HTMLElement).getByRole('button', {
-        name: '任务已完成 3 步 · 4.6 秒',
+        name: '任务已完成 1 次调用 · 4.6 秒',
       }),
     ).toBeVisible();
-    expect(screen.getAllByRole('button', { name: '任务已完成 3 步 · 4.6 秒' })).toHaveLength(2);
     expect(within(firstAnswer as HTMLElement).queryByText('查看执行详情')).not.toBeInTheDocument();
     expect(
       within(firstAnswer as HTMLElement).queryByText('任务已完成', { selector: 'p' }),
@@ -149,7 +189,7 @@ describe('ConversationView answer execution details', () => {
 
     await user.click(
       within(secondAnswer as HTMLElement).getByRole('button', {
-        name: '任务已完成 3 步 · 4.6 秒',
+        name: '任务已完成 1 次调用 · 4.6 秒',
       }),
     );
     const terminal = within(secondAnswer as HTMLElement).getByRole('region', {
@@ -164,12 +204,12 @@ describe('ConversationView answer execution details', () => {
     ).not.toBeInTheDocument();
     expect(
       within(firstAnswer as HTMLElement).getByRole('button', {
-        name: '任务已完成 3 步 · 4.6 秒',
+        name: '任务已完成 0 次调用 · 4.6 秒',
       }),
     ).toBeVisible();
     expect(
       within(secondAnswer as HTMLElement).getByRole('button', {
-        name: '任务已完成 3 步 · 4.6 秒',
+        name: '任务已完成 1 次调用 · 4.6 秒',
       }),
     ).toHaveAttribute('aria-expanded', 'true');
   });
@@ -233,21 +273,21 @@ describe('ConversationView answer execution details', () => {
 
     await user.click(
       within(answer as HTMLElement).getByRole('button', {
-        name: '任务已完成 3 步 · 4.6 秒',
+        name: '任务已完成 1 次调用 · 4.6 秒',
       }),
     );
 
-    expect(within(answer as HTMLElement).getByText('搜索结果已记录')).toBeVisible();
-    expect(within(answer as HTMLElement).getByText('tavily_search')).toBeVisible();
+    expect(within(answer as HTMLElement).getByText('搜索网页已完成')).toBeVisible();
+    expect(within(answer as HTMLElement).getByText('搜索网页')).toBeVisible();
     expect(within(answer as HTMLElement).queryByText(/Reliable browsing/)).not.toBeInTheDocument();
 
     await user.click(
-      within(answer as HTMLElement).getByRole('button', { name: '展开 tavily_search 结果' }),
+      within(answer as HTMLElement).getByRole('button', { name: '展开 搜索网页 结果' }),
     );
     expect(within(answer as HTMLElement).getByText(/Reliable browsing/)).toBeVisible();
 
     await user.click(
-      within(answer as HTMLElement).getByRole('button', { name: '收起 tavily_search 结果' }),
+      within(answer as HTMLElement).getByRole('button', { name: '收起 搜索网页 结果' }),
     );
     expect(within(answer as HTMLElement).queryByText(/Reliable browsing/)).not.toBeInTheDocument();
   });
@@ -304,7 +344,7 @@ describe('ConversationView answer execution details', () => {
       />,
     );
 
-    await user.click(screen.getByRole('button', { name: '任务已完成 3 步 · 4.6 秒' }));
+    await user.click(screen.getByRole('button', { name: '任务已完成 1 次调用 · 4.6 秒' }));
 
     expect(screen.getByText('工作状态已提交')).toBeVisible();
     expect(screen.getByText('提交工作状态')).toBeVisible();
@@ -386,7 +426,7 @@ describe('ConversationView answer execution details', () => {
     );
 
     expect(screen.queryByAltText('page-screenshot.png')).not.toBeInTheDocument();
-    await user.click(screen.getByRole('button', { name: '任务已完成 3 步 · 4.6 秒' }));
+    await user.click(screen.getByRole('button', { name: '任务已完成 1 次调用 · 4.6 秒' }));
     expect(screen.getByText('检查页面已完成')).toBeVisible();
     expect(screen.queryByAltText('page-screenshot.png')).not.toBeInTheDocument();
     await user.click(screen.getByRole('button', { name: '展开 检查页面 结果' }));
@@ -466,29 +506,31 @@ describe('ConversationView answer execution details', () => {
     expect(answer).not.toBeNull();
     await user.click(
       within(answer as HTMLElement).getByRole('button', {
-        name: '任务已完成 4 步 · 4.6 秒',
+        name: '任务已完成 2 次调用 · 4.6 秒',
       }),
     );
 
-    const resultEvents = within(answer as HTMLElement).getAllByText('搜索结果已记录');
-    expect(resultEvents).toHaveLength(2);
-    const searchEvent = resultEvents[0]?.closest('li');
-    const extractEvent = resultEvents[1]?.closest('li');
+    const searchEvent = within(answer as HTMLElement)
+      .getByText('搜索网页已完成')
+      .closest('li');
+    const extractEvent = within(answer as HTMLElement)
+      .getByText('提取网页已完成')
+      .closest('li');
     expect(searchEvent).not.toBeNull();
     expect(extractEvent).not.toBeNull();
     expect(
       within(searchEvent as HTMLElement).getByRole('region', {
-        name: 'tavily_search: 执行完成',
+        name: '搜索网页: 执行完成',
       }),
     ).toBeVisible();
     expect(
       within(extractEvent as HTMLElement).getByRole('region', {
-        name: 'tavily_extract: 执行完成',
+        name: '提取网页: 执行完成',
       }),
     ).toBeVisible();
   });
 
-  it('places a collapsed Markdown reasoning summary beneath its corresponding task event', async () => {
+  it('hides provider reasoning summaries from execution details', async () => {
     const user = userEvent.setup();
     const task: PanelTask = {
       ...completedTask('task_reasoning', 'Reason before answering', 1_300),
@@ -536,21 +578,14 @@ describe('ConversationView answer execution details', () => {
     expect(answer).not.toBeNull();
     await user.click(
       within(answer as HTMLElement).getByRole('button', {
-        name: '任务已完成 3 步 · 4.6 秒',
+        name: '任务已完成 0 次调用 · 4.6 秒',
       }),
     );
 
-    const reasoningEvent = within(answer as HTMLElement)
-      .getByText('思考摘要已生成')
-      .closest('li');
-    expect(reasoningEvent).not.toBeNull();
-    const summary = within(reasoningEvent as HTMLElement).getByRole('region', {
-      name: '思考摘要',
-    });
-    expect(within(summary).queryByText('Checked')).not.toBeInTheDocument();
-    await user.click(within(summary).getByRole('button', { name: '展开思考摘要' }));
-    expect(within(summary).getByText('Checked')).toBeVisible();
-    expect(within(summary).getByRole('button', { name: '收起思考摘要' })).toBeVisible();
+    expect(within(answer as HTMLElement).queryByText('思考摘要已生成')).not.toBeInTheDocument();
+    expect(
+      within(answer as HTMLElement).queryByRole('region', { name: '思考摘要' }),
+    ).not.toBeInTheDocument();
   });
 
   it('attaches a failed task to its retained empty assistant reply', () => {
@@ -664,7 +699,9 @@ describe('ConversationView answer execution details', () => {
     const reply = screen.getByText('任务已取消，未生成回复。').closest('article');
     expect(reply).not.toBeNull();
     expect(
-      within(reply as HTMLElement).getByRole('button', { name: '任务已取消 2 步 · 0.3 秒' }),
+      within(reply as HTMLElement).getByRole('button', {
+        name: '任务已取消 0 次调用 · 0.3 秒',
+      }),
     ).toBeVisible();
   });
 
@@ -768,26 +805,21 @@ describe('ConversationView answer execution details', () => {
 
     await user.click(
       screen.getByRole('button', {
-        name: '任务已完成 4 步 · 4.6 秒',
+        name: '任务已完成 0 次调用 · 4.6 秒',
       }),
     );
 
     expect(
       screen.queryByText('Please also inspect the mobile navigation.'),
     ).not.toBeInTheDocument();
-    const appliedEvents = screen.getAllByText('已应用用户补充').map((label) => label.closest('li'));
-    expect(appliedEvents).toHaveLength(2);
-    const firstEvent = appliedEvents[0] as HTMLElement;
-    const secondEvent = appliedEvents[1] as HTMLElement;
-    const firstSupplements = within(firstEvent).getAllByRole('region', { name: '用户补充' });
-    const secondSupplements = within(secondEvent).getAllByRole('region', { name: '用户补充' });
-    expect(firstSupplements).toHaveLength(2);
-    expect(secondSupplements).toHaveLength(1);
+    expect(screen.queryByText('已应用用户补充')).not.toBeInTheDocument();
+    const supplements = screen.getAllByRole('region', { name: '用户补充' });
+    expect(supplements).toHaveLength(3);
 
     await user.click(
-      within(firstSupplements[0] as HTMLElement).getByRole('button', { name: '展开用户补充' }),
+      within(supplements[0] as HTMLElement).getByRole('button', { name: '展开用户补充' }),
     );
-    const supplement = firstSupplements[0] as HTMLElement;
+    const supplement = supplements[0] as HTMLElement;
     expect(
       within(supplement).getByText('Please also inspect the mobile navigation.'),
     ).toBeVisible();

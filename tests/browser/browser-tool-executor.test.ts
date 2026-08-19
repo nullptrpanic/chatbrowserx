@@ -50,6 +50,14 @@ function call(name: string, arguments_: unknown) {
   });
 }
 
+async function primeVisualFallback(
+  executor: BrowserToolExecutor,
+  signal: AbortSignal,
+  context: { readonly currentTabId: number; readonly sessionOwnerId?: string },
+): Promise<void> {
+  await executor.execute(call('browser_inspect', { mode: 'interactive' }), signal, context);
+}
+
 describe('BrowserToolExecutor', () => {
   it('resolves the task-bound current tab without querying active tabs', async () => {
     const tabs = tabPort();
@@ -95,6 +103,38 @@ describe('BrowserToolExecutor', () => {
     expect(observer.inspect).toHaveBeenCalledWith(8, 'content', expect.any(AbortSignal));
     expect(tabs.activate).not.toHaveBeenCalled();
     expect(JSON.parse(result.output)).toMatchObject({ ok: true, tabId: 8 });
+  });
+
+  it('forwards the requested interactive base snapshot to the observer', async () => {
+    const observer = {
+      inspect: vi.fn(async () => ({
+        tabId: 7,
+        url: 'https://example.com/current',
+        data: {
+          mode: 'interactive',
+          snapshot: 'snapshot_next',
+          unchanged: true,
+        },
+        observation: null,
+        attachmentIds: [],
+        debuggerSession: 'ephemeral' as const,
+      })),
+    };
+    const executor = new BrowserToolExecutor({ tabs: tabPort(), observer });
+
+    await executor.execute(
+      call('browser_inspect', {
+        tabId: 7,
+        mode: 'interactive',
+        since: 'snapshot_previous',
+      }),
+      new AbortController().signal,
+      { currentTabId: 7 },
+    );
+
+    expect(observer.inspect).toHaveBeenCalledWith(7, 'interactive', expect.any(AbortSignal), {
+      since: 'snapshot_previous',
+    });
   });
 
   it('maps tabId zero to the durable task target', async () => {
@@ -383,6 +423,7 @@ describe('BrowserToolExecutor', () => {
         observation: null,
         attachmentIds: ['attachment_1'],
         debuggerSession: 'ephemeral' as const,
+        visualFallbackAllowed: true,
       })),
     };
     const sessions = {
@@ -395,14 +436,309 @@ describe('BrowserToolExecutor', () => {
       sessions,
     });
 
+    const signal = new AbortController().signal;
+    const context = { currentTabId: 7, sessionOwnerId: 'runner_1' };
+    await primeVisualFallback(executor, signal, context);
     await executor.execute(
       call('browser_inspect', { tabId: 7, mode: 'screenshot' }),
-      new AbortController().signal,
-      { currentTabId: 7, sessionOwnerId: 'runner_1' },
+      signal,
+      context,
     );
 
     expect(sessions.retain).toHaveBeenCalledWith(7, 'runner_1:operation');
     expect(sessions.releaseOwner).toHaveBeenCalledWith('runner_1:operation');
+  });
+
+  it('requires native interactive inspection before a model screenshot', async () => {
+    const observer = {
+      inspect: vi.fn(async () => ({
+        tabId: 7,
+        url: 'https://example.com',
+        data: { mode: 'screenshot' },
+        observation: null,
+        attachmentIds: ['attachment_1'],
+        debuggerSession: 'ephemeral' as const,
+        visualFallbackAllowed: true,
+      })),
+    };
+    const executor = new BrowserToolExecutor({ tabs: tabPort(), observer });
+
+    const output = await executor.execute(
+      call('browser_inspect', { tabId: 7, mode: 'screenshot' }),
+      new AbortController().signal,
+      { currentTabId: 7 },
+    );
+
+    expect(JSON.parse(output.output)).toEqual({
+      ok: false,
+      code: 'INTERACTIVE_INSPECTION_REQUIRED',
+      message: 'Inspect the page with mode interactive before requesting a screenshot.',
+      retryable: true,
+      needsInspect: true,
+    });
+    expect(observer.inspect).not.toHaveBeenCalled();
+  });
+
+  it('keeps semantic form workflows on AX refs instead of falling back to screenshots', async () => {
+    const observer = {
+      inspect: vi.fn(async (_tabId: number, mode: string) =>
+        mode === 'interactive'
+          ? {
+              tabId: 7,
+              url: 'https://example.com/exam',
+              data: {
+                mode: 'interactive',
+                snapshot: 'snapshot_1',
+                elements: [
+                  {
+                    d: 1,
+                    r: 'option',
+                    n: 'A. Answer',
+                    s: ['selected=false'],
+                    ref: 'ref_1',
+                  },
+                ],
+              },
+              observation: null,
+              attachmentIds: [],
+              debuggerSession: 'ephemeral' as const,
+              visualFallbackAllowed: false,
+            }
+          : {
+              tabId: 7,
+              url: 'https://example.com/exam',
+              data: { mode: 'screenshot' },
+              observation: null,
+              attachmentIds: ['attachment_1'],
+              debuggerSession: 'ephemeral' as const,
+            },
+      ),
+    };
+    const executor = new BrowserToolExecutor({ tabs: tabPort(), observer });
+    const signal = new AbortController().signal;
+    const context = { currentTabId: 7 };
+
+    await executor.execute(
+      call('browser_inspect', { tabId: 7, mode: 'interactive' }),
+      signal,
+      context,
+    );
+    const output = await executor.execute(
+      call('browser_inspect', { tabId: 7, mode: 'screenshot' }),
+      signal,
+      context,
+    );
+
+    expect(JSON.parse(output.output)).toEqual({
+      ok: false,
+      code: 'SEMANTIC_INSPECTION_AVAILABLE',
+      message:
+        'The current accessibility tree already contains sufficient semantic targets. Continue with refs and verify state with mode interactive.',
+      retryable: false,
+      needsInspect: false,
+    });
+    expect(observer.inspect).toHaveBeenCalledOnce();
+  });
+
+  it('clears a selection mismatch fallback after fresh selectable refs are inspected', async () => {
+    const observer = {
+      inspect: vi.fn(async (_tabId: number, mode: string) => ({
+        tabId: 7,
+        url: 'https://example.com/exam',
+        data:
+          mode === 'screenshot'
+            ? { mode: 'screenshot', width: 800, height: 600 }
+            : {
+                mode: 'interactive',
+                snapshot: 'snapshot_1',
+                elements: [
+                  {
+                    d: 1,
+                    r: 'option',
+                    n: 'A',
+                    s: ['selected=false'],
+                    a: ['set_checked'],
+                    ref: 'ref_1',
+                  },
+                ],
+              },
+        observation: null,
+        attachmentIds: mode === 'screenshot' ? ['attachment_1'] : [],
+        debuggerSession: 'ephemeral' as const,
+        visualFallbackAllowed: false,
+      })),
+    };
+    const actions = {
+      execute: vi.fn(async () => {
+        throw Object.assign(new Error('private state mismatch'), {
+          code: 'ACTION_STATE_MISMATCH',
+        });
+      }),
+    };
+    const executor = new BrowserToolExecutor({
+      tabs: tabPort(),
+      observer,
+      actions,
+    });
+    const signal = new AbortController().signal;
+    const context = { currentTabId: 7 };
+
+    await executor.execute(call('browser_inspect', { mode: 'interactive' }), signal, context);
+    await executor.execute(
+      call('browser_set_checked', { ref: 'ref_1', checked: true }),
+      signal,
+      context,
+    );
+    await executor.execute(call('browser_inspect', { mode: 'interactive' }), signal, context);
+    const screenshot = await executor.execute(
+      call('browser_inspect', { mode: 'screenshot' }),
+      signal,
+      context,
+    );
+
+    expect(JSON.parse(screenshot.output)).toMatchObject({
+      ok: false,
+      code: 'SEMANTIC_INSPECTION_AVAILABLE',
+    });
+    expect(observer.inspect).toHaveBeenCalledTimes(2);
+  });
+
+  it('blocks the same failed semantic selection after a fresh ref is issued', async () => {
+    let inspection = 0;
+    const observer = {
+      inspect: vi.fn(async () => {
+        inspection += 1;
+        return {
+          tabId: 7,
+          url: 'https://example.com/exam',
+          data: {
+            mode: 'interactive',
+            snapshot: `snapshot_${String(inspection)}`,
+            elements: [
+              {
+                d: 2,
+                r: 'option',
+                n: 'A. TCE service upgrade',
+                s: ['selected=false'],
+                a: ['set_checked'],
+                ref: `ref_${String(inspection)}`,
+              },
+            ],
+          },
+          observation: null,
+          attachmentIds: [],
+          debuggerSession: 'ephemeral' as const,
+          visualFallbackAllowed: false,
+        };
+      }),
+    };
+    const actions = {
+      execute: vi.fn(async () => {
+        throw Object.assign(new Error('selection did not settle'), {
+          code: 'ACTION_STATE_MISMATCH',
+        });
+      }),
+    };
+    const executor = new BrowserToolExecutor({
+      tabs: tabPort(),
+      observer,
+      actions,
+    });
+    const signal = new AbortController().signal;
+    const context = { currentTabId: 7 };
+
+    await executor.execute(call('browser_inspect', { mode: 'interactive' }), signal, context);
+    const first = await executor.execute(
+      call('browser_set_checked', { ref: 'ref_1', checked: true }),
+      signal,
+      context,
+    );
+    await executor.execute(call('browser_inspect', { mode: 'interactive' }), signal, context);
+    const repeated = await executor.execute(
+      call('browser_set_checked', { ref: 'ref_2', checked: true }),
+      signal,
+      context,
+    );
+
+    expect(JSON.parse(first.output)).toMatchObject({
+      ok: false,
+      code: 'ACTION_STATE_MISMATCH',
+    });
+    expect(JSON.parse(repeated.output)).toMatchObject({
+      ok: false,
+      code: 'DUPLICATE_FAILED_ACTION',
+      needsInspect: true,
+    });
+    expect(actions.execute).toHaveBeenCalledOnce();
+  });
+
+  it('allows the same selection label after the semantic page content changes', async () => {
+    let inspection = 0;
+    const observer = {
+      inspect: vi.fn(async () => {
+        inspection += 1;
+        return {
+          tabId: 7,
+          url: 'https://example.com/exam',
+          data: {
+            mode: 'interactive',
+            snapshot: `snapshot_${String(inspection)}`,
+            elements: [
+              {
+                d: 1,
+                r: 'heading',
+                n: inspection === 1 ? 'Question one' : 'Question two',
+              },
+              {
+                d: 2,
+                r: 'option',
+                n: 'Yes',
+                s: ['selected=false'],
+                a: ['set_checked'],
+                ref: `ref_${String(inspection)}`,
+              },
+            ],
+          },
+          observation: null,
+          attachmentIds: [],
+          debuggerSession: 'ephemeral' as const,
+          visualFallbackAllowed: false,
+        };
+      }),
+    };
+    const actions = {
+      execute: vi.fn(async () => {
+        throw Object.assign(new Error('selection did not settle'), {
+          code: 'ACTION_STATE_MISMATCH',
+        });
+      }),
+    };
+    const executor = new BrowserToolExecutor({
+      tabs: tabPort(),
+      observer,
+      actions,
+    });
+    const signal = new AbortController().signal;
+    const context = { currentTabId: 7 };
+
+    await executor.execute(call('browser_inspect', { mode: 'interactive' }), signal, context);
+    await executor.execute(
+      call('browser_set_checked', { ref: 'ref_1', checked: true }),
+      signal,
+      context,
+    );
+    await executor.execute(call('browser_inspect', { mode: 'interactive' }), signal, context);
+    const secondPage = await executor.execute(
+      call('browser_set_checked', { ref: 'ref_2', checked: true }),
+      signal,
+      context,
+    );
+
+    expect(JSON.parse(secondPage.output)).toMatchObject({
+      ok: false,
+      code: 'ACTION_STATE_MISMATCH',
+    });
+    expect(actions.execute).toHaveBeenCalledTimes(2);
   });
 
   it('maps coordinates from a downscaled screenshot back to the CSS viewport', async () => {
@@ -420,6 +756,7 @@ describe('BrowserToolExecutor', () => {
         observation: null,
         attachmentIds: ['attachment_1'],
         debuggerSession: 'ephemeral' as const,
+        visualFallbackAllowed: true,
       })),
     };
     const actions = {
@@ -430,10 +767,15 @@ describe('BrowserToolExecutor', () => {
         observation: null,
       })),
     };
-    const executor = new BrowserToolExecutor({ tabs: tabPort(), observer, actions });
+    const executor = new BrowserToolExecutor({
+      tabs: tabPort(),
+      observer,
+      actions,
+    });
     const signal = new AbortController().signal;
     const context = { currentTabId: 7, sessionOwnerId: 'runner_1' };
 
+    await primeVisualFallback(executor, signal, context);
     await executor.execute(call('browser_inspect', { mode: 'screenshot' }), signal, context);
     await executor.execute(
       call('browser_click_point', { x: 250, y: 100, button: 'left', count: 1 }),
@@ -447,6 +789,114 @@ describe('BrowserToolExecutor', () => {
       }),
       signal,
     );
+  });
+
+  it('returns an interactive state delta after a screenshot coordinate click', async () => {
+    const observer = {
+      inspect: vi.fn(
+        async (
+          _tabId: number,
+          mode: string,
+          _signal: AbortSignal,
+          options?: { readonly since?: string },
+        ) => {
+          if (mode === 'screenshot') {
+            return {
+              tabId: 7,
+              url: 'https://example.com/exam',
+              data: {
+                mode: 'screenshot',
+                width: 800,
+                height: 600,
+                viewportWidth: 800,
+                viewportHeight: 600,
+              },
+              observation: null,
+              attachmentIds: ['attachment_1'],
+              debuggerSession: 'ephemeral' as const,
+            };
+          }
+          if (options?.since === 'snapshot_before') {
+            return {
+              tabId: 7,
+              url: 'https://example.com/exam',
+              data: {
+                mode: 'interactive',
+                snapshot: 'snapshot_after',
+                base: 'snapshot_before',
+                changes: [{ i: 4, s: ['selected'] }],
+              },
+              observation: null,
+              attachmentIds: [],
+              debuggerSession: 'ephemeral' as const,
+              visualFallbackAllowed: false,
+            };
+          }
+          return {
+            tabId: 7,
+            url: 'https://example.com/exam',
+            data: {
+              mode: 'interactive',
+              snapshot: 'snapshot_before',
+              elements: [
+                {
+                  d: 2,
+                  r: 'option',
+                  n: 'A. Answer',
+                  s: ['selected=false'],
+                  a: ['set_checked'],
+                  ref: 'ref_a',
+                },
+              ],
+            },
+            observation: null,
+            attachmentIds: [],
+            debuggerSession: 'ephemeral' as const,
+            visualFallbackAllowed: false,
+          };
+        },
+      ),
+    };
+    const actions = {
+      execute: vi.fn(async () => ({
+        tabId: 7,
+        url: 'https://example.com/exam',
+        data: { action: 'click_point', dispatched: true },
+        observation: null,
+      })),
+    };
+    const executor = new BrowserToolExecutor({
+      tabs: tabPort(),
+      observer,
+      actions,
+    });
+    const signal = new AbortController().signal;
+    const context = { currentTabId: 7 };
+
+    await executor.execute(call('browser_inspect', { mode: 'interactive' }), signal, context);
+    await executor.execute(call('browser_inspect', { mode: 'screenshot' }), signal, context);
+    const clicked = await executor.execute(
+      call('browser_click_point', { x: 200, y: 160, button: 'left', count: 1 }),
+      signal,
+      context,
+    );
+
+    expect(JSON.parse(clicked.output)).toMatchObject({
+      ok: true,
+      data: {
+        action: 'click_point',
+        dispatched: true,
+        verification: {
+          mode: 'interactive',
+          snapshot: 'snapshot_after',
+          base: 'snapshot_before',
+          changes: [{ i: 4, s: ['selected'] }],
+        },
+      },
+    });
+    expect(observer.inspect).toHaveBeenLastCalledWith(7, 'interactive', signal, {
+      since: 'snapshot_before',
+    });
   });
 
   it('maps both drag endpoints from screenshot pixels to the CSS viewport', async () => {
@@ -464,6 +914,7 @@ describe('BrowserToolExecutor', () => {
         observation: null,
         attachmentIds: ['attachment_1'],
         debuggerSession: 'ephemeral' as const,
+        visualFallbackAllowed: true,
       })),
     };
     const actions = {
@@ -474,10 +925,15 @@ describe('BrowserToolExecutor', () => {
         observation: null,
       })),
     };
-    const executor = new BrowserToolExecutor({ tabs: tabPort(), observer, actions });
+    const executor = new BrowserToolExecutor({
+      tabs: tabPort(),
+      observer,
+      actions,
+    });
     const signal = new AbortController().signal;
     const context = { currentTabId: 7 };
 
+    await primeVisualFallback(executor, signal, context);
     await executor.execute(call('browser_inspect', { mode: 'screenshot' }), signal, context);
     await executor.execute(
       call('browser_drag_point', { fromX: 10, fromY: 20, toX: 100, toY: 120 }),
@@ -514,6 +970,7 @@ describe('BrowserToolExecutor', () => {
         observation: null,
         attachmentIds: ['attachment_1'],
         debuggerSession: 'ephemeral' as const,
+        visualFallbackAllowed: true,
       })),
     };
     const receivedArguments: ReturnType<typeof call>['arguments'][] = [];
@@ -528,10 +985,15 @@ describe('BrowserToolExecutor', () => {
         };
       }),
     };
-    const executor = new BrowserToolExecutor({ tabs: tabPort(), observer, actions });
+    const executor = new BrowserToolExecutor({
+      tabs: tabPort(),
+      observer,
+      actions,
+    });
     const signal = new AbortController().signal;
     const context = { currentTabId: 7 };
 
+    await primeVisualFallback(executor, signal, context);
     await executor.execute(call('browser_inspect', { mode: 'screenshot' }), signal, context);
     await executor.execute(
       call('browser_click_point', { x: 10, y: 20, button: 'left', count: 1 }),
@@ -563,6 +1025,7 @@ describe('BrowserToolExecutor', () => {
         observation: null,
         attachmentIds: ['attachment_1'],
         debuggerSession: 'ephemeral' as const,
+        visualFallbackAllowed: true,
       })),
     };
     const actions = {
@@ -573,10 +1036,15 @@ describe('BrowserToolExecutor', () => {
         observation: null,
       })),
     };
-    const executor = new BrowserToolExecutor({ tabs: tabPort(), observer, actions });
+    const executor = new BrowserToolExecutor({
+      tabs: tabPort(),
+      observer,
+      actions,
+    });
     const signal = new AbortController().signal;
     const context = { currentTabId: 7, sessionOwnerId: 'runner_1' };
 
+    await primeVisualFallback(executor, signal, context);
     await executor.execute(call('browser_inspect', { mode: 'screenshot' }), signal, context);
     await executor.release('runner_1');
     await executor.execute(
@@ -586,7 +1054,9 @@ describe('BrowserToolExecutor', () => {
     );
 
     expect(actions.execute).toHaveBeenCalledWith(
-      expect.objectContaining({ arguments: expect.objectContaining({ x: 10, y: 20 }) }),
+      expect.objectContaining({
+        arguments: expect.objectContaining({ x: 10, y: 20 }),
+      }),
       signal,
     );
   });
@@ -609,6 +1079,7 @@ describe('BrowserToolExecutor', () => {
         observation: null,
         attachmentIds: ['attachment_1'],
         debuggerSession: 'ephemeral' as const,
+        visualFallbackAllowed: true,
       })),
     };
     const actions = {
@@ -619,10 +1090,15 @@ describe('BrowserToolExecutor', () => {
         observation: null,
       })),
     };
-    const executor = new BrowserToolExecutor({ tabs: tabPort(), observer, actions });
+    const executor = new BrowserToolExecutor({
+      tabs: tabPort(),
+      observer,
+      actions,
+    });
     const signal = new AbortController().signal;
     const context = { currentTabId: 7 };
 
+    await primeVisualFallback(executor, signal, context);
     await executor.execute(call('browser_inspect', { mode: 'screenshot' }), signal, context);
     await executor.execute(call(name, input), signal, context);
     await executor.execute(
@@ -632,7 +1108,9 @@ describe('BrowserToolExecutor', () => {
     );
 
     expect(actions.execute).toHaveBeenCalledWith(
-      expect.objectContaining({ arguments: expect.objectContaining({ x: 10, y: 20 }) }),
+      expect.objectContaining({
+        arguments: expect.objectContaining({ x: 10, y: 20 }),
+      }),
       signal,
     );
   });
@@ -656,9 +1134,10 @@ describe('BrowserToolExecutor', () => {
     expect(JSON.parse(output.output)).toEqual({
       ok: false,
       code: 'PAGE_UNAVAILABLE',
-      message: 'The page observation bridge is unavailable. Reload the page and inspect again.',
-      retryable: true,
-      needsInspect: false,
+      message:
+        'The page content bridge is unavailable. Continue with mode interactive; do not reload solely for this error.',
+      retryable: false,
+      needsInspect: true,
     });
     expect(output.output).not.toContain('private page bridge details');
   });
@@ -682,11 +1161,41 @@ describe('BrowserToolExecutor', () => {
     expect(JSON.parse(output.output)).toEqual({
       ok: false,
       code: 'INVALID_PAGE_RESPONSE',
-      message: 'The page returned an invalid observation. Reload the page and inspect again.',
-      retryable: true,
-      needsInspect: false,
+      message:
+        'The page content bridge returned an invalid response. Continue with mode interactive; do not reload solely for this error.',
+      retryable: false,
+      needsInspect: true,
     });
     expect(output.output).not.toContain('private invalid response details');
+  });
+
+  it('blocks a second reload recovery for the same unchanged browser failure', async () => {
+    const tabs = tabPort();
+    const observer = {
+      inspect: vi.fn(async () => {
+        throw Object.assign(new Error('private page bridge details'), {
+          code: 'PAGE_UNAVAILABLE',
+        });
+      }),
+    };
+    const executor = new BrowserToolExecutor({ tabs, observer });
+    const signal = new AbortController().signal;
+    const context = { currentTabId: 7, sessionOwnerId: 'runner_1' };
+
+    await executor.execute(call('browser_inspect', { mode: 'content' }), signal, context);
+    await executor.execute(call('browser_reload', {}), signal, context);
+    await executor.execute(call('browser_inspect', { mode: 'content' }), signal, context);
+    const repeated = await executor.execute(call('browser_reload', {}), signal, context);
+
+    expect(JSON.parse(repeated.output)).toEqual({
+      ok: false,
+      code: 'REPEATED_RECOVERY_BLOCKED',
+      message:
+        'Reload already failed to recover this browser error. Continue with another inspection or action strategy.',
+      retryable: false,
+      needsInspect: true,
+    });
+    expect(tabs.reload).toHaveBeenCalledOnce();
   });
 
   it('dispatches interaction calls through the action runtime', async () => {
@@ -892,6 +1401,16 @@ describe('BrowserToolExecutor', () => {
         needsInspect: true,
       },
     ],
+    [
+      'ACTION_STATE_MISMATCH',
+      {
+        code: 'ACTION_STATE_MISMATCH',
+        message:
+          'The page did not retain the requested selection. Inspect fresh refs before another action.',
+        retryable: false,
+        needsInspect: true,
+      },
+    ],
   ])('preserves actionable %s recovery guidance', async (code, expected) => {
     const executor = new BrowserToolExecutor({
       tabs: tabPort(),
@@ -917,6 +1436,13 @@ describe('BrowserToolExecutor', () => {
           text: 'hello',
           replace: true,
           submit: false,
+        });
+      }
+      if (code === 'ACTION_STATE_MISMATCH') {
+        return call('browser_set_checked', {
+          tabId: 7,
+          ref: 'ref_1',
+          checked: true,
         });
       }
       return call('browser_click_point', {

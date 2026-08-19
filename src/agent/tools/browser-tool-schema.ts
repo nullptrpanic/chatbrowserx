@@ -7,6 +7,7 @@ const MAX_TOOL_ARGUMENTS_JSON_CHARACTERS = 32 * 1_024;
 const MAX_TAB_ID = 2_147_483_647;
 const MAX_COORDINATE = 1_000_000;
 const MAX_SCROLL_DELTA = 10_000;
+const MAX_SNAPSHOT_ID_CHARACTERS = 64;
 
 const tabIdSchema = z.number().int().min(0).max(MAX_TAB_ID);
 const refSchema = z
@@ -49,6 +50,11 @@ export const browserInspectSchema = z
   .object({
     tabId: tabIdSchema.optional(),
     mode: z.enum(['content', 'interactive', 'interactive_deep', 'screenshot']),
+    since: z
+      .string()
+      .max(MAX_SNAPSHOT_ID_CHARACTERS)
+      .refine((value) => value.trim() === value)
+      .optional(),
   })
   .strict();
 export const browserClickSchema = z
@@ -57,6 +63,13 @@ export const browserClickSchema = z
     ref: refSchema,
     button: z.enum(['left', 'right', 'middle']),
     count: z.union([z.literal(1), z.literal(2)]),
+  })
+  .strict();
+export const browserSetCheckedSchema = z
+  .object({
+    tabId: tabIdSchema.optional(),
+    ref: refSchema,
+    checked: z.boolean(),
   })
   .strict();
 export const browserTypeSchema = z
@@ -160,6 +173,7 @@ const BROWSER_SCHEMAS = {
   browser_reload: browserReloadSchema,
   browser_inspect: browserInspectSchema,
   browser_click: browserClickSchema,
+  browser_set_checked: browserSetCheckedSchema,
   browser_type: browserTypeSchema,
   browser_keypress: browserKeypressSchema,
   browser_scroll: browserScrollSchema,
@@ -186,6 +200,7 @@ export type BrowserOperation =
   | 'reload'
   | 'inspect'
   | 'click'
+  | 'set_checked'
   | 'type'
   | 'keypress'
   | 'scroll'
@@ -228,6 +243,7 @@ const OPERATIONS: Readonly<Record<BrowserToolName, BrowserOperation>> = {
   browser_reload: 'reload',
   browser_inspect: 'inspect',
   browser_click: 'click',
+  browser_set_checked: 'set_checked',
   browser_type: 'type',
   browser_keypress: 'keypress',
   browser_scroll: 'scroll',
@@ -334,21 +350,33 @@ export const BROWSER_TOOL_DEFINITIONS: readonly ModelToolDefinition[] = [
   taskToolDefinition('browser_reload', 'Reload one task page and wait for stability.', {}),
   taskToolDefinition(
     'browser_inspect',
-    'Inspect readable content, a compact native accessibility tree with actionable refs across frames, or a viewport screenshot. Use interactive for page understanding and controls; use screenshot only when the page is visual or canvas-based.',
+    'Inspect readable content, a compact native accessibility tree with actionable refs across frames, or a viewport screenshot. Always inspect interactive before requesting a screenshot. Continue with refs and interactive deltas whenever the accessibility tree contains the needed content or controls. Do not use screenshots to verify semantic form state. Screenshot fallback is accepted only when interactive inspection lacks actionable targets or detects a visual surface such as canvas. Set since to an empty string for a full result. Reuse only the latest interactive snapshot ID when its base elements remain in context. A delta applies to that base: changes items use zero-based i and replacement state s, where null removes state.',
     {
       mode: {
         type: 'string',
         enum: ['content', 'interactive', 'screenshot'],
       },
+      since: {
+        type: 'string',
+        maxLength: MAX_SNAPSHOT_ID_CHARACTERS,
+      },
     },
   ),
   taskToolDefinition(
     'browser_click',
-    'Automatically scroll a recent semantic element ref into view, then click it.',
+    'Automatically scroll a recent semantic element ref into view, click it, and return its latest readable state when available. When an inspected ref advertises set_checked in its actions, use browser_set_checked instead for an idempotent action.',
     {
       ref: REF_PROPERTY,
       button: { type: 'string', enum: ['left', 'right', 'middle'] },
       count: { type: 'integer', enum: [1, 2] },
+    },
+  ),
+  taskToolDefinition(
+    'browser_set_checked',
+    'Idempotently set a recent ref that advertises set_checked to the requested state. Use checked=true for one-way selections such as radio controls. Returns the target state and every other known selection state changed by the action.',
+    {
+      ref: REF_PROPERTY,
+      checked: { type: 'boolean' },
     },
   ),
   taskToolDefinition('browser_type', 'Automatically reveal and type into a recent semantic ref.', {

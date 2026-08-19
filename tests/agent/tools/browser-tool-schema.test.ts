@@ -17,8 +17,9 @@ const CASES = [
   ['browser_close_tab', 'close_tab', 'mutation', { tabId: 7 }],
   ['browser_navigate', 'navigate', 'mutation', { tabId: 7, url: 'https://example.com/a' }],
   ['browser_reload', 'reload', 'mutation', { tabId: 7 }],
-  ['browser_inspect', 'inspect', 'safe', { tabId: 7, mode: 'interactive' }],
+  ['browser_inspect', 'inspect', 'safe', { tabId: 7, mode: 'interactive', since: '' }],
   ['browser_click', 'click', 'mutation', { tabId: 7, ref: 'ref_1', button: 'left', count: 1 }],
+  ['browser_set_checked', 'set_checked', 'mutation', { tabId: 7, ref: 'ref_1', checked: true }],
   [
     'browser_type',
     'type',
@@ -105,6 +106,34 @@ describe('BROWSER_TOOL_DEFINITIONS', () => {
     expect(mode.enum).toEqual(['content', 'interactive', 'screenshot']);
   });
 
+  it('documents AX-first inspection and idempotent selectable actions', () => {
+    const definitions = new Map(
+      BROWSER_TOOL_DEFINITIONS.map((definition) => [definition.name, definition]),
+    );
+
+    expect(definitions.get('browser_inspect')?.description).toContain('Always inspect interactive');
+    expect(definitions.get('browser_inspect')?.description).toContain(
+      'Do not use screenshots to verify semantic form state',
+    );
+    expect(definitions.get('browser_click')?.description).toContain('advertises set_checked');
+  });
+
+  it('requires an explicit string base snapshot on model-generated inspections', () => {
+    const inspect = BROWSER_TOOL_DEFINITIONS.find(
+      (definition) => definition.name === 'browser_inspect',
+    );
+    const parameters = inspect?.parameters as {
+      readonly properties: Readonly<Record<string, Readonly<Record<string, unknown>>>>;
+      readonly required: readonly string[];
+    };
+
+    expect(parameters.properties.since).toMatchObject({
+      type: 'string',
+      maxLength: 64,
+    });
+    expect(parameters.required).toContain('since');
+  });
+
   it('requires a zero-capable tabId on every task-scoped model tool', () => {
     const definitions = new Map(
       BROWSER_TOOL_DEFINITIONS.map((definition) => [definition.name, definition.parameters]),
@@ -114,6 +143,7 @@ describe('BROWSER_TOOL_DEFINITIONS', () => {
       'browser_reload',
       'browser_inspect',
       'browser_click',
+      'browser_set_checked',
       'browser_type',
       'browser_keypress',
       'browser_scroll',
@@ -155,6 +185,7 @@ describe('parseBrowserToolCall', () => {
     ['browser_reload', {}],
     ['browser_inspect', { mode: 'interactive' }],
     ['browser_click', { ref: 'ref_1', button: 'left', count: 1 }],
+    ['browser_set_checked', { ref: 'ref_1', checked: true }],
     ['browser_type', { ref: 'ref_1', text: 'hello', replace: true, submit: false }],
     ['browser_network_list', { urlPattern: '/api/', limit: 25 }],
   ])('accepts task-bound %s without a model-provided tabId', (name, arguments_) => {

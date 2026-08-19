@@ -49,6 +49,7 @@ function tavilyPort(overrides: Partial<TavilyExecutionPort> = {}): TavilyExecuti
 function browserPort(overrides: Partial<BrowserExecutionPort> = {}): BrowserExecutionPort {
   return {
     execute: vi.fn(async () => ({ output: '{"ok":true}', attachmentIds: [] })),
+    resetObservationBaselines: vi.fn(),
     release: vi.fn(async () => undefined),
     ...overrides,
   };
@@ -88,13 +89,13 @@ function browserCall(callId: string, name: string, arguments_: unknown): AgentEv
   };
 }
 
-function contextCommitCall(callId: string, state: string): AgentEvent {
+function contextCommitCall(callId: string, state: string, throughCallId: string): AgentEvent {
   return {
     type: 'context.commit',
     call: parseContextCommitToolCall({
       callId,
       name: 'commit_context',
-      argumentsJson: JSON.stringify({ state }),
+      argumentsJson: JSON.stringify({ state, throughCallId }),
     }),
   };
 }
@@ -199,7 +200,7 @@ describe('TaskExecutor', () => {
     database.close();
   });
 
-  it('safely completes a recorded pending context commit after executor restart', async () => {
+  it('safely completes a legacy recorded pending context commit after executor restart', async () => {
     const database = await openChatBrowserDatabase(
       createTestDatabaseName('pending-context-commit-resume'),
     );
@@ -1020,7 +1021,7 @@ describe('TaskExecutor', () => {
     database.close();
   });
 
-  it('records a context commit internally, compacts active continuation, and preserves audit results', async () => {
+  it('compacts through the requested cursor while retaining later results and full audit', async () => {
     const database = await openChatBrowserDatabase(
       createTestDatabaseName('context-commit-executor'),
     );
@@ -1051,9 +1052,11 @@ describe('TaskExecutor', () => {
       inputs.push(input);
       return (async function* () {
         if (inputs.length === 1) {
-          yield searchCall('call_search');
+          yield searchCall('call_search_1');
         } else if (inputs.length === 2) {
-          yield contextCommitCall('call_commit', commitState);
+          yield searchCall('call_search_2');
+        } else if (inputs.length === 3) {
+          yield contextCommitCall('call_commit', commitState, 'call_search_1');
         } else {
           yield {
             type: 'task.completed',
@@ -1064,7 +1067,8 @@ describe('TaskExecutor', () => {
       })();
     });
     const tavily = tavilyPort();
-    const browser = browserPort();
+    const resetObservationBaselines = vi.fn();
+    const browser = browserPort({ resetObservationBaselines });
     const executor = new TaskExecutor({
       repository,
       conversations: dependencies.conversations,
@@ -1084,6 +1088,8 @@ describe('TaskExecutor', () => {
       'tool.result-recorded',
       'tool.call-recorded',
       'tool.result-recorded',
+      'tool.call-recorded',
+      'tool.result-recorded',
       'task.completed',
     ]);
     const commitBoundary = transitions.find(
@@ -1093,35 +1099,146 @@ describe('TaskExecutor', () => {
     expect(commitBoundary?.checkpoint.pendingToolCall).toEqual({
       callId: 'call_commit',
       name: 'commit_context',
-      argumentsJson: JSON.stringify({ state: commitState }),
+      argumentsJson: JSON.stringify({ state: commitState, throughCallId: 'call_search_1' }),
       executionState: 'recorded',
     });
     expect(result.checkpoint.completedToolResults.map(({ toolName }) => toolName)).toEqual([
       'tavily_search',
+      'tavily_search',
       'commit_context',
     ]);
-    expect(inputs[2]?.checkpoint.continuationItems).toEqual([
+    expect(inputs[3]?.checkpoint.continuationItems).toEqual([
       { type: 'message_ref', messageId: 'message_user' },
       {
         type: 'function_call',
         callId: 'call_commit',
         name: 'commit_context',
-        argumentsJson: JSON.stringify({ state: commitState }),
+        argumentsJson: JSON.stringify({ state: commitState, throughCallId: 'call_search_1' }),
       },
       expect.objectContaining({
         type: 'function_call_output',
         callId: 'call_commit',
         attachmentIds: [],
       }),
+      {
+        type: 'function_call',
+        callId: 'call_search_2',
+        name: 'tavily_search',
+        argumentsJson: JSON.stringify(SEARCH_ARGUMENTS),
+      },
+      expect.objectContaining({
+        type: 'function_call_output',
+        callId: 'call_search_2',
+        output: '{"ok":true,"results":[],"truncated":false}',
+        attachmentIds: [],
+      }),
     ]);
     expect(
       JSON.parse(
-        inputs[2]?.checkpoint.continuationItems.find((item) => item.type === 'function_call_output')
+        inputs[3]?.checkpoint.continuationItems.find((item) => item.type === 'function_call_output')
           ?.output ?? '',
       ),
     ).toMatchObject({ ok: true, compactedCalls: 1, releasedImages: 0 });
-    expect(tavily.search).toHaveBeenCalledOnce();
+    expect(tavily.search).toHaveBeenCalledTimes(2);
+    expect(resetObservationBaselines).toHaveBeenCalledOnce();
     expect(browser.execute).not.toHaveBeenCalled();
+    database.close();
+  });
+
+  it('recovers an invalid context commit cursor without discarding raw tool history', async () => {
+    const database = await openChatBrowserDatabase(
+      createTestDatabaseName('invalid-context-commit-cursor'),
+    );
+    const repository = new IndexedDbTaskRepository(database);
+    const dependencies = sources();
+    const commands = new TaskCommandService(
+      repository,
+      dependencies.clock,
+      dependencies.ids,
+      dependencies.conversations,
+    );
+    const created = await commands.create({
+      conversationId: 'conversation_1',
+      tabId: 7,
+      goal: 'Recover a browser task after a bad commit cursor',
+      userMessageId: 'message_user',
+    });
+    const inputs: AgentPlanInput[] = [];
+    const plan = vi.fn<(input: AgentPlanInput) => AsyncGenerator<AgentEvent>>((input) => {
+      inputs.push(input);
+      return (async function* () {
+        if (inputs.length === 1) {
+          yield searchCall('call_search');
+          return;
+        }
+        if (inputs.length === 2) {
+          yield contextCommitCall(
+            'call_bad_commit',
+            'The search result is preserved. Next: continue the browser task.',
+            'call_hallucinated',
+          );
+          return;
+        }
+        if (inputs.length === 3) {
+          yield contextCommitCall(
+            'call_good_commit',
+            'The search result is preserved. Next: continue the browser task.',
+            'call_search',
+          );
+          return;
+        }
+        yield {
+          type: 'task.completed',
+          reason: 'model_response_completed',
+          messageId: 'message_answer',
+        };
+      })();
+    });
+    const executor = new TaskExecutor({
+      repository,
+      conversations: dependencies.conversations,
+      planner: { plan },
+      tavily: tavilyPort(),
+      browser: browserPort(),
+      clock: dependencies.clock,
+      ids: dependencies.ids,
+    });
+
+    const result = await executor.run(created.task.id, new AbortController().signal);
+
+    expect(result.task.status).toBe('completed');
+    expect(inputs).toHaveLength(4);
+    const retryInput = inputs[2]?.checkpoint;
+    expect(
+      retryInput?.continuationItems.some(
+        (item) => item.type === 'function_call' && item.callId === 'call_search',
+      ),
+    ).toBe(true);
+    expect(
+      retryInput?.continuationItems.find(
+        (item) => item.type === 'function_call_output' && item.callId === 'call_bad_commit',
+      ),
+    ).toMatchObject({
+      output: JSON.stringify({
+        ok: false,
+        code: 'INVALID_CONTEXT_COMMIT_CURSOR',
+        message:
+          'throughCallId did not match a current completed non-commit tool call. Retry commit_context with one of validThroughCallIds.',
+        validThroughCallIds: ['call_search'],
+      }),
+    });
+    expect(result.checkpoint.completedToolResults.map(({ callId }) => callId)).toEqual([
+      'call_search',
+      'call_bad_commit',
+      'call_good_commit',
+    ]);
+    expect(
+      result.checkpoint.continuationItems.some(
+        (item) =>
+          item.type !== 'message_ref' &&
+          (item.callId === 'call_search' || item.callId === 'call_bad_commit'),
+      ),
+    ).toBe(false);
     database.close();
   });
 
@@ -1149,7 +1266,11 @@ describe('TaskExecutor', () => {
         if (turn <= 8) {
           yield searchCall(`call_search_${turn}`);
         } else if (turn === 9) {
-          yield contextCommitCall('call_commit', 'Eight searches completed. Next: answer.');
+          yield contextCommitCall(
+            'call_commit',
+            'Eight searches completed. Next: answer.',
+            'call_search_8',
+          );
         } else {
           yield {
             type: 'task.completed',
@@ -1661,6 +1782,231 @@ describe('TaskExecutor', () => {
       lastError: { code: 'ToolCallLimitError', retryable: false },
     });
     expect(result.checkpoint.completedToolResults).toHaveLength(8);
+    database.close();
+  });
+
+  it('does not charge retained browser audit results against a fresh execution attempt', async () => {
+    const database = await openChatBrowserDatabase(
+      createTestDatabaseName('browser-audit-budget-separation'),
+    );
+    const repository = new IndexedDbTaskRepository(database);
+    const dependencies = sources();
+    const commands = new TaskCommandService(
+      repository,
+      dependencies.clock,
+      dependencies.ids,
+      dependencies.conversations,
+    );
+    const created = await commands.create({
+      conversationId: 'conversation_1',
+      tabId: 7,
+      goal: 'Continue after compacted browser work',
+    });
+    const planningAt = created.task.updatedAt;
+    const auditResults = Array.from({ length: 256 }, (_, index) => ({
+      callId: `call_audit_${String(index + 1)}`,
+      toolName: 'browser_inspect',
+      argumentsJson: '{"tabId":0,"mode":"interactive","since":""}',
+      output: '{"ok":true}',
+      resultRef: `result_audit_${String(index + 1)}`,
+      attachmentIds: [],
+    }));
+    const planningCheckpoint = {
+      ...created.checkpoint,
+      id: 'checkpoint_compacted_browser_audit',
+      sequence: 1,
+      taskStatus: 'planning' as const,
+      completedToolResults: auditResults,
+      continuationItems: [],
+      browserToolCallsInAttempt: 0,
+      createdAt: planningAt,
+    };
+    await repository.saveTransition({
+      task: {
+        ...created.task,
+        status: 'planning',
+        checkpointId: planningCheckpoint.id,
+        updatedAt: planningAt,
+      },
+      event: {
+        id: 'event_compacted_browser_audit',
+        taskId: created.task.id,
+        sequence: 1,
+        type: 'planning.started',
+        reason: 'model_request_started',
+        at: planningAt,
+        error: null,
+      },
+      checkpoint: planningCheckpoint,
+    });
+    let turn = 0;
+    const plan = () =>
+      (async function* () {
+        turn += 1;
+        if (turn === 1) {
+          yield browserCall('call_fresh_browser', 'browser_get_current_tab', {});
+          return;
+        }
+        yield {
+          type: 'task.completed',
+          reason: 'model_response_completed',
+          messageId: 'message_answer',
+        } as const;
+      })();
+    const browser = browserPort();
+    const executor = new TaskExecutor({
+      repository,
+      conversations: dependencies.conversations,
+      planner: { plan },
+      tavily: tavilyPort(),
+      browser,
+      clock: dependencies.clock,
+      ids: dependencies.ids,
+    });
+
+    const result = await executor.run(created.task.id, new AbortController().signal);
+
+    expect(result.task.status).toBe('completed');
+    expect(browser.execute).toHaveBeenCalledOnce();
+    expect(result.checkpoint).toMatchObject({ browserToolCallsInAttempt: 1 });
+    expect(result.checkpoint.completedToolResults).toHaveLength(257);
+    database.close();
+  });
+
+  it('allows 256 browser calls in one execution attempt and rejects the next call', async () => {
+    const database = await openChatBrowserDatabase(
+      createTestDatabaseName('browser-attempt-call-limit'),
+    );
+    const repository = new IndexedDbTaskRepository(database);
+    const dependencies = sources();
+    const commands = new TaskCommandService(
+      repository,
+      dependencies.clock,
+      dependencies.ids,
+      dependencies.conversations,
+    );
+    const created = await commands.create({
+      conversationId: 'conversation_1',
+      tabId: 7,
+      goal: 'Run a long browser workflow',
+    });
+    let turn = 0;
+    const plan = () =>
+      (async function* () {
+        turn += 1;
+        yield browserCall(`call_browser_${String(turn)}`, 'browser_get_current_tab', {});
+      })();
+    const browser = browserPort();
+    const executor = new TaskExecutor({
+      repository,
+      conversations: dependencies.conversations,
+      planner: { plan },
+      tavily: tavilyPort(),
+      browser,
+      clock: dependencies.clock,
+      ids: dependencies.ids,
+    });
+
+    const result = await executor.run(created.task.id, new AbortController().signal);
+
+    expect(turn).toBe(257);
+    expect(browser.execute).toHaveBeenCalledTimes(256);
+    expect(result.task).toMatchObject({
+      status: 'failed',
+      lastError: { code: 'ToolCallLimitError', retryable: false },
+    });
+    expect(result.checkpoint).toMatchObject({ browserToolCallsInAttempt: 256 });
+    database.close();
+  });
+
+  it('resets the browser execution budget only after an explicit retry', async () => {
+    const database = await openChatBrowserDatabase(
+      createTestDatabaseName('browser-attempt-retry-budget'),
+    );
+    const repository = new IndexedDbTaskRepository(database);
+    const dependencies = sources();
+    const commands = new TaskCommandService(
+      repository,
+      dependencies.clock,
+      dependencies.ids,
+      dependencies.conversations,
+    );
+    const created = await commands.create({
+      conversationId: 'conversation_1',
+      tabId: 7,
+      goal: 'Retry a bounded browser workflow',
+    });
+    const planningAt = created.task.updatedAt;
+    const exhaustedCheckpoint = {
+      ...created.checkpoint,
+      id: 'checkpoint_exhausted_browser_attempt',
+      sequence: 1,
+      taskStatus: 'planning' as const,
+      browserToolCallsInAttempt: 256,
+      createdAt: planningAt,
+    };
+    await repository.saveTransition({
+      task: {
+        ...created.task,
+        status: 'planning',
+        checkpointId: exhaustedCheckpoint.id,
+        updatedAt: planningAt,
+      },
+      event: {
+        id: 'event_exhausted_browser_attempt',
+        taskId: created.task.id,
+        sequence: 1,
+        type: 'planning.started',
+        reason: 'model_request_started',
+        at: planningAt,
+        error: null,
+      },
+      checkpoint: exhaustedCheckpoint,
+    });
+    let mode: 'exhausted' | 'retry' = 'exhausted';
+    let retryTurn = 0;
+    const plan = () =>
+      (async function* () {
+        if (mode === 'exhausted') {
+          yield browserCall('call_over_budget', 'browser_get_current_tab', {});
+          return;
+        }
+        retryTurn += 1;
+        if (retryTurn === 1) {
+          yield browserCall('call_after_retry', 'browser_get_current_tab', {});
+          return;
+        }
+        yield {
+          type: 'task.completed',
+          reason: 'model_response_completed',
+          messageId: 'message_answer',
+        } as const;
+      })();
+    const browser = browserPort();
+    const executor = new TaskExecutor({
+      repository,
+      conversations: dependencies.conversations,
+      planner: { plan },
+      tavily: tavilyPort(),
+      browser,
+      clock: dependencies.clock,
+      ids: dependencies.ids,
+    });
+
+    const exhausted = await executor.run(created.task.id, new AbortController().signal);
+
+    expect(exhausted.task.status).toBe('failed');
+    expect(browser.execute).not.toHaveBeenCalled();
+
+    mode = 'retry';
+    const retried = await commands.retry(created.task.id);
+    expect(retried.checkpoint).toMatchObject({ browserToolCallsInAttempt: 0 });
+
+    const completed = await executor.run(created.task.id, new AbortController().signal);
+
+    expect(completed.task.status).toBe('completed');
+    expect(browser.execute).toHaveBeenCalledOnce();
+    expect(completed.checkpoint).toMatchObject({ browserToolCallsInAttempt: 1 });
     database.close();
   });
 

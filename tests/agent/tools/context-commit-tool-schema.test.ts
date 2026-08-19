@@ -4,16 +4,20 @@ import {
   parseContextCommitToolCall,
 } from '../../../src/agent/tools/context-commit-tool-schema';
 
-function call(state: string, overrides: Partial<{ callId: string; name: string }> = {}) {
+function call(
+  state: string,
+  overrides: Partial<{ callId: string; name: string; throughCallId: string }> = {},
+) {
+  const throughCallId = overrides.throughCallId ?? 'call_previous';
   return {
     callId: overrides.callId ?? 'call_commit',
     name: overrides.name ?? 'commit_context',
-    argumentsJson: JSON.stringify({ state }),
+    argumentsJson: JSON.stringify({ state, throughCallId }),
   };
 }
 
 describe('CONTEXT_COMMIT_TOOL_DEFINITION', () => {
-  it('exposes one strict bounded working-state argument', () => {
+  it('requires a stable inclusive tool-call cursor with the bounded working state', () => {
     expect(CONTEXT_COMMIT_TOOL_DEFINITION).toMatchObject({
       type: 'function',
       name: 'commit_context',
@@ -22,11 +26,25 @@ describe('CONTEXT_COMMIT_TOOL_DEFINITION', () => {
         type: 'object',
         properties: {
           state: { type: 'string', minLength: 1, maxLength: 8_192 },
+          throughCallId: { type: 'string', minLength: 1, maxLength: 256 },
         },
-        required: ['state'],
+        required: ['state', 'throughCallId'],
         additionalProperties: false,
       },
     });
+  });
+
+  it('keeps checkpoints factual instead of persisting speculative recovery plans', () => {
+    const parameters = CONTEXT_COMMIT_TOOL_DEFINITION.parameters as {
+      readonly properties: {
+        readonly state: { readonly description?: string };
+      };
+    };
+
+    expect(CONTEXT_COMMIT_TOOL_DEFINITION.description).toContain('verified facts');
+    expect(CONTEXT_COMMIT_TOOL_DEFINITION.description).toContain('failed actions');
+    expect(CONTEXT_COMMIT_TOOL_DEFINITION.description).not.toContain('exact next step');
+    expect(parameters.properties.state.description).toContain('evidence-backed');
   });
 });
 
@@ -37,8 +55,8 @@ describe('parseContextCommitToolCall', () => {
       expect(parseContextCommitToolCall(call(state))).toEqual({
         callId: 'call_commit',
         name: 'commit_context',
-        argumentsJson: JSON.stringify({ state }),
-        arguments: { state },
+        argumentsJson: JSON.stringify({ state, throughCallId: 'call_previous' }),
+        arguments: { state, throughCallId: 'call_previous' },
       });
     },
   );
@@ -47,7 +65,18 @@ describe('parseContextCommitToolCall', () => {
     call(''),
     call('   '),
     call('x'.repeat(8_193)),
-    { ...call('valid'), argumentsJson: JSON.stringify({ state: 'valid', extra: true }) },
+    call('valid', { throughCallId: '' }),
+    call('valid', { throughCallId: '   ' }),
+    call('valid', { throughCallId: 'x'.repeat(257) }),
+    { ...call('valid'), argumentsJson: JSON.stringify({ state: 'valid' }) },
+    {
+      ...call('valid'),
+      argumentsJson: JSON.stringify({
+        state: 'valid',
+        throughCallId: 'call_previous',
+        extra: true,
+      }),
+    },
     { ...call('valid'), argumentsJson: '{' },
     call('valid', { name: 'browser_inspect' }),
     call('valid', { callId: '' }),

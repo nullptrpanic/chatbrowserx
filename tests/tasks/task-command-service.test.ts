@@ -217,7 +217,10 @@ describe('TaskCommandService', () => {
       goal: 'Initial request',
       userMessageId: 'message_1',
     });
-    const commitArguments = JSON.stringify({ state: 'Goal: continue. Next: inspect the form.' });
+    const commitArguments = JSON.stringify({
+      state: 'Goal: continue. Next: inspect the form.',
+      throughCallId: 'call_inspect',
+    });
     const commitOutput =
       '{"ok":true,"compactedCalls":1,"releasedTextChars":100,"releasedImages":1}';
     const committedCheckpoint = {

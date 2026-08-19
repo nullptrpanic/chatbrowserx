@@ -12,6 +12,7 @@ import type {
   PanelEditableSettings,
   PanelSettingsSnapshot,
   PanelSnapshot,
+  PanelTask,
 } from '../../../src/shared/protocol/panel-types';
 
 /**
@@ -101,6 +102,20 @@ function buildPanel() {
   };
   return {
     getSnapshot: vi.fn(async () => snapshot),
+    getTaskDetails: vi.fn(async (): Promise<PanelTask> => ({
+      id: 'task_1',
+      detailLevel: 'full',
+      status: 'completed',
+      goal: 'Complete the page',
+      tabId: 7,
+      createdAt: 1_000,
+      updatedAt: 2_000,
+      sequence: 1,
+      lastError: null,
+      events: [],
+      completedToolResults: [],
+      supplements: [],
+    })),
     submit: vi.fn(async () => buildSnapshot()),
     supplement: vi.fn(async () => ({ accepted: true as const, id: 'supplement_1' })),
     openImagePreview: vi.fn(async () => ({ opened: true as const })),
@@ -447,8 +462,15 @@ describe('createMessageRouter', () => {
       type: 'chat.supplement',
       payload: { taskId: 'task_1', text: 'Use official sources', attachmentIds: [] },
     });
+    await router({
+      version: PROTOCOL_VERSION,
+      requestId: 'req_task_details',
+      type: 'panel.getTaskDetails',
+      payload: { taskId: 'task_1' },
+    });
 
     expect(panel.getSnapshot).toHaveBeenCalledWith(7, undefined);
+    expect(panel.getTaskDetails).toHaveBeenCalledWith('task_1');
     expect(panel.submit).toHaveBeenCalledWith({ tabId: 7, text: 'Do it', attachmentIds: [] });
     expect(panel.supplement).toHaveBeenCalledWith({
       taskId: 'task_1',

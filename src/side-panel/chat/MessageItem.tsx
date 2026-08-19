@@ -20,6 +20,7 @@ export interface MessageItemProps {
   readonly taskInteractive?: boolean;
   readonly onOpenImagePreview?: ((attachmentId: string) => Promise<boolean>) | undefined;
   readonly onOpenSourcePage?: ((source: PanelMessageSourcePage) => Promise<void>) | undefined;
+  readonly onLoadTaskDetails?: ((taskId: string) => Promise<void>) | undefined;
   readonly onPause?: () => void;
   readonly onResume?: () => void;
   readonly onRetry?: () => void;
@@ -35,6 +36,7 @@ export function MessageItem({
   taskInteractive = false,
   onOpenImagePreview,
   onOpenSourcePage,
+  onLoadTaskDetails,
   onPause = noop,
   onResume = noop,
   onRetry = noop,
@@ -144,6 +146,7 @@ export function MessageItem({
             embedded
             interactive={taskInteractive}
             onOpenImagePreview={onOpenImagePreview}
+            onLoadTaskDetails={onLoadTaskDetails}
             onPause={onPause}
             onResume={onResume}
             onRetry={onRetry}

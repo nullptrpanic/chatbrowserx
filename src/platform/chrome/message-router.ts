@@ -25,6 +25,7 @@ export interface MessageRouterDependencies {
   readonly panel: Pick<
     PanelService,
     | 'getSnapshot'
+    | 'getTaskDetails'
     | 'submit'
     | 'supplement'
     | 'openImagePreview'
@@ -100,6 +101,11 @@ async function routeMessage(
       return successResponse(
         message.requestId,
         await dependencies.panel.getSnapshot(message.payload.tabId, message.payload.conversationId),
+      );
+    case 'panel.getTaskDetails':
+      return successResponse(
+        message.requestId,
+        await dependencies.panel.getTaskDetails(message.payload.taskId),
       );
     case 'chat.submit':
       return successResponse(message.requestId, await dependencies.panel.submit(message.payload));

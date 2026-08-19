@@ -27,6 +27,15 @@ const panelGetSnapshotSchema = z
   })
   .strict();
 
+const panelGetTaskDetailsSchema = z
+  .object({
+    version: z.literal(PROTOCOL_VERSION),
+    requestId: requestIdSchema,
+    type: z.literal('panel.getTaskDetails'),
+    payload: z.object({ taskId: identifierSchema }).strict(),
+  })
+  .strict();
+
 const chatSubmitSchema = z
   .object({
     version: z.literal(PROTOCOL_VERSION),
@@ -222,6 +231,7 @@ const selectionAskSchema = z
 export const extensionMessageSchema: z.ZodType<ExtensionMessage> = z.discriminatedUnion('type', [
   systemPingSchema,
   panelGetSnapshotSchema,
+  panelGetTaskDetailsSchema,
   chatSubmitSchema,
   chatSupplementSchema,
   conversationClearSchema,

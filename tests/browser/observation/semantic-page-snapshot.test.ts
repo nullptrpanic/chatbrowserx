@@ -122,7 +122,107 @@ function axNode(
   };
 }
 
+function labeledCheckboxSnapshot(checked: boolean) {
+  const strings = [
+    '',
+    'frame-main',
+    '#document',
+    'LABEL',
+    'INPUT',
+    '#text',
+    'for',
+    'choice-a',
+    'id',
+    'type',
+    'checkbox',
+    'pointer',
+    'block',
+    'visible',
+    'auto',
+  ];
+  return {
+    strings,
+    documents: [
+      {
+        documentURL: 0,
+        title: 0,
+        baseURL: 0,
+        contentLanguage: 0,
+        encodingName: 0,
+        publicId: 0,
+        systemId: 0,
+        frameId: 1,
+        nodes: {
+          parentIndex: [-1, 0, 1, 1],
+          nodeType: [9, 1, 1, 3],
+          nodeName: [2, 3, 4, 5],
+          nodeValue: [0, 0, 0, 0],
+          backendNodeId: [1, 11, 12, 13],
+          attributes: [[], [6, 7], [8, 7, 9, 10], []],
+          isClickable: { index: [1] },
+          inputChecked: { index: checked ? [2] : [] },
+        },
+        layout: {
+          nodeIndex: [1, 3],
+          styles: [
+            [11, 12, 13, 14],
+            [11, 12, 13, 14],
+          ],
+          bounds: [
+            [10, 20, 160, 30],
+            [30, 20, 120, 30],
+          ],
+          text: [0, 0],
+          stackingContexts: { index: [] },
+        },
+        textBoxes: { layoutIndex: [], bounds: [], start: [], length: [] },
+      },
+    ],
+  };
+}
+
 describe('buildSemanticPageSnapshot', () => {
+  it('follows AX child order and preserves repeated labels in different groups', () => {
+    const result = buildSemanticPageSnapshot({
+      axNodes: [
+        axNode('question-2-type', 22, 'StaticText', 'Single choice', {
+          parentId: 'question-2',
+        }),
+        axNode('question-1-type', 12, 'StaticText', 'Single choice', {
+          parentId: 'question-1',
+        }),
+        axNode('root', 1, 'RootWebArea', 'Exam', {
+          childIds: ['question-1', 'question-2'],
+        }),
+        axNode('question-2-title', 23, 'StaticText', 'Second question?', {
+          parentId: 'question-2',
+        }),
+        axNode('question-1', 10, 'group', 'Question 1', {
+          parentId: 'root',
+          childIds: ['question-1-type', 'question-1-title'],
+        }),
+        axNode('question-2', 20, 'group', 'Question 2', {
+          parentId: 'root',
+          childIds: ['question-2-type', 'question-2-title'],
+        }),
+        axNode('question-1-title', 13, 'StaticText', 'First question?', {
+          parentId: 'question-1',
+        }),
+      ],
+      domSnapshot: domSnapshot([{ backendNodeId: 1, nodeName: '#document', parentIndex: -1 }]),
+      frame: 'main',
+    });
+
+    expect(result.entries).toEqual([
+      { depth: 1, role: 'group', name: 'Question 1' },
+      { depth: 2, role: 'statictext', name: 'Single choice' },
+      { depth: 2, role: 'statictext', name: 'First question?' },
+      { depth: 1, role: 'group', name: 'Question 2' },
+      { depth: 2, role: 'statictext', name: 'Single choice' },
+      { depth: 2, role: 'statictext', name: 'Second question?' },
+    ]);
+  });
+
   it('merges accessible label fragments that resolve to one click target', () => {
     const result = buildSemanticPageSnapshot({
       axNodes: [
@@ -173,19 +273,20 @@ describe('buildSemanticPageSnapshot', () => {
     expect(result.targets).toEqual([
       expect.objectContaining({
         backendNodeId: 20,
+        role: 'option',
         name: 'A. First answer',
-        state: ['checked'],
-        actions: ['click'],
+        state: ['selected'],
+        actions: ['click', 'set_checked'],
       }),
     ]);
     expect(result.entries).toEqual([
       {
         depth: 1,
-        role: 'generic',
+        role: 'option',
         name: 'A. First answer',
         targetIndex: 0,
-        state: ['checked'],
-        actions: ['click'],
+        state: ['selected'],
+        actions: ['click', 'set_checked'],
       },
     ]);
   });
@@ -269,17 +370,17 @@ describe('buildSemanticPageSnapshot', () => {
     expect(result.targets).toEqual([
       expect.objectContaining({
         backendNodeId: 20,
-        role: 'generic',
+        role: 'option',
         name: 'A. First answer',
-        state: ['checked'],
-        actions: ['click'],
+        state: ['selected'],
+        actions: ['click', 'set_checked'],
       }),
       expect.objectContaining({
         backendNodeId: 30,
-        role: 'generic',
+        role: 'option',
         name: 'B. Second answer',
-        state: [],
-        actions: ['click'],
+        state: ['selected=false'],
+        actions: ['click', 'set_checked'],
       }),
       expect.objectContaining({ backendNodeId: 40, role: 'button', actions: ['click'] }),
     ]);
@@ -287,18 +388,19 @@ describe('buildSemanticPageSnapshot', () => {
       { depth: 1, role: 'statictext', name: '1. Which option is correct?' },
       {
         depth: 1,
-        role: 'generic',
+        role: 'option',
         name: 'A. First answer',
         targetIndex: 0,
-        state: ['checked'],
-        actions: ['click'],
+        state: ['selected'],
+        actions: ['click', 'set_checked'],
       },
       {
         depth: 1,
-        role: 'generic',
+        role: 'option',
         name: 'B. Second answer',
         targetIndex: 1,
-        actions: ['click'],
+        state: ['selected=false'],
+        actions: ['click', 'set_checked'],
       },
       {
         depth: 1,
@@ -308,8 +410,79 @@ describe('buildSemanticPageSnapshot', () => {
         actions: ['click'],
       },
     ]);
+    expect(result.hasVisualSurface).toBe(false);
     expect(JSON.stringify(result.entries)).not.toContain('bounds');
     expect(JSON.stringify(result.entries)).not.toContain('backendNodeId');
+  });
+
+  it('keeps answer-sheet navigation as ordinary clicks without selection semantics', () => {
+    const result = buildSemanticPageSnapshot({
+      axNodes: [
+        axNode('root', 1, 'RootWebArea', 'Exam', { childIds: ['jump-1', 'jump-2'] }),
+        axNode('jump-1', 21, 'StaticText', '1', { parentId: 'root' }),
+        axNode('jump-2', 31, 'StaticText', '2', { parentId: 'root' }),
+      ],
+      domSnapshot: domSnapshot([
+        { backendNodeId: 1, nodeName: '#document', parentIndex: -1 },
+        {
+          backendNodeId: 10,
+          nodeName: 'DIV',
+          parentIndex: 0,
+          attributes: { class: 'answer-list__WdF-a' },
+          bounds: [0, 0, 200, 100],
+        },
+        {
+          backendNodeId: 20,
+          nodeName: 'DIV',
+          parentIndex: 1,
+          attributes: { class: 'answer__3XFOT finished__Z49Cw' },
+          cursor: 'pointer',
+          clickable: true,
+          bounds: [10, 10, 32, 32],
+        },
+        {
+          backendNodeId: 21,
+          nodeName: 'SPAN',
+          parentIndex: 2,
+          cursor: 'pointer',
+          bounds: [10, 10, 32, 32],
+        },
+        {
+          backendNodeId: 30,
+          nodeName: 'DIV',
+          parentIndex: 1,
+          attributes: { class: 'answer__3XFOT' },
+          cursor: 'pointer',
+          clickable: true,
+          bounds: [50, 10, 32, 32],
+        },
+        {
+          backendNodeId: 31,
+          nodeName: 'SPAN',
+          parentIndex: 4,
+          cursor: 'pointer',
+          bounds: [50, 10, 32, 32],
+        },
+      ]),
+      frame: 'main',
+    });
+
+    expect(result.targets).toEqual([
+      expect.objectContaining({
+        backendNodeId: 20,
+        role: 'statictext',
+        name: '1',
+        state: [],
+        actions: ['click'],
+      }),
+      expect.objectContaining({
+        backendNodeId: 30,
+        role: 'statictext',
+        name: '2',
+        state: [],
+        actions: ['click'],
+      }),
+    ]);
   });
 
   it('does not expose a document-level delegated click listener as an action', () => {
@@ -331,6 +504,24 @@ describe('buildSemanticPageSnapshot', () => {
 
     expect(result.targets).toEqual([]);
     expect(result.entries).toEqual([]);
+  });
+
+  it('detects a rendered canvas as a visual fallback surface', () => {
+    const result = buildSemanticPageSnapshot({
+      axNodes: [axNode('root', 1, 'RootWebArea', 'Canvas app')],
+      domSnapshot: domSnapshot([
+        { backendNodeId: 1, nodeName: '#document', parentIndex: -1 },
+        {
+          backendNodeId: 2,
+          nodeName: 'CANVAS',
+          parentIndex: 0,
+          bounds: [0, 0, 800, 600],
+        },
+      ]),
+      frame: 'main',
+    });
+
+    expect(result.hasVisualSurface).toBe(true);
   });
 
   it('keeps native checked state and prunes duplicate inline text', () => {
@@ -368,9 +559,52 @@ describe('buildSemanticPageSnapshot', () => {
         name: 'Accept',
         targetIndex: 0,
         state: ['checked'],
-        actions: ['click'],
+        actions: ['click', 'set_checked'],
         frame: 'frame-child',
       },
     ]);
   });
+
+  it.each([
+    [false, ['checked=false']],
+    [true, ['checked']],
+  ] as const)(
+    'uses the backing checkbox semantics for a clickable static-text label (checked=%s)',
+    (checked, state) => {
+      const result = buildSemanticPageSnapshot({
+        axNodes: [
+          {
+            nodeId: 'label-text',
+            backendDOMNodeId: 13,
+            ignored: false,
+            role: { type: 'role', value: 'StaticText' },
+            name: { type: 'computedString', value: 'Option A' },
+          },
+        ],
+        domSnapshot: labeledCheckboxSnapshot(checked),
+        frame: 'main',
+      });
+
+      expect(result.entries).toEqual([
+        {
+          depth: 0,
+          role: 'checkbox',
+          name: 'Option A',
+          targetIndex: 0,
+          state,
+          actions: ['click', 'set_checked'],
+        },
+      ]);
+      expect(result.targets).toEqual([
+        {
+          backendNodeId: 11,
+          documentFrameId: 'frame-main',
+          role: 'checkbox',
+          name: 'Option A',
+          state,
+          actions: ['click', 'set_checked'],
+        },
+      ]);
+    },
+  );
 });

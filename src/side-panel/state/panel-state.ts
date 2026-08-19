@@ -3,6 +3,7 @@ import type {
   PanelEditableSettings,
   PanelSettingsSnapshot,
   PanelSnapshot,
+  PanelTask,
 } from '../../shared/protocol/panel-types';
 
 const taskStatusSchema = z.enum([
@@ -76,12 +77,14 @@ const taskSupplementSchema = z
 const panelTaskSchema = z
   .object({
     id: idSchema,
+    detailLevel: z.enum(['summary', 'full']).default('summary'),
     status: taskStatusSchema,
     goal: z.string().max(20_000),
     tabId: z.number().int().nonnegative().nullable(),
     createdAt: timestampSchema,
     updatedAt: timestampSchema,
     sequence: z.number().int().nonnegative(),
+    completedToolCallCount: z.number().int().nonnegative().optional(),
     lastError: z
       .object({
         code: z.string().max(128),
@@ -103,8 +106,8 @@ const panelTaskSchema = z
           })
           .strict(),
       )
-      .max(100),
-    completedToolResults: z.array(completedToolResultSchema).max(20),
+      .max(200),
+    completedToolResults: z.array(completedToolResultSchema).max(100),
     supplements: z.array(taskSupplementSchema).max(100).default([]),
   })
   .strict();
@@ -166,6 +169,15 @@ export const panelSnapshotSchema: z.ZodType<PanelSnapshot> = z
 export function parsePanelSnapshot(value: unknown): PanelSnapshot {
   const parsed = panelSnapshotSchema.safeParse(value);
   if (!parsed.success) throw new Error('Panel snapshot is invalid.');
+  return parsed.data;
+}
+
+/** Parses the task-only result payload returned for one explicit detail expansion. */
+export function parsePanelTaskDetails(value: unknown): PanelTask {
+  const parsed = panelTaskSchema.safeParse(value);
+  if (!parsed.success || parsed.data.detailLevel !== 'full') {
+    throw new Error('Panel task details are invalid.');
+  }
   return parsed.data;
 }
 

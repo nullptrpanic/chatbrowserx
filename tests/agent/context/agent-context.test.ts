@@ -226,6 +226,7 @@ describe('buildAgentContext', () => {
     const largeInspectPayload = `OLD_INSPECT_PAYLOAD_${'x'.repeat(20_000)}`;
     const commitArguments = JSON.stringify({
       state: 'Goal: continue from the checkpoint. Verified: inspection completed.',
+      throughCallId: 'call_old_inspect',
     });
     const commitOutput =
       '{"ok":true,"compactedCalls":1,"releasedTextChars":20000,"releasedImages":1}';
@@ -306,7 +307,10 @@ describe('buildAgentContext', () => {
   });
 
   it('keeps supplements and post-commit results ordered while loading only new screenshots', async () => {
-    const commitArguments = JSON.stringify({ state: 'Goal: continue with the corrected detail.' });
+    const commitArguments = JSON.stringify({
+      state: 'Goal: continue with the corrected detail.',
+      throughCallId: 'call_old_inspect',
+    });
     const commitOutput = '{"ok":true,"compactedCalls":1,"releasedTextChars":50,"releasedImages":1}';
     const messages = [
       message({

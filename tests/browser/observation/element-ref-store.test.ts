@@ -78,4 +78,127 @@ describe('ElementRefStore', () => {
       expect.objectContaining({ code: 'AMBIGUOUS_TARGET' }),
     );
   });
+
+  it('reuses a ref for the same document target while refreshing its semantic state', () => {
+    let id = 0;
+    const store = new ElementRefStore({ create: () => `ref_${++id}` });
+
+    const [first] = store.reconcileSnapshot(7, [ELEMENT]);
+    const [second] = store.reconcileSnapshot(7, [{ ...ELEMENT, state: ['focusable', 'checked'] }]);
+
+    expect(second).toBe(first);
+    expect(store.resolve('ref_1', 7)).toMatchObject({
+      backendNodeId: 42,
+      state: ['focusable', 'checked'],
+    });
+  });
+
+  it('issues a new ref when the document loader changes and removes the stale ref', () => {
+    let id = 0;
+    const store = new ElementRefStore({ create: () => `ref_${++id}` });
+
+    const [first] = store.reconcileSnapshot(7, [ELEMENT]);
+    const [second] = store.reconcileSnapshot(7, [{ ...ELEMENT, loaderId: 'loader-2' }]);
+
+    expect(first).toBe('ref_1');
+    expect(second).toBe('ref_2');
+    expect(() => store.resolve('ref_1', 7)).toThrow(
+      expect.objectContaining({ code: 'REF_NOT_FOUND' }),
+    );
+    expect(store.resolve('ref_2', 7)).toMatchObject({ loaderId: 'loader-2' });
+  });
+
+  it('updates known ref states even when the observed page has more than 200 targets', () => {
+    const store = new ElementRefStore({ create: () => 'ref_known' });
+    store.reconcileSnapshot(7, [ELEMENT]);
+    const observed = [
+      { ...ELEMENT, state: ['focusable', 'checked'] },
+      ...Array.from({ length: 200 }, (_, index) => ({
+        ...ELEMENT,
+        backendNodeId: 1_000 + index,
+        name: `Choice ${String(index)}`,
+      })),
+    ];
+
+    expect(store.updateObservedStates(7, observed)).toEqual([
+      {
+        ref: 'ref_known',
+        role: 'button',
+        state: ['focusable', 'checked'],
+        changed: true,
+      },
+    ]);
+  });
+
+  it('rebinds a ref when a uniquely named semantic target is recreated', () => {
+    const store = new ElementRefStore({ create: () => 'ref_known' });
+    store.reconcileSnapshot(7, [
+      {
+        ...ELEMENT,
+        role: 'checkbox',
+        name: 'A. TCE service upgrade',
+        state: ['checked=false'],
+        actions: ['click', 'set_checked'],
+      },
+    ]);
+
+    expect(
+      store.updateObservedStates(7, [
+        {
+          ...ELEMENT,
+          backendNodeId: 77,
+          role: 'checkbox',
+          name: 'A. TCE service upgrade',
+          state: ['checked'],
+          actions: ['click', 'set_checked'],
+        },
+      ]),
+    ).toEqual([
+      {
+        ref: 'ref_known',
+        role: 'checkbox',
+        state: ['checked'],
+        changed: true,
+      },
+    ]);
+    expect(store.resolve('ref_known', 7)).toMatchObject({
+      backendNodeId: 77,
+      state: ['checked'],
+    });
+  });
+
+  it('does not rebind a recreated target when its semantic identity is ambiguous', () => {
+    const store = new ElementRefStore({ create: () => 'ref_known' });
+    store.reconcileSnapshot(7, [
+      {
+        ...ELEMENT,
+        role: 'checkbox',
+        name: 'Select answer',
+        state: ['checked=false'],
+        actions: ['click', 'set_checked'],
+      },
+    ]);
+
+    expect(
+      store.updateObservedStates(7, [
+        {
+          ...ELEMENT,
+          backendNodeId: 77,
+          role: 'checkbox',
+          name: 'Select answer',
+          state: ['checked'],
+          actions: ['click', 'set_checked'],
+        },
+        {
+          ...ELEMENT,
+          backendNodeId: 78,
+          role: 'checkbox',
+          name: 'Select answer',
+          state: ['checked=false'],
+          actions: ['click', 'set_checked'],
+        },
+      ]),
+    ).toEqual([]);
+    expect(store.resolve('ref_known', 7)).toMatchObject({ backendNodeId: 42 });
+  });
 });

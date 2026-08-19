@@ -19,6 +19,7 @@ export interface ConversationViewProps {
   readonly onSuggestion: (value: string) => void;
   readonly onOpenImagePreview?: ((attachmentId: string) => Promise<boolean>) | undefined;
   readonly onOpenSourcePage?: ((source: PanelMessageSourcePage) => Promise<void>) | undefined;
+  readonly onLoadTaskDetails?: ((taskId: string) => Promise<void>) | undefined;
   readonly onPause: () => void;
   readonly onResume: () => void;
   readonly onRetry: () => void;
@@ -35,6 +36,7 @@ export function ConversationView({
   onSuggestion,
   onOpenImagePreview,
   onOpenSourcePage,
+  onLoadTaskDetails,
   onPause,
   onResume,
   onRetry,
@@ -110,6 +112,7 @@ export function ConversationView({
                 t={t}
                 onOpenImagePreview={onOpenImagePreview}
                 onOpenSourcePage={onOpenSourcePage}
+                onLoadTaskDetails={onLoadTaskDetails}
                 onPause={onPause}
                 onResume={onResume}
                 onRetry={onRetry}
@@ -123,6 +126,7 @@ export function ConversationView({
               attachments={attachments}
               t={t}
               onOpenImagePreview={onOpenImagePreview}
+              onLoadTaskDetails={onLoadTaskDetails}
               onPause={onPause}
               onResume={onResume}
               onRetry={onRetry}

@@ -44,7 +44,7 @@ const CONTENT: PageObservationContentPort = {
   setOverlaysHidden: vi.fn(async () => undefined),
 };
 
-function buttonDomSnapshot(frameId = 'frame-main', backendNodeId = 11) {
+function buttonDomSnapshot(frameId = 'frame-main', backendNodeId = 11, checked = false) {
   const strings = [
     'https://top.test/',
     'Top page',
@@ -77,6 +77,7 @@ function buttonDomSnapshot(frameId = 'frame-main', backendNodeId = 11) {
           backendNodeId: [1, backendNodeId],
           attributes: [[], []],
           isClickable: { index: [1] },
+          inputChecked: { index: checked ? [1] : [] },
         },
         layout: {
           nodeIndex: [1],
@@ -171,6 +172,7 @@ describe('PageObserver', () => {
     expect(result).toMatchObject({
       url: 'https://top.test/',
       debuggerSession: 'ephemeral',
+      visualFallbackAllowed: false,
       data: {
         mode: 'interactive',
         keys: 'd=depth,r=role(default generic),n=name,s=state,a=extra actions(ref defaults click),f=frame',
@@ -348,11 +350,174 @@ describe('PageObserver', () => {
 
     const result = await observer.inspect(7, 'interactive', new AbortController().signal);
 
-    expect(result.data).toEqual({
+    expect(result.data).toMatchObject({
       mode: 'interactive',
+      snapshot: expect.any(String),
       keys: 'd=depth,r=role(default generic),n=name,s=state,a=extra actions(ref defaults click),f=frame',
       elements: [{ d: 0, r: 'textbox', n: 'Query', a: ['type'], ref: 'ref_query' }],
     });
+  });
+
+  it('returns only state changes when inspecting from the latest interactive snapshot', async () => {
+    const snapshot: BrowserSessionSnapshot = {
+      tabId: 7,
+      generation: 1,
+      root: { tabId: 7 },
+      children: new Map(),
+    };
+    let checked = false;
+    let name = 'Choice A';
+    const transport = debuggerTransport((_session, method) => {
+      if (method === 'Accessibility.getFullAXTree') {
+        return {
+          nodes: [
+            {
+              nodeId: 'choice',
+              backendDOMNodeId: 11,
+              ignored: false,
+              role: { value: 'checkbox' },
+              name: { value: name },
+            },
+          ],
+        };
+      }
+      if (method === 'DOMSnapshot.captureSnapshot') {
+        return buttonDomSnapshot('frame-main', 11, checked);
+      }
+      if (method === 'Page.getFrameTree') return mainFrameTree();
+      if (method === 'Page.getNavigationHistory') {
+        return {
+          currentIndex: 0,
+          entries: [
+            { id: 1, url: 'https://top.test/', title: 'Top page', transitionType: 'typed' },
+          ],
+        };
+      }
+      return {};
+    });
+    let refId = 0;
+    const refs = new ElementRefStore({ create: () => `ref_${String(++refId)}` });
+    const observer = new PageObserver({
+      sessions: sessions(snapshot),
+      transport,
+      content: CONTENT,
+      refs,
+    });
+
+    const first = await observer.inspect(7, 'interactive', new AbortController().signal);
+    const firstSnapshot = first.data.snapshot;
+    expect(firstSnapshot).toEqual(expect.any(String));
+    expect(first.data).toMatchObject({
+      elements: [
+        {
+          r: 'checkbox',
+          n: 'Choice A',
+          s: ['checked=false'],
+          a: ['set_checked'],
+          ref: 'ref_1',
+        },
+      ],
+    });
+
+    checked = true;
+    const second = await observer.inspect(7, 'interactive', new AbortController().signal, {
+      since: firstSnapshot as string,
+    });
+
+    expect(second.data).toEqual({
+      mode: 'interactive',
+      snapshot: expect.any(String),
+      base: firstSnapshot,
+      changes: [{ i: 0, s: ['checked'] }],
+    });
+    expect(second.data.snapshot).not.toBe(firstSnapshot);
+    expect(refs.resolve('ref_1', 7)).toMatchObject({ state: ['checked'] });
+
+    const third = await observer.inspect(7, 'interactive', new AbortController().signal, {
+      since: second.data.snapshot as string,
+    });
+    expect(third.data).toEqual({
+      mode: 'interactive',
+      snapshot: expect.any(String),
+      base: second.data.snapshot,
+      unchanged: true,
+    });
+
+    checked = false;
+    const fourth = await observer.inspect(7, 'interactive', new AbortController().signal, {
+      since: third.data.snapshot as string,
+    });
+    expect(fourth.data).toMatchObject({
+      base: third.data.snapshot,
+      changes: [{ i: 0, s: ['checked=false'] }],
+    });
+
+    name = 'Choice B';
+    const fifth = await observer.inspect(7, 'interactive', new AbortController().signal, {
+      since: fourth.data.snapshot as string,
+    });
+    expect(fifth.data).toMatchObject({
+      snapshot: expect.any(String),
+      elements: [
+        {
+          r: 'checkbox',
+          n: 'Choice B',
+          s: ['checked=false'],
+          a: ['set_checked'],
+          ref: 'ref_1',
+        },
+      ],
+    });
+    expect(fifth.data).not.toHaveProperty('base');
+    expect(fifth.data).not.toHaveProperty('changes');
+  });
+
+  it('returns a full interactive tree after interactive snapshot baselines are invalidated', async () => {
+    const snapshot: BrowserSessionSnapshot = {
+      tabId: 7,
+      generation: 1,
+      root: { tabId: 7 },
+      children: new Map(),
+    };
+    const transport = debuggerTransport((_session, method) => {
+      if (method === 'Accessibility.getFullAXTree') {
+        return {
+          nodes: [
+            {
+              nodeId: 'button',
+              backendDOMNodeId: 11,
+              ignored: false,
+              role: { value: 'button' },
+              name: { value: 'Submit' },
+            },
+          ],
+        };
+      }
+      if (method === 'DOMSnapshot.captureSnapshot') return buttonDomSnapshot();
+      if (method === 'Page.getFrameTree') return mainFrameTree();
+      if (method === 'Page.getNavigationHistory') return { currentIndex: 0, entries: [] };
+      return {};
+    });
+    const observer = new PageObserver({
+      sessions: sessions(snapshot),
+      transport,
+      content: CONTENT,
+      refs: new ElementRefStore({ create: () => 'ref_full' }),
+    });
+
+    const first = await observer.inspect(7, 'interactive', new AbortController().signal);
+    observer.invalidateInteractiveSnapshots();
+    const result = await observer.inspect(7, 'interactive', new AbortController().signal, {
+      since: first.data.snapshot as string,
+    });
+
+    expect(result.data).toMatchObject({
+      mode: 'interactive',
+      snapshot: expect.any(String),
+      elements: [{ r: 'button', n: 'Submit', ref: 'ref_full' }],
+    });
+    expect(result.data).not.toHaveProperty('base');
+    expect(result.data).not.toHaveProperty('changes');
   });
 
   it('retains the truncation marker when interactive elements were omitted', async () => {
@@ -501,6 +666,74 @@ describe('PageObserver', () => {
     expect(persistScreenshot).toHaveBeenCalledWith(preparedBlob);
     expect(persistScreenshot).toHaveBeenCalledOnce();
     expect(canvases).toEqual([{ width: 1440, height: 918 }]);
+    expect(close).toHaveBeenCalledOnce();
+  });
+
+  it('captures through CDP when hiding extension overlays is unavailable', async () => {
+    const snapshot: BrowserSessionSnapshot = {
+      tabId: 7,
+      generation: 1,
+      root: { tabId: 7 },
+      children: new Map(),
+    };
+    const pngBase64 =
+      'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=';
+    const transport = debuggerTransport((_session, method) => {
+      if (method === 'Page.getLayoutMetrics') {
+        return {
+          visualViewport: {
+            pageX: 0,
+            pageY: 0,
+            clientWidth: 1,
+            clientHeight: 1,
+          },
+        };
+      }
+      if (method === 'Page.captureScreenshot') return { data: pngBase64 };
+      if (method === 'Page.getNavigationHistory') {
+        return {
+          currentIndex: 0,
+          entries: [
+            {
+              id: 1,
+              url: 'https://top.test/',
+              title: 'Top page',
+              transitionType: 'typed',
+            },
+          ],
+        };
+      }
+      return {};
+    });
+    const setOverlaysHidden = vi.fn(async () => {
+      throw Object.assign(new Error('page bridge unavailable'), { code: 'PAGE_UNAVAILABLE' });
+    });
+    const close = vi.fn();
+    vi.stubGlobal(
+      'createImageBitmap',
+      vi.fn(async () => ({ width: 1, height: 1, close })),
+    );
+    const persistScreenshot = vi.fn(async () => ({ id: 'attachment_screenshot' }));
+    const observer = new PageObserver({
+      sessions: sessions(snapshot),
+      transport,
+      content: { ...CONTENT, setOverlaysHidden },
+      refs: new ElementRefStore({ create: () => 'unused' }),
+      persistScreenshot,
+    });
+
+    const result = await observer.inspect(7, 'screenshot', new AbortController().signal);
+
+    expect(result).toMatchObject({
+      data: { mode: 'screenshot', attachmentId: 'attachment_screenshot' },
+      attachmentIds: ['attachment_screenshot'],
+    });
+    expect(transport.send).toHaveBeenCalledWith(
+      { tabId: 7 },
+      'Page.captureScreenshot',
+      expect.anything(),
+    );
+    expect(persistScreenshot).toHaveBeenCalledOnce();
     expect(close).toHaveBeenCalledOnce();
   });
 

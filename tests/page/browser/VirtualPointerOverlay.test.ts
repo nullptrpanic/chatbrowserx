@@ -10,6 +10,79 @@ afterEach(() => {
 });
 
 describe('VirtualPointerOverlay', () => {
+  it('acknowledges feedback without waiting for a paint frame', async () => {
+    vi.spyOn(window, 'requestAnimationFrame').mockImplementation(() => 1);
+    const pointer = mountVirtualPointer(document, window);
+    let acknowledged = false;
+
+    void pointer
+      .show({ x: 100, y: 80, fromX: 10, fromY: 20, effect: 'click' })
+      .then(() => (acknowledged = true));
+    await Promise.resolve();
+
+    expect(acknowledged).toBe(true);
+    pointer.destroy();
+  });
+
+  it('hides immediately and discards pending feedback when the page becomes hidden', async () => {
+    const previousVisibility = Object.getOwnPropertyDescriptor(document, 'visibilityState');
+    Object.defineProperty(document, 'visibilityState', { configurable: true, value: 'visible' });
+    let pendingFrame: FrameRequestCallback | undefined;
+    vi.spyOn(window, 'requestAnimationFrame').mockImplementation((callback) => {
+      pendingFrame = callback;
+      return 1;
+    });
+    const pointer = mountVirtualPointer(document, window);
+
+    try {
+      await pointer.show({ x: 100, y: 80, fromX: 10, fromY: 20, effect: 'click' });
+      const host = document.querySelector<HTMLElement>(
+        '[data-chatbrowserx-overlay="virtual-pointer"]',
+      );
+      const cursor = host?.shadowRoot?.querySelector<SVGElement>('[data-part="cursor"]');
+      expect(cursor?.style.opacity).toBe('0');
+      pendingFrame?.(0);
+      expect(cursor?.style.opacity).toBe('1');
+
+      Object.defineProperty(document, 'visibilityState', { configurable: true, value: 'hidden' });
+      document.dispatchEvent(new Event('visibilitychange'));
+      expect(cursor?.style.opacity).toBe('0');
+
+      Object.defineProperty(document, 'visibilityState', { configurable: true, value: 'visible' });
+      pendingFrame?.(0);
+      expect(cursor?.style.opacity).toBe('0');
+      expect(host?.shadowRoot?.querySelector('[data-part="ripple"]')).toBeNull();
+    } finally {
+      pointer.destroy();
+      if (previousVisibility) {
+        Object.defineProperty(document, 'visibilityState', previousVisibility);
+      } else {
+        Reflect.deleteProperty(document, 'visibilityState');
+      }
+    }
+  });
+
+  it('does not replay expired feedback when paint frames resume later', async () => {
+    let pendingFrame: FrameRequestCallback | undefined;
+    vi.spyOn(window, 'requestAnimationFrame').mockImplementation((callback) => {
+      pendingFrame = callback;
+      return 1;
+    });
+    vi.spyOn(window.performance, 'now').mockReturnValue(0);
+    const pointer = mountVirtualPointer(document, window);
+
+    await pointer.show({ x: 100, y: 80, fromX: 10, fromY: 20, effect: 'click' });
+    const host = document.querySelector<HTMLElement>(
+      '[data-chatbrowserx-overlay="virtual-pointer"]',
+    );
+    const cursor = host?.shadowRoot?.querySelector<SVGElement>('[data-part="cursor"]');
+    pendingFrame?.(1_000);
+
+    expect(cursor?.style.opacity).toBe('0');
+    expect(host?.shadowRoot?.querySelector('[data-part="ripple"]')).toBeNull();
+    pointer.destroy();
+  });
+
   it('removes a stale overlay left by an earlier content-script context', () => {
     const stale = document.createElement('div');
     stale.dataset.chatbrowserxOverlay = 'virtual-pointer';

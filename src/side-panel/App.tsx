@@ -129,6 +129,7 @@ export function App({ runtimePort, environment, panelClient, attachmentClient }:
               onSuggestion={setDraftText}
               onOpenImagePreview={(attachmentId) => client.openImagePreview(attachmentId)}
               onOpenSourcePage={(source) => client.openSourcePage(source)}
+              onLoadTaskDetails={(taskId) => client.loadTaskDetails(taskId)}
               onPause={() => void client.pauseTask()}
               onResume={() => void client.resumeTask()}
               onRetry={() => void client.retryTask()}

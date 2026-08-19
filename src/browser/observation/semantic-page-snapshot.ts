@@ -7,7 +7,7 @@ export const SEMANTIC_SNAPSHOT_STYLES = [
   'pointer-events',
 ] as const;
 
-export type SemanticAction = 'click' | 'type' | 'select';
+export type SemanticAction = 'click' | 'set_checked' | 'type' | 'select';
 
 export interface SemanticPageEntry {
   readonly depth: number;
@@ -31,6 +31,7 @@ export interface SemanticPageTarget {
 export interface SemanticPageSnapshot {
   readonly entries: readonly SemanticPageEntry[];
   readonly targets: readonly SemanticPageTarget[];
+  readonly hasVisualSurface: boolean;
 }
 
 interface BuildSemanticPageSnapshotInput {
@@ -74,6 +75,11 @@ const UNSAFE_CLICK_NODE_NAMES = new Set(['#DOCUMENT', 'HTML', 'BODY', 'HEAD']);
 const STATE_ATTRIBUTES = ['checked', 'selected', 'expanded', 'pressed', 'disabled'] as const;
 const MODEL_AX_STATES = new Set([...STATE_ATTRIBUTES, 'busy', 'invalid', 'readonly', 'required']);
 const CLASS_STATE_PATTERN = /^(checked|selected|active|disabled)(?:$|[-_])/i;
+const SELECTABLE_ROLES = new Set(['checkbox', 'option', 'radio', 'switch']);
+const SELECTABLE_CLASS_PATTERN = /(?:^|[-_])(checkbox|radio|switch)(?:$|[-_])/i;
+const SELECTABLE_ITEM_CLASS_PATTERN = /(?:^|[-_])(answer|choice|option)(?:$|[-_])/i;
+const DIRECT_VISUAL_SURFACE_NODE_NAMES = new Set(['CANVAS', 'VIDEO']);
+const LARGE_VISUAL_SURFACE_NODE_NAMES = new Set(['IMG', 'SVG']);
 
 function normalizedText(value: unknown, maximum = 500): string {
   return typeof value === 'string' ? value.replace(/\s+/g, ' ').trim().slice(0, maximum) : '';
@@ -122,6 +128,16 @@ function uniqueState(values: readonly string[]): readonly string[] {
   return [...byName.values()].slice(0, 20);
 }
 
+function hasObservableSelectionState(state: readonly string[]): boolean {
+  return state.some(
+    (value) =>
+      value === 'checked' ||
+      value === 'checked=false' ||
+      value === 'selected' ||
+      value === 'selected=false',
+  );
+}
+
 function mergedEntryName(current: string, incoming: string): string {
   if (current === incoming || current.includes(incoming)) return current;
   if (incoming.includes(current)) return incoming;
@@ -140,7 +156,7 @@ function preferredEntryRole(current: string, incoming: string): string {
 function compactTargetEntries(
   entries: readonly SemanticPageEntry[],
   targets: readonly SemanticPageTarget[],
-): SemanticPageSnapshot {
+): Pick<SemanticPageSnapshot, 'entries' | 'targets'> {
   const compactedEntries: SemanticPageEntry[] = [];
   const entryIndexByTarget = new Map<number, number>();
 
@@ -191,6 +207,13 @@ function compactTargetEntries(
         };
   });
   return { entries: compactedEntries, targets: compactedTargets };
+}
+
+function isVisualSurface(node: SnapshotDomNode): boolean {
+  if (!node.visible || node.bounds === undefined) return false;
+  const [, , width, height] = node.bounds;
+  if (DIRECT_VISUAL_SURFACE_NODE_NAMES.has(node.nodeName)) return width >= 8 && height >= 8;
+  return LARGE_VISUAL_SURFACE_NODE_NAMES.has(node.nodeName) && width >= 240 && height >= 160;
 }
 
 function rareBooleanIndexes(value: Protocol.DOMSnapshot.RareBooleanData | undefined): Set<number> {
@@ -333,7 +356,105 @@ function classState(node: SnapshotDomNode): readonly string[] {
   return result;
 }
 
-function domState(node: SnapshotDomNode): readonly string[] {
+function hasSiblingSelectionEvidence(
+  node: SnapshotDomNode,
+  structural: readonly string[],
+): boolean {
+  if (!node.parent) return false;
+  return node.parent.children
+    .filter(
+      (candidate) =>
+        candidate.nodeName === node.nodeName &&
+        structuralClassTokens(candidate).some((token) => structural.includes(token)),
+    )
+    .some((candidate) =>
+      classState(candidate).some((state) =>
+        ['active', 'checked', 'selected'].includes(state.split('=', 1)[0] ?? ''),
+      ),
+    );
+}
+
+function selectableRole(node: SnapshotDomNode): string | undefined {
+  const explicitRole = normalizedText(node.attributes.get('role')).toLowerCase();
+  if (SELECTABLE_ROLES.has(explicitRole)) return explicitRole;
+  if (node.nodeName === 'INPUT') {
+    const type = normalizedText(node.attributes.get('type')).toLowerCase();
+    if (type === 'checkbox' || type === 'radio') return type;
+  }
+  for (const token of (node.attributes.get('class') ?? '').split(/\s+/)) {
+    if (token.toLowerCase().includes('group')) continue;
+    const role = SELECTABLE_CLASS_PATTERN.exec(token)?.[1]?.toLowerCase();
+    if (role) return role;
+  }
+  const structural = structuralClassTokens(node);
+  if (
+    node.parent &&
+    structural.some((token) => SELECTABLE_ITEM_CLASS_PATTERN.test(token)) &&
+    hasSiblingSelectionEvidence(node, structural) &&
+    node.parent.children.some(
+      (sibling) =>
+        sibling !== node &&
+        sibling.nodeName === node.nodeName &&
+        structuralClassTokens(sibling).some((token) => structural.includes(token)),
+    )
+  ) {
+    return 'option';
+  }
+  return undefined;
+}
+
+function boundedDescendants(start: SnapshotDomNode): readonly SnapshotDomNode[] {
+  const result: SnapshotDomNode[] = [];
+  const queue = [...start.children];
+  while (queue.length > 0 && result.length < 100) {
+    const current = queue.shift();
+    if (!current) continue;
+    result.push(current);
+    queue.push(...current.children);
+  }
+  return result;
+}
+
+function associatedSelectableControl(
+  target: SnapshotDomNode,
+  domByBackendId: ReadonlyMap<number, SnapshotDomNode>,
+): { readonly node: SnapshotDomNode; readonly role: string } | undefined {
+  const directRole = selectableRole(target);
+  if (directRole) return { node: target, role: directRole };
+
+  let current: SnapshotDomNode | null = target;
+  for (let depth = 0; current && depth < 8; depth += 1) {
+    const role = selectableRole(current);
+    if (role) return { node: current, role };
+    if (current.nodeName === 'LABEL') {
+      const controlId = current.attributes.get('for');
+      if (controlId) {
+        for (const candidate of domByBackendId.values()) {
+          if (
+            candidate.documentFrameId === current.documentFrameId &&
+            candidate.attributes.get('id') === controlId
+          ) {
+            const candidateRole = selectableRole(candidate);
+            if (candidateRole) return { node: candidate, role: candidateRole };
+          }
+        }
+      }
+      for (const candidate of boundedDescendants(current)) {
+        const candidateRole = selectableRole(candidate);
+        if (candidateRole) return { node: candidate, role: candidateRole };
+      }
+    }
+    current = current.parent;
+  }
+
+  for (const candidate of boundedDescendants(target)) {
+    const role = selectableRole(candidate);
+    if (role) return { node: candidate, role };
+  }
+  return undefined;
+}
+
+function domState(node: SnapshotDomNode, role?: string): readonly string[] {
   const state: string[] = [];
   if (node.inputChecked) state.push('checked');
   if (node.optionSelected) state.push('selected');
@@ -345,6 +466,22 @@ function domState(node: SnapshotDomNode): readonly string[] {
     if (normalized) state.push(normalized);
   }
   state.push(...classState(node));
+  if (role === 'option') {
+    const selected = state.some((value) => ['active', 'checked', 'selected'].includes(value));
+    const remaining = state.filter(
+      (value) =>
+        !['active', 'checked', 'checked=false', 'selected', 'selected=false'].includes(value),
+    );
+    return uniqueState([selected ? 'selected' : 'selected=false', ...remaining]);
+  }
+  if (role === 'checkbox' || role === 'radio' || role === 'switch') {
+    const checked = state.some((value) => ['active', 'checked', 'selected'].includes(value));
+    const remaining = state.filter(
+      (value) =>
+        !['active', 'checked', 'checked=false', 'selected', 'selected=false'].includes(value),
+    );
+    return uniqueState([checked ? 'checked' : 'checked=false', ...remaining]);
+  }
   return uniqueState(state);
 }
 
@@ -403,6 +540,41 @@ function depthOf(
   return Math.min(depth, 40);
 }
 
+function orderedAxNodes(
+  nodes: readonly Protocol.Accessibility.AXNode[],
+): readonly Protocol.Accessibility.AXNode[] {
+  const byId = new Map(nodes.map((node) => [node.nodeId, node]));
+  const childrenByParent = new Map<string, Protocol.Accessibility.AXNode[]>();
+  for (const node of nodes) {
+    if (!node.parentId) continue;
+    const children = childrenByParent.get(node.parentId) ?? [];
+    children.push(node);
+    childrenByParent.set(node.parentId, children);
+  }
+
+  const ordered: Protocol.Accessibility.AXNode[] = [];
+  const visited = new Set<string>();
+  const visit = (node: Protocol.Accessibility.AXNode): void => {
+    if (visited.has(node.nodeId)) return;
+    visited.add(node.nodeId);
+    ordered.push(node);
+    const explicitChildren = new Set(node.childIds ?? []);
+    for (const childId of explicitChildren) {
+      const child = byId.get(childId);
+      if (child) visit(child);
+    }
+    for (const child of childrenByParent.get(node.nodeId) ?? []) {
+      if (!explicitChildren.has(child.nodeId)) visit(child);
+    }
+  };
+
+  for (const node of nodes) {
+    if (!node.parentId || !byId.has(node.parentId)) visit(node);
+  }
+  for (const node of nodes) visit(node);
+  return ordered;
+}
+
 /** Joins native AX semantics with bounded DOMSnapshot action evidence. */
 export function buildSemanticPageSnapshot(
   input: BuildSemanticPageSnapshotInput,
@@ -414,7 +586,7 @@ export function buildSemanticPageSnapshot(
   const targetIndexes = new Map<number, number>();
   const seenEntries = new Set<string>();
 
-  for (const node of input.axNodes) {
+  for (const node of orderedAxNodes(input.axNodes)) {
     if (node.ignored) continue;
     const role = axText(node.role).toLowerCase().slice(0, 100);
     const name = axText(node.name);
@@ -435,10 +607,22 @@ export function buildSemanticPageSnapshot(
     }
     if (!targetDomNode) actions = [];
 
+    const selectable = targetDomNode
+      ? associatedSelectableControl(targetDomNode, domByBackendId)
+      : undefined;
+    const effectiveRole = selectable?.role ?? role;
+
     let targetIndex: number | undefined;
     let state = axState(node);
     if (targetDomNode && actions.length > 0) {
-      state = uniqueState([...state, ...domState(targetDomNode)]);
+      state = uniqueState([
+        ...state,
+        ...(selectable ? domState(selectable.node, effectiveRole) : []),
+        ...domState(targetDomNode, effectiveRole),
+      ]);
+      if (actions.includes('click') && hasObservableSelectionState(state)) {
+        actions = [...actions, 'set_checked'];
+      }
       const existing = targetIndexes.get(targetDomNode.backendNodeId);
       if (existing !== undefined) targetIndex = existing;
       else {
@@ -447,7 +631,7 @@ export function buildSemanticPageSnapshot(
         targets.push({
           backendNodeId: targetDomNode.backendNodeId,
           documentFrameId: targetDomNode.documentFrameId,
-          role,
+          role: effectiveRole,
           name,
           state,
           actions,
@@ -457,13 +641,13 @@ export function buildSemanticPageSnapshot(
 
     const dedupeKey =
       targetIndex === undefined
-        ? `passive:${role}:${name}`
+        ? `passive:${node.parentId ?? 'root'}:${effectiveRole}:${name}`
         : `target:${String(targetIndex)}:${name}`;
     if (seenEntries.has(dedupeKey)) continue;
     seenEntries.add(dedupeKey);
     entries.push({
       depth: depthOf(node, axById),
-      role,
+      role: effectiveRole,
       name,
       ...(targetIndex === undefined ? {} : { targetIndex }),
       ...(state.length === 0 ? {} : { state }),
@@ -472,5 +656,8 @@ export function buildSemanticPageSnapshot(
     });
   }
 
-  return compactTargetEntries(entries, targets);
+  return {
+    ...compactTargetEntries(entries, targets),
+    hasVisualSurface: [...domByBackendId.values()].some(isVisualSurface),
+  };
 }

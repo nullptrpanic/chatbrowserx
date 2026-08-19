@@ -204,6 +204,68 @@ describe('PanelClient', () => {
     client.dispose();
   });
 
+  it('loads full historical task details on demand and retains them across polling', async () => {
+    const summary = snapshot();
+    const summaryTask = summary.tasks[0];
+    if (summaryTask === undefined) throw new Error('Task fixture is missing.');
+    const detailedTask = {
+      ...summaryTask,
+      detailLevel: 'full' as const,
+      sequence: 442,
+      updatedAt: 2_000,
+      events: Array.from({ length: 100 }, (_, index) => ({
+        sequence: index + 343,
+        type: index === 99 ? 'task.completed' : 'reasoning.summary-recorded',
+        reason: index === 99 ? 'done' : 'progress',
+        at: 1_342 + index,
+      })),
+      completedToolResults: Array.from({ length: 22 }, (_, index) => ({
+        callId: `call_${index}`,
+        toolName: 'browser_inspect',
+        argumentsJson: '{}',
+        output: `output_${index}`,
+        resultRef: `result_${index}`,
+        attachmentIds: [],
+      })),
+    };
+    const send = vi.fn<RuntimePort['send']>(async (message) => ({
+      version: 1,
+      requestId: message.requestId,
+      ok: true,
+      data:
+        message.type === 'panel.getTaskDetails'
+          ? detailedTask
+          : message.type === 'panel.getSnapshot'
+            ? summary
+            : { connected: true },
+    }));
+    const client = new PanelClient(
+      { send },
+      { getActiveTab: vi.fn(async () => ({ id: 7 })) },
+      { pollIntervalMs: 60_000 },
+    );
+    await client.connect();
+
+    await client.loadTaskDetails('task_1');
+    await client.refresh();
+
+    expect(client.getSnapshot().snapshot?.task).toMatchObject({
+      id: 'task_1',
+      detailLevel: 'full',
+      sequence: 442,
+    });
+    expect(client.getSnapshot().snapshot?.task?.events).toHaveLength(100);
+    expect(client.getSnapshot().snapshot?.task?.events[0]?.sequence).toBe(343);
+    expect(client.getSnapshot().snapshot?.task?.completedToolResults).toHaveLength(22);
+    expect(send).toHaveBeenCalledWith(
+      expect.objectContaining({
+        type: 'panel.getTaskDetails',
+        payload: { taskId: 'task_1' },
+      }),
+    );
+    client.dispose();
+  });
+
   it('submits into the latest conversation restored after reconnecting the panel', async () => {
     const submitted: Array<{
       readonly tabId: number;

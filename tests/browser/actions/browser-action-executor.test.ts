@@ -9,7 +9,10 @@ import type {
   DebuggerTransport,
 } from '../../../src/browser/debugger/debugger-transport';
 import type { BrowserSessionSnapshot } from '../../../src/browser/debugger/target-session-registry';
-import { ElementRefStore } from '../../../src/browser/observation/element-ref-store';
+import {
+  ElementRefStore,
+  type ObservedElementTarget,
+} from '../../../src/browser/observation/element-ref-store';
 
 const SNAPSHOT: BrowserSessionSnapshot = {
   tabId: 7,
@@ -17,6 +20,84 @@ const SNAPSHOT: BrowserSessionSnapshot = {
   root: { tabId: 7 },
   children: new Map(),
 };
+
+function checkedTargetDomSnapshot(checked = true, backendNodeId = 42) {
+  return {
+    strings: ['', 'frame-main', '#document', 'INPUT', 'pointer', 'block', 'visible', 'auto'],
+    documents: [
+      {
+        documentURL: 0,
+        title: 0,
+        baseURL: 0,
+        contentLanguage: 0,
+        encodingName: 0,
+        publicId: 0,
+        systemId: 0,
+        frameId: 1,
+        nodes: {
+          parentIndex: [-1, 0],
+          nodeType: [9, 1],
+          nodeName: [2, 3],
+          nodeValue: [0, 0],
+          backendNodeId: [1, backendNodeId],
+          attributes: [[], []],
+          isClickable: { index: [1] },
+          inputChecked: { index: checked ? [1] : [] },
+        },
+        layout: {
+          nodeIndex: [1],
+          styles: [[4, 5, 6, 7]],
+          bounds: [[10, 20, 100, 30]],
+          text: [0],
+          stackingContexts: { index: [] },
+        },
+        textBoxes: { layoutIndex: [], bounds: [], start: [], length: [] },
+      },
+    ],
+  };
+}
+
+function choiceDomSnapshot(selectedBackendNodeId: number) {
+  return {
+    strings: ['', 'frame-main', '#document', 'INPUT', 'pointer', 'block', 'visible', 'auto'],
+    documents: [
+      {
+        documentURL: 0,
+        title: 0,
+        baseURL: 0,
+        contentLanguage: 0,
+        encodingName: 0,
+        publicId: 0,
+        systemId: 0,
+        frameId: 1,
+        nodes: {
+          parentIndex: [-1, 0, 0],
+          nodeType: [9, 1, 1],
+          nodeName: [2, 3, 3],
+          nodeValue: [0, 0, 0],
+          backendNodeId: [1, 42, 43],
+          attributes: [[], [], []],
+          isClickable: { index: [1, 2] },
+          inputChecked: { index: selectedBackendNodeId === 42 ? [1] : [2] },
+        },
+        layout: {
+          nodeIndex: [1, 2],
+          styles: [
+            [4, 5, 6, 7],
+            [4, 5, 6, 7],
+          ],
+          bounds: [
+            [10, 20, 100, 30],
+            [10, 60, 100, 30],
+          ],
+          text: [0, 0],
+          stackingContexts: { index: [] },
+        },
+        textBoxes: { layoutIndex: [], bounds: [], start: [], length: [] },
+      },
+    ],
+  };
+}
 
 function call(name: string, arguments_: unknown) {
   return parseBrowserToolCall({
@@ -29,8 +110,10 @@ function call(name: string, arguments_: unknown) {
 function harness(
   options: {
     readonly os?: string;
+    readonly pointerPending?: boolean;
     readonly pointerRejects?: boolean;
     readonly page?: BrowserActionExecutorDependencies['page'];
+    readonly targets?: readonly ObservedElementTarget[];
     readonly responder?: (
       session: DebuggerSession,
       method: string,
@@ -113,23 +196,28 @@ function harness(
     onEvent: () => () => undefined,
     onDetach: () => () => undefined,
   };
-  const refs = new ElementRefStore({ create: () => 'ref_1' });
-  refs.replaceSnapshot(7, [
-    {
-      frameTargetId: null,
-      documentFrameId: 'frame-main',
-      loaderId: 'loader-1',
-      backendNodeId: 42,
-      role: 'button',
-      name: 'Continue',
-      state: [],
-      actions: ['click'],
-      frame: 'main',
-    },
-  ]);
+  let refId = 0;
+  const refs = new ElementRefStore({ create: () => `ref_${String(++refId)}` });
+  refs.replaceSnapshot(
+    7,
+    options.targets ?? [
+      {
+        frameTargetId: null,
+        documentFrameId: 'frame-main',
+        loaderId: 'loader-1',
+        backendNodeId: 42,
+        role: 'button',
+        name: 'Continue',
+        state: [],
+        actions: ['click'],
+        frame: 'main',
+      },
+    ],
+  );
   const pointer = {
     show: vi.fn(async () => {
       order.push('pointer');
+      if (options.pointerPending) await new Promise<void>(() => undefined);
       if (options.pointerRejects) throw new Error('Overlay unavailable');
     }),
   };
@@ -147,6 +235,7 @@ function harness(
     transport,
     send: vi.mocked(send),
     pointer,
+    refs,
     sessions,
     order,
   };
@@ -689,6 +778,834 @@ describe('BrowserActionExecutor', () => {
     });
   });
 
+  it('dispatches a click when pointer feedback never settles', async () => {
+    vi.useFakeTimers();
+    const { executor, send } = harness({ pointerPending: true });
+
+    const execution = executor.execute(
+      call('browser_click', {
+        tabId: 7,
+        ref: 'ref_1',
+        button: 'left',
+        count: 1,
+      }),
+      new AbortController().signal,
+    );
+    await vi.advanceTimersByTimeAsync(300);
+
+    expect(send).toHaveBeenCalledWith(
+      { tabId: 7 },
+      'Input.dispatchMouseEvent',
+      expect.objectContaining({ type: 'mousePressed', x: 60, y: 35 }),
+    );
+    await expect(execution).resolves.toMatchObject({
+      data: { dispatched: true },
+    });
+  });
+
+  it('executes an ordinary click on a selectable ref and returns the observed state', async () => {
+    let checked = false;
+    const { executor } = harness({
+      targets: [
+        {
+          frameTargetId: null,
+          documentFrameId: 'frame-main',
+          loaderId: 'loader-1',
+          backendNodeId: 42,
+          role: 'checkbox',
+          name: 'Continue',
+          state: ['checked=false'],
+          actions: ['click', 'set_checked'],
+          frame: 'main',
+        },
+      ],
+      responder: (_session, method, params) => {
+        if (method === 'Input.dispatchMouseEvent' && params?.type === 'mouseReleased') {
+          checked = true;
+        }
+        if (method === 'Accessibility.getFullAXTree') {
+          return {
+            nodes: [
+              {
+                nodeId: 'checkbox',
+                backendDOMNodeId: 42,
+                ignored: false,
+                role: { value: 'checkbox' },
+                name: { value: 'Continue' },
+                properties: [
+                  {
+                    name: 'checked',
+                    value: { type: 'boolean', value: checked },
+                  },
+                ],
+              },
+            ],
+          };
+        }
+        if (method === 'DOMSnapshot.captureSnapshot') return checkedTargetDomSnapshot(checked);
+        return undefined;
+      },
+    });
+
+    await expect(
+      executor.execute(
+        call('browser_click', {
+          tabId: 7,
+          ref: 'ref_1',
+          button: 'left',
+          count: 1,
+        }),
+        new AbortController().signal,
+      ),
+    ).resolves.toMatchObject({
+      data: {
+        action: 'click',
+        dispatched: true,
+        verified: 'target_remeasured',
+      },
+      observation: {
+        targetPresent: true,
+        target: { ref: 'ref_1', role: 'checkbox', state: ['checked'] },
+        changes: [{ ref: 'ref_1', state: ['checked'] }],
+      },
+    });
+  });
+
+  it('accepts an ordinary click on an already-selected radio without expecting it to clear', async () => {
+    const { executor, send } = harness({
+      targets: [
+        {
+          frameTargetId: null,
+          documentFrameId: 'frame-main',
+          loaderId: 'loader-1',
+          backendNodeId: 42,
+          role: 'radio',
+          name: 'Selected answer',
+          state: ['checked'],
+          actions: ['click', 'set_checked'],
+          frame: 'main',
+        },
+      ],
+      responder: (_session, method) => {
+        if (method === 'Accessibility.getFullAXTree') {
+          return {
+            nodes: [
+              {
+                nodeId: 'radio',
+                backendDOMNodeId: 42,
+                ignored: false,
+                role: { value: 'radio' },
+                name: { value: 'Selected answer' },
+                properties: [{ name: 'checked', value: { type: 'boolean', value: true } }],
+              },
+            ],
+          };
+        }
+        if (method === 'DOMSnapshot.captureSnapshot') return checkedTargetDomSnapshot(true);
+        return undefined;
+      },
+    });
+
+    await expect(
+      executor.execute(
+        call('browser_click', {
+          tabId: 7,
+          ref: 'ref_1',
+          button: 'left',
+          count: 1,
+        }),
+        new AbortController().signal,
+      ),
+    ).resolves.toMatchObject({
+      data: {
+        action: 'click',
+        strategy: 'pointer',
+        selectionVerified: true,
+      },
+      observation: { target: { ref: 'ref_1', role: 'radio', state: ['checked'] } },
+    });
+    expect(send.mock.calls.some(([, method]) => method === 'Runtime.callFunctionOn')).toBe(false);
+  });
+
+  it('waits for a delayed selectable state after an ordinary click', async () => {
+    vi.useFakeTimers();
+    let clickedAt: number | null = null;
+    const { executor, send } = harness({
+      targets: [
+        {
+          frameTargetId: null,
+          documentFrameId: 'frame-main',
+          loaderId: 'loader-1',
+          backendNodeId: 42,
+          role: 'checkbox',
+          name: 'Continue',
+          state: ['checked=false'],
+          actions: ['click', 'set_checked'],
+          frame: 'main',
+        },
+      ],
+      responder: (_session, method, params) => {
+        if (method === 'Input.dispatchMouseEvent' && params?.type === 'mouseReleased') {
+          clickedAt = Date.now();
+        }
+        const checked = clickedAt !== null && Date.now() - clickedAt >= 600;
+        if (method === 'Accessibility.getFullAXTree') {
+          return {
+            nodes: [
+              {
+                nodeId: 'checkbox',
+                backendDOMNodeId: 42,
+                ignored: false,
+                role: { value: 'checkbox' },
+                name: { value: 'Continue' },
+                properties: [
+                  {
+                    name: 'checked',
+                    value: { type: 'boolean', value: checked },
+                  },
+                ],
+              },
+            ],
+          };
+        }
+        if (method === 'DOMSnapshot.captureSnapshot') return checkedTargetDomSnapshot(checked);
+        return undefined;
+      },
+    });
+
+    const execution = executor.execute(
+      call('browser_click', {
+        tabId: 7,
+        ref: 'ref_1',
+        button: 'left',
+        count: 1,
+      }),
+      new AbortController().signal,
+    );
+    await vi.advanceTimersByTimeAsync(2_000);
+
+    await expect(execution).resolves.toMatchObject({
+      data: { action: 'click', dispatched: true },
+      observation: { target: { ref: 'ref_1', state: ['checked'] } },
+    });
+    expect(
+      send.mock.calls.filter(
+        ([, method, params]) =>
+          method === 'Input.dispatchMouseEvent' && params?.type === 'mousePressed',
+      ),
+    ).toHaveLength(1);
+  });
+
+  it('uses one DOM click fallback for an unchanged ordinary selectable click', async () => {
+    vi.useFakeTimers();
+    let domClicked = false;
+    const { executor, send } = harness({
+      targets: [
+        {
+          frameTargetId: null,
+          documentFrameId: 'frame-main',
+          loaderId: 'loader-1',
+          backendNodeId: 42,
+          role: 'checkbox',
+          name: 'Continue',
+          state: ['checked=false'],
+          actions: ['click', 'set_checked'],
+          frame: 'main',
+        },
+      ],
+      responder: (_session, method) => {
+        if (method === 'Runtime.callFunctionOn') {
+          domClicked = true;
+          return { result: { type: 'object', value: { dispatched: true } } };
+        }
+        if (method === 'Accessibility.getFullAXTree') {
+          return {
+            nodes: [
+              {
+                nodeId: 'checkbox',
+                backendDOMNodeId: 42,
+                ignored: false,
+                role: { value: 'checkbox' },
+                name: { value: 'Continue' },
+                properties: [
+                  {
+                    name: 'checked',
+                    value: { type: 'boolean', value: domClicked },
+                  },
+                ],
+              },
+            ],
+          };
+        }
+        if (method === 'DOMSnapshot.captureSnapshot') return checkedTargetDomSnapshot(domClicked);
+        return undefined;
+      },
+    });
+
+    const execution = executor.execute(
+      call('browser_click', {
+        tabId: 7,
+        ref: 'ref_1',
+        button: 'left',
+        count: 1,
+      }),
+      new AbortController().signal,
+    );
+    await vi.advanceTimersByTimeAsync(4_000);
+
+    await expect(execution).resolves.toMatchObject({
+      data: {
+        action: 'click',
+        dispatched: true,
+        strategy: 'dom_fallback',
+        selectionVerified: true,
+      },
+      observation: { target: { ref: 'ref_1', state: ['checked'] } },
+    });
+    expect(
+      send.mock.calls.filter(
+        ([, method, params]) =>
+          method === 'Input.dispatchMouseEvent' && params?.type === 'mousePressed',
+      ),
+    ).toHaveLength(1);
+  });
+
+  it('fails an ordinary selectable click when neither click strategy changes state', async () => {
+    vi.useFakeTimers();
+    const { executor, send } = harness({
+      targets: [
+        {
+          frameTargetId: null,
+          documentFrameId: 'frame-main',
+          loaderId: 'loader-1',
+          backendNodeId: 42,
+          role: 'checkbox',
+          name: 'Continue',
+          state: ['checked=false'],
+          actions: ['click', 'set_checked'],
+          frame: 'main',
+        },
+      ],
+      responder: (_session, method) => {
+        if (method === 'Accessibility.getFullAXTree') {
+          return {
+            nodes: [
+              {
+                nodeId: 'checkbox',
+                backendDOMNodeId: 42,
+                ignored: false,
+                role: { value: 'checkbox' },
+                name: { value: 'Continue' },
+                properties: [{ name: 'checked', value: { type: 'boolean', value: false } }],
+              },
+            ],
+          };
+        }
+        if (method === 'DOMSnapshot.captureSnapshot') return checkedTargetDomSnapshot(false);
+        return undefined;
+      },
+    });
+
+    const execution = executor.execute(
+      call('browser_click', {
+        tabId: 7,
+        ref: 'ref_1',
+        button: 'left',
+        count: 1,
+      }),
+      new AbortController().signal,
+    );
+    const assertion = expect(execution).rejects.toMatchObject({
+      code: 'ACTION_STATE_MISMATCH',
+    });
+    await vi.advanceTimersByTimeAsync(4_000);
+    await assertion;
+
+    expect(
+      send.mock.calls.filter(
+        ([, method, params]) =>
+          method === 'Input.dispatchMouseEvent' && params?.type === 'mousePressed',
+      ),
+    ).toHaveLength(1);
+  });
+
+  it('allows ordinary click when a selectable-looking role does not advertise set_checked', async () => {
+    const { executor } = harness({
+      targets: [
+        {
+          frameTargetId: null,
+          documentFrameId: 'frame-main',
+          loaderId: 'loader-1',
+          backendNodeId: 42,
+          role: 'option',
+          name: 'Open details',
+          state: [],
+          actions: ['click'],
+          frame: 'main',
+        },
+      ],
+    });
+
+    await expect(
+      executor.execute(
+        call('browser_click', {
+          tabId: 7,
+          ref: 'ref_1',
+          button: 'left',
+          count: 1,
+        }),
+        new AbortController().signal,
+      ),
+    ).resolves.toMatchObject({ data: { action: 'click', dispatched: true } });
+  });
+
+  it('does not dispatch when set_checked already matches the latest selectable state', async () => {
+    const { executor, send } = harness({
+      targets: [
+        {
+          frameTargetId: null,
+          documentFrameId: 'frame-main',
+          loaderId: 'loader-1',
+          backendNodeId: 42,
+          role: 'checkbox',
+          name: 'Option A',
+          state: ['checked'],
+          actions: ['click', 'set_checked'],
+          frame: 'main',
+        },
+      ],
+      responder: (_session, method) => {
+        if (method === 'Accessibility.getFullAXTree') {
+          return {
+            nodes: [
+              {
+                nodeId: 'option-a',
+                backendDOMNodeId: 42,
+                ignored: false,
+                role: { value: 'checkbox' },
+                name: { value: 'Option A' },
+                properties: [{ name: 'checked', value: { type: 'boolean', value: true } }],
+              },
+            ],
+          };
+        }
+        if (method === 'DOMSnapshot.captureSnapshot') return checkedTargetDomSnapshot();
+        return undefined;
+      },
+    });
+
+    const result = await executor.execute(
+      call('browser_set_checked', { tabId: 7, ref: 'ref_1', checked: true }),
+      new AbortController().signal,
+    );
+
+    expect(send).not.toHaveBeenCalledWith(
+      { tabId: 7 },
+      'Input.dispatchMouseEvent',
+      expect.anything(),
+    );
+    expect(result).toMatchObject({
+      data: { action: 'set_checked', dispatched: false, verified: true },
+      observation: {
+        targetPresent: true,
+        target: { ref: 'ref_1', role: 'checkbox', state: ['checked'] },
+        changes: [],
+      },
+    });
+  });
+
+  it('sets one selectable target and returns every observed selection change', async () => {
+    let selectedBackendNodeId = 42;
+    const targets: readonly ObservedElementTarget[] = [
+      {
+        frameTargetId: null,
+        documentFrameId: 'frame-main',
+        loaderId: 'loader-1',
+        backendNodeId: 42,
+        role: 'radio',
+        name: 'Option A',
+        state: ['checked'],
+        actions: ['click', 'set_checked'],
+        frame: 'main',
+      },
+      {
+        frameTargetId: null,
+        documentFrameId: 'frame-main',
+        loaderId: 'loader-1',
+        backendNodeId: 43,
+        role: 'radio',
+        name: 'Option B',
+        state: ['checked=false'],
+        actions: ['click', 'set_checked'],
+        frame: 'main',
+      },
+    ];
+    const { executor } = harness({
+      targets,
+      responder: (_session, method, params) => {
+        if (method === 'Input.dispatchMouseEvent' && params?.type === 'mouseReleased') {
+          selectedBackendNodeId = 43;
+        }
+        if (method === 'Accessibility.getFullAXTree') {
+          return {
+            nodes: targets.map((target, index) => ({
+              nodeId: `option-${String(index)}`,
+              backendDOMNodeId: target.backendNodeId,
+              ignored: false,
+              role: { value: 'radio' },
+              name: { value: target.name },
+              properties: [
+                {
+                  name: 'checked',
+                  value: {
+                    type: 'boolean',
+                    value: target.backendNodeId === selectedBackendNodeId,
+                  },
+                },
+              ],
+            })),
+          };
+        }
+        if (method === 'DOMSnapshot.captureSnapshot') {
+          return choiceDomSnapshot(selectedBackendNodeId);
+        }
+        return undefined;
+      },
+    });
+
+    const result = await executor.execute(
+      call('browser_set_checked', { tabId: 7, ref: 'ref_2', checked: true }),
+      new AbortController().signal,
+    );
+
+    expect(result).toMatchObject({
+      data: { action: 'set_checked', dispatched: true, verified: true },
+      observation: {
+        targetPresent: true,
+        target: { ref: 'ref_2', role: 'radio', state: ['checked'] },
+        changes: [
+          { ref: 'ref_1', state: ['checked=false'] },
+          { ref: 'ref_2', state: ['checked'] },
+        ],
+      },
+    });
+  });
+
+  it('waits for a delayed selection state without dispatching a second click', async () => {
+    vi.useFakeTimers();
+    let observationReads = 0;
+    const { executor, send } = harness({
+      targets: [
+        {
+          frameTargetId: null,
+          documentFrameId: 'frame-main',
+          loaderId: 'loader-1',
+          backendNodeId: 42,
+          role: 'checkbox',
+          name: 'Option A',
+          state: ['checked=false'],
+          actions: ['click', 'set_checked'],
+          frame: 'main',
+        },
+      ],
+      responder: (_session, method) => {
+        if (method === 'Accessibility.getFullAXTree') {
+          observationReads += 1;
+          const checked = observationReads >= 3;
+          return {
+            nodes: [
+              {
+                nodeId: 'option-a',
+                backendDOMNodeId: 42,
+                ignored: false,
+                role: { value: 'checkbox' },
+                name: { value: 'Option A' },
+                properties: [
+                  {
+                    name: 'checked',
+                    value: { type: 'boolean', value: checked },
+                  },
+                ],
+              },
+            ],
+          };
+        }
+        if (method === 'DOMSnapshot.captureSnapshot') {
+          return checkedTargetDomSnapshot(observationReads >= 3);
+        }
+        return undefined;
+      },
+    });
+
+    const execution = executor.execute(
+      call('browser_set_checked', { tabId: 7, ref: 'ref_1', checked: true }),
+      new AbortController().signal,
+    );
+    await vi.advanceTimersByTimeAsync(500);
+
+    await expect(execution).resolves.toMatchObject({
+      data: { action: 'set_checked', dispatched: true, verified: true },
+      observation: {
+        target: { ref: 'ref_1', state: ['checked'] },
+      },
+    });
+    expect(
+      send.mock.calls.filter(
+        ([, method, params]) =>
+          method === 'Input.dispatchMouseEvent' && params?.type === 'mousePressed',
+      ),
+    ).toHaveLength(1);
+  });
+
+  it('keeps the same ref when a selected control is recreated after the click', async () => {
+    let selected = false;
+    const { executor, refs } = harness({
+      targets: [
+        {
+          frameTargetId: null,
+          documentFrameId: 'frame-main',
+          loaderId: 'loader-1',
+          backendNodeId: 42,
+          role: 'checkbox',
+          name: 'A. TCE service upgrade',
+          state: ['checked=false'],
+          actions: ['click', 'set_checked'],
+          frame: 'main',
+        },
+      ],
+      responder: (_session, method, params) => {
+        if (method === 'Input.dispatchMouseEvent' && params?.type === 'mouseReleased') {
+          selected = true;
+        }
+        const backendNodeId = selected ? 77 : 42;
+        if (method === 'Accessibility.getFullAXTree') {
+          return {
+            nodes: [
+              {
+                nodeId: selected ? 'option-a-recreated' : 'option-a',
+                backendDOMNodeId: backendNodeId,
+                ignored: false,
+                role: { value: 'checkbox' },
+                name: { value: 'A. TCE service upgrade' },
+                properties: [
+                  {
+                    name: 'checked',
+                    value: { type: 'boolean', value: selected },
+                  },
+                ],
+              },
+            ],
+          };
+        }
+        if (method === 'DOMSnapshot.captureSnapshot') {
+          return checkedTargetDomSnapshot(selected, backendNodeId);
+        }
+        return undefined;
+      },
+    });
+
+    await expect(
+      executor.execute(
+        call('browser_set_checked', { tabId: 7, ref: 'ref_1', checked: true }),
+        new AbortController().signal,
+      ),
+    ).resolves.toMatchObject({
+      data: { action: 'set_checked', verified: true },
+      observation: { target: { ref: 'ref_1', state: ['checked'] } },
+    });
+    expect(refs.resolve('ref_1', 7)).toMatchObject({
+      backendNodeId: 77,
+      state: ['checked'],
+    });
+  });
+
+  it('waits for a selection state that settles after six hundred milliseconds', async () => {
+    vi.useFakeTimers();
+    let clickedAt: number | null = null;
+    const { executor, send } = harness({
+      targets: [
+        {
+          frameTargetId: null,
+          documentFrameId: 'frame-main',
+          loaderId: 'loader-1',
+          backendNodeId: 42,
+          role: 'checkbox',
+          name: 'Option A',
+          state: ['checked=false'],
+          actions: ['click', 'set_checked'],
+          frame: 'main',
+        },
+      ],
+      responder: (_session, method, params) => {
+        if (method === 'Input.dispatchMouseEvent' && params?.type === 'mouseReleased') {
+          clickedAt = Date.now();
+        }
+        const checked = clickedAt !== null && Date.now() - clickedAt >= 600;
+        if (method === 'Accessibility.getFullAXTree') {
+          return {
+            nodes: [
+              {
+                nodeId: 'option-a',
+                backendDOMNodeId: 42,
+                ignored: false,
+                role: { value: 'checkbox' },
+                name: { value: 'Option A' },
+                properties: [
+                  {
+                    name: 'checked',
+                    value: { type: 'boolean', value: checked },
+                  },
+                ],
+              },
+            ],
+          };
+        }
+        if (method === 'DOMSnapshot.captureSnapshot') return checkedTargetDomSnapshot(checked);
+        return undefined;
+      },
+    });
+
+    const execution = executor.execute(
+      call('browser_set_checked', { tabId: 7, ref: 'ref_1', checked: true }),
+      new AbortController().signal,
+    );
+    const assertion = expect(execution).resolves.toMatchObject({
+      data: { action: 'set_checked', dispatched: true, verified: true },
+      observation: { target: { ref: 'ref_1', state: ['checked'] } },
+    });
+    await vi.advanceTimersByTimeAsync(2_000);
+    await assertion;
+
+    expect(
+      send.mock.calls.filter(
+        ([, method, params]) =>
+          method === 'Input.dispatchMouseEvent' && params?.type === 'mousePressed',
+      ),
+    ).toHaveLength(1);
+  });
+
+  it('uses one DOM click fallback when a selectable target ignores the pointer click', async () => {
+    vi.useFakeTimers();
+    let domClicked = false;
+    const { executor, send } = harness({
+      targets: [
+        {
+          frameTargetId: null,
+          documentFrameId: 'frame-main',
+          loaderId: 'loader-1',
+          backendNodeId: 42,
+          role: 'checkbox',
+          name: 'Option A',
+          state: ['checked=false'],
+          actions: ['click', 'set_checked'],
+          frame: 'main',
+        },
+      ],
+      responder: (_session, method) => {
+        if (method === 'Runtime.callFunctionOn') {
+          domClicked = true;
+          return { result: { type: 'object', value: { dispatched: true } } };
+        }
+        if (method === 'Accessibility.getFullAXTree') {
+          return {
+            nodes: [
+              {
+                nodeId: 'option-a',
+                backendDOMNodeId: 42,
+                ignored: false,
+                role: { value: 'checkbox' },
+                name: { value: 'Option A' },
+                properties: [
+                  {
+                    name: 'checked',
+                    value: { type: 'boolean', value: domClicked },
+                  },
+                ],
+              },
+            ],
+          };
+        }
+        if (method === 'DOMSnapshot.captureSnapshot') return checkedTargetDomSnapshot(domClicked);
+        return undefined;
+      },
+    });
+
+    const execution = executor.execute(
+      call('browser_set_checked', { tabId: 7, ref: 'ref_1', checked: true }),
+      new AbortController().signal,
+    );
+    const assertion = expect(execution).resolves.toMatchObject({
+      data: {
+        action: 'set_checked',
+        dispatched: true,
+        requested: true,
+        verified: true,
+        strategy: 'dom_fallback',
+      },
+      observation: { target: { ref: 'ref_1', state: ['checked'] } },
+    });
+    await vi.advanceTimersByTimeAsync(4_000);
+    await assertion;
+
+    expect(
+      send.mock.calls.filter(
+        ([, method, params]) =>
+          method === 'Input.dispatchMouseEvent' && params?.type === 'mousePressed',
+      ),
+    ).toHaveLength(1);
+    expect(send).toHaveBeenCalledWith(
+      { tabId: 7 },
+      'Runtime.callFunctionOn',
+      expect.objectContaining({ userGesture: true }),
+    );
+  });
+
+  it('fails and invalidates the ref when a requested selection never settles', async () => {
+    const { executor, refs } = harness({
+      targets: [
+        {
+          frameTargetId: null,
+          documentFrameId: 'frame-main',
+          loaderId: 'loader-1',
+          backendNodeId: 42,
+          role: 'checkbox',
+          name: 'Option A',
+          state: ['checked=false'],
+          actions: ['click', 'set_checked'],
+          frame: 'main',
+        },
+      ],
+      responder: (_session, method) => {
+        if (method === 'Accessibility.getFullAXTree') {
+          return {
+            nodes: [
+              {
+                nodeId: 'option-a',
+                backendDOMNodeId: 42,
+                ignored: false,
+                role: { value: 'checkbox' },
+                name: { value: 'Option A' },
+                properties: [{ name: 'checked', value: { type: 'boolean', value: false } }],
+              },
+            ],
+          };
+        }
+        if (method === 'DOMSnapshot.captureSnapshot') return checkedTargetDomSnapshot(false);
+        return undefined;
+      },
+    });
+
+    await expect(
+      executor.execute(
+        call('browser_set_checked', { tabId: 7, ref: 'ref_1', checked: true }),
+        new AbortController().signal,
+      ),
+    ).rejects.toMatchObject({ code: 'ACTION_STATE_MISMATCH' });
+    expect(() => refs.resolve('ref_1', 7)).toThrowError(
+      expect.objectContaining({ code: 'REF_NOT_FOUND' }),
+    );
+  });
+
   it('automatically scrolls a stable ref into view and measures it again before clicking', async () => {
     const { executor, send, pointer, order } = harness({
       responder: (_session, method) => {
@@ -703,7 +1620,9 @@ describe('BrowserActionExecutor', () => {
           };
         }
         if (method === 'DOM.getBoxModel') {
-          return { model: { border: [410, 820, 510, 820, 510, 850, 410, 850] } };
+          return {
+            model: { border: [410, 820, 510, 820, 510, 850, 410, 850] },
+          };
         }
         return undefined;
       },

@@ -137,6 +137,7 @@ export class TaskCommandService implements TaskCommandPort {
               },
             ],
       pendingToolCall: null,
+      browserToolCallsInAttempt: 0,
       browserTargetTabId: task.tabId,
       createdAt: task.createdAt,
     };
@@ -231,6 +232,7 @@ export class TaskCommandService implements TaskCommandPort {
         source.checkpoint.pendingToolCall === null
           ? null
           : { ...source.checkpoint.pendingToolCall },
+      browserToolCallsInAttempt: 0,
       browserTargetTabId: task.tabId,
       createdAt: task.createdAt,
     };
@@ -290,7 +292,13 @@ export class TaskCommandService implements TaskCommandPort {
     if (snapshot.task.status === 'queued') {
       return snapshot;
     }
-    return this.#saveTransition(snapshot, 'task.retried', 'user_retry');
+    return this.#saveTransition(
+      snapshot,
+      'task.retried',
+      'user_retry',
+      snapshot.checkpoint.continuationItems,
+      0,
+    );
   }
 
   /**
@@ -345,6 +353,7 @@ export class TaskCommandService implements TaskCommandPort {
     type: TaskEventType,
     reason: string,
     continuationItems = snapshot.checkpoint.continuationItems,
+    browserToolCallsInAttempt = snapshot.checkpoint.browserToolCallsInAttempt ?? 0,
   ): Promise<TaskSnapshot> {
     const latestEventSequence = snapshot.events.at(-1)?.sequence ?? 0;
     if (latestEventSequence !== snapshot.checkpoint.sequence) {
@@ -378,6 +387,7 @@ export class TaskCommandService implements TaskCommandPort {
       sequence,
       taskStatus: task.status,
       continuationItems,
+      browserToolCallsInAttempt,
       createdAt: at,
     };
 

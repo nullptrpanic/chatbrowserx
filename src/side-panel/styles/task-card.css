@@ -207,6 +207,10 @@
   grid-column: 2 / -1;
 }
 
+.task-event-list li.task-supplement-entry {
+  display: block;
+}
+
 .task-event-reasoning,
 .task-event-supplement {
   min-width: 0;

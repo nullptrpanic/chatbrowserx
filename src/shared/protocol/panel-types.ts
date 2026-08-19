@@ -74,12 +74,16 @@ export interface PanelTaskSupplement {
 
 export interface PanelTask {
   readonly id: string;
+  /** Summary projections are lightweight; full projections are loaded only after expansion. */
+  readonly detailLevel?: 'summary' | 'full';
   readonly status: PanelTaskStatus;
   readonly goal: string;
   readonly tabId: number | null;
   readonly createdAt: number;
   readonly updatedAt: number;
   readonly sequence: number;
+  /** Total completed tool calls; optional only for compatibility with an older live panel. */
+  readonly completedToolCallCount?: number | undefined;
   readonly lastError: {
     readonly code: string;
     readonly retryable: boolean;

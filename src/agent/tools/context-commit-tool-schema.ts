@@ -15,10 +15,22 @@ export const contextCommitToolSchema = z
       .min(1)
       .max(MAX_CONTEXT_STATE_CHARACTERS)
       .refine((value) => value.trim().length > 0),
+    throughCallId: z
+      .string()
+      .min(1)
+      .max(MAX_TOOL_CALL_ID_CHARACTERS)
+      .refine((value) => value.trim().length > 0),
   })
   .strict();
 
 export type ContextCommitToolInput = z.infer<typeof contextCommitToolSchema>;
+
+const legacyContextCommitToolSchema = contextCommitToolSchema.omit({ throughCallId: true });
+
+export interface RecordedContextCommitToolInput {
+  readonly state: string;
+  readonly throughCallId?: string;
+}
 
 export interface ContextCommitToolCallSource {
   readonly callId: string;
@@ -33,36 +45,70 @@ export interface ParsedContextCommitToolCall {
   readonly arguments: ContextCommitToolInput;
 }
 
-export const CONTEXT_COMMIT_TOOL_DEFINITION: ModelToolDefinition = {
-  type: 'function',
-  name: CONTEXT_COMMIT_TOOL_NAME,
-  description:
-    'Commit a self-contained working-state checkpoint. Call this when the current ' +
-    'working state should replace the raw tool calls and tool outputs that came before ' +
-    'this call, for example after completing a meaningful phase or establishing a new ' +
-    'stable task state. Future model requests will omit those earlier tool calls and ' +
-    'outputs and retain this checkpoint instead. The state must preserve the user goal, ' +
-    'constraints, verified facts, current browser or task state, unresolved issues, ' +
-    'important evidence, and the exact next step. This operation does not delete user ' +
-    'messages, system instructions, or local audit records. Do not call immediately ' +
-    'before a final answer unless the checkpoint is needed for later continuation.',
-  parameters: {
-    type: 'object',
-    properties: {
-      state: {
-        type: 'string',
-        minLength: 1,
-        maxLength: MAX_CONTEXT_STATE_CHARACTERS,
-        description:
-          'A concise, self-contained working-state summary. Include everything needed ' +
-          'to continue correctly without reading the earlier raw tool results.',
+export interface ParsedRecordedContextCommitToolCall {
+  readonly callId: string;
+  readonly name: typeof CONTEXT_COMMIT_TOOL_NAME;
+  readonly argumentsJson: string;
+  readonly arguments: RecordedContextCommitToolInput;
+}
+
+function contextCommitToolDefinition(validThroughCallIds?: readonly string[]): ModelToolDefinition {
+  return {
+    type: 'function',
+    name: CONTEXT_COMMIT_TOOL_NAME,
+    description:
+      'Commit a self-contained working-state checkpoint. Call this when the current ' +
+      'working state should replace raw tool calls and outputs through a specific completed ' +
+      'non-commit tool call, for example after completing a meaningful phase or establishing ' +
+      "a new stable task state. Copy that function call's call_id into throughCallId. Future " +
+      'model requests will omit tool pairs through that call inclusively, retain later tool ' +
+      'pairs in raw form, and retain this checkpoint at that boundary. The state must summarize ' +
+      'everything through throughCallId and preserve the user goal, ' +
+      'constraints, verified facts, current browser or task state, unresolved issues, ' +
+      'important evidence, and failed actions. Record only evidence-backed state: do not turn ' +
+      'an unverified recovery idea into a future instruction, and do not claim that retrying, ' +
+      'reloading, or taking a screenshot worked unless a later successful result verified it. ' +
+      'Leave uncertain choices unresolved. This operation does not delete user ' +
+      'messages, system instructions, or local audit records. Do not call immediately ' +
+      'before a final answer unless the checkpoint is needed for later continuation.',
+    parameters: {
+      type: 'object',
+      properties: {
+        state: {
+          type: 'string',
+          minLength: 1,
+          maxLength: MAX_CONTEXT_STATE_CHARACTERS,
+          description:
+            'A concise, self-contained, evidence-backed working-state summary. Include verified ' +
+            'facts, failed actions, and unresolved issues needed to continue correctly without ' +
+            'reading the earlier raw tool results; exclude speculative next-step instructions.',
+        },
+        throughCallId: {
+          type: 'string',
+          minLength: 1,
+          maxLength: MAX_TOOL_CALL_ID_CHARACTERS,
+          ...(validThroughCallIds === undefined ? {} : { enum: [...validThroughCallIds] }),
+          description:
+            'The call_id of a completed non-commit function call. The prior checkpoint and ' +
+            'every completed tool pair through this call are replaced inclusively; later tool ' +
+            'pairs remain available in raw form.',
+        },
       },
+      required: ['state', 'throughCallId'],
+      additionalProperties: false,
     },
-    required: ['state'],
-    additionalProperties: false,
-  },
-  strict: true,
-};
+    strict: true,
+  };
+}
+
+export const CONTEXT_COMMIT_TOOL_DEFINITION = contextCommitToolDefinition();
+
+/** Binds the commit cursor to IDs that are present in the current model continuation. */
+export function createContextCommitToolDefinition(
+  validThroughCallIds: readonly string[],
+): ModelToolDefinition {
+  return contextCommitToolDefinition(validThroughCallIds);
+}
 
 /** Parses one internal context commit while replacing unsafe validation details. */
 export function parseContextCommitToolCall(
@@ -83,6 +129,32 @@ export function parseContextCommitToolCall(
       name: CONTEXT_COMMIT_TOOL_NAME,
       argumentsJson: input.argumentsJson,
       arguments: contextCommitToolSchema.parse(value),
+    };
+  } catch {
+    throw providerErrorFromCode('INVALID_RESPONSE');
+  }
+}
+
+/** Parses a durable commit while accepting the cursorless shape recorded by older builds. */
+export function parseRecordedContextCommitToolCall(
+  input: ContextCommitToolCallSource,
+): ParsedRecordedContextCommitToolCall {
+  try {
+    if (
+      input.callId.trim().length === 0 ||
+      input.callId.length > MAX_TOOL_CALL_ID_CHARACTERS ||
+      input.name !== CONTEXT_COMMIT_TOOL_NAME ||
+      input.argumentsJson.length > MAX_TOOL_ARGUMENTS_JSON_CHARACTERS
+    ) {
+      throw new Error('Invalid context commit envelope.');
+    }
+    const value: unknown = JSON.parse(input.argumentsJson);
+    const current = contextCommitToolSchema.safeParse(value);
+    return {
+      callId: input.callId,
+      name: CONTEXT_COMMIT_TOOL_NAME,
+      argumentsJson: input.argumentsJson,
+      arguments: current.success ? current.data : legacyContextCommitToolSchema.parse(value),
     };
   } catch {
     throw providerErrorFromCode('INVALID_RESPONSE');
