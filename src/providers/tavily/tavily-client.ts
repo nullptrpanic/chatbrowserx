@@ -2,7 +2,12 @@ import { z } from 'zod';
 import type { CredentialStore } from '../../persistence/credential-store';
 import { isPublicHttpUrl } from '../../shared/net/public-http-url';
 import { isProviderError, providerErrorFromCode } from '../provider-errors';
-import { throwTavilyHttpError } from './tavily-errors';
+import { isAbortFailure, throwProviderHttpError } from '../provider-http';
+import {
+  tavilyCrawlInputSchema,
+  tavilyExtractInputSchema,
+  tavilySearchInputSchema,
+} from './tavily-input-schema';
 import type {
   TavilyCrawlInput,
   TavilyExecutionPort,
@@ -24,55 +29,6 @@ const MAX_RESULT_TITLE_CHARACTERS = 500;
 const MAX_RESULT_URL_CHARACTERS = 4_096;
 
 export type TavilyFetchPort = (input: RequestInfo | URL, init?: RequestInit) => Promise<Response>;
-
-const domainSchema = z
-  .string()
-  .min(1)
-  .max(253)
-  .refine((value) => value === value.trim() && !/[:/@*\s]/.test(value))
-  .transform((value) => value.toLowerCase().replace(/\.$/, ''))
-  .refine((value) => isPublicHttpUrl(`https://${value}`));
-const domainsSchema = z
-  .array(domainSchema)
-  .max(5)
-  .refine((value) => new Set(value).size === value.length);
-const publicUrlSchema = z
-  .string()
-  .min(1)
-  .max(4_096)
-  .refine(isPublicHttpUrl)
-  .transform((value) => new URL(value).href);
-const searchInputSchema = z
-  .object({
-    query: z.string().trim().min(1).max(2_000),
-    searchDepth: z.enum(['basic', 'advanced']),
-    topic: z.enum(['general', 'news', 'finance']),
-    timeRange: z.enum(['any', 'day', 'week', 'month', 'year']),
-    maxResults: z.number().int().min(1).max(8),
-    includeDomains: domainsSchema,
-    excludeDomains: domainsSchema,
-  })
-  .strict()
-  .refine((value) => !value.includeDomains.some((domain) => value.excludeDomains.includes(domain)));
-const extractInputSchema = z
-  .object({
-    urls: z
-      .array(publicUrlSchema)
-      .min(1)
-      .max(5)
-      .refine((value) => new Set(value).size === value.length),
-    query: z.string().trim().max(500),
-    extractDepth: z.enum(['basic', 'advanced']),
-  })
-  .strict();
-const crawlInputSchema = z
-  .object({
-    url: publicUrlSchema,
-    instructions: z.string().trim().min(1).max(1_000),
-    maxDepth: z.number().int().min(1).max(2),
-    maxPages: z.number().int().min(1).max(10),
-  })
-  .strict();
 
 const responseEnvelopeSchema = z.object({ results: z.array(z.unknown()).max(1_000) }).passthrough();
 const searchResultSchema = z
@@ -96,13 +52,6 @@ interface NormalizedSourceResult {
   readonly url: string;
   readonly content: string;
   readonly score: number | null;
-}
-
-/** Detects abort-shaped platform failures without retaining their messages. */
-function isAbortFailure(error: unknown): boolean {
-  return error instanceof DOMException
-    ? error.name === 'AbortError'
-    : typeof error === 'object' && error !== null && 'name' in error && error.name === 'AbortError';
 }
 
 /** Reads one success body under a byte cap before decoding and parsing JSON. */
@@ -232,7 +181,7 @@ export class TavilyClient implements TavilyExecutionPort {
   }
 
   async search(input: TavilySearchInput, signal: AbortSignal): Promise<TavilyResultSet> {
-    const parsed = this.#parseInput(searchInputSchema, input);
+    const parsed = this.#parseInput(tavilySearchInputSchema, input);
     const body = {
       query: parsed.query,
       search_depth: parsed.searchDepth,
@@ -257,7 +206,7 @@ export class TavilyClient implements TavilyExecutionPort {
   }
 
   async extract(input: TavilyExtractInput, signal: AbortSignal): Promise<TavilyResultSet> {
-    const parsed = this.#parseInput(extractInputSchema, input);
+    const parsed = this.#parseInput(tavilyExtractInputSchema, input);
     const body = {
       urls: parsed.urls,
       ...(parsed.query.length === 0 ? {} : { query: parsed.query, chunks_per_source: 3 }),
@@ -273,7 +222,7 @@ export class TavilyClient implements TavilyExecutionPort {
   }
 
   async crawl(input: TavilyCrawlInput, signal: AbortSignal): Promise<TavilyResultSet> {
-    const parsed = this.#parseInput(crawlInputSchema, input);
+    const parsed = this.#parseInput(tavilyCrawlInputSchema, input);
     const body = {
       url: parsed.url,
       instructions: parsed.instructions,
@@ -331,7 +280,7 @@ export class TavilyClient implements TavilyExecutionPort {
       throw providerErrorFromCode('TRANSIENT');
     }
 
-    if (!response.ok) return await throwTavilyHttpError(response);
+    if (!response.ok) return await throwProviderHttpError(response);
     if (signal.aborted) {
       await response.body?.cancel().catch(() => undefined);
       throw providerErrorFromCode('ABORTED');

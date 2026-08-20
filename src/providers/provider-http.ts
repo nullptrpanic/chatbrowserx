@@ -1,8 +1,14 @@
-import { providerErrorFromCode } from '../provider-errors';
+import { providerErrorFromCode } from './provider-errors';
 
 const MAX_ERROR_BODY_BYTES = 8 * 1024;
 
-/** Parses a standard Retry-After value into a nonnegative millisecond delay. */
+/** Detects abort-shaped platform failures without retaining provider-controlled messages. */
+export function isAbortFailure(error: unknown): boolean {
+  return error instanceof DOMException
+    ? error.name === 'AbortError'
+    : typeof error === 'object' && error !== null && 'name' in error && error.name === 'AbortError';
+}
+
 function retryAfterMs(value: string | null, now = Date.now()): number | null {
   if (value === null) return null;
   const seconds = Number(value);
@@ -11,7 +17,6 @@ function retryAfterMs(value: string | null, now = Date.now()): number | null {
   return Number.isFinite(date) ? Math.max(0, date - now) : null;
 }
 
-/** Consumes only a bounded error-body prefix without retaining provider-controlled text. */
 async function discardErrorBody(body: ReadableStream<Uint8Array> | null): Promise<void> {
   if (body === null) return;
   const reader = body.getReader();
@@ -30,8 +35,8 @@ async function discardErrorBody(body: ReadableStream<Uint8Array> | null): Promis
   }
 }
 
-/** Maps a Tavily HTTP failure into the shared redacted provider taxonomy. */
-export async function throwTavilyHttpError(response: Response): Promise<never> {
+/** Maps an HTTP failure into the shared redacted provider taxonomy. */
+export async function throwProviderHttpError(response: Response): Promise<never> {
   const delay = retryAfterMs(response.headers.get('Retry-After'));
   await discardErrorBody(response.body);
   if (response.status === 401 || response.status === 403) {
