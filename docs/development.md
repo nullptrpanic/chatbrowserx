@@ -40,6 +40,31 @@ CHATBROWSERX_CODEX_ACCESS_TOKEN='…' npm run check:codex
 
 该命令会产生真实网络请求，但不会打印 Token 或完整回复。它只验证文本 Provider 合约，不是浏览器成功率基准。
 
+## 实机浏览器 E2E
+
+实机链路是显式运行的本地验收，不进入默认 `test:e2e` 或 CI。它使用生产构建、真实
+ChatBrowserX Agent Loop 和 Browser Tools，并把登录态保存在仓库内已被 Git 忽略的
+`.chatbrowserx-live-e2e/profile`。该 Profile 与日常 Chrome 完全隔离；删除
+`.chatbrowserx-live-e2e` 会清除这套验收环境的登录态和插件设置。
+
+首次配置：
+
+```bash
+pnpm e2e:live:setup
+```
+
+在打开的专用 Chrome 中，通过 ChatBrowserX 正常设置界面配置 Token，并完成飞书登录；
+终端只检查是否已配置和是否处于目标域名，不读取或输出凭据。准备完成后运行只读场景：
+
+```bash
+pnpm e2e:live:run -- lark-messenger-read
+```
+
+当前场景只允许读取，会验证未使用截图、坐标操作、网络抓包、图片附件或提交式输入。
+脱敏报告写入 `test-results/live-e2e/<run-id>/report.json`；失败不会自动重跑，也不会删除
+Profile 中保留的任务详情。若需要换位置，可用绝对路径环境变量
+`CHATBROWSERX_LIVE_E2E_PROFILE` 覆盖默认 Profile。
+
 ## 代码约定
 
 - 组件使用 `PascalCase.tsx`，其他文件使用 `kebab-case.ts`。

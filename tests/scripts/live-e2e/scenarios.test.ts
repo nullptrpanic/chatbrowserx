@@ -1,0 +1,87 @@
+import { describe, expect, it } from 'vitest';
+import {
+  getLiveScenario,
+  listLiveScenarios,
+  parseLiveScenarioName,
+  validateLiveScenarioAuthorization,
+  validateReadOnlyScenario,
+} from '../../../scripts/live-e2e/scenarios';
+
+describe('live E2E scenario registry', () => {
+  it('registers one read-only structural five-group Feishu messenger scenario', () => {
+    const scenario = getLiveScenario('lark-messenger-read');
+
+    expect(scenario.allowRemoteMutation).toBe(false);
+    expect(scenario.startUrl).toBe('https://bytedance.larkoffice.com/next/messenger');
+    expect(scenario.expectedOrigin).toBe('https://bytedance.larkoffice.com');
+    expect(scenario.requiredTools).toContain('browser_inspect');
+    expect(scenario.forbidScreenshotInspect).toBe(true);
+    expect(scenario.forbidSubmittedType).toBe(true);
+    expect(scenario.forbiddenTools).toEqual(
+      expect.arrayContaining([
+        'browser_click_point',
+        'browser_drag_point',
+        'browser_network_start',
+        'browser_network_list',
+        'browser_network_get',
+        'browser_network_stop',
+      ]),
+    );
+    expect(scenario.finalTextIncludes).toEqual(expect.arrayContaining(['群聊', '最近24小时']));
+    expect(scenario.minimumMarkdownTableRows).toBe(5);
+    expect(scenario.taskText).toContain('5 个');
+    expect(scenario.taskText).toContain('不要发送消息');
+  });
+
+  it('lists stable scenario names without exposing a mutable registry', () => {
+    const scenarios = listLiveScenarios();
+
+    expect(scenarios.map(({ name }) => name)).toEqual(['lark-messenger-read', 'lark-self-send']);
+    expect(() => (scenarios as unknown[]).push({})).toThrow();
+  });
+
+  it('registers one explicitly authorized self-send scenario with verifiable output', () => {
+    const scenario = getLiveScenario('lark-self-send');
+
+    expect(scenario.allowRemoteMutation).toBe(true);
+    expect(scenario.taskText).toContain('caoyang.001');
+    expect(scenario.taskText).toContain('{{RUN_ID}}');
+    expect(scenario.taskText).toContain('submit=true');
+    expect(scenario.expectedSubmittedTypeCount).toBe(1);
+    expect(scenario.requiredToolOutputIncludes?.some((value) => value.includes('{{RUN_ID}}'))).toBe(
+      true,
+    );
+    expect(scenario.requiredTypedTextIncludes?.some((value) => value.includes('{{RUN_ID}}'))).toBe(
+      true,
+    );
+  });
+
+  it('rejects unknown names and mutation-capable scenarios', () => {
+    expect(() => getLiveScenario('missing')).toThrow(/unknown live E2E scenario/i);
+    const scenario = getLiveScenario('lark-messenger-read');
+    expect(() => validateReadOnlyScenario({ ...scenario, allowRemoteMutation: true })).toThrow(
+      /read-only/i,
+    );
+  });
+
+  it('requires an explicit environment opt-in before running a mutation scenario', () => {
+    const scenario = getLiveScenario('lark-self-send');
+
+    expect(() => validateLiveScenarioAuthorization(scenario, {})).toThrow(/explicit opt-in/i);
+    expect(() =>
+      validateLiveScenarioAuthorization(scenario, {
+        CHATBROWSERX_LIVE_ALLOW_MUTATION: '1',
+      }),
+    ).not.toThrow();
+    expect(() =>
+      validateLiveScenarioAuthorization(getLiveScenario('lark-messenger-read'), {}),
+    ).not.toThrow();
+  });
+
+  it('accepts the standalone separator forwarded by pnpm package scripts', () => {
+    expect(parseLiveScenarioName(['lark-messenger-read'])).toBe('lark-messenger-read');
+    expect(parseLiveScenarioName(['--', 'lark-messenger-read'])).toBe('lark-messenger-read');
+    expect(() => parseLiveScenarioName(['--'])).toThrow(/usage/i);
+    expect(() => parseLiveScenarioName(['first', 'second'])).toThrow(/usage/i);
+  });
+});

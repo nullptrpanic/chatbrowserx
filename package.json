@@ -16,6 +16,8 @@
     "test": "vitest",
     "test:run": "vitest run",
     "test:e2e": "npm run build && playwright test",
+    "e2e:live:setup": "npm run build && tsx scripts/live-e2e/setup.ts",
+    "e2e:live:run": "npm run build && tsx scripts/live-e2e/run.ts",
     "audit:bundle": "tsx scripts/audit-production-bundle.ts",
     "check:codex": "tsx scripts/check-codex-contract.ts"
   },
