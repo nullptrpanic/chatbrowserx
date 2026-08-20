@@ -1,4 +1,5 @@
 import type { Protocol } from 'devtools-protocol';
+import { readSelectionState } from '../selection-state';
 
 export const SEMANTIC_SNAPSHOT_STYLES = [
   'cursor',
@@ -21,9 +22,11 @@ export interface SemanticPageEntry {
 
 export interface SemanticPageTarget {
   readonly backendNodeId: number;
+  readonly stateBackendNodeId?: number;
   readonly documentFrameId: string;
   readonly role: string;
   readonly name: string;
+  readonly semanticLocator: string;
   readonly state: readonly string[];
   readonly actions: readonly SemanticAction[];
 }
@@ -73,13 +76,19 @@ const EDITABLE_ROLES = new Set(['searchbox', 'textbox']);
 const OMITTED_ROLES = new Set(['inlinetextbox', 'none', 'presentation', 'rootwebarea', 'webarea']);
 const UNSAFE_CLICK_NODE_NAMES = new Set(['#DOCUMENT', 'HTML', 'BODY', 'HEAD']);
 const STATE_ATTRIBUTES = ['checked', 'selected', 'expanded', 'pressed', 'disabled'] as const;
+const ARIA_STATE_ATTRIBUTES = [...STATE_ATTRIBUTES, 'readonly'] as const;
 const MODEL_AX_STATES = new Set([...STATE_ATTRIBUTES, 'busy', 'invalid', 'readonly', 'required']);
-const CLASS_STATE_PATTERN = /^(checked|selected|active|disabled)(?:$|[-_])/i;
+const PURE_CLASS_STATE_PATTERN =
+  /^(?:(?:is|state)[-_])?(checked|selected|active|disabled)(?:$|[-_])/i;
+const EXPLICIT_CLASS_STATE_PATTERN = /(?:^|[-_])(checked|selected|disabled)(?:$|[-_])/i;
+const ACTIVE_CLASS_STATE_PATTERN = /(?:^|[-_])active(?:$|[-_])/i;
 const SELECTABLE_ROLES = new Set(['checkbox', 'option', 'radio', 'switch']);
 const SELECTABLE_CLASS_PATTERN = /(?:^|[-_])(checkbox|radio|switch)(?:$|[-_])/i;
-const SELECTABLE_ITEM_CLASS_PATTERN = /(?:^|[-_])(answer|choice|option)(?:$|[-_])/i;
+const EXPLICIT_OPTION_CLASS_PATTERN = /(?:^|[-_])(choice|option)(?:$|[-_])/i;
+const AMBIGUOUS_OPTION_CLASS_PATTERN = /(?:^|[-_])answer(?:$|[-_])/i;
 const DIRECT_VISUAL_SURFACE_NODE_NAMES = new Set(['CANVAS', 'VIDEO']);
 const LARGE_VISUAL_SURFACE_NODE_NAMES = new Set(['IMG', 'SVG']);
+const MAX_SEMANTIC_LOCATOR_CHARACTERS = 2_048;
 
 function normalizedText(value: unknown, maximum = 500): string {
   return typeof value === 'string' ? value.replace(/\s+/g, ' ').trim().slice(0, maximum) : '';
@@ -122,8 +131,7 @@ function uniqueState(values: readonly string[]): readonly string[] {
   for (const value of values) {
     const name = value.split('=', 1)[0];
     if (!name) continue;
-    const existing = byName.get(name);
-    if (existing === undefined || existing.endsWith('=false')) byName.set(name, value);
+    if (!byName.has(name)) byName.set(name, value);
   }
   return [...byName.values()].slice(0, 20);
 }
@@ -324,36 +332,75 @@ function structuralClassTokens(node: SnapshotDomNode): readonly string[] {
   return (node.attributes.get('class') ?? '')
     .split(/\s+/)
     .filter(Boolean)
-    .filter((token) => !CLASS_STATE_PATTERN.test(token));
+    .filter((token) => !PURE_CLASS_STATE_PATTERN.test(token));
 }
 
 function classState(node: SnapshotDomNode): readonly string[] {
   const tokens = (node.attributes.get('class') ?? '').split(/\s+/).filter(Boolean);
-  const structural = new Set(structuralClassTokens(node));
-  if (structural.size === 0 || !node.parent) return [];
-  const siblings = node.parent.children.filter(
-    (sibling) =>
-      sibling !== node &&
-      sibling.nodeName === node.nodeName &&
-      structuralClassTokens(sibling).some((token) => structural.has(token)),
-  );
-  if (siblings.length === 0) return [];
   const result: string[] = [];
   for (const token of tokens) {
-    const matched = CLASS_STATE_PATTERN.exec(token);
-    const stateName = matched?.[1]?.toLowerCase();
-    if (
-      stateName &&
-      siblings.some((sibling) =>
-        (sibling.attributes.get('class') ?? '')
-          .split(/\s+/)
-          .every((siblingToken) => !siblingToken.toLowerCase().startsWith(stateName)),
-      )
-    ) {
-      result.push(stateName);
-    }
+    const explicit = EXPLICIT_CLASS_STATE_PATTERN.exec(token)?.[1]?.toLowerCase();
+    if (explicit) result.push(explicit);
   }
+  if (!tokens.some((token) => ACTIVE_CLASS_STATE_PATTERN.test(token))) return uniqueState(result);
+
+  const structural = new Set(structuralClassTokens(node));
+  if (structural.size === 0 || !node.parent) return uniqueState(result);
+  const hasInactiveSibling = node.parent.children
+    .filter(
+      (sibling) =>
+        sibling !== node &&
+        sibling.nodeName === node.nodeName &&
+        structuralClassTokens(sibling).some((token) => structural.has(token)),
+    )
+    .some((sibling) =>
+      (sibling.attributes.get('class') ?? '')
+        .split(/\s+/)
+        .every((token) => !ACTIVE_CLASS_STATE_PATTERN.test(token)),
+    );
+  if (hasInactiveSibling) result.push('active');
   return result;
+}
+
+function dataState(node: SnapshotDomNode): readonly string[] {
+  const state: string[] = [];
+  const booleanAttributes = [
+    ['data-checked', 'checked'],
+    ['data-selected', 'selected'],
+    ['data-disabled', 'disabled'],
+  ] as const;
+  for (const [attribute, name] of booleanAttributes) {
+    const value = node.attributes.get(attribute);
+    if (value === undefined) continue;
+    const normalized = normalizedStateValue(name, value === '' ? true : value.toLowerCase());
+    if (normalized) state.push(normalized);
+  }
+  switch (node.attributes.get('data-state')?.trim().toLowerCase()) {
+    case 'checked':
+    case 'on':
+      state.push('checked');
+      break;
+    case 'unchecked':
+    case 'off':
+      state.push('checked=false');
+      break;
+    case 'selected':
+      state.push('selected');
+      break;
+    case 'unselected':
+      state.push('selected=false');
+      break;
+    case 'disabled':
+      state.push('disabled');
+      break;
+    case 'open':
+      state.push('expanded');
+      break;
+    case 'closed':
+      state.push('expanded=false');
+      break;
+  }
+  return uniqueState(state);
 }
 
 function hasSiblingSelectionEvidence(
@@ -387,16 +434,19 @@ function selectableRole(node: SnapshotDomNode): string | undefined {
     if (role) return role;
   }
   const structural = structuralClassTokens(node);
-  if (
-    node.parent &&
-    structural.some((token) => SELECTABLE_ITEM_CLASS_PATTERN.test(token)) &&
-    hasSiblingSelectionEvidence(node, structural) &&
-    node.parent.children.some(
+  const hasSimilarSibling =
+    node.parent?.children.some(
       (sibling) =>
         sibling !== node &&
         sibling.nodeName === node.nodeName &&
         structuralClassTokens(sibling).some((token) => structural.includes(token)),
-    )
+    ) ?? false;
+  if (
+    node.parent &&
+    hasSimilarSibling &&
+    (structural.some((token) => EXPLICIT_OPTION_CLASS_PATTERN.test(token)) ||
+      (structural.some((token) => AMBIGUOUS_OPTION_CLASS_PATTERN.test(token)) &&
+        hasSiblingSelectionEvidence(node, structural)))
   ) {
     return 'option';
   }
@@ -456,33 +506,46 @@ function associatedSelectableControl(
 
 function domState(node: SnapshotDomNode, role?: string): readonly string[] {
   const state: string[] = [];
-  if (node.inputChecked) state.push('checked');
-  if (node.optionSelected) state.push('selected');
+  const inputType = normalizedText(node.attributes.get('type')).toLowerCase();
+  if (node.nodeName === 'INPUT' && (inputType === 'checkbox' || inputType === 'radio')) {
+    state.push(node.inputChecked ? 'checked' : 'checked=false');
+  } else if (node.inputChecked) {
+    state.push('checked');
+  }
+  if (node.nodeName === 'OPTION') {
+    state.push(node.optionSelected ? 'selected' : 'selected=false');
+  } else if (node.optionSelected) {
+    state.push('selected');
+  }
   if (node.attributes.has('disabled')) state.push('disabled');
-  for (const name of STATE_ATTRIBUTES) {
+  if (node.attributes.has('readonly')) state.push('readonly');
+  for (const name of ARIA_STATE_ATTRIBUTES) {
     const value = node.attributes.get(`aria-${name}`);
     if (value === undefined) continue;
     const normalized = normalizedStateValue(name, value.toLowerCase());
     if (normalized) state.push(normalized);
   }
+  state.push(...dataState(node));
   state.push(...classState(node));
+  const normalized = uniqueState(state);
   if (role === 'option') {
-    const selected = state.some((value) => ['active', 'checked', 'selected'].includes(value));
-    const remaining = state.filter(
+    const direct = readSelectionState(normalized);
+    const selected = direct ?? normalized.includes('active');
+    const remaining = normalized.filter(
       (value) =>
         !['active', 'checked', 'checked=false', 'selected', 'selected=false'].includes(value),
     );
     return uniqueState([selected ? 'selected' : 'selected=false', ...remaining]);
   }
   if (role === 'checkbox' || role === 'radio' || role === 'switch') {
-    const checked = state.some((value) => ['active', 'checked', 'selected'].includes(value));
-    const remaining = state.filter(
+    const checked = readSelectionState(normalized) ?? false;
+    const remaining = normalized.filter(
       (value) =>
         !['active', 'checked', 'checked=false', 'selected', 'selected=false'].includes(value),
     );
     return uniqueState([checked ? 'checked' : 'checked=false', ...remaining]);
   }
-  return uniqueState(state);
+  return normalized;
 }
 
 function hasAxBoolean(node: Protocol.Accessibility.AXNode, name: string): boolean {
@@ -538,6 +601,67 @@ function depthOf(
     current = parent;
   }
   return Math.min(depth, 40);
+}
+
+function semanticAncestorPath(
+  node: Protocol.Accessibility.AXNode,
+  byId: ReadonlyMap<string, Protocol.Accessibility.AXNode>,
+): readonly (readonly [string, string])[] {
+  const path: [string, string][] = [];
+  let parentId = node.parentId;
+  const visited = new Set<string>();
+  while (parentId && !visited.has(parentId) && path.length < 6) {
+    visited.add(parentId);
+    const parent = byId.get(parentId);
+    if (!parent) break;
+    const role = axText(parent.role).toLowerCase().slice(0, 100);
+    const name = axText(parent.name);
+    if (role && name && !OMITTED_ROLES.has(role)) path.push([role, name]);
+    parentId = parent.parentId;
+  }
+  return path.reverse();
+}
+
+function stableDomAttributes(node: SnapshotDomNode): readonly (readonly [string, string])[] {
+  const attributes: [string, string][] = [];
+  for (const name of ['id', 'data-testid', 'data-test-id', 'name', 'role', 'type'] as const) {
+    const value = normalizedText(node.attributes.get(name), 120);
+    if (value) attributes.push([name, value]);
+  }
+  const structural = structuralClassTokens(node).slice(0, 4).join(' ');
+  if (structural) attributes.push(['class', structural]);
+  return attributes;
+}
+
+function domSemanticPath(node: SnapshotDomNode): readonly unknown[] {
+  const path: unknown[] = [];
+  let current: SnapshotDomNode | null = node;
+  while (current && path.length < 10) {
+    if (!UNSAFE_CLICK_NODE_NAMES.has(current.nodeName)) {
+      const siblings = current.parent?.children.filter(
+        (candidate) => candidate.nodeName === current?.nodeName,
+      );
+      const ordinal = siblings?.indexOf(current) ?? 0;
+      path.push([current.nodeName, stableDomAttributes(current), Math.max(0, ordinal)]);
+    }
+    current = current.parent;
+  }
+  return path.reverse();
+}
+
+function semanticLocatorFor(
+  node: Protocol.Accessibility.AXNode,
+  target: SnapshotDomNode,
+  role: string,
+  name: string,
+  byId: ReadonlyMap<string, Protocol.Accessibility.AXNode>,
+): string {
+  return JSON.stringify([
+    semanticAncestorPath(node, byId),
+    domSemanticPath(target),
+    role,
+    name,
+  ]).slice(0, MAX_SEMANTIC_LOCATOR_CHARACTERS);
 }
 
 function orderedAxNodes(
@@ -614,15 +738,19 @@ export function buildSemanticPageSnapshot(
 
     let targetIndex: number | undefined;
     let state = axState(node);
-    if (targetDomNode && actions.length > 0) {
+    if (targetDomNode) {
       state = uniqueState([
         ...state,
         ...(selectable ? domState(selectable.node, effectiveRole) : []),
         ...domState(targetDomNode, effectiveRole),
       ]);
+      if (state.includes('disabled')) actions = [];
+      else if (state.includes('readonly')) actions = actions.filter((action) => action !== 'type');
       if (actions.includes('click') && hasObservableSelectionState(state)) {
         actions = [...actions, 'set_checked'];
       }
+    }
+    if (targetDomNode && actions.length > 0) {
       const existing = targetIndexes.get(targetDomNode.backendNodeId);
       if (existing !== undefined) targetIndex = existing;
       else {
@@ -630,9 +758,14 @@ export function buildSemanticPageSnapshot(
         targetIndexes.set(targetDomNode.backendNodeId, targetIndex);
         targets.push({
           backendNodeId: targetDomNode.backendNodeId,
+          ...(selectable === undefined ||
+          selectable.node.backendNodeId === targetDomNode.backendNodeId
+            ? {}
+            : { stateBackendNodeId: selectable.node.backendNodeId }),
           documentFrameId: targetDomNode.documentFrameId,
           role: effectiveRole,
           name,
+          semanticLocator: semanticLocatorFor(node, targetDomNode, effectiveRole, name, axById),
           state,
           actions,
         });

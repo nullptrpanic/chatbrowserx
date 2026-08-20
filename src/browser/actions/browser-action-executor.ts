@@ -18,6 +18,7 @@ import {
   SEMANTIC_SNAPSHOT_STYLES,
   buildSemanticPageSnapshot,
 } from '../observation/semantic-page-snapshot';
+import { readSelectionState } from '../selection-state';
 import { parseKeyChord, type ParsedKeyChord } from './key-chords';
 
 const POINTER_FEEDBACK_DEADLINE_MS = 250;
@@ -36,6 +37,97 @@ const CLICK_ELEMENT_FUNCTION = `function() {
   if (!this || typeof this.click !== 'function') return { dispatched: false };
   this.click();
   return { dispatched: true };
+}`;
+
+const READ_SELECTION_STATE_FUNCTION = `function(role) {
+  const __chatbrowserxSelectionState = true;
+  void __chatbrowserxSelectionState;
+  const element = this;
+  const window_ = element?.ownerDocument?.defaultView;
+  if (!window_?.Element || !(element instanceof window_.Element)) {
+    return { observable: false };
+  }
+  if (!element.isConnected) return { observable: false };
+  const booleanAttribute = (name) => {
+    const value = element.getAttribute(name);
+    if (value === null) return undefined;
+    const normalized = value.trim().toLowerCase();
+    if (normalized === '' || normalized === 'true' || normalized === '1') return true;
+    if (normalized === 'false' || normalized === '0') return false;
+    return undefined;
+  };
+  let selected;
+  if (role === 'option') {
+    if (typeof element.selected === 'boolean') selected = element.selected;
+    if (selected === undefined) selected = booleanAttribute('aria-selected');
+    if (selected === undefined) selected = booleanAttribute('data-selected');
+  } else {
+    if (typeof element.checked === 'boolean') selected = element.checked;
+    if (selected === undefined) selected = booleanAttribute('aria-checked');
+    if (selected === undefined) selected = booleanAttribute('data-checked');
+  }
+  const dataState = (element.getAttribute('data-state') || '').trim().toLowerCase();
+  if (selected === undefined && ['checked', 'selected', 'on'].includes(dataState)) selected = true;
+  if (selected === undefined && ['unchecked', 'unselected', 'off'].includes(dataState)) selected = false;
+  const className = typeof element.className === 'string' ? element.className : '';
+  const tokens = className.split(/\\s+/).filter(Boolean);
+  if (
+    selected === undefined &&
+    tokens.some((token) => /(?:^|[-_])(?:is[-_]|state[-_])?(?:checked|selected)(?:$|[-_])/i.test(token))
+  ) {
+    selected = true;
+  }
+  if (
+    selected === undefined &&
+    tokens.some((token) => /(?:^|[-_])(?:checkbox|radio|switch|choice|option)(?:$|[-_])/i.test(token))
+  ) {
+    selected = false;
+  }
+  return selected === undefined
+    ? { observable: false }
+    : { observable: true, selected };
+}`;
+
+const FIND_ACTIONABLE_POINT_FUNCTION = `function(points) {
+  const __chatbrowserxActionablePoint = true;
+  void __chatbrowserxActionablePoint;
+  const element = this;
+  const document_ = element?.ownerDocument;
+  const window_ = document_?.defaultView;
+  if (
+    !window_?.Element ||
+    !(element instanceof window_.Element) ||
+    !element.isConnected ||
+    typeof document_.elementFromPoint !== 'function' ||
+    !Array.isArray(points)
+  ) {
+    return null;
+  }
+  const composedRelated = (left, right) => {
+    const reaches = (start, expected) => {
+      let current = start;
+      for (let depth = 0; current && depth < 32; depth += 1) {
+        if (current === expected) return true;
+        const root = current.getRootNode?.();
+        current = current.parentElement ||
+          (window_.ShadowRoot && root instanceof window_.ShadowRoot ? root.host : null);
+      }
+      return false;
+    };
+    return reaches(right, left) || reaches(left, right);
+  };
+  for (let index = 0; index < points.length; index += 1) {
+    const point = points[index];
+    if (!point || !Number.isFinite(point.x) || !Number.isFinite(point.y)) continue;
+    let hit = document_.elementFromPoint(point.x, point.y);
+    for (let depth = 0; hit?.shadowRoot && depth < 8; depth += 1) {
+      const inner = hit.shadowRoot.elementFromPoint?.(point.x, point.y);
+      if (!inner || inner === hit) break;
+      hit = inner;
+    }
+    if (hit && composedRelated(element, hit)) return index;
+  }
+  return -1;
 }`;
 
 const FOCUSED_EDITABLE_VALUE_EXPRESSION = `(() => {
@@ -89,6 +181,8 @@ const INSERT_FOCUSED_TEXT_FUNCTION = `function(text) {
 }`;
 
 const EDITOR_TARGET_INFO_FUNCTION = `function() {
+  const __chatbrowserxEditorTargetInfo = true;
+  void __chatbrowserxEditorTargetInfo;
   const element = this;
   const window_ = element?.ownerDocument?.defaultView;
   if (!window_?.Element || !(element instanceof window_.Element)) {
@@ -173,6 +267,8 @@ export type BrowserActionErrorCode =
   | 'UNSUPPORTED_ACTION'
   | 'SELECTABLE_ACTION_REQUIRED'
   | 'ACTION_STATE_MISMATCH'
+  | 'ACTION_STATE_UNAVAILABLE'
+  | 'ACTION_TARGET_OBSCURED'
   | 'POINT_OUT_OF_VIEWPORT'
   | 'HISTORY_UNAVAILABLE'
   | 'WAIT_TIMEOUT'
@@ -227,6 +323,7 @@ interface PreparedElementTarget {
   readonly reference: ResolvedElementRef;
   readonly session: DebuggerSession;
   readonly point: Point;
+  readonly rect: ViewportRect;
 }
 
 interface EditorTargetInfo {
@@ -236,10 +333,16 @@ interface EditorTargetInfo {
 
 interface RefStateObservation {
   readonly target?: ObservedElementRefState;
+  readonly rebound: boolean;
   readonly changes: readonly Readonly<{
     ref: string;
     state: readonly string[];
   }>[];
+}
+
+interface RuntimeSelectionState {
+  readonly observable: boolean;
+  readonly selected?: boolean;
 }
 
 function input<T>(call: ParsedBrowserToolCall): T {
@@ -307,16 +410,62 @@ function verifiesInput(actual: string | null, expected: string, replace: boolean
     : expected.length === 0 || (actual !== null && actual !== before && actual.includes(expected));
 }
 
-function selectedState(state: readonly string[]): boolean | undefined {
-  for (const property of ['checked', 'selected'] as const) {
-    if (state.includes(property)) return true;
-    if (state.includes(`${property}=false`)) return false;
+function expectedSelectionAfterClick(role: string, selected: boolean): boolean {
+  return role === 'radio' || role === 'option' ? true : !selected;
+}
+
+function booleanAxValue(value: unknown): boolean | undefined {
+  if (value === true || value === 'true' || value === 1) return true;
+  if (value === false || value === 'false' || value === 0) return false;
+  return undefined;
+}
+
+function partialAxSelectionState(
+  response: Protocol.Accessibility.GetPartialAXTreeResponse,
+  backendNodeId: number,
+  role: string,
+): boolean | undefined {
+  const node = response.nodes.find(
+    (candidate) => candidate.backendDOMNodeId === backendNodeId && !candidate.ignored,
+  );
+  if (!node) return undefined;
+  const preferred = role === 'option' ? ['selected', 'checked'] : ['checked', 'selected'];
+  for (const name of preferred) {
+    const property = (node.properties ?? []).find((candidate) => candidate.name === name);
+    const value = booleanAxValue(property?.value.value);
+    if (value !== undefined) return value;
   }
   return undefined;
 }
 
-function expectedSelectionAfterClick(role: string, selected: boolean): boolean {
-  return role === 'radio' || role === 'option' ? true : !selected;
+function runtimeSelectionState(
+  response: Protocol.Runtime.CallFunctionOnResponse,
+): boolean | undefined {
+  if (response.exceptionDetails !== undefined || typeof response.result.value !== 'object') {
+    return undefined;
+  }
+  const value = response.result.value as RuntimeSelectionState | null;
+  return value?.observable === true && typeof value.selected === 'boolean'
+    ? value.selected
+    : undefined;
+}
+
+function selectionState(
+  current: readonly string[],
+  role: string,
+  selected: boolean,
+): readonly string[] {
+  const property = role === 'option' ? 'selected' : 'checked';
+  return [
+    selected ? property : `${property}=false`,
+    ...current.filter(
+      (value) =>
+        value !== 'checked' &&
+        value !== 'checked=false' &&
+        value !== 'selected' &&
+        value !== 'selected=false',
+    ),
+  ];
 }
 
 /** Executes already-checkpointed browser actions through semantic refs or validated viewport points. */
@@ -393,16 +542,17 @@ export class BrowserActionExecutor implements BrowserActionPort {
           target.reference.actions.includes('set_checked')
             ? await this.#readRefStates(target, tabId, value.ref)
             : undefined;
-        const selectedBefore = selectedState(
+        const selectedBefore = readSelectionState(
           selectableBefore?.target?.state ?? target.reference.state,
         );
+        const actionPoint = await this.#actionablePoint(target);
         await this.#showPointer(
           tabId,
-          target.point,
-          target.point,
+          actionPoint,
+          actionPoint,
           value.count === 2 ? 'double_click' : 'click',
         );
-        await this.#click(target.session, target.point, value.button, value.count);
+        await this.#click(target.session, actionPoint, value.button, value.count);
         const expectedSelection =
           selectableBefore !== undefined && selectedBefore !== undefined
             ? expectedSelectionAfterClick(
@@ -411,9 +561,12 @@ export class BrowserActionExecutor implements BrowserActionPort {
               )
             : undefined;
         let strategy = 'pointer';
-        let observed =
+        let observed: RefStateObservation =
           expectedSelection === undefined
-            ? await this.#readRefStates(target, tabId, value.ref)
+            ? await this.#readRefStates(target, tabId, value.ref).catch(() => ({
+                rebound: false,
+                changes: [],
+              }))
             : await this.#waitForSelectionState(
                 target,
                 tabId,
@@ -421,11 +574,12 @@ export class BrowserActionExecutor implements BrowserActionPort {
                 expectedSelection,
                 signal,
               );
-        const afterPointerState = selectedState(observed.target?.state ?? []);
+        const afterPointerState = readSelectionState(observed.target?.state ?? []);
         if (
           expectedSelection !== undefined &&
           afterPointerState !== undefined &&
           afterPointerState !== expectedSelection &&
+          !observed.rebound &&
           (await this.#clickElementByRef(snapshot, tabId, value.ref))
         ) {
           strategy = 'dom_fallback';
@@ -439,9 +593,8 @@ export class BrowserActionExecutor implements BrowserActionPort {
         }
         if (
           expectedSelection !== undefined &&
-          selectedState(observed.target?.state ?? []) !== expectedSelection
+          readSelectionState(observed.target?.state ?? []) !== expectedSelection
         ) {
-          this.#dependencies.refs.invalidate(tabId);
           throw new BrowserActionError(
             'ACTION_STATE_MISMATCH',
             'The clicked selection state did not settle.',
@@ -461,7 +614,7 @@ export class BrowserActionExecutor implements BrowserActionPort {
             : {
                 strategy,
                 selectionVerified:
-                  selectedState(observed.target?.state ?? []) === expectedSelection,
+                  readSelectionState(observed.target?.state ?? []) === expectedSelection,
               }),
         };
         targetPresent = true;
@@ -485,13 +638,14 @@ export class BrowserActionExecutor implements BrowserActionPort {
             'A radio target can only be selected; choose another radio to clear it.',
           );
         }
-        const current = selectedState(beforeTarget?.state ?? target.reference.state);
+        const current = readSelectionState(beforeTarget?.state ?? target.reference.state);
         let dispatched = false;
         let strategy = 'already_set';
         let after = before;
         if (current !== value.checked && !(current === undefined && !value.checked)) {
-          await this.#showPointer(tabId, target.point, target.point, 'click');
-          await this.#click(target.session, target.point, 'left', 1);
+          const actionPoint = await this.#actionablePoint(target);
+          await this.#showPointer(tabId, actionPoint, actionPoint, 'click');
+          await this.#click(target.session, actionPoint, 'left', 1);
           dispatched = true;
           strategy = 'pointer';
           after = await this.#waitForSelectionState(
@@ -501,10 +655,11 @@ export class BrowserActionExecutor implements BrowserActionPort {
             value.checked,
             signal,
           );
-          const afterPointerState = selectedState(after.target?.state ?? []);
+          const afterPointerState = readSelectionState(after.target?.state ?? []);
           if (
             afterPointerState !== undefined &&
             afterPointerState !== value.checked &&
+            !after.rebound &&
             (await this.#clickElementByRef(snapshot, tabId, value.ref))
           ) {
             strategy = 'dom_fallback';
@@ -520,10 +675,9 @@ export class BrowserActionExecutor implements BrowserActionPort {
         observedTarget = after.target ?? beforeTarget;
         stateChanges = after.changes;
         targetState = observedTarget?.state;
-        const actual = selectedState(targetState ?? []);
+        const actual = readSelectionState(targetState ?? []);
         const verified = actual === value.checked;
         if (!verified) {
-          this.#dependencies.refs.invalidate(tabId);
           throw new BrowserActionError(
             'ACTION_STATE_MISMATCH',
             actual === undefined
@@ -597,6 +751,22 @@ export class BrowserActionExecutor implements BrowserActionPort {
             value.replace,
             before.replace(/\r\n?/g, '\n'),
           );
+        } else if (target) {
+          const before = editorInfo?.value.replace(/\r\n?/g, '\n') ?? '';
+          const observed = await this.#editorTargetInfo(target);
+          if (
+            !verifiesInput(
+              observed.value.replace(/\r\n?/g, '\n'),
+              value.text,
+              value.replace,
+              before,
+            )
+          ) {
+            throw new BrowserActionError(
+              'TYPE_VERIFICATION_FAILED',
+              'The target did not retain the requested text.',
+            );
+          }
         }
         if (value.submit) {
           await this.#dispatchKey(targetSession, {
@@ -612,7 +782,7 @@ export class BrowserActionExecutor implements BrowserActionPort {
           replaced: value.replace,
           submitted: value.submit,
           strategy: trustedInput ? 'trusted_input' : 'cdp_ref',
-          ...(trustedInput ? { verified: true } : {}),
+          verified: true,
         };
         targetPresent = true;
         break;
@@ -641,23 +811,30 @@ export class BrowserActionExecutor implements BrowserActionPort {
           x: viewport.width / 2,
           y: viewport.height / 2,
         };
+        const scrollSession = prepared?.session ?? snapshot.root;
+        const before =
+          scrollSession === snapshot.root
+            ? { x: viewport.pageX, y: viewport.pageY }
+            : await this.#scrollPosition(scrollSession);
         await this.#showPointer(tabId, point, point, 'move');
-        await this.#dependencies.transport.send(
-          prepared?.session ?? snapshot.root,
-          'Input.dispatchMouseEvent',
-          {
-            type: 'mouseWheel',
-            x: point.x,
-            y: point.y,
-            deltaX: value.deltaX,
-            deltaY: value.deltaY,
-          },
-        );
+        await this.#dependencies.transport.send(scrollSession, 'Input.dispatchMouseEvent', {
+          type: 'mouseWheel',
+          x: point.x,
+          y: point.y,
+          deltaX: value.deltaX,
+          deltaY: value.deltaY,
+        });
+        const after = await this.#waitForScrollPosition(scrollSession, before, signal);
+        const actualDeltaX = after.x - before.x;
+        const actualDeltaY = after.y - before.y;
         data = {
           action: 'scroll',
           dispatched: true,
           deltaX: value.deltaX,
           deltaY: value.deltaY,
+          moved: actualDeltaX !== 0 || actualDeltaY !== 0,
+          actualDeltaX,
+          actualDeltaY,
         };
         break;
       }
@@ -686,15 +863,39 @@ export class BrowserActionExecutor implements BrowserActionPort {
         if (!resolved.object.objectId) {
           throw new BrowserActionError('UNSUPPORTED_ACTION', 'The select target is unavailable.');
         }
-        await this.#dependencies.transport.send(target.session, 'Runtime.callFunctionOn', {
-          objectId: resolved.object.objectId,
-          functionDeclaration: SELECT_FUNCTION,
-          arguments: [{ value: value.value }],
-          awaitPromise: false,
-          returnByValue: true,
-          userGesture: true,
-        });
-        data = { action: 'select', dispatched: true };
+        const objectId = resolved.object.objectId;
+        try {
+          const response =
+            await this.#dependencies.transport.send<Protocol.Runtime.CallFunctionOnResponse>(
+              target.session,
+              'Runtime.callFunctionOn',
+              {
+                objectId,
+                functionDeclaration: SELECT_FUNCTION,
+                arguments: [{ value: value.value }],
+                awaitPromise: false,
+                returnByValue: true,
+                userGesture: true,
+              },
+            );
+          const result = response.result.value as
+            { readonly ok?: unknown; readonly value?: unknown } | undefined;
+          if (
+            response.exceptionDetails !== undefined ||
+            result?.ok !== true ||
+            result.value !== value.value
+          ) {
+            throw new BrowserActionError(
+              'ACTION_STATE_MISMATCH',
+              'The select element did not retain the requested value.',
+            );
+          }
+        } finally {
+          await this.#dependencies.transport
+            .send(target.session, 'Runtime.releaseObject', { objectId })
+            .catch(() => undefined);
+        }
+        data = { action: 'select', dispatched: true, verified: true };
         targetPresent = true;
         break;
       }
@@ -720,7 +921,7 @@ export class BrowserActionExecutor implements BrowserActionPort {
           condition: 'load' | 'network_idle' | 'dom_stable' | 'delay';
           timeoutMs: number;
         }>(call);
-        await this.#wait(snapshot.root, value.condition, value.timeoutMs, signal);
+        await this.#wait(snapshot, value.condition, value.timeoutMs, signal);
         data = { action: 'wait', condition: value.condition, completed: true };
         break;
       }
@@ -793,47 +994,162 @@ export class BrowserActionExecutor implements BrowserActionPort {
     tabId: number,
     ref: string,
   ): Promise<RefStateObservation> {
+    let targetedError: unknown;
     try {
-      const [tree, domSnapshot] = await Promise.all([
-        this.#dependencies.transport.send<Protocol.Accessibility.GetFullAXTreeResponse>(
-          target.session,
-          'Accessibility.getFullAXTree',
-        ),
-        this.#dependencies.transport.send<Protocol.DOMSnapshot.CaptureSnapshotResponse>(
-          target.session,
-          'DOMSnapshot.captureSnapshot',
-          { computedStyles: [...SEMANTIC_SNAPSHOT_STYLES] },
-        ),
-      ]);
-      const semantic = buildSemanticPageSnapshot({
-        axNodes: tree.nodes,
-        domSnapshot,
-        frame: target.reference.frameTargetId ?? 'main',
-      });
-      const observedTargets: ObservedElementTarget[] = semantic.targets
-        .filter(({ documentFrameId }) => documentFrameId === target.reference.documentFrameId)
-        .map((observed) => ({
-          frameTargetId: target.reference.frameTargetId,
-          documentFrameId: observed.documentFrameId,
-          loaderId: target.reference.loaderId,
-          backendNodeId: observed.backendNodeId,
-          role: observed.role,
-          name: observed.name,
-          state: observed.state,
-          actions: observed.actions,
-          frame: target.reference.frameTargetId ?? 'main',
-        }));
-      const observations = this.#dependencies.refs.updateObservedStates(tabId, observedTargets);
-      const targetObservation = observations.find((observation) => observation.ref === ref);
-      return {
-        ...(targetObservation === undefined ? {} : { target: targetObservation }),
-        changes: observations
-          .filter(({ changed }) => changed)
-          .map(({ ref: changedRef, state }) => ({ ref: changedRef, state })),
-      };
-    } catch {
-      return { changes: [] };
+      const targeted = await this.#readTargetRefState(target, tabId, ref);
+      if (targeted !== undefined) return targeted;
+    } catch (error) {
+      targetedError = error;
     }
+
+    try {
+      const refreshed = await this.#refreshRefStates(target, tabId, ref);
+      if (refreshed.target !== undefined) return refreshed;
+      throw new ElementRefStoreError(
+        'STALE_REF',
+        'The element was replaced and could not be identified unambiguously.',
+      );
+    } catch (error) {
+      if (error instanceof ElementRefStoreError) throw error;
+      if (error instanceof BrowserActionError) throw error;
+      void targetedError;
+      throw new BrowserActionError(
+        'ACTION_STATE_UNAVAILABLE',
+        'The browser could not read the current element state.',
+      );
+    }
+  }
+
+  async #readTargetRefState(
+    target: PreparedElementTarget,
+    tabId: number,
+    ref: string,
+  ): Promise<RefStateObservation | undefined> {
+    const reference = this.#dependencies.refs.resolve(ref, tabId);
+    const stateBackendNodeId = reference.stateBackendNodeId ?? reference.backendNodeId;
+    const partial =
+      await this.#dependencies.transport.send<Protocol.Accessibility.GetPartialAXTreeResponse>(
+        target.session,
+        'Accessibility.getPartialAXTree',
+        {
+          backendNodeId: stateBackendNodeId,
+          fetchRelatives: false,
+        },
+      );
+    if (!Array.isArray(partial.nodes)) return undefined;
+
+    let selected = partialAxSelectionState(partial, stateBackendNodeId, reference.role);
+    if (selected === undefined) {
+      const resolved = await this.#dependencies.transport.send<Protocol.DOM.ResolveNodeResponse>(
+        target.session,
+        'DOM.resolveNode',
+        { backendNodeId: stateBackendNodeId },
+      );
+      const objectId = resolved.object.objectId;
+      if (!objectId) return undefined;
+      try {
+        const runtime =
+          await this.#dependencies.transport.send<Protocol.Runtime.CallFunctionOnResponse>(
+            target.session,
+            'Runtime.callFunctionOn',
+            {
+              objectId,
+              functionDeclaration: READ_SELECTION_STATE_FUNCTION,
+              arguments: [{ value: reference.role }],
+              returnByValue: true,
+              silent: true,
+            },
+          );
+        selected = runtimeSelectionState(runtime);
+      } finally {
+        await this.#dependencies.transport
+          .send(target.session, 'Runtime.releaseObject', { objectId })
+          .catch(() => undefined);
+      }
+    }
+    if (selected === undefined) return undefined;
+
+    const observations = this.#dependencies.refs.updateObservedStates(tabId, [
+      {
+        frameTargetId: reference.frameTargetId,
+        documentFrameId: reference.documentFrameId,
+        loaderId: reference.loaderId,
+        backendNodeId: reference.backendNodeId,
+        ...(reference.stateBackendNodeId === undefined
+          ? {}
+          : { stateBackendNodeId: reference.stateBackendNodeId }),
+        role: reference.role,
+        name: reference.name,
+        ...(reference.semanticLocator === undefined
+          ? {}
+          : { semanticLocator: reference.semanticLocator }),
+        state: selectionState(reference.state, reference.role, selected),
+        actions: reference.actions,
+        frame: reference.frameTargetId ?? 'main',
+      },
+    ]);
+    const targetObservation = observations.find((observation) => observation.ref === ref);
+    return {
+      ...(targetObservation === undefined ? {} : { target: targetObservation }),
+      rebound: false,
+      changes: observations
+        .filter(({ changed }) => changed)
+        .map(({ ref: changedRef, state }) => ({ ref: changedRef, state })),
+    };
+  }
+
+  async #refreshRefStates(
+    target: PreparedElementTarget,
+    tabId: number,
+    ref: string,
+  ): Promise<RefStateObservation> {
+    const beforeBackendNodeId = this.#dependencies.refs.resolve(ref, tabId).backendNodeId;
+    const [tree, domSnapshot] = await Promise.all([
+      this.#dependencies.transport.send<Protocol.Accessibility.GetFullAXTreeResponse>(
+        target.session,
+        'Accessibility.getFullAXTree',
+      ),
+      this.#dependencies.transport.send<Protocol.DOMSnapshot.CaptureSnapshotResponse>(
+        target.session,
+        'DOMSnapshot.captureSnapshot',
+        { computedStyles: [...SEMANTIC_SNAPSHOT_STYLES] },
+      ),
+    ]);
+    const semantic = buildSemanticPageSnapshot({
+      axNodes: tree.nodes,
+      domSnapshot,
+      frame: target.reference.frameTargetId ?? 'main',
+    });
+    const observedTargets: ObservedElementTarget[] = semantic.targets
+      .filter(({ documentFrameId }) => documentFrameId === target.reference.documentFrameId)
+      .map((observed) => ({
+        frameTargetId: target.reference.frameTargetId,
+        documentFrameId: observed.documentFrameId,
+        loaderId: target.reference.loaderId,
+        backendNodeId: observed.backendNodeId,
+        ...(observed.stateBackendNodeId === undefined
+          ? {}
+          : { stateBackendNodeId: observed.stateBackendNodeId }),
+        role: observed.role,
+        name: observed.name,
+        semanticLocator: observed.semanticLocator,
+        state: observed.state,
+        actions: observed.actions,
+        frame: target.reference.frameTargetId ?? 'main',
+      }));
+    const observations = this.#dependencies.refs.updateObservedStates(tabId, observedTargets);
+    const targetObservation = observations.find((observation) => observation.ref === ref);
+    const currentBackendNodeId =
+      targetObservation === undefined
+        ? beforeBackendNodeId
+        : this.#dependencies.refs.resolve(ref, tabId).backendNodeId;
+    return {
+      ...(targetObservation === undefined ? {} : { target: targetObservation }),
+      rebound: currentBackendNodeId !== beforeBackendNodeId,
+      changes: observations
+        .filter(({ changed }) => changed)
+        .map(({ ref: changedRef, state }) => ({ ref: changedRef, state })),
+    };
   }
 
   async #waitForSelectionState(
@@ -846,11 +1162,20 @@ export class BrowserActionExecutor implements BrowserActionPort {
     let observed = await this.#readRefStates(target, tabId, ref);
     const settleDeadline = Date.now() + SELECTION_SETTLE_TIMEOUT_MS;
     while (
-      selectedState(observed.target?.state ?? []) !== expected &&
+      readSelectionState(observed.target?.state ?? []) !== expected &&
       Date.now() < settleDeadline
     ) {
       await this.#delay(Math.min(SELECTION_POLL_INTERVAL_MS, settleDeadline - Date.now()), signal);
       observed = await this.#readRefStates(target, tabId, ref);
+    }
+    if (readSelectionState(observed.target?.state ?? []) !== expected) {
+      throwIfAborted(signal);
+      try {
+        const refreshed = await this.#refreshRefStates(target, tabId, ref);
+        if (refreshed.target !== undefined) observed = refreshed;
+      } catch {
+        // The targeted observation is still useful when an optional full refresh is unavailable.
+      }
     }
     return observed;
   }
@@ -897,6 +1222,57 @@ export class BrowserActionExecutor implements BrowserActionPort {
     }
   }
 
+  async #actionablePoint(target: PreparedElementTarget): Promise<Point> {
+    const candidates: readonly Point[] = [
+      target.point,
+      { x: target.rect.x + target.rect.width * 0.25, y: target.point.y },
+      { x: target.rect.x + target.rect.width * 0.75, y: target.point.y },
+      { x: target.point.x, y: target.rect.y + target.rect.height * 0.25 },
+      { x: target.point.x, y: target.rect.y + target.rect.height * 0.75 },
+    ];
+    let objectId: string | undefined;
+    try {
+      const resolved = await this.#dependencies.transport.send<Protocol.DOM.ResolveNodeResponse>(
+        target.session,
+        'DOM.resolveNode',
+        { backendNodeId: target.reference.backendNodeId },
+      );
+      objectId = resolved.object.objectId;
+      if (!objectId) return target.point;
+      const response =
+        await this.#dependencies.transport.send<Protocol.Runtime.CallFunctionOnResponse>(
+          target.session,
+          'Runtime.callFunctionOn',
+          {
+            objectId,
+            functionDeclaration: FIND_ACTIONABLE_POINT_FUNCTION,
+            arguments: [{ value: candidates }],
+            returnByValue: true,
+            silent: true,
+          },
+        );
+      const index = response.exceptionDetails === undefined ? response.result.value : undefined;
+      if (index === -1) {
+        throw new BrowserActionError(
+          'ACTION_TARGET_OBSCURED',
+          'Every measured point inside the target is covered by another element.',
+        );
+      }
+      return typeof index === 'number' && Number.isInteger(index) && candidates[index]
+        ? candidates[index]
+        : target.point;
+    } catch (error) {
+      if (error instanceof BrowserActionError) throw error;
+      return target.point;
+    } finally {
+      if (objectId) {
+        await this.#dependencies.transport
+          .send(target.session, 'Runtime.releaseObject', { objectId })
+          .catch(() => undefined);
+      }
+    }
+  }
+
   async #prepareElementTarget(
     snapshot: BrowserSessionSnapshot,
     ref: string,
@@ -934,19 +1310,20 @@ export class BrowserActionExecutor implements BrowserActionPort {
       ]);
       const pageBounds = quadRect(model.model.border);
       if (!pageBounds) throw new Error('The element has no visible box.');
+      const viewport = metrics.cssVisualViewport ?? metrics.visualViewport;
       const point = {
-        x: pageBounds.x + pageBounds.width / 2 - metrics.visualViewport.pageX,
-        y: pageBounds.y + pageBounds.height / 2 - metrics.visualViewport.pageY,
+        x: pageBounds.x + pageBounds.width / 2,
+        y: pageBounds.y + pageBounds.height / 2,
       };
       if (
         point.x < 0 ||
         point.y < 0 ||
-        point.x > metrics.visualViewport.clientWidth ||
-        point.y > metrics.visualViewport.clientHeight
+        point.x > viewport.clientWidth ||
+        point.y > viewport.clientHeight
       ) {
         throw new Error('The element is outside the frame viewport.');
       }
-      return { reference, session, point };
+      return { reference, session, point, rect: pageBounds };
     } catch (error) {
       if (error instanceof ElementRefStoreError) throw error;
       throw new ElementRefStoreError('STALE_REF', 'The element ref is stale.');
@@ -1307,7 +1684,9 @@ export class BrowserActionExecutor implements BrowserActionPort {
     });
   }
 
-  async #viewport(session: DebuggerSession): Promise<{ width: number; height: number }> {
+  async #viewport(
+    session: DebuggerSession,
+  ): Promise<{ width: number; height: number; pageX: number; pageY: number }> {
     const metrics = await this.#dependencies.transport.send<Protocol.Page.GetLayoutMetricsResponse>(
       session,
       'Page.getLayoutMetrics',
@@ -1315,7 +1694,31 @@ export class BrowserActionExecutor implements BrowserActionPort {
     return {
       width: metrics.visualViewport.clientWidth,
       height: metrics.visualViewport.clientHeight,
+      pageX: metrics.visualViewport.pageX,
+      pageY: metrics.visualViewport.pageY,
     };
+  }
+
+  async #scrollPosition(session: DebuggerSession): Promise<Point> {
+    const viewport = await this.#viewport(session);
+    return { x: viewport.pageX, y: viewport.pageY };
+  }
+
+  async #waitForScrollPosition(
+    session: DebuggerSession,
+    before: Point,
+    signal: AbortSignal,
+  ): Promise<Point> {
+    let current = await this.#scrollPosition(session);
+    for (
+      let attempt = 0;
+      attempt < 4 && current.x === before.x && current.y === before.y;
+      attempt += 1
+    ) {
+      await this.#delay(25, signal);
+      current = await this.#scrollPosition(session);
+    }
+    return current;
   }
 
   async #validatePoint(session: DebuggerSession, point: Point): Promise<void> {
@@ -1329,7 +1732,7 @@ export class BrowserActionExecutor implements BrowserActionPort {
   }
 
   async #wait(
-    session: DebuggerSession,
+    snapshot: BrowserSessionSnapshot,
     condition: 'load' | 'network_idle' | 'dom_stable' | 'delay',
     timeoutMs: number,
     signal: AbortSignal,
@@ -1340,30 +1743,91 @@ export class BrowserActionExecutor implements BrowserActionPort {
     }
     if (condition === 'load') {
       const ready = await this.#dependencies.transport.send<Protocol.Runtime.EvaluateResponse>(
-        session,
+        snapshot.root,
         'Runtime.evaluate',
         { expression: 'document.readyState', returnByValue: true },
       );
       if (ready.result.value === 'complete') return;
-      await this.#waitForEvents(session, timeoutMs, signal, ['Page.loadEventFired'], 0);
+      await this.#waitForEvents(snapshot.root, timeoutMs, signal, ['Page.loadEventFired'], 0);
       return;
     }
     const network = condition === 'network_idle';
-    if (network) await this.#dependencies.transport.send(session, 'Network.enable');
+    if (network) {
+      await this.#waitForNetworkIdle(
+        [snapshot.root, ...[...snapshot.children.values()].map(({ session }) => session)],
+        timeoutMs,
+        signal,
+      );
+      return;
+    }
     await this.#waitForEvents(
-      session,
+      snapshot.root,
       timeoutMs,
       signal,
-      network
-        ? ['Network.requestWillBeSent', 'Network.loadingFinished', 'Network.loadingFailed']
-        : [
-            'DOM.documentUpdated',
-            'DOM.attributeModified',
-            'DOM.childNodeInserted',
-            'DOM.childNodeRemoved',
-          ],
+      [
+        'DOM.documentUpdated',
+        'DOM.attributeModified',
+        'DOM.childNodeInserted',
+        'DOM.childNodeRemoved',
+      ],
       500,
     );
+  }
+
+  #waitForNetworkIdle(
+    sessions: readonly DebuggerSession[],
+    timeoutMs: number,
+    signal: AbortSignal,
+  ): Promise<void> {
+    const sessionKey = ({ tabId, sessionId }: DebuggerSession): string =>
+      `${String(tabId)}:${sessionId ?? 'root'}`;
+    const sessionKeys = new Set(sessions.map(sessionKey));
+    const inFlight = new Set<string>();
+    return new Promise((resolve, reject) => {
+      let done = false;
+      let quietTimer: ReturnType<typeof setTimeout> | undefined;
+      const finish = (error?: unknown): void => {
+        if (done) return;
+        done = true;
+        clearTimeout(timeoutTimer);
+        if (quietTimer) clearTimeout(quietTimer);
+        unsubscribe();
+        signal.removeEventListener('abort', onAbort);
+        if (error) reject(error);
+        else resolve();
+      };
+      const scheduleQuiet = (): void => {
+        if (inFlight.size > 0 || done) return;
+        if (quietTimer) clearTimeout(quietTimer);
+        quietTimer = setTimeout(() => finish(), 500);
+      };
+      const unsubscribe = this.#dependencies.transport.onEvent((source, method, params) => {
+        const sourceKey = sessionKey(source);
+        if (!sessionKeys.has(sourceKey)) return;
+        const requestId = params.requestId;
+        if (typeof requestId !== 'string' || requestId.length === 0) return;
+        const requestKey = `${sourceKey}:${requestId}`;
+        if (method === 'Network.requestWillBeSent') {
+          inFlight.add(requestKey);
+          if (quietTimer) clearTimeout(quietTimer);
+          quietTimer = undefined;
+          return;
+        }
+        if (method !== 'Network.loadingFinished' && method !== 'Network.loadingFailed') return;
+        inFlight.delete(requestKey);
+        scheduleQuiet();
+      });
+      const onAbort = (): void =>
+        finish(new DOMException('Browser wait was aborted.', 'AbortError'));
+      const timeoutTimer = setTimeout(
+        () => finish(new BrowserActionError('WAIT_TIMEOUT', 'The browser wait timed out.')),
+        timeoutMs,
+      );
+      signal.addEventListener('abort', onAbort, { once: true });
+      Promise.all(
+        sessions.map((session) => this.#dependencies.transport.send(session, 'Network.enable')),
+      ).then(scheduleQuiet, finish);
+    });
   }
 
   #waitForEvents(

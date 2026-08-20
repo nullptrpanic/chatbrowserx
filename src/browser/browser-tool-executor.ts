@@ -11,6 +11,7 @@ import { BrowserTabError, type BrowserTabPort, type BrowserTabState } from './ta
 import type { PageInspectionOptions, PageObservationResult } from './observation/page-observer';
 import type { BrowserActionPort } from './actions/browser-action-executor';
 import type { NetworkCapturePort } from './network/network-capture-registry';
+import { readSelectionState } from './selection-state';
 
 const MAX_OUTPUT_CHARACTERS = 100 * 1_024;
 const RELOAD_RECOVERY_FAILURES = new Set<BrowserToolFailureCode>([
@@ -39,7 +40,6 @@ const TASK_SCOPED_OPERATIONS = new Set<ParsedBrowserToolCall['operation']>([
   'network_get',
   'network_stop',
 ]);
-type SessionPurpose = 'action' | 'operation' | 'network';
 
 interface ReloadRecoveryState {
   readonly operation: ParsedBrowserToolCall['operation'];
@@ -142,6 +142,13 @@ function failureFor(error: unknown): BrowserToolFailure {
         true,
         true,
       );
+    case 'STALE_SCREENSHOT':
+      return failure(
+        'STALE_SCREENSHOT',
+        'The screenshot no longer represents the current page state. Take a new screenshot before using coordinates.',
+        true,
+        true,
+      );
     case 'TYPE_VERIFICATION_FAILED':
       return failure(
         'TYPE_VERIFICATION_FAILED',
@@ -154,6 +161,20 @@ function failureFor(error: unknown): BrowserToolFailure {
         'ACTION_STATE_MISMATCH',
         'The page did not retain the requested selection. Inspect fresh refs before another action.',
         false,
+        true,
+      );
+    case 'ACTION_STATE_UNAVAILABLE':
+      return failure(
+        'ACTION_STATE_UNAVAILABLE',
+        'The browser could not measure the requested state. Inspect fresh refs before another action.',
+        true,
+        true,
+      );
+    case 'ACTION_TARGET_OBSCURED':
+      return failure(
+        'ACTION_TARGET_OBSCURED',
+        'The target is covered by another element. Inspect the page before retrying.',
+        true,
         true,
       );
     case 'WAIT_TIMEOUT':
@@ -273,15 +294,6 @@ interface SelectableRefIdentity {
   readonly selected: boolean | undefined;
 }
 
-function selectedState(state: unknown): boolean | undefined {
-  if (!Array.isArray(state)) return undefined;
-  for (const property of ['checked', 'selected'] as const) {
-    if (state.includes(property)) return true;
-    if (state.includes(`${property}=false`)) return false;
-  }
-  return undefined;
-}
-
 function selectableRefs(
   data: Readonly<Record<string, unknown>>,
 ): ReadonlyMap<string, SelectableRefIdentity> | null {
@@ -323,7 +335,7 @@ function selectableRefs(
     candidates.push({
       ref: value.ref,
       semanticKey,
-      selected: selectedState(value.s),
+      selected: readSelectionState(value.s),
     });
     counts.set(semanticKey, (counts.get(semanticKey) ?? 0) + 1);
   }
@@ -480,7 +492,7 @@ function throwIfAborted(signal: AbortSignal): void {
 /** Dispatches validated browser calls and always returns a bounded, normalized result. */
 export class BrowserToolExecutor implements BrowserExecutionPort {
   readonly #dependencies: BrowserToolExecutorDependencies;
-  readonly #ownersByRunner = new Map<string, Set<string>>();
+  readonly #retainedTabsByRunner = new Map<string, Set<number>>();
   readonly #screenshotScales = new Map<number, ScreenshotCoordinateScale>();
   readonly #visualFallbackByTab = new Map<number, boolean>();
   readonly #stateMismatchFallbackByTab = new Set<number>();
@@ -516,12 +528,8 @@ export class BrowserToolExecutor implements BrowserExecutionPort {
     this.#reloadRecoveryByTab.clear();
     const sessions = this.#dependencies.sessions;
     if (!sessions) return;
-    const owners = [...(this.#ownersByRunner.get(sessionOwnerId) ?? [])];
-    this.#ownersByRunner.delete(sessionOwnerId);
-    await Promise.all([
-      ...owners.map((ownerId) => sessions.releaseOwner(ownerId)),
-      sessions.releaseOwner(sessionOwnerId),
-    ]);
+    this.#retainedTabsByRunner.delete(sessionOwnerId);
+    await sessions.releaseOwner(sessionOwnerId);
   }
 
   async execute(
@@ -663,6 +671,7 @@ export class BrowserToolExecutor implements BrowserExecutionPort {
             readonly since?: string;
           };
           const targetTabId = requiredTaskTabId(taskTarget);
+          if (input.mode !== 'screenshot') this.#screenshotScales.delete(targetTabId);
           if (input.mode === 'screenshot') {
             const allowed = this.#visualFallbackByTab.get(targetTabId);
             const mismatchFallback = this.#stateMismatchFallbackByTab.has(targetTabId);
@@ -685,23 +694,15 @@ export class BrowserToolExecutor implements BrowserExecutionPort {
               break;
             }
           }
-          const purpose = 'operation' as const;
           if (input.mode !== 'content') {
-            await this.#retainPurpose(targetTabId, context?.sessionOwnerId, purpose);
+            await this.#retainRunner(targetTabId, context?.sessionOwnerId);
           }
-          let observed: PageObservationResult;
-          try {
-            observed =
-              input.since === undefined
-                ? await this.#dependencies.observer.inspect(targetTabId, input.mode, signal)
-                : await this.#dependencies.observer.inspect(targetTabId, input.mode, signal, {
-                    since: input.since,
-                  });
-          } catch (error) {
-            await this.#releasePurpose(context?.sessionOwnerId, purpose);
-            throw error;
-          }
-          await this.#releasePurpose(context?.sessionOwnerId, purpose);
+          const observed: PageObservationResult =
+            input.since === undefined
+              ? await this.#dependencies.observer.inspect(targetTabId, input.mode, signal)
+              : await this.#dependencies.observer.inspect(targetTabId, input.mode, signal, {
+                  since: input.since,
+                });
           if (input.mode === 'interactive' || input.mode === 'interactive_deep') {
             this.#rememberSelectableRefs(targetTabId, observed.data);
             const snapshotId = interactiveSnapshotId(observed.data);
@@ -761,18 +762,25 @@ export class BrowserToolExecutor implements BrowserExecutionPort {
             );
             break;
           }
+          const screenshotScale = this.#screenshotScales.get(targetTabId);
+          const coordinateAction =
+            call.operation === 'click_point' || call.operation === 'drag_point';
+          if (coordinateAction && screenshotScale === undefined) {
+            output = failure(
+              'STALE_SCREENSHOT',
+              'The screenshot no longer represents the current page state. Take a new screenshot before using coordinates.',
+              true,
+              true,
+            );
+            break;
+          }
           const boundCall = bindTaskTarget(
-            mapScreenshotCoordinates(call, this.#screenshotScales.get(targetTabId)),
+            mapScreenshotCoordinates(call, screenshotScale),
             targetTabId,
           );
           this.#screenshotScales.delete(targetTabId);
-          await this.#retainPurpose(targetTabId, context?.sessionOwnerId, 'action');
-          let action;
-          try {
-            action = await this.#dependencies.actions.execute(boundCall, signal);
-          } finally {
-            await this.#releasePurpose(context?.sessionOwnerId, 'action');
-          }
+          await this.#retainRunner(targetTabId, context?.sessionOwnerId);
+          const action = await this.#dependencies.actions.execute(boundCall, signal);
           this.#clearFailedSelection(call, targetTabId);
           this.#stateMismatchFallbackByTab.delete(targetTabId);
           let verification: Readonly<Record<string, unknown>> | undefined;
@@ -782,7 +790,7 @@ export class BrowserToolExecutor implements BrowserExecutionPort {
             baseSnapshot !== undefined &&
             this.#dependencies.observer
           ) {
-            await this.#retainPurpose(targetTabId, context?.sessionOwnerId, 'operation');
+            await this.#retainRunner(targetTabId, context?.sessionOwnerId);
             try {
               const observed = await this.#dependencies.observer.inspect(
                 targetTabId,
@@ -800,8 +808,6 @@ export class BrowserToolExecutor implements BrowserExecutionPort {
               );
             } catch {
               // The coordinate action already completed; a failed best-effort recheck must not replay it.
-            } finally {
-              await this.#releasePurpose(context?.sessionOwnerId, 'operation');
             }
           }
           output = {
@@ -824,14 +830,8 @@ export class BrowserToolExecutor implements BrowserExecutionPort {
             break;
           }
           const targetTabId = requiredTaskTabId(taskTarget);
-          await this.#retainPurpose(targetTabId, context?.sessionOwnerId, 'network');
-          let started;
-          try {
-            started = await this.#dependencies.network.start(targetTabId, signal);
-          } catch (error) {
-            await this.#releasePurpose(context?.sessionOwnerId, 'network');
-            throw error;
-          }
+          await this.#retainRunner(targetTabId, context?.sessionOwnerId);
+          const started = await this.#dependencies.network.start(targetTabId, signal);
           output = {
             ok: true,
             tabId: targetTabId,
@@ -910,11 +910,7 @@ export class BrowserToolExecutor implements BrowserExecutionPort {
             break;
           }
           const targetTabId = requiredTaskTabId(taskTarget);
-          try {
-            await this.#dependencies.network.stop(targetTabId);
-          } finally {
-            await this.#releasePurpose(context?.sessionOwnerId, 'network');
-          }
+          await this.#dependencies.network.stop(targetTabId);
           output = {
             ok: true,
             tabId: targetTabId,
@@ -1055,27 +1051,13 @@ export class BrowserToolExecutor implements BrowserExecutionPort {
     }
   }
 
-  async #retainPurpose(
-    tabId_: number,
-    runnerId: string | undefined,
-    purpose: SessionPurpose,
-  ): Promise<void> {
+  async #retainRunner(tabId_: number, runnerId: string | undefined): Promise<void> {
     const sessions = this.#dependencies.sessions;
     if (!sessions || runnerId === undefined) return;
-    const ownerId = `${runnerId}:${purpose}`;
-    await sessions.retain(tabId_, ownerId);
-    const owners = this.#ownersByRunner.get(runnerId) ?? new Set<string>();
-    owners.add(ownerId);
-    this.#ownersByRunner.set(runnerId, owners);
-  }
-
-  async #releasePurpose(runnerId: string | undefined, purpose: SessionPurpose): Promise<void> {
-    const sessions = this.#dependencies.sessions;
-    if (!sessions || runnerId === undefined) return;
-    const ownerId = `${runnerId}:${purpose}`;
-    const owners = this.#ownersByRunner.get(runnerId);
-    if (!owners?.delete(ownerId)) return;
-    if (owners.size === 0) this.#ownersByRunner.delete(runnerId);
-    await sessions.releaseOwner(ownerId);
+    const retainedTabs = this.#retainedTabsByRunner.get(runnerId) ?? new Set<number>();
+    if (retainedTabs.has(tabId_)) return;
+    await sessions.retain(tabId_, runnerId);
+    retainedTabs.add(tabId_);
+    this.#retainedTabsByRunner.set(runnerId, retainedTabs);
   }
 }

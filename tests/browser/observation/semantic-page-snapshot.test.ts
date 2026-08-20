@@ -223,6 +223,65 @@ describe('buildSemanticPageSnapshot', () => {
     ]);
   });
 
+  it('gives repeated controls stable container-scoped locators across node replacement', () => {
+    const build = (firstBackendNodeId: number, secondBackendNodeId: number) =>
+      buildSemanticPageSnapshot({
+        axNodes: [
+          axNode('root', 1, 'RootWebArea', 'Exam', {
+            childIds: ['question-1', 'question-2'],
+          }),
+          axNode('question-1', 10, 'group', 'Question 1', {
+            parentId: 'root',
+            childIds: ['answer-1'],
+          }),
+          axNode('answer-1', firstBackendNodeId, 'checkbox', 'A', {
+            parentId: 'question-1',
+          }),
+          axNode('question-2', 20, 'group', 'Question 2', {
+            parentId: 'root',
+            childIds: ['answer-2'],
+          }),
+          axNode('answer-2', secondBackendNodeId, 'checkbox', 'A', {
+            parentId: 'question-2',
+          }),
+        ],
+        domSnapshot: domSnapshot([
+          { backendNodeId: 1, nodeName: '#document', parentIndex: -1 },
+          { backendNodeId: 10, nodeName: 'SECTION', parentIndex: 0 },
+          {
+            backendNodeId: firstBackendNodeId,
+            nodeName: 'INPUT',
+            parentIndex: 1,
+            attributes: { type: 'checkbox' },
+            clickable: true,
+            cursor: 'pointer',
+            bounds: [20, 80, 20, 20],
+          },
+          { backendNodeId: 20, nodeName: 'SECTION', parentIndex: 0 },
+          {
+            backendNodeId: secondBackendNodeId,
+            nodeName: 'INPUT',
+            parentIndex: 3,
+            attributes: { type: 'checkbox' },
+            clickable: true,
+            cursor: 'pointer',
+            bounds: [20, 180, 20, 20],
+          },
+        ]),
+        frame: 'main',
+      });
+
+    const initial = build(11, 21);
+    const replaced = build(12, 22);
+    const initialLocators = initial.targets.map((target) => target.semanticLocator);
+    const replacedLocators = replaced.targets.map((target) => target.semanticLocator);
+
+    expect(initialLocators).toHaveLength(2);
+    expect(initialLocators[0]).toBeTruthy();
+    expect(initialLocators[0]).not.toBe(initialLocators[1]);
+    expect(replacedLocators).toEqual(initialLocators);
+  });
+
   it('merges accessible label fragments that resolve to one click target', () => {
     const result = buildSemanticPageSnapshot({
       axNodes: [
@@ -415,6 +474,345 @@ describe('buildSemanticPageSnapshot', () => {
     expect(JSON.stringify(result.entries)).not.toContain('backendNodeId');
   });
 
+  it('keeps every exam option selected when the whole multi-select group is checked', () => {
+    const result = buildSemanticPageSnapshot({
+      axNodes: [
+        axNode('root', 1, 'RootWebArea', 'Exam', {
+          childIds: ['choice-a', 'choice-b'],
+        }),
+        axNode('choice-a', 21, 'StaticText', 'A. First answer', { parentId: 'root' }),
+        axNode('choice-b', 31, 'StaticText', 'B. Second answer', { parentId: 'root' }),
+      ],
+      domSnapshot: domSnapshot([
+        { backendNodeId: 1, nodeName: '#document', parentIndex: -1 },
+        {
+          backendNodeId: 20,
+          nodeName: 'DIV',
+          parentIndex: 0,
+          attributes: { class: 'choice-option__7sZO8 checked__Hq2oI' },
+          cursor: 'pointer',
+          clickable: true,
+          bounds: [20, 160, 760, 48],
+        },
+        {
+          backendNodeId: 21,
+          nodeName: 'SPAN',
+          parentIndex: 1,
+          cursor: 'pointer',
+          bounds: [40, 170, 700, 28],
+        },
+        {
+          backendNodeId: 30,
+          nodeName: 'DIV',
+          parentIndex: 0,
+          attributes: { class: 'choice-option__7sZO8 checked__Hq2oI' },
+          cursor: 'pointer',
+          clickable: true,
+          bounds: [20, 220, 760, 48],
+        },
+        {
+          backendNodeId: 31,
+          nodeName: 'SPAN',
+          parentIndex: 3,
+          cursor: 'pointer',
+          bounds: [40, 230, 700, 28],
+        },
+      ]),
+      frame: 'main',
+    });
+
+    expect(result.targets).toEqual([
+      expect.objectContaining({
+        backendNodeId: 20,
+        role: 'option',
+        state: ['selected'],
+        actions: ['click', 'set_checked'],
+      }),
+      expect.objectContaining({
+        backendNodeId: 30,
+        role: 'option',
+        state: ['selected'],
+        actions: ['click', 'set_checked'],
+      }),
+    ]);
+  });
+
+  it('reads an explicit state class on a standalone custom checkbox', () => {
+    const result = buildSemanticPageSnapshot({
+      axNodes: [
+        axNode('root', 1, 'RootWebArea', 'Settings', { childIds: ['toggle'] }),
+        axNode('toggle', 20, 'checkbox', 'Enable alerts', { parentId: 'root' }),
+      ],
+      domSnapshot: domSnapshot([
+        { backendNodeId: 1, nodeName: '#document', parentIndex: -1 },
+        {
+          backendNodeId: 20,
+          nodeName: 'DIV',
+          parentIndex: 0,
+          attributes: { class: 'ui-checkbox is-checked' },
+          cursor: 'pointer',
+          clickable: true,
+          bounds: [20, 20, 160, 32],
+        },
+      ]),
+      frame: 'main',
+    });
+
+    expect(result.targets).toEqual([
+      expect.objectContaining({
+        backendNodeId: 20,
+        role: 'checkbox',
+        state: ['checked'],
+        actions: ['click', 'set_checked'],
+      }),
+    ]);
+  });
+
+  it('reads exact data-state semantics on a standalone custom switch', () => {
+    const result = buildSemanticPageSnapshot({
+      axNodes: [
+        axNode('root', 1, 'RootWebArea', 'Settings', { childIds: ['toggle'] }),
+        axNode('toggle', 20, 'switch', 'Dark mode', { parentId: 'root' }),
+      ],
+      domSnapshot: domSnapshot([
+        { backendNodeId: 1, nodeName: '#document', parentIndex: -1 },
+        {
+          backendNodeId: 20,
+          nodeName: 'BUTTON',
+          parentIndex: 0,
+          attributes: { class: 'toggle-switch', 'data-state': 'checked' },
+          cursor: 'pointer',
+          clickable: true,
+          bounds: [20, 20, 80, 32],
+        },
+      ]),
+      frame: 'main',
+    });
+
+    expect(result.targets).toEqual([
+      expect.objectContaining({
+        backendNodeId: 20,
+        role: 'switch',
+        state: ['checked'],
+        actions: ['click', 'set_checked'],
+      }),
+    ]);
+  });
+
+  it('keeps authoritative AX selection state ahead of CSS state hints', () => {
+    const result = buildSemanticPageSnapshot({
+      axNodes: [
+        axNode('root', 1, 'RootWebArea', 'Settings', {
+          childIds: ['first-toggle', 'second-toggle'],
+        }),
+        axNode('first-toggle', 20, 'checkbox', 'First toggle', {
+          parentId: 'root',
+          properties: [{ name: 'checked', value: { type: 'boolean', value: false } }],
+        }),
+        axNode('second-toggle', 30, 'checkbox', 'Second toggle', { parentId: 'root' }),
+      ],
+      domSnapshot: domSnapshot([
+        { backendNodeId: 1, nodeName: '#document', parentIndex: -1 },
+        {
+          backendNodeId: 20,
+          nodeName: 'DIV',
+          parentIndex: 0,
+          attributes: { class: 'ui-checkbox checked' },
+          cursor: 'pointer',
+          clickable: true,
+          bounds: [20, 20, 160, 32],
+        },
+        {
+          backendNodeId: 30,
+          nodeName: 'DIV',
+          parentIndex: 0,
+          attributes: { class: 'ui-checkbox' },
+          cursor: 'pointer',
+          clickable: true,
+          bounds: [20, 60, 160, 32],
+        },
+      ]),
+      frame: 'main',
+    });
+
+    expect(result.targets[0]).toEqual(
+      expect.objectContaining({
+        backendNodeId: 20,
+        role: 'checkbox',
+        state: ['checked=false'],
+      }),
+    );
+  });
+
+  it('does not treat an active checkbox class as checked state', () => {
+    const result = buildSemanticPageSnapshot({
+      axNodes: [
+        axNode('root', 1, 'RootWebArea', 'Settings', {
+          childIds: ['first-toggle', 'second-toggle'],
+        }),
+        axNode('first-toggle', 20, 'checkbox', 'First toggle', { parentId: 'root' }),
+        axNode('second-toggle', 30, 'checkbox', 'Second toggle', { parentId: 'root' }),
+      ],
+      domSnapshot: domSnapshot([
+        { backendNodeId: 1, nodeName: '#document', parentIndex: -1 },
+        {
+          backendNodeId: 20,
+          nodeName: 'DIV',
+          parentIndex: 0,
+          attributes: { class: 'ui-checkbox active' },
+          cursor: 'pointer',
+          clickable: true,
+          bounds: [20, 20, 160, 32],
+        },
+        {
+          backendNodeId: 30,
+          nodeName: 'DIV',
+          parentIndex: 0,
+          attributes: { class: 'ui-checkbox' },
+          cursor: 'pointer',
+          clickable: true,
+          bounds: [20, 60, 160, 32],
+        },
+      ]),
+      frame: 'main',
+    });
+
+    expect(result.targets[0]).toEqual(
+      expect.objectContaining({
+        backendNodeId: 20,
+        role: 'checkbox',
+        state: ['checked=false'],
+      }),
+    );
+  });
+
+  it('recognizes an unselected custom choice group before any option is selected', () => {
+    const result = buildSemanticPageSnapshot({
+      axNodes: [
+        axNode('root', 1, 'RootWebArea', 'Survey', {
+          childIds: ['choice-a', 'choice-b'],
+        }),
+        axNode('choice-a', 21, 'StaticText', 'A. First answer', { parentId: 'root' }),
+        axNode('choice-b', 31, 'StaticText', 'B. Second answer', { parentId: 'root' }),
+      ],
+      domSnapshot: domSnapshot([
+        { backendNodeId: 1, nodeName: '#document', parentIndex: -1 },
+        {
+          backendNodeId: 20,
+          nodeName: 'DIV',
+          parentIndex: 0,
+          attributes: { class: 'choice-option__7sZO8' },
+          cursor: 'pointer',
+          clickable: true,
+          bounds: [20, 160, 760, 48],
+        },
+        {
+          backendNodeId: 21,
+          nodeName: 'SPAN',
+          parentIndex: 1,
+          cursor: 'pointer',
+          bounds: [40, 170, 700, 28],
+        },
+        {
+          backendNodeId: 30,
+          nodeName: 'DIV',
+          parentIndex: 0,
+          attributes: { class: 'choice-option__7sZO8' },
+          cursor: 'pointer',
+          clickable: true,
+          bounds: [20, 220, 760, 48],
+        },
+        {
+          backendNodeId: 31,
+          nodeName: 'SPAN',
+          parentIndex: 3,
+          cursor: 'pointer',
+          bounds: [40, 230, 700, 28],
+        },
+      ]),
+      frame: 'main',
+    });
+
+    expect(result.targets).toEqual([
+      expect.objectContaining({
+        backendNodeId: 20,
+        role: 'option',
+        state: ['selected=false'],
+        actions: ['click', 'set_checked'],
+      }),
+      expect.objectContaining({
+        backendNodeId: 30,
+        role: 'option',
+        state: ['selected=false'],
+        actions: ['click', 'set_checked'],
+      }),
+    ]);
+  });
+
+  it('does not advertise actions for a disabled control', () => {
+    const result = buildSemanticPageSnapshot({
+      axNodes: [
+        axNode('root', 1, 'RootWebArea', 'Form', { childIds: ['submit'] }),
+        axNode('submit', 20, 'button', 'Submit', {
+          parentId: 'root',
+          properties: [
+            { name: 'focusable', value: { type: 'boolean', value: true } },
+            { name: 'disabled', value: { type: 'boolean', value: true } },
+          ],
+        }),
+      ],
+      domSnapshot: domSnapshot([
+        { backendNodeId: 1, nodeName: '#document', parentIndex: -1 },
+        {
+          backendNodeId: 20,
+          nodeName: 'BUTTON',
+          parentIndex: 0,
+          attributes: { disabled: '' },
+          cursor: 'pointer',
+          clickable: true,
+          bounds: [20, 20, 120, 40],
+        },
+      ]),
+      frame: 'main',
+    });
+
+    expect(result.targets).toEqual([]);
+    expect(result.entries).toEqual([
+      { depth: 1, role: 'button', name: 'Submit', state: ['disabled'] },
+    ]);
+  });
+
+  it('does not advertise typing for a native readonly editor', () => {
+    const result = buildSemanticPageSnapshot({
+      axNodes: [
+        axNode('root', 1, 'RootWebArea', 'Profile', { childIds: ['account-id'] }),
+        axNode('account-id', 20, 'textbox', 'Account ID', { parentId: 'root' }),
+      ],
+      domSnapshot: domSnapshot([
+        { backendNodeId: 1, nodeName: '#document', parentIndex: -1 },
+        {
+          backendNodeId: 20,
+          nodeName: 'INPUT',
+          parentIndex: 0,
+          attributes: { readonly: '' },
+          cursor: 'text',
+          clickable: true,
+          bounds: [20, 20, 240, 40],
+        },
+      ]),
+      frame: 'main',
+    });
+
+    expect(result.targets).toEqual([
+      expect.objectContaining({
+        backendNodeId: 20,
+        role: 'textbox',
+        state: ['readonly'],
+        actions: ['click'],
+      }),
+    ]);
+  });
+
   it('keeps answer-sheet navigation as ordinary clicks without selection semantics', () => {
     const result = buildSemanticPageSnapshot({
       axNodes: [
@@ -598,9 +996,11 @@ describe('buildSemanticPageSnapshot', () => {
       expect(result.targets).toEqual([
         {
           backendNodeId: 11,
+          stateBackendNodeId: 12,
           documentFrameId: 'frame-main',
           role: 'checkbox',
           name: 'Option A',
+          semanticLocator: expect.any(String),
           state,
           actions: ['click', 'set_checked'],
         },

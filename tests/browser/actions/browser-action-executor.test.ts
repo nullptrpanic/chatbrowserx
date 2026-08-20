@@ -57,6 +57,53 @@ function checkedTargetDomSnapshot(checked = true, backendNodeId = 42) {
   };
 }
 
+function customOptionDomSnapshot(selected: boolean, backendNodeId: number) {
+  return {
+    strings: [
+      '',
+      'frame-main',
+      '#document',
+      'DIV',
+      'class',
+      'choice-option__x',
+      'choice-option__x checked__x',
+      'pointer',
+      'block',
+      'visible',
+      'auto',
+    ],
+    documents: [
+      {
+        documentURL: 0,
+        title: 0,
+        baseURL: 0,
+        contentLanguage: 0,
+        encodingName: 0,
+        publicId: 0,
+        systemId: 0,
+        frameId: 1,
+        nodes: {
+          parentIndex: [-1, 0],
+          nodeType: [9, 1],
+          nodeName: [2, 3],
+          nodeValue: [0, 0],
+          backendNodeId: [1, backendNodeId],
+          attributes: [[], [4, selected ? 6 : 5]],
+          isClickable: { index: [1] },
+        },
+        layout: {
+          nodeIndex: [1],
+          styles: [[7, 8, 9, 10]],
+          bounds: [[10, 20, 100, 30]],
+          text: [0],
+          stackingContexts: { index: [] },
+        },
+        textBoxes: { layoutIndex: [], bounds: [], start: [], length: [] },
+      },
+    ],
+  };
+}
+
 function choiceDomSnapshot(selectedBackendNodeId: number) {
   return {
     strings: ['', 'frame-main', '#document', 'INPUT', 'pointer', 'block', 'visible', 'auto'],
@@ -114,6 +161,7 @@ function harness(
     readonly pointerRejects?: boolean;
     readonly page?: BrowserActionExecutorDependencies['page'];
     readonly targets?: readonly ObservedElementTarget[];
+    readonly onEvent?: DebuggerTransport['onEvent'];
     readonly responder?: (
       session: DebuggerSession,
       method: string,
@@ -122,8 +170,12 @@ function harness(
   } = {},
 ) {
   const order: string[] = [];
+  let insertedText = '';
   const send = vi.fn(async (session, method, params) => {
     order.push(`cdp:${method}`);
+    if (method === 'Input.insertText' && typeof params?.text === 'string') {
+      insertedText = params.text;
+    }
     if (method === 'Runtime.evaluate' && params?.returnByValue !== true) {
       return { result: { type: 'object', objectId: 'page_global' } };
     }
@@ -184,6 +236,31 @@ function harness(
       return { model: { border: [10, 20, 110, 20, 110, 50, 10, 50] } };
     }
     if (method === 'Runtime.callFunctionOn') {
+      if (
+        typeof params?.functionDeclaration === 'string' &&
+        params.functionDeclaration.includes('__chatbrowserxEditorTargetInfo')
+      ) {
+        return {
+          result: {
+            type: 'object',
+            value: { editor: false, value: insertedText },
+          },
+        };
+      }
+      if (
+        typeof params?.functionDeclaration === 'string' &&
+        params.functionDeclaration.includes('HTMLSelectElement')
+      ) {
+        const argument = Array.isArray(params.arguments)
+          ? (params.arguments[0] as { readonly value?: unknown } | undefined)
+          : undefined;
+        return {
+          result: {
+            type: 'object',
+            value: { ok: true, value: argument?.value },
+          },
+        };
+      }
       return { result: { type: 'object', value: { dispatched: true } } };
     }
     if (method === 'DOM.resolveNode') return { object: { objectId: 'object_1' } };
@@ -193,7 +270,7 @@ function harness(
     attach: vi.fn(async () => undefined),
     detach: vi.fn(async () => undefined),
     send,
-    onEvent: () => () => undefined,
+    onEvent: options.onEvent ?? (() => () => undefined),
     onDetach: () => () => undefined,
   };
   let refId = 0;
@@ -924,7 +1001,11 @@ describe('BrowserActionExecutor', () => {
       },
       observation: { target: { ref: 'ref_1', role: 'radio', state: ['checked'] } },
     });
-    expect(send.mock.calls.some(([, method]) => method === 'Runtime.callFunctionOn')).toBe(false);
+    expect(
+      send.mock.calls.some(
+        ([, method, params]) => method === 'Runtime.callFunctionOn' && params?.userGesture === true,
+      ),
+    ).toBe(false);
   });
 
   it('waits for a delayed selectable state after an ordinary click', async () => {
@@ -1013,8 +1094,8 @@ describe('BrowserActionExecutor', () => {
           frame: 'main',
         },
       ],
-      responder: (_session, method) => {
-        if (method === 'Runtime.callFunctionOn') {
+      responder: (_session, method, params) => {
+        if (method === 'Runtime.callFunctionOn' && params?.userGesture === true) {
           domClicked = true;
           return { result: { type: 'object', value: { dispatched: true } } };
         }
@@ -1291,6 +1372,399 @@ describe('BrowserActionExecutor', () => {
     });
   });
 
+  it('verifies a stable selection through targeted state reads without full-page snapshots', async () => {
+    let checked = false;
+    const { executor, send } = harness({
+      targets: [
+        {
+          frameTargetId: null,
+          documentFrameId: 'frame-main',
+          loaderId: 'loader-1',
+          backendNodeId: 42,
+          role: 'checkbox',
+          name: 'Option A',
+          semanticLocator: 'question:1/checkbox:A:0',
+          state: ['checked=false'],
+          actions: ['click', 'set_checked'],
+          frame: 'main',
+        },
+      ],
+      responder: (_session, method, params) => {
+        if (method === 'Input.dispatchMouseEvent' && params?.type === 'mouseReleased')
+          checked = true;
+        if (method === 'Accessibility.getPartialAXTree') {
+          return {
+            nodes: [
+              {
+                nodeId: 'option-a',
+                backendDOMNodeId: 42,
+                ignored: false,
+                role: { value: 'checkbox' },
+                name: { value: 'Option A' },
+                properties: [{ name: 'checked', value: { type: 'boolean', value: checked } }],
+              },
+            ],
+          };
+        }
+        if (
+          method === 'Runtime.callFunctionOn' &&
+          typeof params?.functionDeclaration === 'string' &&
+          params.functionDeclaration.includes('__chatbrowserxSelectionState')
+        ) {
+          return {
+            result: {
+              type: 'object',
+              value: { observable: true, selected: checked },
+            },
+          };
+        }
+        if (method === 'Accessibility.getFullAXTree') {
+          return {
+            nodes: [
+              {
+                nodeId: 'option-a',
+                backendDOMNodeId: 42,
+                ignored: false,
+                role: { value: 'checkbox' },
+                name: { value: 'Option A' },
+                properties: [{ name: 'checked', value: { type: 'boolean', value: checked } }],
+              },
+            ],
+          };
+        }
+        if (method === 'DOMSnapshot.captureSnapshot') return checkedTargetDomSnapshot(checked);
+        return undefined;
+      },
+    });
+
+    await expect(
+      executor.execute(
+        call('browser_set_checked', { tabId: 7, ref: 'ref_1', checked: true }),
+        new AbortController().signal,
+      ),
+    ).resolves.toMatchObject({
+      data: { action: 'set_checked', verified: true },
+      observation: { target: { ref: 'ref_1', state: ['checked'] } },
+    });
+    expect(send.mock.calls.some(([, method]) => method === 'Accessibility.getPartialAXTree')).toBe(
+      true,
+    );
+    expect(send.mock.calls.some(([, method]) => method === 'DOMSnapshot.captureSnapshot')).toBe(
+      false,
+    );
+  });
+
+  it('reads selection state from the control associated with a separate click target', async () => {
+    let checked = false;
+    const { executor, send } = harness({
+      targets: [
+        {
+          frameTargetId: null,
+          documentFrameId: 'frame-main',
+          loaderId: 'loader-1',
+          backendNodeId: 41,
+          stateBackendNodeId: 42,
+          role: 'checkbox',
+          name: 'Option A',
+          state: ['checked=false'],
+          actions: ['click', 'set_checked'],
+          frame: 'main',
+        },
+      ],
+      responder: (_session, method, params) => {
+        if (method === 'Input.dispatchMouseEvent' && params?.type === 'mouseReleased') {
+          checked = true;
+        }
+        if (method === 'Accessibility.getPartialAXTree') {
+          const backendNodeId = params?.backendNodeId;
+          return backendNodeId === 42
+            ? {
+                nodes: [
+                  {
+                    nodeId: 'option-a-control',
+                    backendDOMNodeId: 42,
+                    ignored: false,
+                    role: { value: 'checkbox' },
+                    name: { value: 'Option A' },
+                    properties: [{ name: 'checked', value: { type: 'boolean', value: checked } }],
+                  },
+                ],
+              }
+            : {
+                nodes: [
+                  {
+                    nodeId: 'option-a-label',
+                    backendDOMNodeId: 41,
+                    ignored: true,
+                  },
+                ],
+              };
+        }
+        if (
+          method === 'Runtime.callFunctionOn' &&
+          typeof params?.functionDeclaration === 'string' &&
+          params.functionDeclaration.includes('__chatbrowserxActionablePoint')
+        ) {
+          return { result: { type: 'number', value: 0 } };
+        }
+        if (method === 'Accessibility.getFullAXTree') {
+          throw new Error('A targeted state read should be sufficient.');
+        }
+        if (method === 'DOMSnapshot.captureSnapshot') {
+          throw new Error('A targeted state read should be sufficient.');
+        }
+        return undefined;
+      },
+    });
+
+    await expect(
+      executor.execute(
+        call('browser_set_checked', { tabId: 7, ref: 'ref_1', checked: true }),
+        new AbortController().signal,
+      ),
+    ).resolves.toMatchObject({
+      data: { action: 'set_checked', verified: true },
+      observation: { target: { ref: 'ref_1', state: ['checked'] } },
+    });
+    expect(
+      send.mock.calls
+        .filter(([, method]) => method === 'Accessibility.getPartialAXTree')
+        .map(([, , params]) => params?.backendNodeId),
+    ).toEqual([42, 42]);
+  });
+
+  it('rebinds a custom selection ref when the old DOM node is detached after the click', async () => {
+    vi.useFakeTimers();
+    const oldElement = document.createElement('div');
+    oldElement.className = 'choice-option__x';
+    document.body.append(oldElement);
+    let selected = false;
+    const semanticLocator = JSON.stringify([
+      [],
+      [['DIV', [['class', 'choice-option__x']], 0]],
+      'option',
+      'A. First answer',
+    ]);
+    const { executor, refs } = harness({
+      targets: [
+        {
+          frameTargetId: null,
+          documentFrameId: 'frame-main',
+          loaderId: 'loader-1',
+          backendNodeId: 42,
+          role: 'option',
+          name: 'A. First answer',
+          semanticLocator,
+          state: ['selected=false'],
+          actions: ['click', 'set_checked'],
+          frame: 'main',
+        },
+      ],
+      responder: (_session, method, params) => {
+        if (method === 'Input.dispatchMouseEvent' && params?.type === 'mouseReleased') {
+          selected = true;
+          oldElement.remove();
+        }
+        if (method === 'Accessibility.getPartialAXTree') {
+          return selected
+            ? {
+                nodes: [
+                  {
+                    nodeId: 'detached-option-a',
+                    backendDOMNodeId: 42,
+                    ignored: true,
+                  },
+                ],
+              }
+            : {
+                nodes: [
+                  {
+                    nodeId: 'option-a',
+                    backendDOMNodeId: 42,
+                    ignored: false,
+                    role: { value: 'option' },
+                    name: { value: 'A. First answer' },
+                    properties: [{ name: 'selected', value: { type: 'boolean', value: false } }],
+                  },
+                ],
+              };
+        }
+        if (method === 'DOM.resolveNode') return { object: { objectId: 'old-option-a' } };
+        if (
+          method === 'Runtime.callFunctionOn' &&
+          typeof params?.functionDeclaration === 'string' &&
+          params.functionDeclaration.includes('__chatbrowserxSelectionState')
+        ) {
+          const read = Function(`return (${params.functionDeclaration})`)() as (
+            this: Element,
+            role: string,
+          ) => unknown;
+          return {
+            result: {
+              type: 'object',
+              value: read.call(oldElement, 'option'),
+            },
+          };
+        }
+        if (
+          method === 'Runtime.callFunctionOn' &&
+          typeof params?.functionDeclaration === 'string' &&
+          params.functionDeclaration.includes('__chatbrowserxActionablePoint')
+        ) {
+          return { result: { type: 'number', value: 0 } };
+        }
+        if (method === 'Runtime.callFunctionOn') {
+          return { result: { type: 'object', value: { dispatched: false } } };
+        }
+        if (method === 'Accessibility.getFullAXTree') {
+          return {
+            nodes: [
+              {
+                nodeId: 'option-a-recreated',
+                backendDOMNodeId: 77,
+                ignored: false,
+                role: { value: 'option' },
+                name: { value: 'A. First answer' },
+                properties: [{ name: 'selected', value: { type: 'boolean', value: selected } }],
+              },
+            ],
+          };
+        }
+        if (method === 'DOMSnapshot.captureSnapshot') {
+          return customOptionDomSnapshot(selected, 77);
+        }
+        return undefined;
+      },
+    });
+
+    const execution = executor.execute(
+      call('browser_set_checked', { tabId: 7, ref: 'ref_1', checked: true }),
+      new AbortController().signal,
+    );
+    const assertion = expect(execution).resolves.toMatchObject({
+      data: { action: 'set_checked', verified: true },
+      observation: { target: { ref: 'ref_1', state: ['selected'] } },
+    });
+    await vi.advanceTimersByTimeAsync(4_000);
+    await assertion;
+
+    expect(refs.resolve('ref_1', 7)).toMatchObject({
+      backendNodeId: 77,
+      state: ['selected'],
+    });
+  });
+
+  it('uses one final semantic refresh when a targeted selection read stays stale', async () => {
+    vi.useFakeTimers();
+    let checked = false;
+    const { executor, send } = harness({
+      targets: [
+        {
+          frameTargetId: null,
+          documentFrameId: 'frame-main',
+          loaderId: 'loader-1',
+          backendNodeId: 42,
+          role: 'checkbox',
+          name: 'Option A',
+          semanticLocator: JSON.stringify([[], [['INPUT', [], 0]], 'checkbox', 'Option A']),
+          state: ['checked=false'],
+          actions: ['click', 'set_checked'],
+          frame: 'main',
+        },
+      ],
+      responder: (_session, method, params) => {
+        if (method === 'Input.dispatchMouseEvent' && params?.type === 'mouseReleased') {
+          checked = true;
+        }
+        if (method === 'Accessibility.getPartialAXTree') {
+          return {
+            nodes: [
+              {
+                nodeId: 'stale-option-a',
+                backendDOMNodeId: 42,
+                ignored: false,
+                role: { value: 'checkbox' },
+                name: { value: 'Option A' },
+                properties: [{ name: 'checked', value: { type: 'boolean', value: false } }],
+              },
+            ],
+          };
+        }
+        if (
+          method === 'Runtime.callFunctionOn' &&
+          typeof params?.functionDeclaration === 'string' &&
+          params.functionDeclaration.includes('__chatbrowserxActionablePoint')
+        ) {
+          return { result: { type: 'number', value: 0 } };
+        }
+        if (method === 'Accessibility.getFullAXTree') {
+          return {
+            nodes: [
+              {
+                nodeId: 'fresh-option-a',
+                backendDOMNodeId: 42,
+                ignored: false,
+                role: { value: 'checkbox' },
+                name: { value: 'Option A' },
+                properties: [{ name: 'checked', value: { type: 'boolean', value: checked } }],
+              },
+            ],
+          };
+        }
+        if (method === 'DOMSnapshot.captureSnapshot') return checkedTargetDomSnapshot(checked);
+        return undefined;
+      },
+    });
+
+    const execution = executor.execute(
+      call('browser_set_checked', { tabId: 7, ref: 'ref_1', checked: true }),
+      new AbortController().signal,
+    );
+    const assertion = expect(execution).resolves.toMatchObject({
+      data: { action: 'set_checked', strategy: 'pointer', verified: true },
+      observation: { target: { ref: 'ref_1', state: ['checked'] } },
+    });
+    await vi.advanceTimersByTimeAsync(2_000);
+    await assertion;
+    expect(send.mock.calls.some(([, method]) => method === 'Accessibility.getFullAXTree')).toBe(
+      true,
+    );
+  });
+
+  it('reports state observation failures instead of misclassifying them as a mismatch', async () => {
+    vi.useFakeTimers();
+    const { executor } = harness({
+      targets: [
+        {
+          frameTargetId: null,
+          documentFrameId: 'frame-main',
+          loaderId: 'loader-1',
+          backendNodeId: 42,
+          role: 'checkbox',
+          name: 'Option A',
+          state: ['checked=false'],
+          actions: ['click', 'set_checked'],
+          frame: 'main',
+        },
+      ],
+      responder: (_session, method) => {
+        if (method === 'Accessibility.getFullAXTree') throw new Error('CDP session disappeared');
+        if (method === 'DOMSnapshot.captureSnapshot') throw new Error('CDP session disappeared');
+        return undefined;
+      },
+    });
+
+    const execution = executor.execute(
+      call('browser_set_checked', { tabId: 7, ref: 'ref_1', checked: true }),
+      new AbortController().signal,
+    );
+    const assertion = expect(execution).rejects.toMatchObject({
+      code: 'ACTION_STATE_UNAVAILABLE',
+    });
+    await vi.advanceTimersByTimeAsync(2_000);
+    await assertion;
+  });
+
   it('waits for a delayed selection state without dispatching a second click', async () => {
     vi.useFakeTimers();
     let observationReads = 0;
@@ -1501,8 +1975,8 @@ describe('BrowserActionExecutor', () => {
           frame: 'main',
         },
       ],
-      responder: (_session, method) => {
-        if (method === 'Runtime.callFunctionOn') {
+      responder: (_session, method, params) => {
+        if (method === 'Runtime.callFunctionOn' && params?.userGesture === true) {
           domClicked = true;
           return { result: { type: 'object', value: { dispatched: true } } };
         }
@@ -1560,7 +2034,7 @@ describe('BrowserActionExecutor', () => {
     );
   });
 
-  it('fails and invalidates the ref when a requested selection never settles', async () => {
+  it('fails without invalidating a still-live ref when a requested selection never settles', async () => {
     const { executor, refs } = harness({
       targets: [
         {
@@ -1601,12 +2075,10 @@ describe('BrowserActionExecutor', () => {
         new AbortController().signal,
       ),
     ).rejects.toMatchObject({ code: 'ACTION_STATE_MISMATCH' });
-    expect(() => refs.resolve('ref_1', 7)).toThrowError(
-      expect.objectContaining({ code: 'REF_NOT_FOUND' }),
-    );
+    expect(refs.resolve('ref_1', 7)).toMatchObject({ backendNodeId: 42 });
   });
 
-  it('automatically scrolls a stable ref into view and measures it again before clicking', async () => {
+  it('uses the viewport-relative box model after scrolling a stable ref into view', async () => {
     const { executor, send, pointer, order } = harness({
       responder: (_session, method) => {
         if (method === 'Page.getLayoutMetrics') {
@@ -1621,7 +2093,7 @@ describe('BrowserActionExecutor', () => {
         }
         if (method === 'DOM.getBoxModel') {
           return {
-            model: { border: [410, 820, 510, 820, 510, 850, 410, 850] },
+            model: { border: [410, 120, 510, 120, 510, 150, 410, 150] },
           };
         }
         return undefined;
@@ -1657,6 +2129,78 @@ describe('BrowserActionExecutor', () => {
       'Input.dispatchMouseEvent',
       expect.objectContaining({ type: 'mousePressed', x: 460, y: 135 }),
     );
+  });
+
+  it('uses an uncovered point inside the target when its center is occluded', async () => {
+    const { executor, send, pointer } = harness({
+      responder: (_session, method, params) => {
+        if (
+          method === 'Runtime.callFunctionOn' &&
+          typeof params?.functionDeclaration === 'string' &&
+          params.functionDeclaration.includes('__chatbrowserxActionablePoint')
+        ) {
+          return { result: { type: 'number', value: 1 } };
+        }
+        return undefined;
+      },
+    });
+
+    await executor.execute(
+      call('browser_click', {
+        tabId: 7,
+        ref: 'ref_1',
+        button: 'left',
+        count: 1,
+      }),
+      new AbortController().signal,
+    );
+
+    expect(pointer.show).toHaveBeenCalledWith(7, {
+      x: 35,
+      y: 35,
+      fromX: 35,
+      fromY: 35,
+      effect: 'click',
+    });
+    expect(send).toHaveBeenCalledWith(
+      { tabId: 7 },
+      'Input.dispatchMouseEvent',
+      expect.objectContaining({ type: 'mousePressed', x: 35, y: 35 }),
+    );
+  });
+
+  it('does not dispatch a click when every point inside the target is occluded', async () => {
+    const { executor, send, pointer } = harness({
+      responder: (_session, method, params) => {
+        if (
+          method === 'Runtime.callFunctionOn' &&
+          typeof params?.functionDeclaration === 'string' &&
+          params.functionDeclaration.includes('__chatbrowserxActionablePoint')
+        ) {
+          return { result: { type: 'number', value: -1 } };
+        }
+        return undefined;
+      },
+    });
+
+    await expect(
+      executor.execute(
+        call('browser_click', {
+          tabId: 7,
+          ref: 'ref_1',
+          button: 'left',
+          count: 1,
+        }),
+        new AbortController().signal,
+      ),
+    ).rejects.toMatchObject({ code: 'ACTION_TARGET_OBSCURED' });
+    expect(pointer.show).not.toHaveBeenCalled();
+    expect(
+      send.mock.calls.some(
+        ([, method, params]) =>
+          method === 'Input.dispatchMouseEvent' && params?.type === 'mousePressed',
+      ),
+    ).toBe(false);
   });
 
   it('rejects a ref when its document loader changed before scrolling or input', async () => {
@@ -1745,6 +2289,42 @@ describe('BrowserActionExecutor', () => {
     );
   });
 
+  it('rejects ordinary input when the target value does not retain inserted text', async () => {
+    let editorInfoReads = 0;
+    const { executor } = harness({
+      responder: (_session, method, params) => {
+        if (
+          method === 'Runtime.callFunctionOn' &&
+          typeof params?.functionDeclaration === 'string' &&
+          params.functionDeclaration.includes('__chatbrowserxEditorTargetInfo')
+        ) {
+          editorInfoReads += 1;
+          return {
+            result: {
+              type: 'object',
+              value: { editor: false, value: 'starter' },
+            },
+          };
+        }
+        return undefined;
+      },
+    });
+
+    await expect(
+      executor.execute(
+        call('browser_type', {
+          tabId: 7,
+          ref: 'ref_1',
+          text: 'hello',
+          replace: true,
+          submit: false,
+        }),
+        new AbortController().signal,
+      ),
+    ).rejects.toMatchObject({ code: 'TYPE_VERIFICATION_FAILED' });
+    expect(editorInfoReads).toBeGreaterThanOrEqual(2);
+  });
+
   it('keeps editor-aware atomic replacement for new CDP semantic refs', async () => {
     const replacement = 'fn main() {\n    println!("hello");\n}';
     let editorValue = 'starter';
@@ -1817,6 +2397,47 @@ describe('BrowserActionExecutor', () => {
     expect(send.mock.calls.some(([, method]) => method === 'Input.dispatchMouseEvent')).toBe(false);
   });
 
+  it('reports the actual viewport movement after a CDP scroll', async () => {
+    let pageY = 0;
+    const { executor } = harness({
+      responder: (_session, method, params) => {
+        if (method === 'Input.dispatchMouseEvent' && params?.type === 'mouseWheel') {
+          pageY = 120;
+          return {};
+        }
+        if (method === 'Page.getLayoutMetrics') {
+          return {
+            visualViewport: {
+              pageX: 0,
+              pageY,
+              clientWidth: 800,
+              clientHeight: 600,
+            },
+          };
+        }
+        return undefined;
+      },
+    });
+
+    const result = await executor.execute(
+      call('browser_scroll', {
+        tabId: 7,
+        target: 'viewport',
+        deltaX: 0,
+        deltaY: 200,
+      }),
+      new AbortController().signal,
+    );
+
+    expect(result.data).toMatchObject({
+      action: 'scroll',
+      dispatched: true,
+      moved: true,
+      actualDeltaX: 0,
+      actualDeltaY: 120,
+    });
+  });
+
   it('navigates logical browser history without synthesizing shortcuts', async () => {
     const { executor, send } = harness();
 
@@ -1848,6 +2469,24 @@ describe('BrowserActionExecutor', () => {
     );
   });
 
+  it('rejects a select action when the page retains a different value', async () => {
+    const { executor } = harness({
+      responder: (_session, method, params) =>
+        method === 'Runtime.callFunctionOn' &&
+        typeof params?.functionDeclaration === 'string' &&
+        params.functionDeclaration.includes('HTMLSelectElement')
+          ? { result: { type: 'object', value: { ok: true, value: 'free' } } }
+          : undefined,
+    });
+
+    await expect(
+      executor.execute(
+        call('browser_select', { tabId: 7, ref: 'ref_1', value: 'pro' }),
+        new AbortController().signal,
+      ),
+    ).rejects.toMatchObject({ code: 'ACTION_STATE_MISMATCH' });
+  });
+
   it('waits for an explicit bounded delay without dispatching input', async () => {
     vi.useFakeTimers();
     const { executor, send, sessions } = harness();
@@ -1862,5 +2501,36 @@ describe('BrowserActionExecutor', () => {
     });
     expect(sessions.ensure).not.toHaveBeenCalled();
     expect(send.mock.calls.some(([, method]) => method.startsWith('Input.'))).toBe(false);
+  });
+
+  it('waits for in-flight requests to finish before declaring network idle', async () => {
+    vi.useFakeTimers();
+    let listener: Parameters<DebuggerTransport['onEvent']>[0] | undefined;
+    const { executor, send } = harness({
+      onEvent: (received) => {
+        listener = received;
+        return () => undefined;
+      },
+    });
+    let settled = false;
+    const waiting = executor
+      .execute(
+        call('browser_wait', { tabId: 7, condition: 'network_idle', timeoutMs: 2_000 }),
+        new AbortController().signal,
+      )
+      .finally(() => {
+        settled = true;
+      });
+    await vi.waitFor(() => expect(send).toHaveBeenCalledWith({ tabId: 7 }, 'Network.enable'));
+    listener?.({ tabId: 7 }, 'Network.requestWillBeSent', { requestId: 'request_1' });
+
+    await vi.advanceTimersByTimeAsync(600);
+    expect(settled).toBe(false);
+
+    listener?.({ tabId: 7 }, 'Network.loadingFinished', { requestId: 'request_1' });
+    await vi.advanceTimersByTimeAsync(500);
+    await expect(waiting).resolves.toMatchObject({
+      data: { action: 'wait', condition: 'network_idle', completed: true },
+    });
   });
 });

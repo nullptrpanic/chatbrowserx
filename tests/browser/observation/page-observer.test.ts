@@ -251,6 +251,72 @@ describe('PageObserver', () => {
     });
   });
 
+  it('keeps actionable targets beyond the ordinary prefix in interactive_deep mode', async () => {
+    const snapshot: BrowserSessionSnapshot = {
+      tabId: 7,
+      generation: 1,
+      root: { tabId: 7 },
+      children: new Map(),
+    };
+    const passiveNodes = Array.from({ length: 510 }, (_, index) => ({
+      nodeId: `text_${String(index)}`,
+      parentId: 'root',
+      ignored: false,
+      role: { value: 'StaticText' },
+      name: { value: `Question context ${String(index)}` },
+    }));
+    const transport = debuggerTransport((_session, method) => {
+      if (method === 'Accessibility.getFullAXTree') {
+        return {
+          nodes: [
+            {
+              nodeId: 'root',
+              backendDOMNodeId: 1,
+              ignored: false,
+              role: { value: 'RootWebArea' },
+              name: { value: 'Long form' },
+              childIds: [...passiveNodes.map(({ nodeId }) => nodeId), 'late_button'],
+            },
+            ...passiveNodes,
+            {
+              nodeId: 'late_button',
+              parentId: 'root',
+              backendDOMNodeId: 11,
+              ignored: false,
+              role: { value: 'button' },
+              name: { value: 'Submit late form' },
+            },
+          ],
+        };
+      }
+      if (method === 'DOMSnapshot.captureSnapshot') return buttonDomSnapshot();
+      if (method === 'Page.getFrameTree') return mainFrameTree();
+      if (method === 'Page.getNavigationHistory') {
+        return {
+          currentIndex: 0,
+          entries: [
+            { id: 1, url: 'https://top.test/', title: 'Top page', transitionType: 'typed' },
+          ],
+        };
+      }
+      return {};
+    });
+    const observer = new PageObserver({
+      sessions: sessions(snapshot),
+      transport,
+      content: CONTENT,
+      refs: new ElementRefStore({ create: () => 'ref_late' }),
+    });
+
+    const ordinary = await observer.inspect(7, 'interactive', new AbortController().signal);
+    const deep = await observer.inspect(7, 'interactive_deep', new AbortController().signal);
+
+    expect(JSON.stringify(ordinary.data)).not.toContain('Submit late form');
+    expect(deep.data.elements).toEqual(
+      expect.arrayContaining([expect.objectContaining({ n: 'Submit late form', ref: 'ref_late' })]),
+    );
+  });
+
   it('omits the default generic role and does not expose long semantic field names', async () => {
     const snapshot: BrowserSessionSnapshot = {
       tabId: 7,

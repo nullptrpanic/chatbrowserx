@@ -110,6 +110,30 @@ function interactiveStateChanges(
   return changes;
 }
 
+/** Gives deep inspection's bounded budget to actionable entries and their nearby context first. */
+function interactiveCandidateIndexes(
+  entries: readonly SemanticPageEntry[],
+  deep: boolean,
+): readonly number[] {
+  if (!deep) return entries.map((_entry, index) => index);
+  const indexes: number[] = [];
+  const included = new Set<number>();
+  const include = (index: number): void => {
+    if (index < 0 || index >= entries.length || included.has(index)) return;
+    included.add(index);
+    indexes.push(index);
+  };
+  entries.forEach((entry, index) => {
+    if (entry.targetIndex === undefined) return;
+    include(index - 2);
+    include(index - 1);
+    include(index);
+    include(index + 1);
+  });
+  entries.forEach((_entry, index) => include(index));
+  return indexes;
+}
+
 function throwIfAborted(signal: AbortSignal): void {
   if (signal.aborted) throw new DOMException('Page observation was aborted.', 'AbortError');
 }
@@ -251,7 +275,7 @@ export class PageObserver {
 
   async #inspectInteractive(
     tabId: number,
-    _deep: boolean,
+    deep: boolean,
     signal: AbortSignal,
     options: PageInspectionOptions,
   ): Promise<PageObservationResult> {
@@ -309,8 +333,12 @@ export class PageObserver {
           documentFrameId: target.documentFrameId,
           loaderId,
           backendNodeId: target.backendNodeId,
+          ...(target.stateBackendNodeId === undefined
+            ? {}
+            : { stateBackendNodeId: target.stateBackendNodeId }),
           role: target.role,
           name: target.name,
+          semanticLocator: target.semanticLocator,
           state: target.state,
           actions: target.actions,
           frame: sessionTarget.frame,
@@ -332,9 +360,12 @@ export class PageObserver {
     }
 
     const originalCount = entries.length;
-    const boundedEntries: SemanticPageEntry[] = [];
+    const selectedEntryIndexes: number[] = [];
     const usedTargetIndexes = new Set<number>();
-    for (const entry of entries.slice(0, MAX_INTERACTIVE_ELEMENTS)) {
+    for (const entryIndex of interactiveCandidateIndexes(entries, deep)) {
+      if (selectedEntryIndexes.length >= MAX_INTERACTIVE_ELEMENTS) break;
+      const entry = entries[entryIndex];
+      if (!entry) continue;
       if (
         entry.targetIndex !== undefined &&
         !usedTargetIndexes.has(entry.targetIndex) &&
@@ -342,16 +373,27 @@ export class PageObserver {
       ) {
         continue;
       }
-      boundedEntries.push(entry);
+      selectedEntryIndexes.push(entryIndex);
       if (entry.targetIndex !== undefined) usedTargetIndexes.add(entry.targetIndex);
       if (
-        JSON.stringify({ mode: 'interactive', elements: boundedEntries }).length >
-        MAX_INTERACTIVE_JSON_CHARACTERS
+        JSON.stringify({
+          mode: 'interactive',
+          elements: selectedEntryIndexes.map((index) => entries[index]),
+        }).length > MAX_INTERACTIVE_JSON_CHARACTERS
       ) {
-        boundedEntries.pop();
+        selectedEntryIndexes.pop();
+        if (entry.targetIndex !== undefined) {
+          const stillUsed = selectedEntryIndexes.some(
+            (index) => entries[index]?.targetIndex === entry.targetIndex,
+          );
+          if (!stillUsed) usedTargetIndexes.delete(entry.targetIndex);
+        }
         break;
       }
     }
+    const boundedEntries = selectedEntryIndexes
+      .toSorted((left, right) => left - right)
+      .flatMap((index) => (entries[index] === undefined ? [] : [entries[index]]));
     const selectedTargetIndexes: number[] = [];
     const selectedTargets: ObservedElementTarget[] = [];
     for (const targetIndex of usedTargetIndexes) {

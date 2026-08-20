@@ -53,9 +53,29 @@ describe('ElementRefStore', () => {
       loaderId: 'loader-1',
       backendNodeId: 42,
       role: 'button',
+      name: 'Continue',
       state: ['focusable'],
       actions: ['click'],
     });
+  });
+
+  it('tracks a separate state node and removes it when a later snapshot no longer needs one', () => {
+    const store = new ElementRefStore({ create: () => 'ref_known' });
+    store.replaceSnapshot(7, [{ ...ELEMENT, stateBackendNodeId: 43 }]);
+
+    expect(store.resolve('ref_known', 7)).toMatchObject({
+      backendNodeId: 42,
+      stateBackendNodeId: 43,
+    });
+
+    store.updateObservedStates(7, [{ ...ELEMENT, stateBackendNodeId: 44 }]);
+    expect(store.resolve('ref_known', 7)).toMatchObject({
+      backendNodeId: 42,
+      stateBackendNodeId: 44,
+    });
+
+    store.updateObservedStates(7, [ELEMENT]);
+    expect(store.resolve('ref_known', 7)).not.toHaveProperty('stateBackendNodeId');
   });
 
   it('rejects cross-tab refs and invalidates the previous observation snapshot', () => {
@@ -200,5 +220,78 @@ describe('ElementRefStore', () => {
       ]),
     ).toEqual([]);
     expect(store.resolve('ref_known', 7)).toMatchObject({ backendNodeId: 42 });
+  });
+
+  it('rebinds repeated labels only within their stable semantic container', () => {
+    let id = 0;
+    const store = new ElementRefStore({ create: () => `ref_${++id}` });
+    const firstQuestion = {
+      ...ELEMENT,
+      backendNodeId: 101,
+      role: 'checkbox',
+      name: 'A',
+      semanticLocator: 'question:1/checkbox:A:0',
+      state: ['checked=false'],
+      actions: ['click', 'set_checked'],
+    } as const;
+    const secondQuestion = {
+      ...firstQuestion,
+      backendNodeId: 201,
+      semanticLocator: 'question:2/checkbox:A:0',
+    } as const;
+    store.reconcileSnapshot(7, [firstQuestion, secondQuestion]);
+
+    expect(
+      store.updateObservedStates(7, [
+        { ...firstQuestion, backendNodeId: 102, state: ['checked'] },
+        { ...secondQuestion, backendNodeId: 202 },
+      ]),
+    ).toEqual([
+      {
+        ref: 'ref_1',
+        role: 'checkbox',
+        state: ['checked'],
+        changed: true,
+      },
+      {
+        ref: 'ref_2',
+        role: 'checkbox',
+        state: ['checked=false'],
+        changed: false,
+      },
+    ]);
+    expect(store.resolve('ref_1', 7)).toMatchObject({ backendNodeId: 102 });
+    expect(store.resolve('ref_2', 7)).toMatchObject({ backendNodeId: 202 });
+  });
+
+  it('keeps issued refs across a fresh snapshot when stable semantic locators survive', () => {
+    let id = 0;
+    const store = new ElementRefStore({ create: () => `ref_${++id}` });
+    const targets = [
+      {
+        ...ELEMENT,
+        backendNodeId: 101,
+        role: 'checkbox',
+        name: 'A',
+        semanticLocator: 'question:1/checkbox:A:0',
+      },
+      {
+        ...ELEMENT,
+        backendNodeId: 201,
+        role: 'checkbox',
+        name: 'A',
+        semanticLocator: 'question:2/checkbox:A:0',
+      },
+    ] as const;
+
+    expect(store.reconcileSnapshot(7, targets)).toEqual(['ref_1', 'ref_2']);
+    expect(
+      store.reconcileSnapshot(7, [
+        { ...targets[0], backendNodeId: 102 },
+        { ...targets[1], backendNodeId: 202 },
+      ]),
+    ).toEqual(['ref_1', 'ref_2']);
+    expect(store.resolve('ref_1', 7)).toMatchObject({ backendNodeId: 102 });
+    expect(store.resolve('ref_2', 7)).toMatchObject({ backendNodeId: 202 });
   });
 });

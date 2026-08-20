@@ -329,7 +329,7 @@ describe('BrowserToolExecutor', () => {
     });
   });
 
-  it('retains and releases an ephemeral native interactive inspection immediately', async () => {
+  it('retains native interactive inspection until the task runner releases it', async () => {
     const observer = {
       inspect: vi.fn(async () => ({
         tabId: 7,
@@ -356,11 +356,13 @@ describe('BrowserToolExecutor', () => {
       { currentTabId: 7, sessionOwnerId: 'runner_1' },
     );
 
-    expect(sessions.retain).toHaveBeenCalledWith(7, 'runner_1:operation');
-    expect(sessions.releaseOwner).toHaveBeenCalledWith('runner_1:operation');
+    expect(sessions.retain).toHaveBeenCalledWith(7, 'runner_1');
+    expect(sessions.releaseOwner).not.toHaveBeenCalled();
+    await executor.release('runner_1');
+    expect(sessions.releaseOwner).toHaveBeenCalledWith('runner_1');
   });
 
-  it('detaches after inspection and reattaches only for the stable-ref action', async () => {
+  it('reuses the retained inspection attachment for the stable-ref action', async () => {
     const observer = {
       inspect: vi.fn(async () => ({
         tabId: 7,
@@ -396,8 +398,8 @@ describe('BrowserToolExecutor', () => {
       new AbortController().signal,
       context,
     );
-    expect(sessions.retain).toHaveBeenCalledWith(7, 'runner_1:operation');
-    expect(sessions.releaseOwner).toHaveBeenCalledWith('runner_1:operation');
+    expect(sessions.retain).toHaveBeenCalledWith(7, 'runner_1');
+    expect(sessions.releaseOwner).not.toHaveBeenCalled();
 
     await executor.execute(
       call('browser_click', {
@@ -410,11 +412,57 @@ describe('BrowserToolExecutor', () => {
       context,
     );
 
-    expect(sessions.retain).toHaveBeenCalledWith(7, 'runner_1:action');
-    expect(sessions.releaseOwner).toHaveBeenCalledWith('runner_1:action');
+    expect(sessions.retain).toHaveBeenCalledTimes(1);
+    expect(sessions.releaseOwner).not.toHaveBeenCalled();
+    await executor.release('runner_1');
+    expect(sessions.releaseOwner).toHaveBeenCalledWith('runner_1');
   });
 
-  it('releases an ephemeral screenshot session after capture', async () => {
+  it('keeps one runner attachment across inspect and action until the task releases it', async () => {
+    const observer = {
+      inspect: vi.fn(async () => ({
+        tabId: 7,
+        url: 'https://example.com',
+        data: { mode: 'interactive', elements: [] },
+        observation: null,
+        attachmentIds: [],
+        debuggerSession: 'ephemeral' as const,
+      })),
+    };
+    const actions = {
+      execute: vi.fn(async () => ({
+        tabId: 7,
+        url: 'https://example.com',
+        data: { action: 'click', dispatched: true },
+        observation: { targetPresent: true },
+      })),
+    };
+    const sessions = {
+      retain: vi.fn(async () => undefined),
+      releaseOwner: vi.fn(async () => undefined),
+    };
+    const executor = new BrowserToolExecutor({ tabs: tabPort(), observer, actions, sessions });
+    const context = { currentTabId: 7, sessionOwnerId: 'runner_1' };
+
+    await executor.execute(
+      call('browser_inspect', { tabId: 7, mode: 'interactive' }),
+      new AbortController().signal,
+      context,
+    );
+    await executor.execute(
+      call('browser_click', { tabId: 7, ref: 'ref_1', button: 'left', count: 1 }),
+      new AbortController().signal,
+      context,
+    );
+
+    expect(sessions.retain).toHaveBeenCalledWith(7, 'runner_1');
+    expect(sessions.releaseOwner).not.toHaveBeenCalled();
+    await executor.release('runner_1');
+    expect(sessions.releaseOwner).toHaveBeenCalledTimes(1);
+    expect(sessions.releaseOwner).toHaveBeenCalledWith('runner_1');
+  });
+
+  it('keeps a screenshot session attached until the task runner releases it', async () => {
     const observer = {
       inspect: vi.fn(async () => ({
         tabId: 7,
@@ -445,8 +493,10 @@ describe('BrowserToolExecutor', () => {
       context,
     );
 
-    expect(sessions.retain).toHaveBeenCalledWith(7, 'runner_1:operation');
-    expect(sessions.releaseOwner).toHaveBeenCalledWith('runner_1:operation');
+    expect(sessions.retain).toHaveBeenCalledWith(7, 'runner_1');
+    expect(sessions.releaseOwner).not.toHaveBeenCalled();
+    await executor.release('runner_1');
+    expect(sessions.releaseOwner).toHaveBeenCalledWith('runner_1');
   });
 
   it('requires native interactive inspection before a model screenshot', async () => {
@@ -852,7 +902,7 @@ describe('BrowserToolExecutor', () => {
             observation: null,
             attachmentIds: [],
             debuggerSession: 'ephemeral' as const,
-            visualFallbackAllowed: false,
+            visualFallbackAllowed: true,
           };
         },
       ),
@@ -955,7 +1005,57 @@ describe('BrowserToolExecutor', () => {
     );
   });
 
-  it('uses a screenshot coordinate mapping for only the next page action', async () => {
+  it('rejects screenshot coordinates after an intervening page inspection', async () => {
+    const observer = {
+      inspect: vi.fn(async (_tabId: number, mode: string) => ({
+        tabId: 7,
+        url: 'https://example.com',
+        data:
+          mode === 'screenshot'
+            ? {
+                mode,
+                width: 500,
+                height: 250,
+                viewportWidth: 1000,
+                viewportHeight: 500,
+              }
+            : { mode: 'interactive', snapshot: 'snapshot_2', elements: [] },
+        observation: null,
+        attachmentIds: mode === 'screenshot' ? ['attachment_1'] : [],
+        debuggerSession: 'ephemeral' as const,
+        visualFallbackAllowed: true,
+      })),
+    };
+    const actions = {
+      execute: vi.fn(async () => ({
+        tabId: 7,
+        url: 'https://example.com',
+        data: { action: 'click_point', dispatched: true },
+        observation: null,
+      })),
+    };
+    const executor = new BrowserToolExecutor({ tabs: tabPort(), observer, actions });
+    const signal = new AbortController().signal;
+    const context = { currentTabId: 7 };
+
+    await primeVisualFallback(executor, signal, context);
+    await executor.execute(call('browser_inspect', { mode: 'screenshot' }), signal, context);
+    await executor.execute(call('browser_inspect', { mode: 'interactive' }), signal, context);
+    const clicked = await executor.execute(
+      call('browser_click_point', { x: 10, y: 20, button: 'left', count: 1 }),
+      signal,
+      context,
+    );
+
+    expect(JSON.parse(clicked.output)).toMatchObject({
+      ok: false,
+      code: 'STALE_SCREENSHOT',
+      needsInspect: true,
+    });
+    expect(actions.execute).not.toHaveBeenCalled();
+  });
+
+  it('requires a fresh screenshot for every coordinate action', async () => {
     const observer = {
       inspect: vi.fn(async () => ({
         tabId: 7,
@@ -1000,14 +1100,15 @@ describe('BrowserToolExecutor', () => {
       signal,
       context,
     );
-    await executor.execute(
+    const stale = await executor.execute(
       call('browser_click_point', { x: 10, y: 20, button: 'left', count: 1 }),
       signal,
       context,
     );
 
     expect(receivedArguments[0]).toMatchObject({ x: 20, y: 40 });
-    expect(receivedArguments[1]).toMatchObject({ x: 10, y: 20 });
+    expect(receivedArguments).toHaveLength(1);
+    expect(JSON.parse(stale.output)).toMatchObject({ ok: false, code: 'STALE_SCREENSHOT' });
   });
 
   it('drops screenshot coordinate state when the task runner is released', async () => {
@@ -1047,18 +1148,14 @@ describe('BrowserToolExecutor', () => {
     await primeVisualFallback(executor, signal, context);
     await executor.execute(call('browser_inspect', { mode: 'screenshot' }), signal, context);
     await executor.release('runner_1');
-    await executor.execute(
+    const stale = await executor.execute(
       call('browser_click_point', { x: 10, y: 20, button: 'left', count: 1 }),
       signal,
       context,
     );
 
-    expect(actions.execute).toHaveBeenCalledWith(
-      expect.objectContaining({
-        arguments: expect.objectContaining({ x: 10, y: 20 }),
-      }),
-      signal,
-    );
+    expect(actions.execute).not.toHaveBeenCalled();
+    expect(JSON.parse(stale.output)).toMatchObject({ ok: false, code: 'STALE_SCREENSHOT' });
   });
 
   it.each([
@@ -1101,18 +1198,14 @@ describe('BrowserToolExecutor', () => {
     await primeVisualFallback(executor, signal, context);
     await executor.execute(call('browser_inspect', { mode: 'screenshot' }), signal, context);
     await executor.execute(call(name, input), signal, context);
-    await executor.execute(
+    const stale = await executor.execute(
       call('browser_click_point', { x: 10, y: 20, button: 'left', count: 1 }),
       signal,
       context,
     );
 
-    expect(actions.execute).toHaveBeenCalledWith(
-      expect.objectContaining({
-        arguments: expect.objectContaining({ x: 10, y: 20 }),
-      }),
-      signal,
-    );
+    expect(actions.execute).not.toHaveBeenCalled();
+    expect(JSON.parse(stale.output)).toMatchObject({ ok: false, code: 'STALE_SCREENSHOT' });
   });
 
   it('returns an actionable failure when the page observation bridge is unavailable', async () => {
@@ -1306,7 +1399,7 @@ describe('BrowserToolExecutor', () => {
     });
   });
 
-  it('keeps the debugger only while network capture is active', async () => {
+  it('keeps the network debugger with the task after capture stops', async () => {
     const network = {
       start: vi.fn(async () => ({
         tabId: 7,
@@ -1334,15 +1427,17 @@ describe('BrowserToolExecutor', () => {
       new AbortController().signal,
       context,
     );
-    expect(sessions.retain).toHaveBeenCalledWith(7, 'runner_1:network');
-    expect(sessions.releaseOwner).not.toHaveBeenCalledWith('runner_1:network');
+    expect(sessions.retain).toHaveBeenCalledWith(7, 'runner_1');
+    expect(sessions.releaseOwner).not.toHaveBeenCalled();
 
     await executor.execute(
       call('browser_network_stop', { tabId: 7 }),
       new AbortController().signal,
       context,
     );
-    expect(sessions.releaseOwner).toHaveBeenCalledWith('runner_1:network');
+    expect(sessions.releaseOwner).not.toHaveBeenCalled();
+    await executor.release('runner_1');
+    expect(sessions.releaseOwner).toHaveBeenCalledWith('runner_1');
   });
 
   it('preserves retryable network-capture loss so the model can start capture again', async () => {
@@ -1411,6 +1506,15 @@ describe('BrowserToolExecutor', () => {
         needsInspect: true,
       },
     ],
+    [
+      'ACTION_TARGET_OBSCURED',
+      {
+        code: 'ACTION_TARGET_OBSCURED',
+        message: 'The target is covered by another element. Inspect the page before retrying.',
+        retryable: true,
+        needsInspect: true,
+      },
+    ],
   ])('preserves actionable %s recovery guidance', async (code, expected) => {
     const executor = new BrowserToolExecutor({
       tabs: tabPort(),
@@ -1445,12 +1549,19 @@ describe('BrowserToolExecutor', () => {
           checked: true,
         });
       }
-      return call('browser_click_point', {
+      if (code === 'ACTION_TARGET_OBSCURED') {
+        return call('browser_click', {
+          tabId: 7,
+          ref: 'ref_1',
+          button: 'left',
+          count: 1,
+        });
+      }
+      return call('browser_scroll', {
         tabId: 7,
-        x: 20,
-        y: 20,
-        button: 'left',
-        count: 1,
+        target: 'viewport',
+        deltaX: 0,
+        deltaY: 20,
       });
     })();
 

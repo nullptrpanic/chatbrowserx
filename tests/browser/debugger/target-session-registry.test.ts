@@ -109,6 +109,44 @@ describe('TargetSessionRegistry', () => {
     });
   });
 
+  it('does not expose an attached OOPIF until its CDP domains are configured', async () => {
+    const debuggerTransport = transport();
+    let childConfigured = false;
+    let releaseChildConfiguration: (() => void) | undefined;
+    const childConfiguration = new Promise<void>((resolve) => {
+      releaseChildConfiguration = resolve;
+    });
+    vi.mocked(debuggerTransport.send).mockImplementation(async (session, method) => {
+      if (session.sessionId === undefined && method === 'Target.setAutoAttach') {
+        queueMicrotask(() => {
+          debuggerTransport.emitEvent({ tabId: 7 }, 'Target.attachedToTarget', {
+            sessionId: 'session_child',
+            targetInfo: { targetId: 'target_child', type: 'iframe', url: 'https://frame.test' },
+          });
+        });
+      }
+      if (session.sessionId === 'session_child' && method === 'Accessibility.enable') {
+        await childConfiguration;
+        childConfigured = true;
+      }
+      return {};
+    });
+    const registry = new TargetSessionRegistry(debuggerTransport);
+
+    const ensuring = registry.ensure(7, new AbortController().signal);
+    const beforeChildConfiguration = await Promise.race([
+      ensuring.then(() => 'resolved' as const),
+      new Promise<'pending'>((resolve) => globalThis.setTimeout(() => resolve('pending'), 10)),
+    ]);
+    expect(childConfigured).toBe(false);
+    expect(beforeChildConfiguration).toBe('pending');
+
+    releaseChildConfiguration?.();
+    const snapshot = await ensuring;
+    expect(childConfigured).toBe(true);
+    expect(snapshot.children.has('target_child')).toBe(true);
+  });
+
   it('invalidates child and root state without affecting another tab', async () => {
     const debuggerTransport = transport();
     const registry = new TargetSessionRegistry(debuggerTransport);

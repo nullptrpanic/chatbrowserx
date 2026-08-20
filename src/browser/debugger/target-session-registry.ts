@@ -103,11 +103,21 @@ export class TargetSessionRegistry {
   readonly #ownersByTab = new Map<number, Set<string>>();
   readonly #tabsByOwner = new Map<string, Set<number>>();
   readonly #lifecycleQueues = new Map<number, Promise<void>>();
+  readonly #eventTasksByTab = new Map<number, Set<Promise<void>>>();
 
   constructor(transport: DebuggerTransport) {
     this.#transport = transport;
     transport.onEvent((session, method, params) => {
-      void this.#handleEvent(session, method, params);
+      const task = this.#handleEvent(session, method, params);
+      const tasks = this.#eventTasksByTab.get(session.tabId) ?? new Set<Promise<void>>();
+      tasks.add(task);
+      this.#eventTasksByTab.set(session.tabId, tasks);
+      void task.finally(() => {
+        tasks.delete(task);
+        if (tasks.size === 0 && this.#eventTasksByTab.get(session.tabId) === tasks) {
+          this.#eventTasksByTab.delete(session.tabId);
+        }
+      });
     });
     transport.onDetach((session) => {
       if (session.sessionId === undefined) this.invalidate(session.tabId);
@@ -130,7 +140,9 @@ export class TargetSessionRegistry {
       void attaching.then(clearInFlight, clearInFlight);
     }
     const state = await this.#withAbort(attaching, signal);
-    return snapshot(state);
+    await Promise.resolve();
+    await this.#waitForEventTasks(tabId, signal);
+    return snapshot(this.#states.get(tabId) ?? state);
   }
 
   /** Retains one tab for a runner without attaching until its first CDP operation. */
@@ -326,5 +338,17 @@ export class TargetSessionRegistry {
         },
       );
     });
+  }
+
+  async #waitForEventTasks(tabId: number, signal: AbortSignal): Promise<void> {
+    while (true) {
+      throwIfAborted(signal);
+      const tasks = [...(this.#eventTasksByTab.get(tabId) ?? [])];
+      if (tasks.length === 0) return;
+      await this.#withAbort(
+        Promise.all(tasks).then(() => undefined),
+        signal,
+      );
+    }
   }
 }

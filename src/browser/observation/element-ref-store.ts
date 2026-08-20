@@ -12,8 +12,10 @@ export interface ObservedElementTarget {
   readonly documentFrameId: string;
   readonly loaderId: string;
   readonly backendNodeId: number;
+  readonly stateBackendNodeId?: number;
   readonly role: string;
   readonly name: string;
+  readonly semanticLocator?: string;
   readonly state: readonly string[];
   readonly actions: readonly string[];
   readonly frame: string;
@@ -25,7 +27,10 @@ export interface ResolvedElementRef {
   readonly documentFrameId: string;
   readonly loaderId: string;
   readonly backendNodeId: number;
+  readonly stateBackendNodeId?: number;
   readonly role: string;
+  readonly name: string;
+  readonly semanticLocator?: string;
   readonly state: readonly string[];
   readonly actions: readonly string[];
 }
@@ -87,15 +92,15 @@ function targetKey(
 function semanticTargetKey(
   target: Pick<
     ObservedElementTarget,
-    'frameTargetId' | 'documentFrameId' | 'loaderId' | 'role' | 'name'
+    'frameTargetId' | 'documentFrameId' | 'loaderId' | 'role' | 'name' | 'semanticLocator'
   >,
 ): string {
+  const locator = target.semanticLocator?.trim();
   return JSON.stringify([
     target.frameTargetId,
     target.documentFrameId,
     target.loaderId,
-    target.role,
-    target.name,
+    ...(locator ? ['locator', locator] : ['semantic', target.role, target.name]),
   ]);
 }
 
@@ -141,8 +146,14 @@ export class ElementRefStore {
         documentFrameId: target.documentFrameId,
         loaderId: target.loaderId,
         backendNodeId: target.backendNodeId,
+        ...(target.stateBackendNodeId === undefined
+          ? {}
+          : { stateBackendNodeId: target.stateBackendNodeId }),
         role: target.role,
         name: target.name,
+        ...(target.semanticLocator === undefined
+          ? {}
+          : { semanticLocator: target.semanticLocator }),
         state: [...target.state],
         actions: [...target.actions],
       });
@@ -156,14 +167,34 @@ export class ElementRefStore {
   reconcileSnapshot(tabId: number, targets: readonly ObservedElementTarget[]): readonly string[] {
     validateSnapshotTargets(targets);
     const existingByTarget = new Map<string, string>();
+    const existingBySemanticTarget = new Map<string, string[]>();
     for (const ref of this.#refsByTab.get(tabId) ?? []) {
       const stored = this.#refs.get(ref);
-      if (stored) existingByTarget.set(targetKey(stored), ref);
+      if (!stored) continue;
+      existingByTarget.set(targetKey(stored), ref);
+      const semanticKey = semanticTargetKey(stored);
+      const semanticRefs = existingBySemanticTarget.get(semanticKey) ?? [];
+      semanticRefs.push(ref);
+      existingBySemanticTarget.set(semanticKey, semanticRefs);
+    }
+    const incomingSemanticCounts = new Map<string, number>();
+    for (const target of targets) {
+      const semanticKey = semanticTargetKey(target);
+      incomingSemanticCounts.set(semanticKey, (incomingSemanticCounts.get(semanticKey) ?? 0) + 1);
     }
 
     const nextRefs = new Set<string>();
     const refs = targets.map((target): string => {
-      const ref = existingByTarget.get(targetKey(target)) ?? this.#createRef();
+      const semanticKey = semanticTargetKey(target);
+      const semanticRefs = existingBySemanticTarget.get(semanticKey) ?? [];
+      const exactRef = existingByTarget.get(targetKey(target));
+      const semanticRef =
+        incomingSemanticCounts.get(semanticKey) === 1 && semanticRefs.length === 1
+          ? semanticRefs[0]
+          : undefined;
+      const reusableRef = exactRef ?? semanticRef;
+      const ref =
+        reusableRef !== undefined && !nextRefs.has(reusableRef) ? reusableRef : this.#createRef();
       this.#refs.set(ref, {
         ref,
         tabId,
@@ -171,8 +202,14 @@ export class ElementRefStore {
         documentFrameId: target.documentFrameId,
         loaderId: target.loaderId,
         backendNodeId: target.backendNodeId,
+        ...(target.stateBackendNodeId === undefined
+          ? {}
+          : { stateBackendNodeId: target.stateBackendNodeId }),
         role: target.role,
         name: target.name,
+        ...(target.semanticLocator === undefined
+          ? {}
+          : { semanticLocator: target.semanticLocator }),
         state: [...target.state],
         actions: [...target.actions],
       });
@@ -221,11 +258,24 @@ export class ElementRefStore {
           : undefined);
       if (!observed) continue;
       const changed = JSON.stringify(stored.state) !== JSON.stringify(observed.state);
+      const {
+        semanticLocator: _storedSemanticLocator,
+        stateBackendNodeId: _storedStateBackendNodeId,
+        ...stable
+      } = stored;
+      void _storedSemanticLocator;
+      void _storedStateBackendNodeId;
       this.#refs.set(ref, {
-        ...stored,
+        ...stable,
         backendNodeId: observed.backendNodeId,
+        ...(observed.stateBackendNodeId === undefined
+          ? {}
+          : { stateBackendNodeId: observed.stateBackendNodeId }),
         role: observed.role,
         name: observed.name,
+        ...(observed.semanticLocator === undefined
+          ? {}
+          : { semanticLocator: observed.semanticLocator }),
         state: [...observed.state],
         actions: [...observed.actions],
       });
@@ -256,7 +306,12 @@ export class ElementRefStore {
       documentFrameId: stored.documentFrameId,
       loaderId: stored.loaderId,
       backendNodeId: stored.backendNodeId,
+      ...(stored.stateBackendNodeId === undefined
+        ? {}
+        : { stateBackendNodeId: stored.stateBackendNodeId }),
       role: stored.role,
+      name: stored.name,
+      ...(stored.semanticLocator === undefined ? {} : { semanticLocator: stored.semanticLocator }),
       state: [...stored.state],
       actions: [...stored.actions],
     };
