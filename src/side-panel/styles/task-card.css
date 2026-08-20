@@ -207,10 +207,6 @@
   grid-column: 2 / -1;
 }
 
-.task-event-list li.task-supplement-entry {
-  display: block;
-}
-
 .task-event-reasoning,
 .task-event-supplement {
   min-width: 0;
@@ -361,11 +357,36 @@
   background: rgba(255, 255, 255, 0.06);
 }
 
+.terminal-content {
+  display: grid;
+  gap: 1px;
+}
+
+.terminal-payload + .terminal-payload {
+  border-top: 1px solid #293345;
+}
+
+.terminal-payload-header,
+.tool-result-payload-header {
+  display: flex;
+  min-height: 27px;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  font-size: 9px;
+  font-weight: 500;
+}
+
+.terminal-payload-header {
+  padding: 2px 7px 0 10px;
+  color: #8e9aae;
+}
+
 .terminal-command {
   display: flex;
   min-width: 0;
   gap: 7px;
-  padding: 9px 10px 5px;
+  padding: 2px 10px 8px;
   color: #78d7a5;
   font:
     10px/1.55 ui-monospace,
@@ -385,7 +406,7 @@
 .terminal-output {
   max-height: 220px;
   margin: 0;
-  padding: 4px 10px 10px 24px;
+  padding: 2px 10px 10px 24px;
   overflow: auto;
   color: #aeb9ca;
   background: transparent;
@@ -449,14 +470,31 @@
 }
 
 .tool-result-content {
+  display: grid;
+  min-width: 0;
+  gap: 7px;
   padding: 0 8px 8px;
 }
 
+.tool-result-payload {
+  min-width: 0;
+}
+
+.tool-result-payload-header {
+  width: 100%;
+  min-width: 0;
+  color: var(--cbx-faint);
+}
+
 .tool-result-content pre {
+  width: 100%;
+  max-width: 100%;
+  min-width: 0;
   max-height: 180px;
-  margin: 7px 0 0;
+  margin: 0;
   padding: 7px;
-  overflow: auto;
+  overflow-x: auto;
+  overflow-y: auto;
   border-radius: 6px;
   color: var(--cbx-muted);
   background: var(--cbx-subtle);
@@ -466,12 +504,45 @@
     Menlo,
     Consolas,
     monospace;
-  white-space: pre-wrap;
+  overscroll-behavior: contain;
+  white-space: pre;
 }
 
 .tool-result-content .message-images {
   margin: 7px 0 0;
   grid-template-columns: repeat(auto-fill, minmax(64px, 96px));
+}
+
+.tool-copy-action {
+  display: grid;
+  width: 24px;
+  height: 24px;
+  flex: 0 0 24px;
+  place-items: center;
+  padding: 0;
+  border: 0;
+  border-radius: 5px;
+  color: var(--cbx-muted);
+  background: transparent;
+  cursor: pointer;
+  opacity: 1;
+  visibility: visible;
+}
+
+.tool-copy-action:hover {
+  color: var(--cbx-text);
+  background: var(--cbx-hover);
+}
+
+.terminal-payload-header .tool-copy-action {
+  border: 0;
+  color: #9da9bd;
+  background: transparent;
+}
+
+.terminal-payload-header .tool-copy-action:hover {
+  color: #f6f8fc;
+  background: rgba(255, 255, 255, 0.06);
 }
 
 .task-controls {

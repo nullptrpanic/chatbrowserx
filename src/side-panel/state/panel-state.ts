@@ -64,6 +64,7 @@ const completedToolResultSchema = z
     output: z.string().max(100_000),
     resultRef: z.string().max(512),
     attachmentIds: z.array(idSchema).max(8).default([]),
+    detailIndex: z.number().int().positive().optional(),
   })
   .strict();
 const taskSupplementSchema = z
@@ -72,6 +73,7 @@ const taskSupplementSchema = z
     text: z.string().max(20_000),
     attachmentIds: z.array(idSchema).max(8),
     createdAt: timestampSchema,
+    detailIndex: z.number().int().positive().optional(),
   })
   .strict();
 const panelTaskSchema = z
@@ -85,6 +87,7 @@ const panelTaskSchema = z
     updatedAt: timestampSchema,
     sequence: z.number().int().nonnegative(),
     completedToolCallCount: z.number().int().nonnegative().optional(),
+    detailItemCount: z.number().int().nonnegative().optional(),
     lastError: z
       .object({
         code: z.string().max(128),

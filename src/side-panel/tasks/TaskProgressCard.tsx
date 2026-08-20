@@ -47,7 +47,7 @@ export function TaskProgressCard({
   const [expanded, setExpanded] = useState(false);
   const requestedDetailKey = useRef<string | null>(null);
   const latestEvent = task.detailLevel === 'full' ? undefined : task.events.at(-1);
-  const completedToolCallCount = taskToolCallCount(task);
+  const detailItemCount = taskDetailItemCount(task);
 
   useEffect(() => {
     if (!expanded || task.detailLevel === 'full' || onLoadTaskDetails === undefined) return;
@@ -61,7 +61,7 @@ export function TaskProgressCard({
 
   if (embedded) {
     const summaryMeta = t('taskSummaryMeta', {
-      toolCalls: completedToolCallCount,
+      toolCalls: detailItemCount,
       duration: formatTaskDuration(task),
     });
     return (
@@ -131,7 +131,7 @@ export function TaskProgressCard({
           onClick={() => setExpanded((value) => !value)}
         >
           {expanded ? <ChevronUp size={14} /> : <ChevronDown size={14} />}
-          {expanded ? t('hideTaskDetails') : t('taskDetails')}({completedToolCallCount})
+          {expanded ? t('hideTaskDetails') : t('taskDetails')}({detailItemCount})
         </button>
       </div>
       {task.lastError === null ? null : (
@@ -173,15 +173,7 @@ function TaskDetailContent({
 }) {
   const toolResultGroups = groupToolResultsByEvent(task);
   const supplementsByEvent = groupSupplementsByEvent(task);
-  const toolResultIndexes = new Map(
-    task.completedToolResults.map((result, index) => [result.callId, index]),
-  );
-  const firstVisibleToolCall = Math.max(
-    0,
-    taskToolCallCount(task) - task.completedToolResults.length,
-  );
-  const toolCallNumber = (result: PanelCompletedToolResult) =>
-    firstVisibleToolCall + (toolResultIndexes.get(result.callId) ?? 0) + 1;
+  const detailNumbers = taskDetailNumbers(task, toolResultGroups, supplementsByEvent);
   return (
     <div className="task-detail-content">
       {task.completedToolResults.length === 0 && task.supplements.length === 0 ? (
@@ -193,7 +185,7 @@ function TaskDetailContent({
             <CompletedToolEvent
               key={result.callId}
               result={result}
-              number={toolCallNumber(result)}
+              number={detailNumbers.results.get(result.callId) ?? 1}
               attachments={attachments}
               t={t}
               onOpenImagePreview={onOpenImagePreview}
@@ -207,7 +199,7 @@ function TaskDetailContent({
                 <CompletedToolEvent
                   key={result.callId}
                   result={result}
-                  number={toolCallNumber(result)}
+                  number={detailNumbers.results.get(result.callId) ?? 1}
                   at={event.at}
                   attachments={attachments}
                   t={t}
@@ -216,6 +208,9 @@ function TaskDetailContent({
               )),
               ...supplements.map((supplement) => (
                 <li className="task-supplement-entry" key={supplement.id}>
+                  <span className="task-event-index">
+                    {detailNumbers.supplements.get(supplement.id) ?? 1}
+                  </span>
                   <TaskSupplement
                     supplement={supplement}
                     attachments={attachments}
@@ -228,6 +223,9 @@ function TaskDetailContent({
           })}
           {supplementsByEvent.unmatched.map((supplement) => (
             <li className="task-supplement-entry" key={supplement.id}>
+              <span className="task-event-index">
+                {detailNumbers.supplements.get(supplement.id) ?? 1}
+              </span>
               <TaskSupplement
                 supplement={supplement}
                 attachments={attachments}
@@ -317,6 +315,48 @@ function groupSupplementsByEvent(task: PanelTask): GroupedSupplements {
     grouped,
     unmatched: task.supplements.filter(({ id }) => !assigned.has(id)),
   };
+}
+
+interface TaskDetailNumbers {
+  readonly results: ReadonlyMap<string, number>;
+  readonly supplements: ReadonlyMap<string, number>;
+}
+
+/** Uses server-projected positions and derives deterministic positions for legacy snapshots. */
+function taskDetailNumbers(
+  task: PanelTask,
+  toolResults: GroupedToolResults,
+  supplements: GroupedSupplements,
+): TaskDetailNumbers {
+  const ordered = [
+    ...toolResults.unmatched.map((result) => ({ type: 'result' as const, value: result })),
+    ...task.events.flatMap((_, eventIndex) => [
+      ...(toolResults.grouped.get(eventIndex) ?? []).map((result) => ({
+        type: 'result' as const,
+        value: result,
+      })),
+      ...(supplements.grouped.get(eventIndex) ?? []).map((supplement) => ({
+        type: 'supplement' as const,
+        value: supplement,
+      })),
+    ]),
+    ...supplements.unmatched.map((supplement) => ({
+      type: 'supplement' as const,
+      value: supplement,
+    })),
+  ];
+  const results = new Map<string, number>();
+  const supplementNumbers = new Map<string, number>();
+  let nextNumber = Math.max(1, taskDetailItemCount(task) - ordered.length + 1);
+
+  for (const item of ordered) {
+    const projected = item.value.detailIndex;
+    const number = projected ?? nextNumber;
+    nextNumber = Math.max(nextNumber + 1, number + 1);
+    if (item.type === 'result') results.set(item.value.callId, number);
+    else supplementNumbers.set(item.value.id, number);
+  }
+  return { results, supplements: supplementNumbers };
 }
 
 function CompletedToolResult({
@@ -441,6 +481,11 @@ function taskToolCallCount(task: PanelTask): number {
       task.events.filter((event) => event.type === 'tool.result-recorded').length,
     )
   );
+}
+
+/** Counts every user-visible detail while retaining older snapshot compatibility. */
+function taskDetailItemCount(task: PanelTask): number {
+  return task.detailItemCount ?? taskToolCallCount(task) + task.supplements.length;
 }
 
 /** Creates a concise accessible label for the complete task progress card. */

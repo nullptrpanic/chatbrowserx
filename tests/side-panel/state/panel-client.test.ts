@@ -266,6 +266,167 @@ describe('PanelClient', () => {
     client.dispose();
   });
 
+  it('keeps loaded tool details mounted while a newer live summary is being expanded', async () => {
+    let liveSnapshot = snapshot(1);
+    const initialTask = liveSnapshot.tasks[0];
+    if (initialTask === undefined) throw new Error('Task fixture is missing.');
+    let detailedTask = {
+      ...initialTask,
+      detailLevel: 'full' as const,
+      events: [
+        {
+          sequence: 1,
+          type: 'tool.result-recorded',
+          reason: 'browser_inspect_result_recorded',
+          at: 1_000,
+        },
+      ],
+      completedToolResults: [
+        {
+          callId: 'call_1',
+          toolName: 'browser_inspect',
+          argumentsJson: '{"tabId":7}',
+          output: '{"ok":true}',
+          resultRef: 'result_1',
+          attachmentIds: [],
+        },
+      ],
+    };
+    const send = vi.fn<RuntimePort['send']>(async (message) => ({
+      version: 1,
+      requestId: message.requestId,
+      ok: true,
+      data:
+        message.type === 'panel.getTaskDetails'
+          ? detailedTask
+          : message.type === 'panel.getSnapshot'
+            ? liveSnapshot
+            : { connected: true },
+    }));
+    const client = new PanelClient(
+      { send },
+      { getActiveTab: vi.fn(async () => ({ id: 7 })) },
+      { pollIntervalMs: 60_000 },
+    );
+    await client.connect();
+    await client.loadTaskDetails('task_1');
+
+    const nextSnapshot = snapshot(2);
+    const nextSummary = nextSnapshot.tasks[0];
+    if (nextSummary === undefined) throw new Error('Next task fixture is missing.');
+    liveSnapshot = {
+      ...nextSnapshot,
+      tasks: [{ ...nextSummary, completedToolCallCount: 2 }],
+      task: { ...nextSummary, completedToolCallCount: 2 },
+    };
+    await client.refresh();
+
+    expect(client.getSnapshot().snapshot?.task).toMatchObject({
+      detailLevel: 'summary',
+      sequence: 2,
+      completedToolCallCount: 2,
+      completedToolResults: [{ callId: 'call_1' }],
+    });
+
+    detailedTask = {
+      ...nextSummary,
+      detailLevel: 'full',
+      completedToolCallCount: 2,
+      events: [
+        ...detailedTask.events,
+        {
+          sequence: 2,
+          type: 'tool.result-recorded',
+          reason: 'browser_click_result_recorded',
+          at: 1_100,
+        },
+      ],
+      completedToolResults: [
+        ...detailedTask.completedToolResults,
+        {
+          callId: 'call_2',
+          toolName: 'browser_click',
+          argumentsJson: '{"tabId":7,"ref":"e2"}',
+          output: '{"ok":true}',
+          resultRef: 'result_2',
+          attachmentIds: [],
+        },
+      ],
+    };
+    await client.loadTaskDetails('task_1');
+
+    expect(client.getSnapshot().snapshot?.task).toMatchObject({
+      detailLevel: 'full',
+      sequence: 2,
+      completedToolResults: [{ callId: 'call_1' }, { callId: 'call_2' }],
+    });
+    client.dispose();
+  });
+
+  it('queues a fresh detail read when the live sequence advances during an in-flight read', async () => {
+    let liveSnapshot = snapshot(1);
+    const firstSummary = liveSnapshot.tasks[0];
+    if (firstSummary === undefined) throw new Error('Task fixture is missing.');
+    let releaseFirstRead: (() => void) | undefined;
+    const firstReadBlocked = new Promise<void>((resolve) => {
+      releaseFirstRead = resolve;
+    });
+    let detailReads = 0;
+    const send = vi.fn<RuntimePort['send']>(async (message) => {
+      if (message.type === 'panel.getTaskDetails') {
+        detailReads += 1;
+        const current = liveSnapshot.tasks[0];
+        if (current === undefined) throw new Error('Current task fixture is missing.');
+        if (detailReads === 1) await firstReadBlocked;
+        return {
+          version: 1,
+          requestId: message.requestId,
+          ok: true,
+          data: {
+            ...current,
+            detailLevel: 'full',
+            completedToolResults: Array.from({ length: current.sequence }, (_, index) => ({
+              callId: `call_${String(index + 1)}`,
+              toolName: 'browser_inspect',
+              argumentsJson: '{}',
+              output: '{"ok":true}',
+              resultRef: `result_${String(index + 1)}`,
+              attachmentIds: [],
+            })),
+          },
+        };
+      }
+      return {
+        version: 1,
+        requestId: message.requestId,
+        ok: true,
+        data: message.type === 'panel.getSnapshot' ? liveSnapshot : { connected: true },
+      };
+    });
+    const client = new PanelClient(
+      { send },
+      { getActiveTab: vi.fn(async () => ({ id: 7 })) },
+      { pollIntervalMs: 60_000 },
+    );
+    await client.connect();
+
+    const firstLoad = client.loadTaskDetails('task_1');
+    const nextSnapshot = snapshot(2);
+    liveSnapshot = nextSnapshot;
+    await client.refresh();
+    const latestLoad = client.loadTaskDetails('task_1');
+    releaseFirstRead?.();
+    await Promise.all([firstLoad, latestLoad]);
+
+    expect(detailReads).toBe(2);
+    expect(client.getSnapshot().snapshot?.task).toMatchObject({
+      detailLevel: 'full',
+      sequence: 2,
+      completedToolResults: [{ callId: 'call_1' }, { callId: 'call_2' }],
+    });
+    client.dispose();
+  });
+
   it('submits into the latest conversation restored after reconnecting the panel', async () => {
     const submitted: Array<{
       readonly tabId: number;

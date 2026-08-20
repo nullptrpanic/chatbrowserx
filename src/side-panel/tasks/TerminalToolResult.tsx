@@ -2,6 +2,7 @@ import { ChevronDown, ChevronUp, Terminal } from 'lucide-react';
 import { useState } from 'react';
 import type { Translator } from '../../shared/i18n/i18n';
 import type { PanelCompletedToolResult } from '../../shared/protocol/panel-types';
+import { ToolCopyButton } from './ToolCopyButton';
 
 const terminalToolNames = new Set(['bash', 'shell', 'terminal', 'exec_command']);
 
@@ -58,14 +59,34 @@ export function TerminalToolResult({ result, t }: TerminalToolResultProps) {
       </div>
       {expanded ? (
         <div className="terminal-content">
-          <div className="terminal-command">
-            <span aria-hidden="true">$</span>
-            <code>{command}</code>
-          </div>
+          <section className="terminal-payload">
+            <header className="terminal-payload-header">
+              <span>{t('terminalCommand')}</span>
+              <ToolCopyButton
+                label={t('copyTerminalCommand')}
+                copiedLabel={t('terminalCommandCopied')}
+                onCopy={() => navigator.clipboard.writeText(command)}
+              />
+            </header>
+            <div className="terminal-command">
+              <span aria-hidden="true">$</span>
+              <code>{command}</code>
+            </div>
+          </section>
           {result.output.length > 0 ? (
-            <pre className="terminal-output">
-              <code>{result.output}</code>
-            </pre>
+            <section className="terminal-payload">
+              <header className="terminal-payload-header">
+                <span>{t('terminalOutput')}</span>
+                <ToolCopyButton
+                  label={t('copyTerminalOutput')}
+                  copiedLabel={t('terminalOutputCopied')}
+                  onCopy={() => navigator.clipboard.writeText(result.output)}
+                />
+              </header>
+              <pre className="terminal-output">
+                <code>{result.output}</code>
+              </pre>
+            </section>
           ) : null}
         </div>
       ) : null}

@@ -13,10 +13,12 @@ import type {
   PanelTask,
 } from '../shared/protocol/panel-types';
 import type { IdGenerator } from '../shared/ids';
+import { bytesToBase64 } from '../shared/base64';
 import type { Clock } from '../shared/time';
+import type { CompletedToolResult } from './checkpoint-types';
 import type { MessageRecord, MessageSourcePage } from './message-types';
 import { TaskCommandError, type TaskCommandPort, type TaskSnapshot } from './task-command-service';
-import type { TaskRun } from './task-types';
+import type { TaskEvent, TaskRun } from './task-types';
 
 const ATTACHMENT_GC_GRACE_MS = 24 * 60 * 60 * 1_000;
 const MAX_PANEL_MESSAGES = 500;
@@ -150,14 +152,77 @@ function taskGoal(text: string): string {
   return normalized.length > 0 ? normalized : '请根据所附图片完成当前页面任务。';
 }
 
-/** Encodes bounded image bytes without exceeding function argument limits. */
-function bytesToBase64(bytes: Uint8Array): string {
-  let binary = '';
-  const chunkSize = 8 * 1024;
-  for (let offset = 0; offset < bytes.length; offset += chunkSize) {
-    binary += String.fromCharCode(...bytes.subarray(offset, offset + chunkSize));
+interface TaskDetailIndexes {
+  readonly itemCount: number;
+  readonly resultIndexes: ReadonlyMap<string, number>;
+  readonly supplementIndexes: ReadonlyMap<string, number>;
+}
+
+/** Assigns stable display positions across completed tools and applied or pending supplements. */
+function taskDetailIndexes(
+  completedResults: readonly CompletedToolResult[],
+  events: readonly TaskEvent[],
+  supplements: readonly MessageRecord[],
+): TaskDetailIndexes {
+  const resultIndexes = new Map<string, number>();
+  const supplementIndexes = new Map<string, number>();
+  const assignedSupplements = new Set<string>();
+  const resultEvents = events.filter((event) => event.type === 'tool.result-recorded');
+  const pairedCount = Math.min(resultEvents.length, completedResults.length);
+  const firstPairedEvent = resultEvents.length - pairedCount;
+  const firstPairedResult = completedResults.length - pairedCount;
+  const resultByEventSequence = new Map<number, CompletedToolResult>();
+  let itemCount = 0;
+
+  for (const result of completedResults.slice(0, firstPairedResult)) {
+    resultIndexes.set(result.callId, ++itemCount);
   }
-  return btoa(binary);
+  for (let index = 0; index < pairedCount; index += 1) {
+    const event = resultEvents[firstPairedEvent + index];
+    const result = completedResults[firstPairedResult + index];
+    if (event !== undefined && result !== undefined) {
+      resultByEventSequence.set(event.sequence, result);
+    }
+  }
+
+  for (const event of events) {
+    const result = resultByEventSequence.get(event.sequence);
+    if (result !== undefined) {
+      resultIndexes.set(result.callId, ++itemCount);
+      continue;
+    }
+    if (event.type !== 'task.supplements-applied') continue;
+
+    const explicitIds = new Set(event.supplementIds ?? []);
+    const applied = supplements
+      .filter(
+        (message) =>
+          !assignedSupplements.has(message.id) &&
+          (explicitIds.has(message.id) || message.createdAt <= event.at),
+      )
+      .sort(
+        (left, right) =>
+          left.createdAt - right.createdAt ||
+          left.updatedAt - right.updatedAt ||
+          left.id.localeCompare(right.id),
+      );
+    for (const message of applied) {
+      assignedSupplements.add(message.id);
+      supplementIndexes.set(message.id, ++itemCount);
+    }
+  }
+
+  for (const message of supplements
+    .filter((candidate) => !assignedSupplements.has(candidate.id))
+    .sort(
+      (left, right) =>
+        left.createdAt - right.createdAt ||
+        left.updatedAt - right.updatedAt ||
+        left.id.localeCompare(right.id),
+    )) {
+    supplementIndexes.set(message.id, ++itemCount);
+  }
+  return { itemCount, resultIndexes, supplementIndexes };
 }
 
 export class PanelService {
@@ -209,12 +274,9 @@ export class PanelService {
     const selectedSummary = selectedIndex < 0 ? null : (summaries[selectedIndex] ?? null);
     const selectedTasks = selectedIndex < 0 ? [] : (taskLists[selectedIndex] ?? []);
     const latestTask = selectedTasks.at(-1) ?? null;
-    const storedMessages =
-      selected === null
-        ? []
-        : (await this.#dependencies.conversations.listMessages(selected.id)).slice(
-            -MAX_PANEL_MESSAGES,
-          );
+    const allStoredMessages =
+      selected === null ? [] : await this.#dependencies.conversations.listMessages(selected.id);
+    const storedMessages = allStoredMessages.slice(-MAX_PANEL_MESSAGES);
     const messages = storedMessages.filter((message) => message.kind === 'conversation');
     const attachments = await this.#readAttachmentMetadata(storedMessages);
     const visibleTaskIds = new Set(
@@ -224,7 +286,7 @@ export class PanelService {
     const panelTasks = await Promise.all(
       selectedTasks
         .filter((task) => visibleTaskIds.has(task.id))
-        .map((task) => this.#readTask(task, storedMessages)),
+        .map((task) => this.#readTask(task, allStoredMessages)),
     );
     const panelTask =
       latestTask === null ? null : (panelTasks.find((task) => task.id === latestTask.id) ?? null);
@@ -499,6 +561,10 @@ export class PanelService {
       this.#dependencies.tasks.listEvents(task.id),
     ]);
     const completedResults = checkpoint?.completedToolResults ?? [];
+    const taskSupplements = messages.filter(
+      (message) => message.kind === 'supplement' && message.taskId === task.id,
+    );
+    const detailIndexes = taskDetailIndexes(completedResults, events, taskSupplements);
     const projectedEvents =
       detailLevel === 'full'
         ? [
@@ -522,6 +588,7 @@ export class PanelService {
       updatedAt: task.updatedAt,
       sequence: checkpoint?.sequence ?? events.at(-1)?.sequence ?? 0,
       completedToolCallCount: completedResults.length,
+      detailItemCount: detailIndexes.itemCount,
       lastError:
         task.lastError === null
           ? null
@@ -553,16 +620,15 @@ export class PanelService {
         output: result.output.slice(0, MAX_PANEL_TOOL_OUTPUT),
         resultRef: result.resultRef.slice(0, 512),
         attachmentIds: [...(result.attachmentIds ?? [])].slice(0, 8),
+        detailIndex: detailIndexes.resultIndexes.get(result.callId),
       })),
-      supplements: messages
-        .filter((message) => message.kind === 'supplement' && message.taskId === task.id)
-        .slice(-MAX_PANEL_SUPPLEMENTS)
-        .map((message) => ({
-          id: message.id,
-          text: message.text.slice(0, 20_000),
-          attachmentIds: [...message.attachmentIds].slice(0, 8),
-          createdAt: message.createdAt,
-        })),
+      supplements: taskSupplements.slice(-MAX_PANEL_SUPPLEMENTS).map((message) => ({
+        id: message.id,
+        text: message.text.slice(0, 20_000),
+        attachmentIds: [...message.attachmentIds].slice(0, 8),
+        createdAt: message.createdAt,
+        detailIndex: detailIndexes.supplementIndexes.get(message.id),
+      })),
     };
   }
 

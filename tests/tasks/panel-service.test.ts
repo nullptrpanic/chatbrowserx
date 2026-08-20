@@ -423,11 +423,108 @@ describe('PanelService', () => {
         text: 'Use official sources',
         attachmentIds: ['attachment_1'],
         createdAt: 1_100,
+        detailIndex: 1,
       },
     ]);
     expect(snapshot.task?.events[0]?.supplementIds).toEqual(['supplement_1']);
     expect(snapshot.attachments).toEqual([
       expect.objectContaining({ id: 'attachment_1', fileName: 'photo.png' }),
+    ]);
+  });
+
+  it('projects one continuous detail index across tool results and user supplements', async () => {
+    const fixture = buildFixture();
+    fixture.dependencies.tasks.listEvents.mockResolvedValue([
+      {
+        id: 'event_result_1',
+        taskId: fixture.task.id,
+        sequence: 1,
+        type: 'tool.result-recorded',
+        reason: 'browser_inspect_result_recorded',
+        at: 1_100,
+        error: null,
+      },
+      {
+        id: 'event_supplement',
+        taskId: fixture.task.id,
+        sequence: 2,
+        type: 'task.supplements-applied',
+        reason: 'user_supplements_applied',
+        at: 1_200,
+        error: null,
+        supplementIds: ['supplement_1'],
+      },
+      {
+        id: 'event_result_2',
+        taskId: fixture.task.id,
+        sequence: 3,
+        type: 'tool.result-recorded',
+        reason: 'browser_click_result_recorded',
+        at: 1_300,
+        error: null,
+      },
+    ]);
+    fixture.dependencies.tasks.getCheckpoint.mockResolvedValue({
+      ...fixture.checkpoint,
+      sequence: 3,
+      completedToolResults: [
+        {
+          callId: 'call_1',
+          toolName: 'browser_inspect',
+          argumentsJson: '{}',
+          output: '{"ok":true}',
+          resultRef: 'result_1',
+          attachmentIds: [],
+        },
+        {
+          callId: 'call_2',
+          toolName: 'browser_click',
+          argumentsJson: '{"ref":"e2"}',
+          output: '{"ok":true}',
+          resultRef: 'result_2',
+          attachmentIds: [],
+        },
+      ],
+    });
+    fixture.dependencies.conversations.listMessages.mockResolvedValue([
+      {
+        id: 'message_1',
+        kind: 'conversation',
+        conversationId: fixture.conversation.id,
+        taskId: fixture.task.id,
+        role: 'user',
+        status: 'complete',
+        text: 'Book a room',
+        attachmentIds: [],
+        createdAt: 1_010,
+        updatedAt: 1_010,
+      },
+      {
+        id: 'supplement_1',
+        kind: 'supplement',
+        conversationId: fixture.conversation.id,
+        taskId: fixture.task.id,
+        role: 'user',
+        status: 'complete',
+        text: 'Prefer a room with natural light.',
+        attachmentIds: [],
+        createdAt: 1_150,
+        updatedAt: 1_150,
+      },
+    ]);
+    const service = new PanelService(fixture.dependencies);
+
+    const details = await service.getTaskDetails(fixture.task.id);
+
+    expect(details.detailItemCount).toBe(3);
+    expect(
+      details.completedToolResults.map(({ callId, detailIndex }) => [callId, detailIndex]),
+    ).toEqual([
+      ['call_1', 1],
+      ['call_2', 3],
+    ]);
+    expect(details.supplements).toEqual([
+      expect.objectContaining({ id: 'supplement_1', detailIndex: 2 }),
     ]);
   });
 

@@ -70,6 +70,7 @@ export class PanelClient {
   #featuresEnsuredKey: string | null = null;
   readonly #detailedTasks = new Map<string, NonNullable<PanelSnapshot['task']>>();
   readonly #taskDetailLoads = new Map<string, Promise<void>>();
+  readonly #taskDetailTargets = new Map<string, number>();
 
   /** Creates a full-snapshot polling client resilient to MV3 worker and UI reconnection. */
   constructor(
@@ -170,10 +171,18 @@ export class PanelClient {
 
   /** Loads and caches the complete persisted execution detail for one expanded task card. */
   loadTaskDetails(taskId: string): Promise<void> {
+    const visibleTask = this.#state.snapshot?.tasks.find((task) => task.id === taskId);
+    if (visibleTask !== undefined) {
+      this.#taskDetailTargets.set(
+        taskId,
+        Math.max(this.#taskDetailTargets.get(taskId) ?? 0, visibleTask.sequence),
+      );
+    }
     const existing = this.#taskDetailLoads.get(taskId);
     if (existing !== undefined) return existing;
-    const loading = this.#loadTaskDetails(taskId).finally(() => {
+    const loading = this.#loadTaskDetailsThroughTarget(taskId).finally(() => {
       if (this.#taskDetailLoads.get(taskId) === loading) this.#taskDetailLoads.delete(taskId);
+      this.#taskDetailTargets.delete(taskId);
     });
     this.#taskDetailLoads.set(taskId, loading);
     return loading;
@@ -369,6 +378,19 @@ export class PanelClient {
     this.#listeners.clear();
     this.#detailedTasks.clear();
     this.#taskDetailLoads.clear();
+    this.#taskDetailTargets.clear();
+  }
+
+  /** Repeats a local detail read when an in-flight response predates a newer requested boundary. */
+  async #loadTaskDetailsThroughTarget(taskId: string): Promise<void> {
+    while (!this.#disposed) {
+      const visibleTask = this.#state.snapshot?.tasks.find((task) => task.id === taskId);
+      if (visibleTask === undefined) return;
+      await this.#loadTaskDetails(taskId);
+      const requestedSequence = this.#taskDetailTargets.get(taskId) ?? visibleTask.sequence;
+      const loadedSequence = this.#detailedTasks.get(taskId)?.sequence ?? -1;
+      if (loadedSequence >= requestedSequence) return;
+    }
   }
 
   /** Fetches one detail projection and applies it only while that task remains visible. */
@@ -398,7 +420,7 @@ export class PanelClient {
     });
   }
 
-  /** Preserves already-loaded details while polling the same or an older task boundary. */
+  /** Keeps loaded detail nodes mounted until a newer full projection replaces them. */
   #mergeDetailedTasks(snapshot: PanelSnapshot): PanelSnapshot {
     const visibleIds = new Set(snapshot.tasks.map(({ id }) => id));
     for (const taskId of this.#detailedTasks.keys()) {
@@ -406,15 +428,15 @@ export class PanelClient {
     }
     const tasks = snapshot.tasks.map((task) => {
       const detailed = this.#detailedTasks.get(task.id);
-      if (
-        detailed === undefined ||
-        detailed.sequence < task.sequence ||
-        detailed.updatedAt < task.updatedAt
-      ) {
-        if (detailed !== undefined) this.#detailedTasks.delete(task.id);
-        return task;
-      }
-      return detailed;
+      if (detailed === undefined) return task;
+      if (detailed.sequence > task.sequence) return detailed;
+      return {
+        ...task,
+        detailLevel: detailed.sequence === task.sequence ? ('full' as const) : ('summary' as const),
+        events: detailed.events,
+        completedToolResults: detailed.completedToolResults,
+        supplements: task.supplements,
+      };
     });
     const task =
       snapshot.task === null

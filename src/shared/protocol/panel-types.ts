@@ -63,6 +63,8 @@ export interface PanelCompletedToolResult {
   readonly output: string;
   readonly resultRef: string;
   readonly attachmentIds?: readonly string[];
+  /** One-based position among every user-visible execution-detail item. */
+  readonly detailIndex?: number | undefined;
 }
 
 export interface PanelTaskSupplement {
@@ -70,6 +72,8 @@ export interface PanelTaskSupplement {
   readonly text: string;
   readonly attachmentIds: readonly string[];
   readonly createdAt: number;
+  /** One-based position among every user-visible execution-detail item. */
+  readonly detailIndex?: number | undefined;
 }
 
 export interface PanelTask {
@@ -84,6 +88,8 @@ export interface PanelTask {
   readonly sequence: number;
   /** Total completed tool calls; optional only for compatibility with an older live panel. */
   readonly completedToolCallCount?: number | undefined;
+  /** Total tool results and user supplements shown by the execution-detail timeline. */
+  readonly detailItemCount?: number | undefined;
   readonly lastError: {
     readonly code: string;
     readonly retryable: boolean;

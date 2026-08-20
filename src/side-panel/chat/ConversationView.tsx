@@ -1,5 +1,5 @@
 import { ArrowDown, FileText, ListChecks, Search } from 'lucide-react';
-import { useEffect, useRef, useState } from 'react';
+import { useLayoutEffect, useRef, useState } from 'react';
 import type { Translator } from '../../shared/i18n/i18n';
 import type {
   PanelMessage,
@@ -44,6 +44,7 @@ export function ConversationView({
 }: ConversationViewProps) {
   const scroller = useRef<HTMLDivElement>(null);
   const [following, setFollowing] = useState(true);
+  const contentVersion = conversationContentVersion(messages, tasks, task);
   const tasksById = new Map(tasks.map((item) => [item.id, item]));
   const taskHostMessageIds = new Map<string, string>();
   for (const message of messages) {
@@ -54,10 +55,10 @@ export function ConversationView({
   }
   const attachedTaskIds = new Set(taskHostMessageIds.keys());
 
-  useEffect(() => {
+  useLayoutEffect(() => {
     const element = scroller.current;
     if (following && element !== null) element.scrollTop = element.scrollHeight;
-  }, [following, messages, task?.sequence]);
+  }, [contentVersion, following]);
 
   const empty = messages.length === 0 && task === null;
   return (
@@ -150,6 +151,43 @@ export function ConversationView({
       )}
     </div>
   );
+}
+
+/** Tracks only visible content changes so identity-only polling cannot disturb scrolling. */
+function conversationContentVersion(
+  messages: readonly PanelMessage[],
+  tasks: readonly PanelTask[],
+  activeTask: PanelTask | null,
+): string {
+  const latestMessage = messages.at(-1);
+  const messageVersion =
+    latestMessage === undefined
+      ? 'empty'
+      : [
+          messages.length,
+          latestMessage.id,
+          latestMessage.updatedAt,
+          latestMessage.status,
+          latestMessage.text.length,
+          latestMessage.attachmentIds.length,
+        ].join(':');
+  const taskVersion = tasks
+    .map((item) =>
+      [
+        item.id,
+        item.sequence,
+        item.status,
+        item.detailLevel ?? 'summary',
+        item.completedToolResults.length,
+        item.supplements.length,
+      ].join(':'),
+    )
+    .join('|');
+  const activeVersion =
+    activeTask === null
+      ? 'none'
+      : `${activeTask.id}:${String(activeTask.sequence)}:${activeTask.status}`;
+  return `${messageVersion}#${taskVersion}#${activeVersion}`;
 }
 
 /** Prevents an invisible interrupted placeholder from swallowing its task's fallback card. */

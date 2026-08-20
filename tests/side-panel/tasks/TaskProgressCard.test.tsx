@@ -21,6 +21,7 @@ function runningTask(completedToolCallCount: number): PanelTask {
     updatedAt: 2_000,
     sequence: 9,
     completedToolCallCount,
+    detailItemCount: completedToolCallCount + 1,
     lastError: null,
     events: [
       { sequence: 1, type: 'planning.started', reason: 'started', at: 1_000 },
@@ -52,6 +53,7 @@ function runningTask(completedToolCallCount: number): PanelTask {
         argumentsJson: '{"tabId":7}',
         output: '{"ok":true}',
         resultRef: 'result_inspect',
+        detailIndex: 1,
       },
       {
         callId: 'call_commit',
@@ -59,6 +61,7 @@ function runningTask(completedToolCallCount: number): PanelTask {
         argumentsJson: '{"state":"Continue from the inspected page."}',
         output: '{"ok":true,"compactedCalls":1,"releasedTextChars":100,"releasedImages":0}',
         resultRef: 'result_commit',
+        detailIndex: 3,
       },
     ],
     supplements: [
@@ -67,6 +70,7 @@ function runningTask(completedToolCallCount: number): PanelTask {
         text: 'Also check the mobile layout.',
         attachmentIds: [],
         createdAt: 1_450,
+        detailIndex: 2,
       },
     ],
   };
@@ -87,7 +91,7 @@ describe('TaskProgressCard execution details', () => {
       />,
     );
 
-    await user.click(screen.getByRole('button', { name: '查看执行详情(2)' }));
+    await user.click(screen.getByRole('button', { name: '查看执行详情(3)' }));
     const details = document.querySelector('.task-detail-content');
     expect(details).not.toBeNull();
     expect(within(details as HTMLElement).getByText('检查页面已完成')).toBeVisible();
@@ -96,6 +100,11 @@ describe('TaskProgressCard execution details', () => {
     expect(within(details as HTMLElement).queryByText('思考摘要已生成')).not.toBeInTheDocument();
     expect(within(details as HTMLElement).queryByText('工具调用已记录')).not.toBeInTheDocument();
     expect(within(details as HTMLElement).queryByText('任务状态已更新')).not.toBeInTheDocument();
+    expect(
+      [...(details as HTMLElement).querySelectorAll('.task-event-index')].map(
+        (element) => element.textContent,
+      ),
+    ).toEqual(['1', '2', '3']);
 
     rerender(
       <TaskProgressCard
@@ -109,6 +118,6 @@ describe('TaskProgressCard execution details', () => {
       />,
     );
 
-    expect(screen.getByRole('button', { name: '收起执行详情(3)' })).toBeVisible();
+    expect(screen.getByRole('button', { name: '收起执行详情(4)' })).toBeVisible();
   });
 });

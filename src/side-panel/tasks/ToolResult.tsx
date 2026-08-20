@@ -3,14 +3,27 @@ import { useState } from 'react';
 import type { Translator } from '../../shared/i18n/i18n';
 import type { PanelCompletedToolResult } from '../../shared/protocol/panel-types';
 import { MessageImages } from '../chat/MessageImages';
+import { copyMessageToClipboard } from '../chat/copy-message';
 import type { AttachmentDraftClient } from '../chat/use-image-draft';
 import { toolDisplayName } from './browser-tool-label';
+import { ToolCopyButton } from './ToolCopyButton';
 
 export interface ToolResultProps {
   readonly result: PanelCompletedToolResult;
   readonly attachments: AttachmentDraftClient;
   readonly t: Translator;
   readonly onOpenImagePreview?: ((attachmentId: string) => Promise<boolean>) | undefined;
+}
+
+/** Pretty-prints complete JSON containers while preserving arbitrary tool text verbatim. */
+function formatToolPayload(value: string): string {
+  try {
+    const parsed: unknown = JSON.parse(value);
+    if (typeof parsed !== 'object' || parsed === null) return value;
+    return JSON.stringify(parsed, null, 2);
+  } catch {
+    return value;
+  }
 }
 
 /** Reads only the bounded numeric fields from a trusted internal commit result. */
@@ -48,6 +61,8 @@ export function ToolResult({ result, attachments, t, onOpenImagePreview }: ToolR
   const [expanded, setExpanded] = useState(false);
   const displayName = toolDisplayName(result.toolName, t);
   const commitSummary = contextCommitSummary(result, t);
+  const formattedArguments = formatToolPayload(result.argumentsJson);
+  const formattedOutput = formatToolPayload(result.output);
   return (
     <section className="tool-result" aria-label={`${displayName}: ${t('toolCompleted')}`}>
       <button
@@ -73,21 +88,55 @@ export function ToolResult({ result, attachments, t, onOpenImagePreview }: ToolR
       {expanded ? (
         <div className="tool-result-content">
           {result.argumentsJson.length === 0 ? null : (
-            <pre>
-              <code>{result.argumentsJson}</code>
-            </pre>
+            <section className="tool-result-payload">
+              <header className="tool-result-payload-header">
+                <span>{t('toolInvocation')}</span>
+                <ToolCopyButton
+                  label={t('copyToolArguments')}
+                  copiedLabel={t('toolArgumentsCopied')}
+                  onCopy={() =>
+                    copyMessageToClipboard({
+                      text: formattedArguments,
+                      attachmentIds: [],
+                      client: attachments,
+                    })
+                  }
+                />
+              </header>
+              <pre>
+                <code>{formattedArguments}</code>
+              </pre>
+            </section>
           )}
-          {result.output.length === 0 ? null : (
-            <pre>
-              <code>{result.output}</code>
-            </pre>
+          {result.output.length === 0 && (result.attachmentIds?.length ?? 0) === 0 ? null : (
+            <section className="tool-result-payload">
+              <header className="tool-result-payload-header">
+                <span>{t('toolResult')}</span>
+                <ToolCopyButton
+                  label={t('copyToolResult')}
+                  copiedLabel={t('toolResultCopied')}
+                  onCopy={() =>
+                    copyMessageToClipboard({
+                      text: formattedOutput,
+                      attachmentIds: result.attachmentIds ?? [],
+                      client: attachments,
+                    })
+                  }
+                />
+              </header>
+              {result.output.length === 0 ? null : (
+                <pre>
+                  <code>{formattedOutput}</code>
+                </pre>
+              )}
+              <MessageImages
+                attachmentIds={result.attachmentIds ?? []}
+                client={attachments}
+                t={t}
+                onOpenImagePreview={onOpenImagePreview}
+              />
+            </section>
           )}
-          <MessageImages
-            attachmentIds={result.attachmentIds ?? []}
-            client={attachments}
-            t={t}
-            onOpenImagePreview={onOpenImagePreview}
-          />
         </div>
       ) : null}
     </section>

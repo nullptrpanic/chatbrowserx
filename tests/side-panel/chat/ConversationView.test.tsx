@@ -42,6 +42,51 @@ function completedTask(id: string, goal: string, updatedAt: number): PanelTask {
 }
 
 describe('ConversationView answer execution details', () => {
+  it('does not rewrite the scroll position for an unchanged polling snapshot', () => {
+    const task = completedTask('task_poll', 'Polling task', 1_300);
+    const message: PanelMessage = {
+      id: 'assistant_poll',
+      taskId: task.id,
+      role: 'assistant',
+      status: 'complete',
+      text: 'Stable answer',
+      attachmentIds: [],
+      createdAt: 1_300,
+      updatedAt: 1_300,
+    };
+    const props = {
+      attachments,
+      t,
+      onSuggestion: vi.fn(),
+      onPause: vi.fn(),
+      onResume: vi.fn(),
+      onRetry: vi.fn(),
+      onCancel: vi.fn(),
+    };
+    const { container, rerender } = render(
+      <ConversationView messages={[message]} tasks={[task]} task={task} {...props} />,
+    );
+    const scroller = container.querySelector('.conversation-scroller');
+    if (!(scroller instanceof HTMLDivElement)) throw new Error('Conversation scroller is missing.');
+    const setScrollTop = vi.fn();
+    Object.defineProperties(scroller, {
+      scrollHeight: { configurable: true, value: 1_000 },
+      clientHeight: { configurable: true, value: 500 },
+      scrollTop: { configurable: true, get: () => 500, set: setScrollTop },
+    });
+
+    rerender(
+      <ConversationView
+        messages={[{ ...message }]}
+        tasks={[{ ...task, events: [...task.events] }]}
+        task={{ ...task, events: [...task.events] }}
+        {...props}
+      />,
+    );
+
+    expect(setScrollTop).not.toHaveBeenCalled();
+  });
+
   it('requests complete persisted details when a historical answer is expanded', async () => {
     const user = userEvent.setup();
     const task: PanelTask = {
@@ -77,7 +122,7 @@ describe('ConversationView answer execution details', () => {
       />,
     );
 
-    await user.click(screen.getByRole('button', { name: '任务已完成 0 次调用 · 4.6 秒' }));
+    await user.click(screen.getByRole('button', { name: '任务已完成 0 步 · 4.6 秒' }));
 
     expect(loadTaskDetails).toHaveBeenCalledOnce();
     expect(loadTaskDetails).toHaveBeenCalledWith(task.id);
@@ -174,12 +219,12 @@ describe('ConversationView answer execution details', () => {
     expect(secondAnswer).not.toBeNull();
     expect(
       within(firstAnswer as HTMLElement).getByRole('button', {
-        name: '任务已完成 0 次调用 · 4.6 秒',
+        name: '任务已完成 0 步 · 4.6 秒',
       }),
     ).toBeVisible();
     expect(
       within(secondAnswer as HTMLElement).getByRole('button', {
-        name: '任务已完成 1 次调用 · 4.6 秒',
+        name: '任务已完成 1 步 · 4.6 秒',
       }),
     ).toBeVisible();
     expect(within(firstAnswer as HTMLElement).queryByText('查看执行详情')).not.toBeInTheDocument();
@@ -189,7 +234,7 @@ describe('ConversationView answer execution details', () => {
 
     await user.click(
       within(secondAnswer as HTMLElement).getByRole('button', {
-        name: '任务已完成 1 次调用 · 4.6 秒',
+        name: '任务已完成 1 步 · 4.6 秒',
       }),
     );
     const terminal = within(secondAnswer as HTMLElement).getByRole('region', {
@@ -204,12 +249,12 @@ describe('ConversationView answer execution details', () => {
     ).not.toBeInTheDocument();
     expect(
       within(firstAnswer as HTMLElement).getByRole('button', {
-        name: '任务已完成 0 次调用 · 4.6 秒',
+        name: '任务已完成 0 步 · 4.6 秒',
       }),
     ).toBeVisible();
     expect(
       within(secondAnswer as HTMLElement).getByRole('button', {
-        name: '任务已完成 1 次调用 · 4.6 秒',
+        name: '任务已完成 1 步 · 4.6 秒',
       }),
     ).toHaveAttribute('aria-expanded', 'true');
   });
@@ -273,7 +318,7 @@ describe('ConversationView answer execution details', () => {
 
     await user.click(
       within(answer as HTMLElement).getByRole('button', {
-        name: '任务已完成 1 次调用 · 4.6 秒',
+        name: '任务已完成 1 步 · 4.6 秒',
       }),
     );
 
@@ -344,7 +389,7 @@ describe('ConversationView answer execution details', () => {
       />,
     );
 
-    await user.click(screen.getByRole('button', { name: '任务已完成 1 次调用 · 4.6 秒' }));
+    await user.click(screen.getByRole('button', { name: '任务已完成 1 步 · 4.6 秒' }));
 
     expect(screen.getByText('工作状态已提交')).toBeVisible();
     expect(screen.getByText('提交工作状态')).toBeVisible();
@@ -426,7 +471,7 @@ describe('ConversationView answer execution details', () => {
     );
 
     expect(screen.queryByAltText('page-screenshot.png')).not.toBeInTheDocument();
-    await user.click(screen.getByRole('button', { name: '任务已完成 1 次调用 · 4.6 秒' }));
+    await user.click(screen.getByRole('button', { name: '任务已完成 1 步 · 4.6 秒' }));
     expect(screen.getByText('检查页面已完成')).toBeVisible();
     expect(screen.queryByAltText('page-screenshot.png')).not.toBeInTheDocument();
     await user.click(screen.getByRole('button', { name: '展开 检查页面 结果' }));
@@ -506,7 +551,7 @@ describe('ConversationView answer execution details', () => {
     expect(answer).not.toBeNull();
     await user.click(
       within(answer as HTMLElement).getByRole('button', {
-        name: '任务已完成 2 次调用 · 4.6 秒',
+        name: '任务已完成 2 步 · 4.6 秒',
       }),
     );
 
@@ -578,7 +623,7 @@ describe('ConversationView answer execution details', () => {
     expect(answer).not.toBeNull();
     await user.click(
       within(answer as HTMLElement).getByRole('button', {
-        name: '任务已完成 0 次调用 · 4.6 秒',
+        name: '任务已完成 0 步 · 4.6 秒',
       }),
     );
 
@@ -700,7 +745,7 @@ describe('ConversationView answer execution details', () => {
     expect(reply).not.toBeNull();
     expect(
       within(reply as HTMLElement).getByRole('button', {
-        name: '任务已取消 0 次调用 · 0.3 秒',
+        name: '任务已取消 0 步 · 0.3 秒',
       }),
     ).toBeVisible();
   });
@@ -805,7 +850,7 @@ describe('ConversationView answer execution details', () => {
 
     await user.click(
       screen.getByRole('button', {
-        name: '任务已完成 0 次调用 · 4.6 秒',
+        name: '任务已完成 3 步 · 4.6 秒',
       }),
     );
 
