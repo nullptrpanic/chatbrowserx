@@ -8,6 +8,7 @@ import { createTask, type CreateTaskInput } from './task-factory';
 import { retainTaskReply } from './task-reply-retention';
 import { transitionTask } from './task-transition';
 import type { TaskEvent, TaskEventType, TaskRun } from './task-types';
+import { selectPendingWorkSessionSupplements } from './work-session-supplements';
 
 export type TaskCommandErrorCode =
   'TASK_NOT_FOUND' | 'TASK_STATE_INVALID' | 'CHECKPOINT_NOT_FOUND' | 'TASK_ALREADY_RUNNING';
@@ -181,29 +182,15 @@ export class TaskCommandService implements TaskCommandPort {
     const referencedMessageIds = new Set(
       continuationItems.flatMap((item) => (item.type === 'message_ref' ? [item.messageId] : [])),
     );
-    const workSessionTaskIds = new Set(
-      conversationTasks
-        .filter((task) => task.workSessionId === source.task.workSessionId)
-        .map((task) => task.id),
-    );
-    const pendingSupplementItems = messages
-      .filter(
-        (message) =>
-          message.kind === 'supplement' &&
-          message.taskId !== null &&
-          workSessionTaskIds.has(message.taskId) &&
-          !referencedMessageIds.has(message.id),
-      )
-      .sort(
-        (left, right) =>
-          left.createdAt - right.createdAt ||
-          left.updatedAt - right.updatedAt ||
-          left.id.localeCompare(right.id),
-      )
-      .map((message): ContinuationItem => ({
-        type: 'message_ref',
-        messageId: message.id,
-      }));
+    const pendingSupplementItems = selectPendingWorkSessionSupplements(
+      messages,
+      conversationTasks,
+      source.task.workSessionId,
+      referencedMessageIds,
+    ).map((message): ContinuationItem => ({
+      type: 'message_ref',
+      messageId: message.id,
+    }));
     continuationItems = insertBeforePendingToolCall(
       continuationItems,
       source.checkpoint.pendingToolCall,

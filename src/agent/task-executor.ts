@@ -14,6 +14,7 @@ import { TaskLeaseManager } from '../tasks/task-lease';
 import { retainTaskReply } from '../tasks/task-reply-retention';
 import { transitionTask } from '../tasks/task-transition';
 import type { TaskEvent, TaskEventType, TaskModelTurnMetrics, TaskRun } from '../tasks/task-types';
+import { selectPendingWorkSessionSupplements } from '../tasks/work-session-supplements';
 import type { AgentEvent, AgentModelTurn, AgentPlanner } from './execution-types';
 import {
   compactContextAtCommit,
@@ -76,25 +77,23 @@ const runnableStatuses = new Set<TaskRun['status']>(['queued', 'planning']);
 const TAVILY_TOOL_CALL_LIMIT = 8;
 const BROWSER_TOOL_CALL_LIMIT = 256;
 const tavilyToolNames = new Set(['tavily_search', 'tavily_extract', 'tavily_crawl']);
-const taskScopedBrowserOperations = new Set<ReturnType<typeof parseBrowserToolCall>['operation']>([
-  'navigate',
-  'reload',
-  'inspect',
-  'click',
-  'set_checked',
-  'type',
-  'keypress',
-  'scroll',
-  'hover',
-  'select',
-  'drag',
-  'wait',
-  'click_point',
-  'drag_point',
-  'network_start',
-  'network_list',
-  'network_get',
-  'network_stop',
+const readOnlyBrowserToolNames = new Set([
+  'browser_get_current_tab',
+  'browser_list_tabs',
+  'browser_inspect',
+  'browser_wait',
+  'browser_network_list',
+  'browser_network_get',
+]);
+const browserProgressDynamicKeys = new Set([
+  'snapshot',
+  'snapshotId',
+  'timestamp',
+  'createdAt',
+  'updatedAt',
+  'generatedAt',
+  'elapsedMs',
+  'durationMs',
 ]);
 
 function throwIfAborted(signal: AbortSignal): void {
@@ -179,10 +178,10 @@ function browserTargetAfterCall(
   ) {
     return null;
   }
+  if (call.operation === 'switch_tab') return resultTabId;
   if (
-    call.operation === 'switch_tab' ||
-    call.operation === 'open_tab' ||
-    taskScopedBrowserOperations.has(call.operation)
+    call.operation === 'open_tab' &&
+    (call.arguments as { readonly activate: boolean }).activate
   ) {
     return resultTabId;
   }
@@ -251,6 +250,124 @@ function duplicateFailedBrowserTypeOutput(
   } catch {
     return null;
   }
+}
+
+interface CompletedBrowserProgress {
+  readonly callFingerprint: string;
+  readonly pairFingerprint: string;
+  readonly eligible: boolean;
+}
+
+/** Removes transport-only churn while preserving page semantics for progress comparisons. */
+function canonicalBrowserProgressValue(value: unknown): unknown {
+  if (Array.isArray(value)) return value.map(canonicalBrowserProgressValue);
+  if (typeof value !== 'object' || value === null) return value;
+  return Object.fromEntries(
+    Object.entries(value)
+      .filter(([key]) => !browserProgressDynamicKeys.has(key))
+      .sort(([left], [right]) => left.localeCompare(right))
+      .map(([key, child]) => [key, canonicalBrowserProgressValue(child)]),
+  );
+}
+
+function canonicalBrowserProgressJson(raw: string, normalizeTabId: boolean): string {
+  try {
+    const parsed: unknown = JSON.parse(raw);
+    if (
+      normalizeTabId &&
+      typeof parsed === 'object' &&
+      parsed !== null &&
+      !Array.isArray(parsed) &&
+      'tabId' in parsed &&
+      parsed.tabId === 0
+    ) {
+      const { tabId: _tabId, ...rest } = parsed;
+      void _tabId;
+      return JSON.stringify(canonicalBrowserProgressValue(rest));
+    }
+    return JSON.stringify(canonicalBrowserProgressValue(parsed));
+  } catch {
+    return raw;
+  }
+}
+
+function browserCallFingerprint(name: string, argumentsJson: string): string {
+  return `${name}:${canonicalBrowserProgressJson(argumentsJson, true)}`;
+}
+
+function browserOutputFailed(output: string): boolean {
+  try {
+    const value: unknown = JSON.parse(output);
+    return typeof value === 'object' && value !== null && 'ok' in value && value.ok === false;
+  } catch {
+    return false;
+  }
+}
+
+/** Reconstructs completed browser pairs since the latest user/compaction boundary. */
+function recentBrowserProgress(items: readonly ContinuationItem[]): CompletedBrowserProgress[] {
+  const calls = new Map<string, Extract<ContinuationItem, { readonly type: 'function_call' }>>();
+  const completed: CompletedBrowserProgress[] = [];
+  for (const item of items) {
+    if (item.type === 'message_ref') {
+      calls.clear();
+      completed.length = 0;
+      continue;
+    }
+    if (item.type === 'function_call') {
+      if (item.name === CONTEXT_COMMIT_TOOL_NAME) {
+        calls.clear();
+        completed.length = 0;
+        continue;
+      }
+      calls.set(item.callId, item);
+      continue;
+    }
+    const call = calls.get(item.callId);
+    calls.delete(item.callId);
+    if (call === undefined || !call.name.startsWith('browser_')) continue;
+    const callFingerprint = browserCallFingerprint(call.name, call.argumentsJson);
+    const outputFingerprint = canonicalBrowserProgressJson(item.output, false);
+    completed.push({
+      callFingerprint,
+      pairFingerprint: `${callFingerprint}=>${outputFingerprint}`,
+      eligible: readOnlyBrowserToolNames.has(call.name) || browserOutputFailed(item.output),
+    });
+  }
+  return completed;
+}
+
+/** Stops a repeated read/failure strategy only after two semantically identical cycles. */
+function noProgressBrowserOutput(
+  items: readonly ContinuationItem[],
+  pending: PendingToolCall,
+): string | null {
+  const completed = recentBrowserProgress(items);
+  const pendingFingerprint = browserCallFingerprint(pending.name, pending.argumentsJson);
+  for (let cycleLength = 1; cycleLength <= 4; cycleLength += 1) {
+    if (completed.length < cycleLength * 2) continue;
+    const previous = completed.slice(-cycleLength * 2, -cycleLength);
+    const latest = completed.slice(-cycleLength);
+    if (
+      previous.every(
+        (entry, index) =>
+          entry.eligible &&
+          latest[index]?.eligible === true &&
+          entry.pairFingerprint === latest[index]?.pairFingerprint,
+      ) &&
+      previous[0]?.callFingerprint === pendingFingerprint
+    ) {
+      return JSON.stringify({
+        ok: false,
+        code: 'NO_PROGRESS',
+        message:
+          'The same browser strategy repeated without a semantic state change. Inspect fresh state or choose a different action.',
+        retryable: false,
+        needsInspect: true,
+      });
+    }
+  }
+  return null;
 }
 
 function taskErrorFromProvider(error: ProviderError, source: 'model' | 'tavily'): TaskError {
@@ -599,6 +716,14 @@ export class TaskExecutor {
       return this.#recordToolResult(snapshot, ownerId, signal, pending, duplicateFailure);
     }
 
+    const noProgressFailure = noProgressBrowserOutput(
+      snapshot.checkpoint.continuationItems,
+      pending,
+    );
+    if (noProgressFailure !== null) {
+      return this.#recordToolResult(snapshot, ownerId, signal, pending, noProgressFailure);
+    }
+
     if (call.replay === 'mutation') {
       snapshot = await this.#saveBoundary(snapshot, ownerId, signal, {
         type: 'tool.execution-started',
@@ -704,30 +829,17 @@ export class TaskExecutor {
       this.#dependencies.conversations.listMessages(snapshot.task.conversationId),
       this.#dependencies.repository.listByConversation(snapshot.task.conversationId),
     ]);
-    const workSessionTaskIds = new Set(
-      tasks
-        .filter((task) => task.workSessionId === snapshot.task.workSessionId)
-        .map((task) => task.id),
-    );
     const referencedMessageIds = new Set(
       snapshot.checkpoint.continuationItems.flatMap((item) =>
         item.type === 'message_ref' ? [item.messageId] : [],
       ),
     );
-    const supplements = messages
-      .filter(
-        (message) =>
-          message.kind === 'supplement' &&
-          message.taskId !== null &&
-          workSessionTaskIds.has(message.taskId) &&
-          !referencedMessageIds.has(message.id),
-      )
-      .sort(
-        (left, right) =>
-          left.createdAt - right.createdAt ||
-          left.updatedAt - right.updatedAt ||
-          left.id.localeCompare(right.id),
-      );
+    const supplements = selectPendingWorkSessionSupplements(
+      messages,
+      tasks,
+      snapshot.task.workSessionId,
+      referencedMessageIds,
+    );
     if (supplements.length === 0) return snapshot;
 
     return this.#saveBoundary(snapshot, ownerId, signal, {

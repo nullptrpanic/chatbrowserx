@@ -38,12 +38,15 @@ const shortOutput: ContinuationItem = {
   attachmentIds: [],
 };
 
-function currentCommit(throughCallId: string): {
+function currentCommit(
+  throughCallId: string,
+  state = 'Goal: continue from the saved state.',
+): {
   readonly call: Extract<ContinuationItem, { readonly type: 'function_call' }>;
   readonly pending: PendingToolCall;
 } {
   const argumentsJson = JSON.stringify({
-    state: 'Goal: continue from the saved state.',
+    state,
     throughCallId,
   });
   return {
@@ -288,6 +291,31 @@ describe('compactContextAtCommit', () => {
       'function_call',
       'function_call_output',
     ]);
+  });
+
+  it('expires browser refs and snapshot ids in the active committed state', () => {
+    const current = currentCommit(
+      'call_short',
+      'Continue with ref e1a2b3c4d5e6 and snapshot s0123456789abcdef0123 at screenshot x=420 y=315.',
+    );
+    const compacted = compactContextAtCommit(
+      [userMessage, shortCall, shortOutput, current.call],
+      current.pending,
+      'result_commit',
+    );
+    const committedCall = compacted.continuationItems.find(
+      (item) => item.type === 'function_call' && item.callId === 'call_commit',
+    );
+    if (!committedCall || committedCall.type !== 'function_call') {
+      throw new Error('Expected committed function call.');
+    }
+    const committedArguments = JSON.parse(committedCall.argumentsJson) as {
+      readonly state: string;
+    };
+
+    expect(committedArguments.state).not.toContain('e1a2b3c4d5e6');
+    expect(committedArguments.state).not.toContain('s0123456789abcdef0123');
+    expect(committedArguments.state).toContain('fresh interactive inspection');
   });
 
   it('rejects malformed or empty commit boundaries', () => {

@@ -34,7 +34,7 @@ describe('CONTEXT_COMMIT_TOOL_DEFINITION', () => {
     });
   });
 
-  it('keeps checkpoints factual instead of persisting speculative recovery plans', () => {
+  it('prioritizes complete important state while keeping checkpoints factual', () => {
     const parameters = CONTEXT_COMMIT_TOOL_DEFINITION.parameters as {
       readonly properties: {
         readonly state: { readonly description?: string };
@@ -43,8 +43,13 @@ describe('CONTEXT_COMMIT_TOOL_DEFINITION', () => {
 
     expect(CONTEXT_COMMIT_TOOL_DEFINITION.description).toContain('verified facts');
     expect(CONTEXT_COMMIT_TOOL_DEFINITION.description).toContain('failed actions');
+    expect(CONTEXT_COMMIT_TOOL_DEFINITION.description).toContain(
+      'Prioritize completeness over brevity',
+    );
+    expect(CONTEXT_COMMIT_TOOL_DEFINITION.description).toContain('runtime supplements');
     expect(CONTEXT_COMMIT_TOOL_DEFINITION.description).not.toContain('exact next step');
     expect(parameters.properties.state.description).toContain('evidence-backed');
+    expect(parameters.properties.state.description).toContain('Do not omit important');
   });
 });
 

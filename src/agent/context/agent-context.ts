@@ -3,6 +3,7 @@ import type { AttachmentRepository } from '../../persistence/attachment-reposito
 import type { ConversationRepository } from '../../persistence/conversation-repository';
 import type { TaskRepository } from '../../persistence/task-repository';
 import type { ModelInputItem, ModelMessageContent } from '../../providers/provider-types';
+import { bytesToBase64 } from '../../shared/base64';
 import type { Checkpoint } from '../../tasks/checkpoint-types';
 import type { ContinuationItem } from '../../tasks/continuation-types';
 import type { MessageRecord } from '../../tasks/message-types';
@@ -83,16 +84,6 @@ function selectedHistoryMessages(
     .slice(-limit);
 
   return selected[0]?.role === 'assistant' ? selected.slice(1) : selected;
-}
-
-/** Converts bytes to base64 without exceeding function argument limits for large images. */
-function bytesToBase64(bytes: Uint8Array): string {
-  let binary = '';
-  const chunkSize = 8 * 1024;
-  for (let offset = 0; offset < bytes.length; offset += chunkSize) {
-    binary += String.fromCharCode(...bytes.subarray(offset, offset + chunkSize));
-  }
-  return btoa(binary);
 }
 
 /** Revalidates one stored image before materializing a transient Provider data URL. */

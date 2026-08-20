@@ -29,6 +29,28 @@ export class ContextCommitCursorError extends Error {
 
 const MAX_RAW_TOOL_PAIRS_BEFORE_COMMIT = 16;
 const MAX_RAW_TOOL_CHARACTERS_BEFORE_COMMIT = 32 * 1024;
+const MAX_COMMITTED_STATE_CHARACTERS = 8_192;
+const ELEMENT_REF_PATTERN =
+  /\b(?:ref_[a-z0-9_-]{1,64}|e(?=[a-z0-9]{8,32}\b)(?=[a-z0-9]*\d)[a-z0-9]{8,32})\b/gi;
+const SNAPSHOT_ID_PATTERN = /\bs(?=[a-f0-9]{16,32}\b)(?=[a-f0-9]*\d)[a-f0-9]{16,32}\b/gi;
+const SCREENSHOT_COORDINATE_PATTERN = /\b(?:fromX|fromY|toX|toY|x|y)\s*[:=]\s*-?\d+(?:\.\d+)?\b/gi;
+const EXPIRED_BROWSER_STATE_NOTE =
+  'Browser refs, snapshot ids, and screenshot coordinates expired at this checkpoint; use a fresh interactive inspection before the next browser action.';
+
+function durableCommittedState(state: string): string {
+  let sanitized = state
+    .replace(ELEMENT_REF_PATTERN, '[expired-browser-ref]')
+    .replace(SNAPSHOT_ID_PATTERN, '[expired-browser-snapshot]');
+  const browserEpochChanged = sanitized !== state || /\b(?:screenshot|coordinate)\b/i.test(state);
+  if (browserEpochChanged)
+    sanitized = sanitized.replace(SCREENSHOT_COORDINATE_PATTERN, '[expired]');
+  if (sanitized === state) return state;
+  const separator = sanitized.endsWith('\n') ? '' : '\n';
+  return `${sanitized}${separator}${EXPIRED_BROWSER_STATE_NOTE}`.slice(
+    0,
+    MAX_COMMITTED_STATE_CHARACTERS,
+  );
+}
 
 function invalidContinuation(): never {
   throw new Error('Context continuation is invalid.');
@@ -283,9 +305,22 @@ export function compactContextAtCommit(
     releasedImages: releasedAttachmentIds.size,
   };
   const output = JSON.stringify({ ok: true, ...stats });
+  const durableState = durableCommittedState(commitArguments.state);
+  const durableCommit =
+    durableState === commitArguments.state
+      ? currentCommit
+      : {
+          ...currentCommit,
+          argumentsJson: JSON.stringify({
+            state: durableState,
+            ...(commitArguments.throughCallId === undefined
+              ? {}
+              : { throughCallId: commitArguments.throughCallId }),
+          }),
+        };
   const continuationItems: readonly ContinuationItem[] = [
     ...beforeBoundary,
-    currentCommit,
+    durableCommit,
     {
       type: 'function_call_output',
       callId: currentCommit.callId,

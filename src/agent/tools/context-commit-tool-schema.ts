@@ -62,10 +62,12 @@ function contextCommitToolDefinition(validThroughCallIds?: readonly string[]): M
       'non-commit tool call, for example after completing a meaningful phase or establishing ' +
       "a new stable task state. Copy that function call's call_id into throughCallId. Future " +
       'model requests will omit tool pairs through that call inclusively, retain later tool ' +
-      'pairs in raw form, and retain this checkpoint at that boundary. The state must summarize ' +
-      'everything through throughCallId and preserve the user goal, ' +
-      'constraints, verified facts, current browser or task state, unresolved issues, ' +
-      'important evidence, and failed actions. Record only evidence-backed state: do not turn ' +
+      'pairs in raw form, and retain this checkpoint at that boundary. The state must preserve ' +
+      'everything important through throughCallId. Prioritize completeness over brevity within ' +
+      'the state limit. Retain all relevant user requirements and runtime supplements, verified ' +
+      'facts, decisions, exact identifiers or URLs, current browser or task state, unresolved ' +
+      'issues, important evidence, and failed actions. Remove only redundant raw logs and details ' +
+      'that cannot affect correct continuation. Record only evidence-backed state: do not turn ' +
       'an unverified recovery idea into a future instruction, and do not claim that retrying, ' +
       'reloading, or taking a screenshot worked unless a later successful result verified it. ' +
       'Leave uncertain choices unresolved. This operation does not delete user ' +
@@ -79,9 +81,11 @@ function contextCommitToolDefinition(validThroughCallIds?: readonly string[]): M
           minLength: 1,
           maxLength: MAX_CONTEXT_STATE_CHARACTERS,
           description:
-            'A concise, self-contained, evidence-backed working-state summary. Include verified ' +
-            'facts, failed actions, and unresolved issues needed to continue correctly without ' +
-            'reading the earlier raw tool results; exclude speculative next-step instructions.',
+            'A compact but complete, self-contained, evidence-backed working-state summary. ' +
+            'Do not omit important user requirements, runtime supplements, verified facts, ' +
+            'decisions, identifiers, current state, failed actions, or unresolved issues needed ' +
+            'to continue correctly without reading the earlier raw tool results. Remove only ' +
+            'redundant raw logs and exclude speculative next-step instructions.',
         },
         throughCallId: {
           type: 'string',

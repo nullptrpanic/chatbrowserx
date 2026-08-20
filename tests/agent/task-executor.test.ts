@@ -428,6 +428,89 @@ describe('TaskExecutor', () => {
     database.close();
   });
 
+  it('stops a repeated inspect and failed-action cycle before the hard tool limit', async () => {
+    const database = await openChatBrowserDatabase(createTestDatabaseName('browser-no-progress'));
+    const repository = new IndexedDbTaskRepository(database);
+    const dependencies = sources();
+    const commands = new TaskCommandService(
+      repository,
+      dependencies.clock,
+      dependencies.ids,
+      dependencies.conversations,
+    );
+    const created = await commands.create({
+      conversationId: 'conversation_1',
+      tabId: 7,
+      goal: 'Select an answer without looping',
+    });
+    const calls = [
+      browserCall('call_inspect_1', 'browser_inspect', { mode: 'interactive' }),
+      browserCall('call_select_1', 'browser_set_checked', { ref: 'e12345678a', checked: true }),
+      browserCall('call_inspect_2', 'browser_inspect', { mode: 'interactive' }),
+      browserCall('call_select_2', 'browser_set_checked', { ref: 'e12345678a', checked: true }),
+      browserCall('call_inspect_3', 'browser_inspect', { mode: 'interactive' }),
+    ];
+    let turn = 0;
+    const planner = {
+      plan: () =>
+        (async function* () {
+          const next = calls[turn++];
+          if (next) {
+            yield next;
+            return;
+          }
+          yield {
+            type: 'task.completed',
+            reason: 'model_response_completed',
+            messageId: 'message_answer',
+          } as const;
+        })(),
+    };
+    let inspectCount = 0;
+    const execute = vi.fn<BrowserExecutionPort['execute']>(async (call) => ({
+      output:
+        call.operation === 'inspect'
+          ? JSON.stringify({
+              ok: true,
+              tabId: 7,
+              url: 'https://exam.test/',
+              data: {
+                mode: 'interactive',
+                snapshot: inspectCount++ === 0 ? 's1111111111111111' : 's2222222222222222',
+                elements: [{ r: 'checkbox', n: 'A', ref: 'e12345678a', s: ['checked=false'] }],
+                truncated: false,
+              },
+            })
+          : JSON.stringify({
+              ok: false,
+              code: 'ACTION_STATE_MISMATCH',
+              message: 'The page did not retain the requested selection.',
+              retryable: false,
+              needsInspect: true,
+            }),
+      attachmentIds: [],
+    }));
+    const executor = new TaskExecutor({
+      repository,
+      conversations: dependencies.conversations,
+      planner,
+      tavily: tavilyPort(),
+      browser: browserPort({ execute }),
+      clock: dependencies.clock,
+      ids: dependencies.ids,
+    });
+
+    const result = await executor.run(created.task.id, new AbortController().signal);
+
+    expect(execute).toHaveBeenCalledTimes(4);
+    expect(JSON.parse(result.checkpoint.completedToolResults.at(-1)?.output ?? '')).toMatchObject({
+      ok: false,
+      code: 'NO_PROGRESS',
+      needsInspect: true,
+    });
+    database.close();
+  });
+
   it('retains browser screenshot attachment IDs and gives them a durable result reference', async () => {
     const database = await openChatBrowserDatabase(createTestDatabaseName('browser-screenshot'));
     const repository = new IndexedDbTaskRepository(database);
@@ -644,7 +727,7 @@ describe('TaskExecutor', () => {
     database.close();
   });
 
-  it('moves the durable target across background tabs and clears a closed target', async () => {
+  it('keeps the durable target while inspecting and closing explicit background tabs', async () => {
     const database = await openChatBrowserDatabase(createTestDatabaseName('browser-target'));
     const repository = new IndexedDbTaskRepository(database);
     const dependencies = sources();
@@ -705,10 +788,10 @@ describe('TaskExecutor', () => {
     const result = await executor.run(created.task.id, new AbortController().signal);
 
     const contexts = execute.mock.calls.map(([, , context]) => context);
-    expect(contexts.map((context) => context?.currentTabId)).toEqual([7, 91, 22]);
+    expect(contexts.map((context) => context?.currentTabId)).toEqual([7, 7, 7]);
     expect(new Set(contexts.map((context) => context?.sessionOwnerId)).size).toBe(1);
     expect(contexts[0]?.sessionOwnerId).toMatch(/^runner_/);
-    expect(result.checkpoint.browserTargetTabId).toBeNull();
+    expect(result.checkpoint.browserTargetTabId).toBe(7);
     database.close();
   });
 
@@ -1896,7 +1979,13 @@ describe('TaskExecutor', () => {
         turn += 1;
         yield browserCall(`call_browser_${String(turn)}`, 'browser_get_current_tab', {});
       })();
-    const browser = browserPort();
+    let browserResult = 0;
+    const browser = browserPort({
+      execute: vi.fn(async () => ({
+        output: JSON.stringify({ ok: true, data: { sequence: ++browserResult } }),
+        attachmentIds: [],
+      })),
+    });
     const executor = new TaskExecutor({
       repository,
       conversations: dependencies.conversations,

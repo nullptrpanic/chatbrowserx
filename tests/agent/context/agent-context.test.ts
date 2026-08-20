@@ -112,6 +112,59 @@ function contextDependencies(
 }
 
 describe('buildAgentContext', () => {
+  it('does not carry a completed WorkSession supplement into later history', async () => {
+    const messages = [
+      message({
+        id: 'history_user',
+        taskId: 'task_history',
+        role: 'user',
+        text: 'Inspect the checkout flow.',
+        createdAt: 10,
+      }),
+      message({
+        id: 'history_supplement',
+        kind: 'supplement',
+        taskId: 'task_history',
+        role: 'user',
+        text: 'THIS RUNTIME SUPPLEMENT MUST NOT ENTER LATER HISTORY',
+        createdAt: 11,
+      }),
+      message({
+        id: 'history_assistant',
+        taskId: 'task_history',
+        role: 'assistant',
+        text: 'The checkout flow was verified.',
+        createdAt: 12,
+      }),
+      message({
+        id: 'current_user',
+        taskId: TASK.id,
+        role: 'user',
+        text: 'Now inspect the account page.',
+        createdAt: 20,
+      }),
+    ];
+    const context = await buildAgentContext(
+      {
+        task: TASK,
+        checkpoint: {
+          ...CHECKPOINT,
+          completedToolResults: [],
+          continuationItems: [{ type: 'message_ref', messageId: 'current_user' }],
+        },
+        customSystemPrompt: '',
+        historyMessageLimit: 50,
+      },
+      contextDependencies(messages, { get: vi.fn(async () => undefined) }),
+    );
+
+    expect(JSON.stringify(context.input)).toContain('Inspect the checkout flow.');
+    expect(JSON.stringify(context.input)).toContain('The checkout flow was verified.');
+    expect(JSON.stringify(context.input)).not.toContain(
+      'THIS RUNTIME SUPPLEMENT MUST NOT ENTER LATER HISTORY',
+    );
+  });
+
   it('passes the configured system prompt without injecting browser instructions', async () => {
     const context = await buildAgentContext(
       {
