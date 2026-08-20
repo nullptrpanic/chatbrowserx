@@ -68,4 +68,5 @@ export interface BrowserToolFailure {
   readonly message: string;
   readonly retryable: boolean;
   readonly needsInspect: boolean;
+  readonly stage?: 'focus' | 'insert' | 'readback' | 'submit';
 }

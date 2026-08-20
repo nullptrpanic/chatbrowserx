@@ -57,6 +57,35 @@ const MODEL_REQUEST: ModelRequest = {
 };
 
 describe('buildCodexRequest', () => {
+  it('replays encrypted reasoning output items for stateless continuation', () => {
+    const request = buildCodexRequest({
+      accessToken: 'synthetic-token-value',
+      accountId: 'acct_123',
+      request: {
+        ...MODEL_REQUEST,
+        tools: [],
+        input: [
+          {
+            type: 'reasoning',
+            itemId: 'reasoning_1',
+            encryptedContent: 'opaque-encrypted-content',
+            summary: [{ type: 'summary_text', text: 'Checked the page state.' }],
+          },
+        ],
+      },
+    });
+
+    expect(request.body.input).toEqual([
+      {
+        type: 'reasoning',
+        id: 'reasoning_1',
+        encrypted_content: 'opaque-encrypted-content',
+        summary: [{ type: 'summary_text', text: 'Checked the page state.' }],
+      },
+    ]);
+    expect(request.body.include).toEqual(['reasoning.encrypted_content']);
+  });
+
   it('maps multimodal function outputs without changing legacy string outputs', () => {
     const request = buildCodexRequest({
       accessToken: 'synthetic-token-value',
@@ -262,6 +291,7 @@ describe('buildCodexRequest', () => {
       parallel_tool_calls: false,
       store: false,
       stream: true,
+      include: ['reasoning.encrypted_content'],
       reasoning: { effort: 'medium', summary: 'auto' },
     });
   });

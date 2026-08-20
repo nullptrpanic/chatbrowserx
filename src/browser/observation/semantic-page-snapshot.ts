@@ -6,9 +6,11 @@ export const SEMANTIC_SNAPSHOT_STYLES = [
   'display',
   'visibility',
   'pointer-events',
+  'overflow-x',
+  'overflow-y',
 ] as const;
 
-export type SemanticAction = 'click' | 'set_checked' | 'type' | 'select';
+export type SemanticAction = 'click' | 'set_checked' | 'type' | 'select' | 'scroll';
 
 export interface SemanticPageEntry {
   readonly depth: number;
@@ -47,12 +49,15 @@ interface SnapshotDomNode {
   readonly backendNodeId: number;
   readonly documentFrameId: string;
   readonly nodeName: string;
+  readonly ownText: string;
   readonly attributes: ReadonlyMap<string, string>;
   readonly clickable: boolean;
   readonly inputChecked: boolean;
   readonly optionSelected: boolean;
   readonly cursor: string;
   readonly visible: boolean;
+  readonly scrollableX: boolean;
+  readonly scrollableY: boolean;
   readonly bounds?: readonly [number, number, number, number];
   parent: SnapshotDomNode | null;
   readonly children: SnapshotDomNode[];
@@ -272,13 +277,21 @@ function snapshotDomNodes(
       {
         readonly styles: readonly number[];
         readonly bounds?: readonly [number, number, number, number];
+        readonly text: string;
+        readonly scrollRect?: readonly [number, number, number, number];
+        readonly clientRect?: readonly [number, number, number, number];
       }
     >();
     document_.layout.nodeIndex.forEach((nodeIndex, layoutIndex) => {
       const bounds = tupleBounds(document_.layout.bounds[layoutIndex]);
+      const scrollRect = tupleBounds(document_.layout.scrollRects?.[layoutIndex]);
+      const clientRect = tupleBounds(document_.layout.clientRects?.[layoutIndex]);
       layoutByNodeIndex.set(nodeIndex, {
         styles: document_.layout.styles[layoutIndex] ?? [],
+        text: stringAt(snapshot.strings, document_.layout.text[layoutIndex]),
         ...(bounds ? { bounds } : {}),
+        ...(scrollRect ? { scrollRect } : {}),
+        ...(clientRect ? { clientRect } : {}),
       });
     });
     const documentNodes: SnapshotDomNode[] = [];
@@ -293,15 +306,34 @@ function snapshotDomNodes(
         ]),
       );
       const bounds = layout?.bounds;
+      const overflowX = styles['overflow-x']?.trim().toLowerCase() ?? '';
+      const overflowY = styles['overflow-y']?.trim().toLowerCase() ?? '';
+      const scrollRect = layout?.scrollRect;
+      const clientRect = layout?.clientRect;
+      const scrollableOverflow = (value: string): boolean =>
+        value === 'auto' || value === 'scroll' || value === 'overlay';
       const node: SnapshotDomNode = {
         backendNodeId,
         documentFrameId,
         nodeName: stringAt(snapshot.strings, nodeTable.nodeName?.[nodeIndex]).toUpperCase(),
+        ownText: normalizedText(
+          layout?.text || stringAt(snapshot.strings, nodeTable.nodeValue?.[nodeIndex]),
+        ),
         attributes: parseAttributes(snapshot.strings, nodeTable.attributes?.[nodeIndex]),
         clickable: clickable.has(nodeIndex),
         inputChecked: inputChecked.has(nodeIndex),
         optionSelected: optionSelected.has(nodeIndex),
         cursor: styles.cursor ?? '',
+        scrollableX:
+          scrollableOverflow(overflowX) &&
+          scrollRect !== undefined &&
+          clientRect !== undefined &&
+          scrollRect[2] > clientRect[2] + 1,
+        scrollableY:
+          scrollableOverflow(overflowY) &&
+          scrollRect !== undefined &&
+          clientRect !== undefined &&
+          scrollRect[3] > clientRect[3] + 1,
         visible:
           layout !== undefined &&
           (bounds === undefined || (bounds[2] > 0 && bounds[3] > 0)) &&
@@ -649,6 +681,99 @@ function domSemanticPath(node: SnapshotDomNode): readonly unknown[] {
   return path.reverse();
 }
 
+function domDepth(node: SnapshotDomNode): number {
+  let depth = 0;
+  let current = node.parent;
+  while (current && depth < 40) {
+    depth += 1;
+    current = current.parent;
+  }
+  return depth;
+}
+
+function domSubtreeText(node: SnapshotDomNode, maximum = 500): string {
+  const parts: string[] = [];
+  let characters = 0;
+  const visit = (current: SnapshotDomNode): void => {
+    if (characters >= maximum) return;
+    const text = normalizedText(current.ownText, maximum - characters);
+    if (text) {
+      parts.push(text);
+      characters += text.length + 1;
+    }
+    for (const child of current.children) visit(child);
+  };
+  visit(node);
+  return normalizedText(parts.join(' '), maximum);
+}
+
+function syntheticNameText(value: unknown, maximum = 200): string {
+  return normalizedText(
+    typeof value === 'string' ? value.replace(/[\u200B-\u200D\u2060\uFEFF]/g, ' ') : value,
+    maximum,
+  );
+}
+
+function syntheticTargetName(node: SnapshotDomNode, fallback: string): string {
+  for (const attribute of ['aria-label', 'placeholder', 'data-placeholder', 'title', 'name']) {
+    const value = syntheticNameText(node.attributes.get(attribute));
+    if (value) return value;
+  }
+  const own = syntheticNameText(domSubtreeText(node, 200));
+  if (own) return own;
+  const parent = node.parent;
+  if (parent?.bounds && node.bounds) {
+    const parentArea = parent.bounds[2] * parent.bounds[3];
+    const nodeArea = Math.max(1, node.bounds[2] * node.bounds[3]);
+    if (parentArea <= nodeArea * 6) {
+      const context = syntheticNameText(domSubtreeText(parent, 200));
+      if (context) return context;
+    }
+  }
+  return fallback;
+}
+
+function domEditableRole(node: SnapshotDomNode): 'searchbox' | 'textbox' | undefined {
+  const role = node.attributes.get('role')?.trim().toLowerCase();
+  if (role === 'searchbox') return 'searchbox';
+  if (role === 'textbox') return 'textbox';
+  if (node.nodeName === 'TEXTAREA') return 'textbox';
+  if (node.nodeName === 'INPUT') {
+    const type = node.attributes.get('type')?.trim().toLowerCase() ?? 'text';
+    if (type === 'search') return 'searchbox';
+    if (
+      !['button', 'checkbox', 'file', 'hidden', 'image', 'radio', 'reset', 'submit'].includes(type)
+    ) {
+      return 'textbox';
+    }
+  }
+  const contentEditable = node.attributes.get('contenteditable')?.trim().toLowerCase();
+  return contentEditable === '' ||
+    contentEditable === 'true' ||
+    contentEditable === 'plaintext-only'
+    ? 'textbox'
+    : undefined;
+}
+
+function nearestEditableDomNode(
+  start: SnapshotDomNode,
+): { readonly node: SnapshotDomNode; readonly role: 'searchbox' | 'textbox' } | undefined {
+  let current: SnapshotDomNode | null = start;
+  while (current) {
+    const role = domEditableRole(current);
+    if (role && current.visible) return { node: current, role };
+    current = current.parent;
+  }
+  return undefined;
+}
+
+function syntheticSemanticLocator(node: SnapshotDomNode, role: string, name: string): string {
+  return JSON.stringify([[], domSemanticPath(node), role, name]).slice(
+    0,
+    MAX_SEMANTIC_LOCATOR_CHARACTERS,
+  );
+}
+
 function semanticLocatorFor(
   node: Protocol.Accessibility.AXNode,
   target: SnapshotDomNode,
@@ -713,15 +838,17 @@ export function buildSemanticPageSnapshot(
   for (const node of orderedAxNodes(input.axNodes)) {
     if (node.ignored) continue;
     const role = axText(node.role).toLowerCase().slice(0, 100);
-    const name = axText(node.name);
-    if (!role || !name || OMITTED_ROLES.has(role)) continue;
+    if (!role || OMITTED_ROLES.has(role)) continue;
     const backendNodeId = node.backendDOMNodeId;
     const domNode =
       backendNodeId !== undefined && Number.isInteger(backendNodeId)
         ? domByBackendId.get(backendNodeId)
         : undefined;
     let actions = actionsFor(node, role, domNode);
-    let targetDomNode = actions.length > 0 && domNode?.visible ? domNode : undefined;
+    const editableTarget =
+      actions.includes('type') && domNode ? nearestEditableDomNode(domNode) : undefined;
+    let targetDomNode =
+      editableTarget?.node ?? (actions.length > 0 && domNode?.visible ? domNode : undefined);
     if (actions.length === 0 && domNode) {
       const customTarget = safePointerTarget(domNode);
       if (customTarget) {
@@ -734,7 +861,18 @@ export function buildSemanticPageSnapshot(
     const selectable = targetDomNode
       ? associatedSelectableControl(targetDomNode, domByBackendId)
       : undefined;
-    const effectiveRole = selectable?.role ?? role;
+    const effectiveRole =
+      selectable?.role ??
+      (editableTarget ? (EDITABLE_ROLES.has(role) ? role : editableTarget.role) : role);
+    const name =
+      syntheticNameText(axText(node.name)) ||
+      (targetDomNode && actions.includes('type')
+        ? syntheticTargetName(
+            targetDomNode,
+            effectiveRole === 'searchbox' ? 'Search' : 'Editable field',
+          )
+        : '');
+    if (!name) continue;
 
     let targetIndex: number | undefined;
     let state = axState(node);
@@ -785,6 +923,50 @@ export function buildSemanticPageSnapshot(
       ...(targetIndex === undefined ? {} : { targetIndex }),
       ...(state.length === 0 ? {} : { state }),
       ...(actions.length === 0 ? {} : { actions }),
+      ...(input.frame === 'main' ? {} : { frame: input.frame }),
+    });
+  }
+
+  for (const domNode of domByBackendId.values()) {
+    if (!domNode.visible || targetIndexes.has(domNode.backendNodeId)) continue;
+    const editableRole = domEditableRole(domNode);
+    const scrollable = domNode.scrollableX || domNode.scrollableY;
+    if (!editableRole && !scrollable) continue;
+    const declaredRole = normalizedText(domNode.attributes.get('role'), 100).toLowerCase();
+    const role =
+      editableRole ?? (declaredRole && !OMITTED_ROLES.has(declaredRole) ? declaredRole : 'region');
+    const state = domState(domNode, role);
+    if (state.includes('disabled')) continue;
+    const actions: SemanticAction[] = [];
+    if (editableRole) {
+      actions.push('click');
+      if (!state.includes('readonly')) actions.push('type');
+    }
+    if (scrollable) actions.push('scroll');
+    const fallback = editableRole
+      ? role === 'searchbox'
+        ? 'Search'
+        : 'Editable field'
+      : 'Scrollable area';
+    const name = syntheticTargetName(domNode, fallback);
+    const targetIndex = targets.length;
+    targetIndexes.set(domNode.backendNodeId, targetIndex);
+    targets.push({
+      backendNodeId: domNode.backendNodeId,
+      documentFrameId: domNode.documentFrameId,
+      role,
+      name,
+      semanticLocator: syntheticSemanticLocator(domNode, role, name),
+      state,
+      actions,
+    });
+    entries.push({
+      depth: domDepth(domNode),
+      role,
+      name,
+      targetIndex,
+      ...(state.length === 0 ? {} : { state }),
+      actions,
       ...(input.frame === 'main' ? {} : { frame: input.frame }),
     });
   }

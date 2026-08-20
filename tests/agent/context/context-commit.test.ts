@@ -131,6 +131,29 @@ describe('shouldForceContextCommit', () => {
     ).toBe(true);
   });
 
+  it('counts encrypted reasoning when deciding whether to force a commit', () => {
+    expect(
+      shouldForceContextCommit({
+        continuationItems: [
+          userMessage,
+          {
+            ...shortCall,
+            modelOutputItems: [
+              {
+                type: 'reasoning',
+                itemId: 'reasoning_large',
+                encryptedContent: 'x'.repeat(32 * 1024),
+                summary: [],
+              },
+            ],
+          },
+          shortOutput,
+        ],
+        completedToolResults: [],
+      }),
+    ).toBe(true);
+  });
+
   it('ignores retained audit results when the active continuation is already compact', () => {
     const browserResults = Array.from({ length: 256 }, (_, index) => ({
       callId: `call_browser_${String(index + 1)}`,
@@ -149,6 +172,30 @@ describe('shouldForceContextCommit', () => {
 });
 
 describe('compactContextAtCommit', () => {
+  it('releases encrypted reasoning with its compacted tool pair', () => {
+    const current = currentCommit('call_short');
+    const callWithReasoning: ContinuationItem = {
+      ...shortCall,
+      modelOutputItems: [
+        {
+          type: 'reasoning',
+          itemId: 'reasoning_short',
+          encryptedContent: 'opaque',
+          summary: [{ type: 'summary_text', text: 'summary' }],
+        },
+      ],
+    };
+
+    const compacted = compactContextAtCommit(
+      [userMessage, callWithReasoning, shortOutput, current.call],
+      current.pending,
+      'result_commit',
+    );
+
+    expect(compacted.stats.releasedTextChars).toBe(2 + 2 + 6 + 7);
+    expect(JSON.stringify(compacted.continuationItems)).not.toContain('opaque');
+  });
+
   it('replaces prior tool pairs with the current commit while retaining every message ref', () => {
     const current = currentCommit('call_click');
     const items: ContinuationItem[] = [

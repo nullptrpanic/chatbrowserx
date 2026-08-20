@@ -259,6 +259,81 @@ describe('IndexedDbTaskRepository', () => {
     database.close();
   });
 
+  it('preserves validated model output continuation items on a function call', async () => {
+    const database = await openChatBrowserDatabase(
+      createTestDatabaseName('model-output-continuation'),
+    );
+    const repository = new IndexedDbTaskRepository(database);
+    await database.add('checkpoints', {
+      id: 'checkpoint_model_output',
+      taskId: 'task_model_output',
+      sequence: 2,
+      taskStatus: 'planning',
+      completedToolResults: [
+        {
+          callId: 'call_inspect',
+          toolName: 'browser_inspect',
+          argumentsJson: '{}',
+          output: '{"ok":true}',
+          resultRef: 'result_inspect',
+        },
+      ],
+      continuationItems: [
+        { type: 'message_ref', messageId: 'message_user' },
+        {
+          type: 'function_call',
+          callId: 'call_inspect',
+          name: 'browser_inspect',
+          argumentsJson: '{}',
+          modelOutputItems: [
+            {
+              type: 'reasoning',
+              itemId: 'reasoning_1',
+              encryptedContent: 'opaque-encrypted-content',
+              summary: [{ type: 'summary_text', text: 'Inspect the page.' }],
+            },
+            {
+              type: 'assistant_message_ref',
+              messageId: 'message_assistant',
+            },
+          ],
+        },
+        {
+          type: 'function_call_output',
+          callId: 'call_inspect',
+          output: '{"ok":true}',
+          resultRef: 'result_inspect',
+        },
+      ],
+      pendingToolCall: null,
+      createdAt: 1_000,
+    });
+
+    await expect(repository.getCheckpoint('checkpoint_model_output')).resolves.toMatchObject({
+      continuationItems: [
+        { type: 'message_ref', messageId: 'message_user' },
+        {
+          type: 'function_call',
+          callId: 'call_inspect',
+          modelOutputItems: [
+            {
+              type: 'reasoning',
+              itemId: 'reasoning_1',
+              encryptedContent: 'opaque-encrypted-content',
+              summary: [{ type: 'summary_text', text: 'Inspect the page.' }],
+            },
+            {
+              type: 'assistant_message_ref',
+              messageId: 'message_assistant',
+            },
+          ],
+        },
+        { type: 'function_call_output', callId: 'call_inspect' },
+      ],
+    });
+    database.close();
+  });
+
   it('creates only the durable stores used by the current task and conversation model', async () => {
     const database = await openChatBrowserDatabase(createTestDatabaseName('schema-stores'));
 

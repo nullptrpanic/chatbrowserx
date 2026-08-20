@@ -60,6 +60,8 @@ export const zhCN = {
   cancel: '取消任务',
   noEvents: '尚无执行记录',
   userSupplement: '用户补充',
+  userSupplementApplied: '已应用',
+  userSupplementPending: '待下一轮',
   expandUserSupplement: '展开用户补充',
   collapseUserSupplement: '收起用户补充',
   toolCompleted: '执行完成',

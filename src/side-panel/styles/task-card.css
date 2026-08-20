@@ -237,10 +237,24 @@
   text-align: left;
 }
 
-.reasoning-summary-toggle span,
-.task-supplement-toggle span {
+.reasoning-summary-toggle > span,
+.task-supplement-title {
   min-width: 0;
   flex: 1;
+}
+
+.task-supplement-state {
+  flex: 0 0 auto;
+  font-size: 9px;
+  font-weight: 600;
+}
+
+.task-supplement-state.is-applied {
+  color: var(--cbx-success);
+}
+
+.task-supplement-state.is-pending {
+  color: var(--cbx-warning);
 }
 
 .reasoning-summary-toggle:hover,

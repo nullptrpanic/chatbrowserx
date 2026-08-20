@@ -853,6 +853,72 @@ describe('CodexAgentPlanner', () => {
     ]);
   });
 
+  it('attaches encrypted reasoning and same-turn assistant text to a tool continuation', async () => {
+    const model = provider(async function* () {
+      yield { type: 'response.started', responseId: 'resp_continuation' };
+      yield {
+        type: 'reasoning.encrypted',
+        itemId: 'reasoning_continuation',
+        encryptedContent: 'opaque-encrypted-content',
+        summary: [{ type: 'summary_text', text: 'Inspect the active page.' }],
+      };
+      yield { type: 'text.delta', delta: 'I will inspect the page.' };
+      yield {
+        type: 'tool.started',
+        callId: 'call_inspect',
+        name: 'browser_inspect',
+      };
+      yield {
+        type: 'tool.completed',
+        callId: 'call_inspect',
+        name: 'browser_inspect',
+        argumentsJson: '{"tabId":0,"mode":"interactive"}',
+      };
+      yield {
+        type: 'response.completed',
+        responseId: 'resp_continuation',
+        usage: null,
+      };
+    });
+    const storage = repositories();
+    const planner = new CodexAgentPlanner({
+      provider: model.instance,
+      tavilyAvailability: { isConfigured: vi.fn(async () => false) },
+      settings: settings(),
+      conversations: storage.conversations,
+      tasks: storage.tasks,
+      attachments: storage.attachments,
+      ids: { create: (prefix) => `${prefix}_continuation` },
+      clock: { now: () => 500 },
+    });
+
+    await expect(collect(planner)).resolves.toMatchObject([
+      {
+        type: 'browser.call',
+        modelOutputItems: [
+          {
+            type: 'reasoning',
+            itemId: 'reasoning_continuation',
+            encryptedContent: 'opaque-encrypted-content',
+            summary: [{ type: 'summary_text', text: 'Inspect the active page.' }],
+          },
+          {
+            type: 'assistant_message_ref',
+            messageId: 'message_continuation',
+          },
+        ],
+      },
+    ]);
+    expect(storage.updateMessage).toHaveBeenLastCalledWith(
+      expect.objectContaining({
+        id: 'message_continuation',
+        role: 'assistant',
+        status: 'interrupted',
+        text: 'I will inspect the page.',
+      }),
+    );
+  });
+
   it('emits a bounded provider-authored reasoning summary before the turn outcome', async () => {
     const model = provider(async function* () {
       yield { type: 'response.started', responseId: 'resp_reasoning' };

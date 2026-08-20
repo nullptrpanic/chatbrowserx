@@ -402,6 +402,58 @@ describe('CodexProvider', () => {
     ]);
   });
 
+  it('returns encrypted reasoning only as an opaque continuation item', async () => {
+    const provider = new CodexProvider(
+      credentialStore(ACCESS_TOKEN),
+      vi.fn<typeof fetch>(async () =>
+        sseResponse([
+          {
+            event: 'response.created',
+            data: {
+              type: 'response.created',
+              response: { id: 'resp_reasoning_continuation' },
+            },
+          },
+          {
+            event: 'response.output_item.done',
+            data: {
+              type: 'response.output_item.done',
+              output_index: 0,
+              item: {
+                id: 'reasoning_continuation_1',
+                type: 'reasoning',
+                encrypted_content: 'opaque-encrypted-content',
+                summary: [{ type: 'summary_text', text: 'Checked the current page.' }],
+              },
+            },
+          },
+          {
+            event: 'response.completed',
+            data: {
+              type: 'response.completed',
+              response: { id: 'resp_reasoning_continuation' },
+            },
+          },
+        ]),
+      ),
+    );
+
+    await expect(collect(provider.stream(REQUEST, new AbortController().signal))).resolves.toEqual([
+      { type: 'response.started', responseId: 'resp_reasoning_continuation' },
+      {
+        type: 'reasoning.encrypted',
+        itemId: 'reasoning_continuation_1',
+        encryptedContent: 'opaque-encrypted-content',
+        summary: [{ type: 'summary_text', text: 'Checked the current page.' }],
+      },
+      {
+        type: 'response.completed',
+        responseId: 'resp_reasoning_continuation',
+        usage: null,
+      },
+    ]);
+  });
+
   it('uses the finalized refusal when no refusal delta was delivered', async () => {
     const provider = new CodexProvider(
       credentialStore(ACCESS_TOKEN),

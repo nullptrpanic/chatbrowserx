@@ -68,8 +68,43 @@ function failure(
   message: string,
   retryable: boolean,
   needsInspect: boolean,
+  stage?: BrowserToolFailure['stage'],
 ): BrowserToolFailure {
-  return { ok: false, code, message, retryable, needsInspect };
+  return {
+    ok: false,
+    code,
+    message,
+    retryable,
+    needsInspect,
+    ...(stage ? { stage } : {}),
+  };
+}
+
+const BROWSER_ACTION_FAILURE_STAGES = new Set<NonNullable<BrowserToolFailure['stage']>>([
+  'focus',
+  'insert',
+  'readback',
+  'submit',
+]);
+
+function browserActionFailureStage(error: unknown): BrowserToolFailure['stage'] {
+  if (typeof error !== 'object' || error === null) return undefined;
+  if (
+    'stage' in error &&
+    typeof error.stage === 'string' &&
+    BROWSER_ACTION_FAILURE_STAGES.has(error.stage as NonNullable<BrowserToolFailure['stage']>)
+  ) {
+    return error.stage as NonNullable<BrowserToolFailure['stage']>;
+  }
+  const message = 'message' in error && typeof error.message === 'string' ? error.message : '';
+  if (message === 'The focused editor could not receive the requested text.') return 'insert';
+  if (
+    message === 'The focused editable value did not contain the requested input.' ||
+    message === 'The target did not retain the requested text.'
+  ) {
+    return 'readback';
+  }
+  return undefined;
 }
 
 function failureFor(error: unknown): BrowserToolFailure {
@@ -155,6 +190,7 @@ function failureFor(error: unknown): BrowserToolFailure {
         'The page did not retain the requested text. Inspect the editor and try again.',
         true,
         true,
+        browserActionFailureStage(error),
       );
     case 'ACTION_STATE_MISMATCH':
       return failure(

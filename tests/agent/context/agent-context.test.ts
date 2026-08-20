@@ -359,6 +359,103 @@ describe('buildAgentContext', () => {
     expect(get).not.toHaveBeenCalledWith('old_screenshot');
   });
 
+  it('replays same-turn model output before its function call', async () => {
+    const messages = [
+      message({
+        id: 'current',
+        taskId: TASK.id,
+        role: 'user',
+        text: 'Inspect the page.',
+      }),
+      message({
+        id: 'assistant_before_tool',
+        taskId: TASK.id,
+        role: 'assistant',
+        status: 'interrupted',
+        text: 'I found the target and will inspect it.',
+      }),
+    ];
+    const context = await buildAgentContext(
+      {
+        task: TASK,
+        checkpoint: {
+          ...CHECKPOINT,
+          completedToolResults: [
+            {
+              callId: 'call_inspect',
+              toolName: 'browser_inspect',
+              argumentsJson: '{"tabId":0,"mode":"interactive"}',
+              output: '{"ok":true}',
+              resultRef: 'result_inspect',
+            },
+          ],
+          continuationItems: [
+            { type: 'message_ref', messageId: 'current' },
+            {
+              type: 'function_call',
+              callId: 'call_inspect',
+              name: 'browser_inspect',
+              argumentsJson: '{"tabId":0,"mode":"interactive"}',
+              modelOutputItems: [
+                {
+                  type: 'reasoning',
+                  itemId: 'reasoning_inspect',
+                  encryptedContent: 'opaque-encrypted-content',
+                  summary: [{ type: 'summary_text', text: 'Inspect the active page.' }],
+                },
+                {
+                  type: 'assistant_message_ref',
+                  messageId: 'assistant_before_tool',
+                },
+              ],
+            },
+            {
+              type: 'function_call_output',
+              callId: 'call_inspect',
+              output: '{"ok":true}',
+              resultRef: 'result_inspect',
+            },
+          ],
+        },
+        customSystemPrompt: '',
+        historyMessageLimit: 50,
+      },
+      contextDependencies(messages, { get: vi.fn(async () => undefined) }),
+    );
+
+    expect(context.input).toEqual([
+      {
+        type: 'message',
+        role: 'user',
+        content: [{ type: 'input_text', text: 'Inspect the page.' }],
+      },
+      {
+        type: 'reasoning',
+        itemId: 'reasoning_inspect',
+        encryptedContent: 'opaque-encrypted-content',
+        summary: [{ type: 'summary_text', text: 'Inspect the active page.' }],
+      },
+      {
+        type: 'message',
+        role: 'assistant',
+        content: [
+          { type: 'output_text', text: 'I found the target and will inspect it.' },
+        ],
+      },
+      {
+        type: 'function_call',
+        callId: 'call_inspect',
+        name: 'browser_inspect',
+        argumentsJson: '{"tabId":0,"mode":"interactive"}',
+      },
+      {
+        type: 'function_call_output',
+        callId: 'call_inspect',
+        output: '{"ok":true}',
+      },
+    ]);
+  });
+
   it('keeps supplements and post-commit results ordered while loading only new screenshots', async () => {
     const commitArguments = JSON.stringify({
       state: 'Goal: continue with the corrected detail.',

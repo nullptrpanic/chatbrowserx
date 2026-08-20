@@ -2,6 +2,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import { parseBrowserToolCall } from '../../../src/agent/tools/browser-tool-schema';
 import {
   BrowserActionExecutor,
+  inspectEditorTarget,
   type BrowserActionExecutorDependencies,
 } from '../../../src/browser/actions/browser-action-executor';
 import type {
@@ -175,6 +176,13 @@ function harness(
     order.push(`cdp:${method}`);
     if (method === 'Input.insertText' && typeof params?.text === 'string') {
       insertedText = params.text;
+    }
+    if (
+      method === 'Input.dispatchKeyEvent' &&
+      params?.type === 'keyDown' &&
+      params.key === 'Enter'
+    ) {
+      insertedText = '';
     }
     if (method === 'Runtime.evaluate' && params?.returnByValue !== true) {
       return { result: { type: 'object', objectId: 'page_global' } };
@@ -552,14 +560,24 @@ describe('BrowserActionExecutor', () => {
             typeof params?.functionDeclaration === 'string' ? params.functionDeclaration : '';
           const arguments_ = Array.isArray(params?.arguments) ? params.arguments : [];
           const text = arguments_[0] as { readonly value?: unknown } | undefined;
+          const replace = arguments_[1] as { readonly value?: unknown } | undefined;
+          const customEditor = arguments_[2] as { readonly value?: unknown } | undefined;
           const pageFunction = Function(`return (${declaration});`)() as (
             this: Window,
             text: string,
+            replace: boolean,
+            customEditor: boolean,
           ) => unknown;
+          const value = pageFunction.call(
+            window,
+            typeof text?.value === 'string' ? text.value : '',
+            replace?.value === true,
+            customEditor?.value === true,
+          );
           return {
             result: {
               type: 'object',
-              value: pageFunction.call(window, typeof text?.value === 'string' ? text.value : ''),
+              value,
             },
           };
         }
@@ -776,7 +794,340 @@ describe('BrowserActionExecutor', () => {
         }),
         new AbortController().signal,
       ),
-    ).rejects.toMatchObject({ code: 'TYPE_VERIFICATION_FAILED' });
+    ).rejects.toMatchObject({
+      code: 'TYPE_VERIFICATION_FAILED',
+      stage: 'readback',
+    });
+  });
+
+  it('identifies a trusted input dispatch failure as an insert-stage failure', async () => {
+    const page = {
+      performAction: vi.fn(async () => ({
+        action: 'type' as const,
+        applied: false,
+        dispatched: false,
+        reason: 'trusted_input_required' as const,
+        target: { x: 60, y: 35 },
+        value: '',
+        submitted: false,
+        url: 'https://example.test/current',
+      })),
+    };
+    const { executor } = harness({
+      page,
+      responder: (_session, method, params) =>
+        method === 'Runtime.callFunctionOn' && params?.objectId === 'page_global'
+          ? { result: { type: 'object', value: { dispatched: false } } }
+          : undefined,
+    });
+
+    await expect(
+      executor.execute(
+        call('browser_type', {
+          tabId: 7,
+          ref: 'page_1_1',
+          text: 'hello',
+          replace: true,
+          submit: false,
+        }),
+        new AbortController().signal,
+      ),
+    ).rejects.toMatchObject({
+      code: 'TYPE_VERIFICATION_FAILED',
+      stage: 'insert',
+    });
+  });
+
+  it('accepts trailing editor placeholders before submitting a trusted replacement', async () => {
+    const text = 'message to submit';
+    let accessibilityReads = 0;
+    const page = {
+      performAction: vi.fn(async () => ({
+        action: 'type' as const,
+        applied: false,
+        dispatched: false,
+        reason: 'trusted_input_required' as const,
+        target: { x: 60, y: 35 },
+        value: '',
+        submitted: false,
+        url: 'https://example.test/current',
+      })),
+    };
+    const { executor, send } = harness({
+      page,
+      responder: (_session, method, params) => {
+        if (method === 'Runtime.evaluate') {
+          return params?.returnByValue === true
+            ? { result: { type: 'object', value: null } }
+            : { result: { type: 'object', objectId: 'page_global' } };
+        }
+        if (method === 'Runtime.callFunctionOn') {
+          return { result: { type: 'object', value: { dispatched: true } } };
+        }
+        if (method === 'Accessibility.getFullAXTree') {
+          accessibilityReads += 1;
+          return {
+            nodes: [
+              {
+                nodeId: 'editor',
+                ignored: false,
+                role: { type: 'role', value: 'generic' },
+                value: {
+                  type: 'string',
+                  value:
+                    accessibilityReads === 1
+                      ? `${text} \u200b \u200b \u200b`
+                      : '',
+                },
+                properties: [
+                  { name: 'focused', value: { type: 'boolean', value: true } },
+                  {
+                    name: 'editable',
+                    value: { type: 'token', value: 'richtext' },
+                  },
+                ],
+              },
+            ],
+          };
+        }
+        return undefined;
+      },
+    });
+
+    await expect(
+      executor.execute(
+        call('browser_type', {
+          tabId: 7,
+          ref: 'page_1_1',
+          text,
+          replace: true,
+          submit: true,
+        }),
+        new AbortController().signal,
+      ),
+    ).resolves.toMatchObject({
+      data: {
+        action: 'type',
+        replaced: true,
+        submitted: true,
+        submissionVerified: true,
+        verified: true,
+      },
+    });
+
+    expect(accessibilityReads).toBeGreaterThanOrEqual(2);
+    expect(
+      send.mock.calls.filter(
+        ([, method, params]) =>
+          method === 'Input.dispatchKeyEvent' &&
+          params?.type === 'keyDown' &&
+          params.key === 'Enter' &&
+          params.windowsVirtualKeyCode === 13 &&
+          params.text === '\r',
+      ),
+    ).toHaveLength(1);
+  });
+
+  it('accepts a complete rich-text replacement when the editor normalizes blank lines', async () => {
+    const text = 'Summary title\n\n| Chat | Recent content |\n|---|---|\n| Alpha | Updated |';
+    const normalizedEditorValue =
+      'Summary title\u200b\n| Chat | Recent content |\u200b\n|---|---|\u200b\n| Alpha | Updated |\u200b\n\n';
+    let editorInfoReads = 0;
+    const { executor } = harness({
+      targets: [
+        {
+          frameTargetId: null,
+          documentFrameId: 'frame-main',
+          loaderId: 'loader-1',
+          backendNodeId: 42,
+          role: 'textbox',
+          name: 'Message',
+          state: [],
+          actions: ['type'],
+          frame: 'main',
+        },
+      ],
+      responder: (_session, method, params) => {
+        if (method === 'DOM.resolveNode') {
+          return { object: { objectId: 'editor_node' } };
+        }
+        if (
+          method === 'Runtime.callFunctionOn' &&
+          params?.objectId === 'editor_node' &&
+          typeof params.functionDeclaration === 'string' &&
+          params.functionDeclaration.includes('__chatbrowserxEditorTargetInfo')
+        ) {
+          editorInfoReads += 1;
+          return {
+            result: {
+              type: 'object',
+              value: {
+                editor: true,
+                custom: true,
+                connected: true,
+                value: editorInfoReads === 1 ? '' : normalizedEditorValue,
+              },
+            },
+          };
+        }
+        if (
+          method === 'Runtime.callFunctionOn' &&
+          params?.objectId === 'editor_node' &&
+          typeof params.functionDeclaration === 'string' &&
+          params.functionDeclaration.includes('__chatbrowserxInsertText')
+        ) {
+          return { result: { type: 'object', value: { dispatched: true } } };
+        }
+        if (method === 'Accessibility.getFullAXTree') {
+          return { nodes: [] };
+        }
+        return undefined;
+      },
+    });
+
+    await expect(
+      executor.execute(
+        call('browser_type', {
+          tabId: 7,
+          ref: 'ref_1',
+          text,
+          replace: true,
+          submit: false,
+        }),
+        new AbortController().signal,
+      ),
+    ).resolves.toMatchObject({
+      data: {
+        action: 'type',
+        replaced: true,
+        submitted: false,
+        verified: true,
+      },
+    });
+  });
+
+  it('rejects a normalized rich-text replacement when a substantive line is missing', async () => {
+    vi.useFakeTimers();
+    const text = 'Summary title\n\n| Chat | Recent content |\n|---|---|\n| Alpha | Updated |';
+    const incompleteEditorValue =
+      'Summary title\u200b\n| Chat | Recent content |\u200b\n|---|---|\u200b\n\n';
+    let editorInfoReads = 0;
+    const { executor } = harness({
+      targets: [
+        {
+          frameTargetId: null,
+          documentFrameId: 'frame-main',
+          loaderId: 'loader-1',
+          backendNodeId: 42,
+          role: 'textbox',
+          name: 'Message',
+          state: [],
+          actions: ['type'],
+          frame: 'main',
+        },
+      ],
+      responder: (_session, method, params) => {
+        if (method === 'DOM.resolveNode') {
+          return { object: { objectId: 'editor_node' } };
+        }
+        if (
+          method === 'Runtime.callFunctionOn' &&
+          params?.objectId === 'editor_node' &&
+          typeof params.functionDeclaration === 'string' &&
+          params.functionDeclaration.includes('__chatbrowserxEditorTargetInfo')
+        ) {
+          editorInfoReads += 1;
+          return {
+            result: {
+              type: 'object',
+              value: {
+                editor: true,
+                custom: true,
+                connected: true,
+                value: editorInfoReads === 1 ? '' : incompleteEditorValue,
+              },
+            },
+          };
+        }
+        if (
+          method === 'Runtime.callFunctionOn' &&
+          params?.objectId === 'editor_node' &&
+          typeof params.functionDeclaration === 'string' &&
+          params.functionDeclaration.includes('__chatbrowserxInsertText')
+        ) {
+          return { result: { type: 'object', value: { dispatched: true } } };
+        }
+        if (method === 'Accessibility.getFullAXTree') {
+          return { nodes: [] };
+        }
+        return undefined;
+      },
+    });
+
+    const operation = executor.execute(
+      call('browser_type', {
+        tabId: 7,
+        ref: 'ref_1',
+        text,
+        replace: true,
+        submit: false,
+      }),
+      new AbortController().signal,
+    );
+    const rejection = expect(operation).rejects.toMatchObject({
+      code: 'TYPE_VERIFICATION_FAILED',
+      stage: 'readback',
+    });
+    await vi.advanceTimersByTimeAsync(2_000);
+    await rejection;
+  });
+
+  it('rejects a submitted editor action when the requested text remains in the editor', async () => {
+    vi.useFakeTimers();
+    const text = 'message that was not sent';
+    const page = {
+      performAction: vi.fn(async () => ({
+        action: 'type' as const,
+        applied: false,
+        dispatched: false,
+        reason: 'trusted_input_required' as const,
+        target: { x: 60, y: 35 },
+        value: '',
+        submitted: false,
+        url: 'https://example.test/current',
+      })),
+    };
+    const { executor } = harness({
+      page,
+      responder: (_session, method, params) => {
+        if (method === 'Runtime.evaluate') {
+          return params?.returnByValue === true
+            ? { result: { type: 'string', value: text } }
+            : { result: { type: 'object', objectId: 'page_global' } };
+        }
+        if (method === 'Runtime.callFunctionOn') {
+          return { result: { type: 'object', value: { dispatched: true } } };
+        }
+        return undefined;
+      },
+    });
+
+    const operation = executor.execute(
+      call('browser_type', {
+        tabId: 7,
+        ref: 'page_1_1',
+        text,
+        replace: true,
+        submit: true,
+      }),
+      new AbortController().signal,
+    );
+    const rejection = expect(operation).rejects.toMatchObject({
+      code: 'ACTION_STATE_MISMATCH',
+      stage: 'submit',
+    });
+    await vi.advanceTimersByTimeAsync(2_000);
+    await rejection;
   });
 
   it('falls back to CDP only when the page bridge proves it did not dispatch', async () => {
@@ -999,7 +1350,9 @@ describe('BrowserActionExecutor', () => {
         strategy: 'pointer',
         selectionVerified: true,
       },
-      observation: { target: { ref: 'ref_1', role: 'radio', state: ['checked'] } },
+      observation: {
+        target: { ref: 'ref_1', role: 'radio', state: ['checked'] },
+      },
     });
     expect(
       send.mock.calls.some(
@@ -1401,7 +1754,12 @@ describe('BrowserActionExecutor', () => {
                 ignored: false,
                 role: { value: 'checkbox' },
                 name: { value: 'Option A' },
-                properties: [{ name: 'checked', value: { type: 'boolean', value: checked } }],
+                properties: [
+                  {
+                    name: 'checked',
+                    value: { type: 'boolean', value: checked },
+                  },
+                ],
               },
             ],
           };
@@ -1427,7 +1785,12 @@ describe('BrowserActionExecutor', () => {
                 ignored: false,
                 role: { value: 'checkbox' },
                 name: { value: 'Option A' },
-                properties: [{ name: 'checked', value: { type: 'boolean', value: checked } }],
+                properties: [
+                  {
+                    name: 'checked',
+                    value: { type: 'boolean', value: checked },
+                  },
+                ],
               },
             ],
           };
@@ -1486,7 +1849,12 @@ describe('BrowserActionExecutor', () => {
                     ignored: false,
                     role: { value: 'checkbox' },
                     name: { value: 'Option A' },
-                    properties: [{ name: 'checked', value: { type: 'boolean', value: checked } }],
+                    properties: [
+                      {
+                        name: 'checked',
+                        value: { type: 'boolean', value: checked },
+                      },
+                    ],
                   },
                 ],
               }
@@ -1584,7 +1952,12 @@ describe('BrowserActionExecutor', () => {
                     ignored: false,
                     role: { value: 'option' },
                     name: { value: 'A. First answer' },
-                    properties: [{ name: 'selected', value: { type: 'boolean', value: false } }],
+                    properties: [
+                      {
+                        name: 'selected',
+                        value: { type: 'boolean', value: false },
+                      },
+                    ],
                   },
                 ],
               };
@@ -1625,7 +1998,12 @@ describe('BrowserActionExecutor', () => {
                 ignored: false,
                 role: { value: 'option' },
                 name: { value: 'A. First answer' },
-                properties: [{ name: 'selected', value: { type: 'boolean', value: selected } }],
+                properties: [
+                  {
+                    name: 'selected',
+                    value: { type: 'boolean', value: selected },
+                  },
+                ],
               },
             ],
           };
@@ -1706,7 +2084,12 @@ describe('BrowserActionExecutor', () => {
                 ignored: false,
                 role: { value: 'checkbox' },
                 name: { value: 'Option A' },
-                properties: [{ name: 'checked', value: { type: 'boolean', value: checked } }],
+                properties: [
+                  {
+                    name: 'checked',
+                    value: { type: 'boolean', value: checked },
+                  },
+                ],
               },
             ],
           };
@@ -2241,6 +2624,66 @@ describe('BrowserActionExecutor', () => {
     expect(send.mock.calls.some(([, method]) => method === 'Input.dispatchMouseEvent')).toBe(false);
   });
 
+  it('rebinds a unique semantic ref once when a framework replaces the node before the action', async () => {
+    const replacementBackendNodeId = 84;
+    const semanticLocator = JSON.stringify([[], [['INPUT', [], 0]], 'button', 'Continue']);
+    const { executor, refs, send } = harness({
+      targets: [
+        {
+          frameTargetId: null,
+          documentFrameId: 'frame-main',
+          loaderId: 'loader-1',
+          backendNodeId: 42,
+          role: 'button',
+          name: 'Continue',
+          semanticLocator,
+          state: [],
+          actions: ['click'],
+          frame: 'main',
+        },
+      ],
+      responder: (_session, method, params) => {
+        if (method === 'DOM.scrollIntoViewIfNeeded' && params?.backendNodeId === 42) {
+          throw new Error('No node with given id');
+        }
+        if (method === 'Accessibility.getFullAXTree') {
+          return {
+            nodes: [
+              {
+                nodeId: 'continue-replacement',
+                backendDOMNodeId: replacementBackendNodeId,
+                ignored: false,
+                role: { value: 'button' },
+                name: { value: 'Continue' },
+              },
+            ],
+          };
+        }
+        if (method === 'DOMSnapshot.captureSnapshot') {
+          return checkedTargetDomSnapshot(false, replacementBackendNodeId);
+        }
+        return undefined;
+      },
+    });
+
+    await expect(
+      executor.execute(
+        call('browser_click', {
+          tabId: 7,
+          ref: 'ref_1',
+          button: 'left',
+          count: 1,
+        }),
+        new AbortController().signal,
+      ),
+    ).resolves.toMatchObject({ data: { action: 'click', dispatched: true } });
+
+    expect(refs.resolve('ref_1', 7).backendNodeId).toBe(replacementBackendNodeId);
+    expect(send).toHaveBeenCalledWith({ tabId: 7 }, 'DOM.scrollIntoViewIfNeeded', {
+      backendNodeId: replacementBackendNodeId,
+    });
+  });
+
   it('does not repeat a click when the optional pointer overlay fails', async () => {
     const { executor, send } = harness({ pointerRejects: true });
 
@@ -2289,6 +2732,27 @@ describe('BrowserActionExecutor', () => {
     );
   });
 
+  it('resolves an inner text node to its contenteditable host without misclassifying ace-line', () => {
+    const editor = document.createElement('div');
+    editor.setAttribute('contenteditable', 'true');
+    const line = document.createElement('div');
+    line.className = 'ace-line';
+    const text = document.createTextNode('\u200bcaoyang.001\u200b');
+    line.append(text);
+    editor.append(line);
+    document.body.append(editor);
+
+    expect(inspectEditorTarget.call(text)).toEqual({
+      editor: true,
+      custom: false,
+      connected: true,
+      value: '\u200bcaoyang.001\u200b',
+    });
+
+    editor.className = 'ace_editor';
+    expect(inspectEditorTarget.call(text)).toMatchObject({ editor: true, custom: true });
+  });
+
   it('rejects ordinary input when the target value does not retain inserted text', async () => {
     let editorInfoReads = 0;
     const { executor } = harness({
@@ -2321,7 +2785,10 @@ describe('BrowserActionExecutor', () => {
         }),
         new AbortController().signal,
       ),
-    ).rejects.toMatchObject({ code: 'TYPE_VERIFICATION_FAILED' });
+    ).rejects.toMatchObject({
+      code: 'TYPE_VERIFICATION_FAILED',
+      stage: 'readback',
+    });
     expect(editorInfoReads).toBeGreaterThanOrEqual(2);
   });
 
@@ -2334,15 +2801,25 @@ describe('BrowserActionExecutor', () => {
         if (method === 'DOM.resolveNode') {
           return { object: { objectId: 'editor_node' } };
         }
-        if (method === 'Runtime.callFunctionOn' && params?.objectId === 'editor_node') {
+        if (
+          method === 'Runtime.callFunctionOn' &&
+          params?.objectId === 'editor_node' &&
+          typeof params.functionDeclaration === 'string' &&
+          params.functionDeclaration.includes('__chatbrowserxEditorTargetInfo')
+        ) {
           return {
             result: {
               type: 'object',
-              value: { editor: true, value: editorValue },
+              value: { editor: true, custom: true, value: editorValue },
             },
           };
         }
-        if (method === 'Runtime.callFunctionOn' && params?.objectId === 'page_global') {
+        if (
+          method === 'Runtime.callFunctionOn' &&
+          params?.objectId === 'editor_node' &&
+          typeof params.functionDeclaration === 'string' &&
+          params.functionDeclaration.includes('__chatbrowserxInsertText')
+        ) {
           editorValue = replacement;
           return { result: { type: 'object', value: { dispatched: true } } };
         }
@@ -2377,6 +2854,125 @@ describe('BrowserActionExecutor', () => {
       'Input.insertText',
       expect.objectContaining({ text: replacement }),
     );
+  });
+
+  it('verifies a trusted semantic editor from its bound node when global focus is stale', async () => {
+    const replacement = 'ChatBrowserX target-bound input';
+    let editorValue = 'starter';
+    const { executor } = harness({
+      responder: (_session, method, params) => {
+        if (method === 'DOM.resolveNode') {
+          return { object: { objectId: 'editor_node' } };
+        }
+        if (
+          method === 'Runtime.callFunctionOn' &&
+          params?.objectId === 'editor_node' &&
+          typeof params.functionDeclaration === 'string' &&
+          params.functionDeclaration.includes('__chatbrowserxEditorTargetInfo')
+        ) {
+          return {
+            result: {
+              type: 'object',
+              value: { editor: true, custom: true, value: editorValue },
+            },
+          };
+        }
+        if (
+          method === 'Runtime.callFunctionOn' &&
+          params?.objectId === 'editor_node' &&
+          typeof params.functionDeclaration === 'string' &&
+          params.functionDeclaration.includes('__chatbrowserxInsertText')
+        ) {
+          editorValue = replacement;
+          return { result: { type: 'object', value: { dispatched: true } } };
+        }
+        if (method === 'Runtime.callFunctionOn' && params?.objectId === 'page_global') {
+          return { result: { type: 'object', value: { dispatched: true } } };
+        }
+        if (method === 'Runtime.evaluate' && params?.returnByValue === true) {
+          return { result: { type: 'string', value: 'starter' } };
+        }
+        if (method === 'Accessibility.getFullAXTree') {
+          return {
+            nodes: [
+              {
+                nodeId: 'stale-editor',
+                ignored: false,
+                role: { type: 'role', value: 'textbox' },
+                value: { type: 'string', value: 'starter' },
+                properties: [{ name: 'focused', value: { type: 'boolean', value: true } }],
+              },
+            ],
+          };
+        }
+        return undefined;
+      },
+    });
+
+    await expect(
+      executor.execute(
+        call('browser_type', {
+          tabId: 7,
+          ref: 'ref_1',
+          text: replacement,
+          replace: true,
+          submit: false,
+        }),
+        new AbortController().signal,
+      ),
+    ).resolves.toMatchObject({
+      data: { action: 'type', strategy: 'trusted_input', verified: true },
+    });
+    expect(editorValue).toBe(replacement);
+  });
+
+  it('uses native CDP text insertion for a non-code contenteditable semantic editor', async () => {
+    const replacement = 'caoyang.001';
+    let editorValue = '\u200b';
+    const { executor, send } = harness({
+      responder: (_session, method, params) => {
+        if (method === 'DOM.resolveNode') {
+          return { object: { objectId: 'rich_text_editor' } };
+        }
+        if (
+          method === 'Runtime.callFunctionOn' &&
+          params?.objectId === 'rich_text_editor' &&
+          typeof params.functionDeclaration === 'string' &&
+          params.functionDeclaration.includes('__chatbrowserxEditorTargetInfo')
+        ) {
+          return {
+            result: {
+              type: 'object',
+              value: { editor: true, custom: false, value: editorValue },
+            },
+          };
+        }
+        if (method === 'Input.insertText') {
+          editorValue = `\u200b\n${replacement}\u200b`;
+          return {};
+        }
+        if (method === 'Accessibility.getFullAXTree') return { nodes: [] };
+        return undefined;
+      },
+    });
+
+    await expect(
+      executor.execute(
+        call('browser_type', {
+          tabId: 7,
+          ref: 'ref_1',
+          text: replacement,
+          replace: true,
+          submit: false,
+        }),
+        new AbortController().signal,
+      ),
+    ).resolves.toMatchObject({
+      data: { action: 'type', strategy: 'trusted_input', verified: true },
+    });
+    expect(send).toHaveBeenCalledWith({ tabId: 7 }, 'Input.insertText', {
+      text: replacement,
+    });
   });
 
   it('validates screenshot coordinates against the current viewport', async () => {
@@ -2436,6 +3032,69 @@ describe('BrowserActionExecutor', () => {
       actualDeltaX: 0,
       actualDeltaY: 120,
     });
+  });
+
+  it('scrolls the nearest nested container directly and reports its real position', async () => {
+    const { executor, send } = harness({
+      targets: [
+        {
+          frameTargetId: null,
+          documentFrameId: 'frame-main',
+          loaderId: 'loader-1',
+          backendNodeId: 42,
+          role: 'region',
+          name: 'Message history',
+          state: [],
+          actions: ['scroll'],
+          frame: 'main',
+        },
+      ],
+      responder: (_session, method) => {
+        if (method === 'Runtime.callFunctionOn') {
+          return {
+            result: {
+              type: 'object',
+              value: {
+                found: true,
+                beforeX: 0,
+                beforeY: 120,
+                afterX: 0,
+                afterY: 320,
+                maxX: 0,
+                maxY: 800,
+              },
+            },
+          };
+        }
+        return undefined;
+      },
+    });
+
+    const result = await executor.execute(
+      call('browser_scroll', {
+        tabId: 7,
+        target: 'ref_1',
+        deltaX: 0,
+        deltaY: 200,
+      }),
+      new AbortController().signal,
+    );
+
+    expect(result.data).toMatchObject({
+      action: 'scroll',
+      dispatched: true,
+      strategy: 'element',
+      moved: true,
+      actualDeltaX: 0,
+      actualDeltaY: 200,
+      position: { x: 0, y: 320, maxX: 0, maxY: 800 },
+    });
+    expect(
+      send.mock.calls.some(
+        ([, method, params]) =>
+          method === 'Input.dispatchMouseEvent' && params?.type === 'mouseWheel',
+      ),
+    ).toBe(false);
   });
 
   it('navigates logical browser history without synthesizing shortcuts', async () => {
@@ -2515,19 +3174,27 @@ describe('BrowserActionExecutor', () => {
     let settled = false;
     const waiting = executor
       .execute(
-        call('browser_wait', { tabId: 7, condition: 'network_idle', timeoutMs: 2_000 }),
+        call('browser_wait', {
+          tabId: 7,
+          condition: 'network_idle',
+          timeoutMs: 2_000,
+        }),
         new AbortController().signal,
       )
       .finally(() => {
         settled = true;
       });
     await vi.waitFor(() => expect(send).toHaveBeenCalledWith({ tabId: 7 }, 'Network.enable'));
-    listener?.({ tabId: 7 }, 'Network.requestWillBeSent', { requestId: 'request_1' });
+    listener?.({ tabId: 7 }, 'Network.requestWillBeSent', {
+      requestId: 'request_1',
+    });
 
     await vi.advanceTimersByTimeAsync(600);
     expect(settled).toBe(false);
 
-    listener?.({ tabId: 7 }, 'Network.loadingFinished', { requestId: 'request_1' });
+    listener?.({ tabId: 7 }, 'Network.loadingFinished', {
+      requestId: 'request_1',
+    });
     await vi.advanceTimersByTimeAsync(500);
     await expect(waiting).resolves.toMatchObject({
       data: { action: 'wait', condition: 'network_idle', completed: true },

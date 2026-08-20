@@ -15,7 +15,7 @@ import type {
 import type { IdGenerator } from '../shared/ids';
 import { bytesToBase64 } from '../shared/base64';
 import type { Clock } from '../shared/time';
-import type { CompletedToolResult } from './checkpoint-types';
+import type { Checkpoint, CompletedToolResult } from './checkpoint-types';
 import type { MessageRecord, MessageSourcePage } from './message-types';
 import { TaskCommandError, type TaskCommandPort, type TaskSnapshot } from './task-command-service';
 import type { TaskEvent, TaskRun } from './task-types';
@@ -156,6 +156,35 @@ interface TaskDetailIndexes {
   readonly itemCount: number;
   readonly resultIndexes: ReadonlyMap<string, number>;
   readonly supplementIndexes: ReadonlyMap<string, number>;
+  readonly appliedSupplementIds: ReadonlySet<string>;
+}
+
+interface TaskReadCache {
+  readonly checkpoints: Map<string, Promise<Checkpoint | undefined>>;
+  readonly events: Map<string, Promise<readonly TaskEvent[]>>;
+}
+
+/** Matches the durable WorkSession continuation ordering. */
+function compareWorkSessionTasks(left: TaskRun, right: TaskRun): number {
+  return (
+    left.createdAt - right.createdAt ||
+    left.updatedAt - right.updatedAt ||
+    left.id.localeCompare(right.id)
+  );
+}
+
+/** Selects one task and every earlier TaskRun in the same WorkSession. */
+function workSessionTaskPrefix(tasks: readonly TaskRun[], target: TaskRun): readonly TaskRun[] {
+  const candidates = tasks.some(({ id }) => id === target.id) ? tasks : [...tasks, target];
+  const ordered = candidates
+    .filter(({ workSessionId }) => workSessionId === target.workSessionId)
+    .sort(compareWorkSessionTasks);
+  const targetIndex = ordered.findIndex(({ id }) => id === target.id);
+  return targetIndex < 0 ? [target] : ordered.slice(0, targetIndex + 1);
+}
+
+function createTaskReadCache(): TaskReadCache {
+  return { checkpoints: new Map(), events: new Map() };
 }
 
 /** Assigns stable display positions across completed tools and applied or pending supplements. */
@@ -171,7 +200,7 @@ function taskDetailIndexes(
   const pairedCount = Math.min(resultEvents.length, completedResults.length);
   const firstPairedEvent = resultEvents.length - pairedCount;
   const firstPairedResult = completedResults.length - pairedCount;
-  const resultByEventSequence = new Map<number, CompletedToolResult>();
+  const resultByEvent = new Map<TaskEvent, CompletedToolResult>();
   let itemCount = 0;
 
   for (const result of completedResults.slice(0, firstPairedResult)) {
@@ -181,24 +210,24 @@ function taskDetailIndexes(
     const event = resultEvents[firstPairedEvent + index];
     const result = completedResults[firstPairedResult + index];
     if (event !== undefined && result !== undefined) {
-      resultByEventSequence.set(event.sequence, result);
+      resultByEvent.set(event, result);
     }
   }
 
   for (const event of events) {
-    const result = resultByEventSequence.get(event.sequence);
+    const result = resultByEvent.get(event);
     if (result !== undefined) {
       resultIndexes.set(result.callId, ++itemCount);
       continue;
     }
     if (event.type !== 'task.supplements-applied') continue;
 
-    const explicitIds = new Set(event.supplementIds ?? []);
+    const explicitIds = event.supplementIds === undefined ? null : new Set(event.supplementIds);
     const applied = supplements
       .filter(
         (message) =>
           !assignedSupplements.has(message.id) &&
-          (explicitIds.has(message.id) || message.createdAt <= event.at),
+          (explicitIds === null ? message.createdAt <= event.at : explicitIds.has(message.id)),
       )
       .sort(
         (left, right) =>
@@ -222,7 +251,12 @@ function taskDetailIndexes(
     )) {
     supplementIndexes.set(message.id, ++itemCount);
   }
-  return { itemCount, resultIndexes, supplementIndexes };
+  return {
+    itemCount,
+    resultIndexes,
+    supplementIndexes,
+    appliedSupplementIds: assignedSupplements,
+  };
 }
 
 export class PanelService {
@@ -278,7 +312,11 @@ export class PanelService {
       selected === null ? [] : await this.#dependencies.conversations.listMessages(selected.id);
     const storedMessages = allStoredMessages.slice(-MAX_PANEL_MESSAGES);
     const messages = storedMessages.filter((message) => message.kind === 'conversation');
-    const attachments = await this.#readAttachmentMetadata(storedMessages);
+    const taskReadCache = createTaskReadCache();
+    const [attachments, appliedSupplementIdsByWorkSession] = await Promise.all([
+      this.#readAttachmentMetadata(storedMessages),
+      this.#readAppliedSupplementIdsByWorkSession(selectedTasks, allStoredMessages, taskReadCache),
+    ]);
     const visibleTaskIds = new Set(
       storedMessages.flatMap((message) => (message.taskId === null ? [] : [message.taskId])),
     );
@@ -286,7 +324,16 @@ export class PanelService {
     const panelTasks = await Promise.all(
       selectedTasks
         .filter((task) => visibleTaskIds.has(task.id))
-        .map((task) => this.#readTask(task, allStoredMessages)),
+        .map((task) =>
+          this.#readTask(
+            task,
+            allStoredMessages,
+            'summary',
+            appliedSupplementIdsByWorkSession.get(task.workSessionId),
+            selectedTasks,
+            taskReadCache,
+          ),
+        ),
     );
     const panelTask =
       latestTask === null ? null : (panelTasks.find((task) => task.id === latestTask.id) ?? null);
@@ -332,8 +379,24 @@ export class PanelService {
     }
     const task = await this.#dependencies.tasks.get(normalizedTaskId);
     if (task === undefined) throw new Error('Task details are unavailable.');
-    const messages = await this.#dependencies.conversations.listMessages(task.conversationId);
-    return this.#readTask(task, messages, 'full');
+    const [messages, conversationTasks] = await Promise.all([
+      this.#dependencies.conversations.listMessages(task.conversationId),
+      this.#dependencies.tasks.listByConversation(task.conversationId),
+    ]);
+    const taskReadCache = createTaskReadCache();
+    const appliedSupplementIdsByWorkSession = await this.#readAppliedSupplementIdsByWorkSession(
+      conversationTasks,
+      messages,
+      taskReadCache,
+    );
+    return this.#readTask(
+      task,
+      messages,
+      'full',
+      appliedSupplementIdsByWorkSession.get(task.workSessionId),
+      conversationTasks,
+      taskReadCache,
+    );
   }
 
   /** Persists a user message before creating and scheduling its recoverable browser task. */
@@ -548,24 +611,87 @@ export class PanelService {
     };
   }
 
+  /** Reads the latest durable continuation only for WorkSessions that own supplements. */
+  async #readAppliedSupplementIdsByWorkSession(
+    tasks: readonly TaskRun[],
+    messages: readonly MessageRecord[],
+    readCache: TaskReadCache,
+  ): Promise<ReadonlyMap<string, ReadonlySet<string>>> {
+    const supplementTaskIds = new Set(
+      messages.flatMap((message) =>
+        message.kind === 'supplement' && message.taskId !== null ? [message.taskId] : [],
+      ),
+    );
+    const relevantWorkSessionIds = new Set(
+      tasks.flatMap((task) => (supplementTaskIds.has(task.id) ? [task.workSessionId] : [])),
+    );
+    const latestTasks = new Map<string, TaskRun>();
+    for (const task of tasks) {
+      if (!relevantWorkSessionIds.has(task.workSessionId)) continue;
+      const current = latestTasks.get(task.workSessionId);
+      if (current === undefined || compareWorkSessionTasks(current, task) < 0) {
+        latestTasks.set(task.workSessionId, task);
+      }
+    }
+    const entries = await Promise.all(
+      [...latestTasks.entries()].map(async ([workSessionId, task]) => {
+        const checkpoint = await this.#readCheckpoint(task, readCache);
+        const messageIds = new Set(
+          checkpoint?.continuationItems.flatMap((item) =>
+            item.type === 'message_ref' ? [item.messageId] : [],
+          ) ?? [],
+        );
+        return [workSessionId, messageIds] as const;
+      }),
+    );
+    return new Map(entries);
+  }
+
+  /** Deduplicates checkpoint reads within one panel request. */
+  #readCheckpoint(task: TaskRun, readCache: TaskReadCache): Promise<Checkpoint | undefined> {
+    if (task.checkpointId === null) return Promise.resolve(undefined);
+    const cached = readCache.checkpoints.get(task.checkpointId);
+    if (cached !== undefined) return cached;
+    const pending = this.#dependencies.tasks.getCheckpoint(task.checkpointId);
+    readCache.checkpoints.set(task.checkpointId, pending);
+    return pending;
+  }
+
+  /** Deduplicates event reads while several visible tasks share a WorkSession prefix. */
+  #readEvents(task: TaskRun, readCache: TaskReadCache): Promise<readonly TaskEvent[]> {
+    const cached = readCache.events.get(task.id);
+    if (cached !== undefined) return cached;
+    const pending = this.#dependencies.tasks.listEvents(task.id);
+    readCache.events.set(task.id, pending);
+    return pending;
+  }
+
   /** Keeps summaries light and returns only completed tools plus supplements in full mode. */
   async #readTask(
     task: TaskRun,
     messages: readonly MessageRecord[] = [],
     detailLevel: 'summary' | 'full' = 'summary',
+    appliedSupplementIds: ReadonlySet<string> = new Set(),
+    conversationTasks: readonly TaskRun[] = [task],
+    readCache: TaskReadCache = createTaskReadCache(),
   ): Promise<PanelTask> {
-    const [checkpoint, events] = await Promise.all([
-      task.checkpointId === null
-        ? Promise.resolve(undefined)
-        : this.#dependencies.tasks.getCheckpoint(task.checkpointId),
-      this.#dependencies.tasks.listEvents(task.id),
+    const workSessionTasks = workSessionTaskPrefix(conversationTasks, task);
+    const [checkpoint, taskEventLists] = await Promise.all([
+      this.#readCheckpoint(task, readCache),
+      Promise.all(workSessionTasks.map((candidate) => this.#readEvents(candidate, readCache))),
     ]);
+    const events = taskEventLists.flat();
+    const currentTaskEvents = taskEventLists.at(-1) ?? [];
     const completedResults = checkpoint?.completedToolResults ?? [];
+    const workSessionTaskIds = new Set(workSessionTasks.map(({ id }) => id));
     const taskSupplements = messages.filter(
-      (message) => message.kind === 'supplement' && message.taskId === task.id,
+      (message) =>
+        message.kind === 'supplement' &&
+        message.taskId !== null &&
+        workSessionTaskIds.has(message.taskId),
     );
     const detailIndexes = taskDetailIndexes(completedResults, events, taskSupplements);
-    const projectedEvents =
+    const retainedFullEvents = new Set(
       detailLevel === 'full'
         ? [
             ...events
@@ -574,8 +700,13 @@ export class PanelService {
             ...events
               .filter((event) => event.type === 'task.supplements-applied')
               .slice(-MAX_PANEL_SUPPLEMENTS),
-          ].sort((left, right) => left.sequence - right.sequence)
-        : events.slice(-MAX_PANEL_EVENTS);
+          ]
+        : [],
+    );
+    const projectedEvents =
+      detailLevel === 'full'
+        ? events.filter((event) => retainedFullEvents.has(event))
+        : currentTaskEvents.slice(-MAX_PANEL_EVENTS);
     const completedToolResults =
       detailLevel === 'full' ? completedResults.slice(-MAX_PANEL_EVENTS) : [];
     return {
@@ -586,7 +717,7 @@ export class PanelService {
       tabId: task.tabId,
       createdAt: task.createdAt,
       updatedAt: task.updatedAt,
-      sequence: checkpoint?.sequence ?? events.at(-1)?.sequence ?? 0,
+      sequence: checkpoint?.sequence ?? currentTaskEvents.at(-1)?.sequence ?? 0,
       completedToolCallCount: completedResults.length,
       detailItemCount: detailIndexes.itemCount,
       lastError:
@@ -627,6 +758,10 @@ export class PanelService {
         text: message.text.slice(0, 20_000),
         attachmentIds: [...message.attachmentIds].slice(0, 8),
         createdAt: message.createdAt,
+        applicationState:
+          appliedSupplementIds.has(message.id) || detailIndexes.appliedSupplementIds.has(message.id)
+            ? 'applied'
+            : 'pending',
         detailIndex: detailIndexes.supplementIndexes.get(message.id),
       })),
     };

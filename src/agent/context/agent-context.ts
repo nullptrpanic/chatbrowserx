@@ -265,6 +265,7 @@ function validateContinuation(
   const activeMessages: MessageRecord[] = [];
   const seenMessages = new Set<string>();
   const seenCalls = new Set<string>();
+  const seenReasoningItems = new Set<string>();
   let unresolvedCall: Extract<ContinuationItem, { type: 'function_call' }> | null = null;
 
   for (const item of items) {
@@ -297,6 +298,37 @@ function validateContinuation(
     if (item.type === 'function_call') {
       if (unresolvedCall !== null || seenCalls.has(item.callId)) {
         throw new Error('WorkSession tool order is invalid.');
+      }
+      for (const outputItem of item.modelOutputItems ?? []) {
+        if (outputItem.type === 'reasoning') {
+          if (
+            outputItem.itemId.length === 0 ||
+            outputItem.encryptedContent.length === 0 ||
+            seenReasoningItems.has(outputItem.itemId)
+          ) {
+            throw new Error('WorkSession model output is invalid.');
+          }
+          seenReasoningItems.add(outputItem.itemId);
+          continue;
+        }
+        if (seenMessages.has(outputItem.messageId)) {
+          throw new Error('WorkSession model output is invalid.');
+        }
+        const message = messagesById.get(outputItem.messageId);
+        const owner = message?.taskId === null ? undefined : tasksById.get(message?.taskId ?? '');
+        if (
+          message === undefined ||
+          owner === undefined ||
+          message.kind !== 'conversation' ||
+          message.role !== 'assistant' ||
+          (message.status !== 'complete' && message.status !== 'interrupted') ||
+          message.conversationId !== task.conversationId ||
+          owner.workSessionId !== task.workSessionId
+        ) {
+          throw new Error('WorkSession model output is invalid.');
+        }
+        seenMessages.add(outputItem.messageId);
+        activeMessages.push(message);
       }
       unresolvedCall = item;
       seenCalls.add(item.callId);
@@ -372,6 +404,26 @@ export async function buildAgentContext(
       const modelItem = modelMessage(message, images.get(message.id));
       if (modelItem) input.push(modelItem);
     } else if (item.type === 'function_call') {
+      for (const outputItem of item.modelOutputItems ?? []) {
+        if (outputItem.type === 'reasoning') {
+          input.push({
+            type: 'reasoning',
+            itemId: outputItem.itemId,
+            encryptedContent: outputItem.encryptedContent,
+            summary: outputItem.summary,
+          });
+          continue;
+        }
+        const message = messagesById.get(outputItem.messageId);
+        if (message === undefined) {
+          throw new Error('WorkSession model output is invalid.');
+        }
+        const modelItem = modelMessage(message, images.get(message.id));
+        if (modelItem === undefined) {
+          throw new Error('WorkSession model output is invalid.');
+        }
+        input.push(modelItem);
+      }
       input.push({
         type: 'function_call',
         callId: item.callId,

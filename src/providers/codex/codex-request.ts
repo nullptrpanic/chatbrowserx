@@ -39,6 +39,13 @@ function mapInputItem(item: ModelInputItem): Readonly<Record<string, unknown>> {
         role: item.role,
         content: item.content.map(mapContentPart),
       };
+    case 'reasoning':
+      return {
+        type: 'reasoning',
+        id: item.itemId,
+        encrypted_content: item.encryptedContent,
+        summary: item.summary,
+      };
     case 'function_call':
       return {
         type: 'function_call',
@@ -100,6 +107,7 @@ export function buildCodexRequest(input: BuildCodexRequestInput): CodexHttpReque
       ...toolContract,
       store: false,
       stream: true,
+      include: ['reasoning.encrypted_content'],
       reasoning: { effort: input.request.reasoningEffort, summary: 'auto' },
     },
   };

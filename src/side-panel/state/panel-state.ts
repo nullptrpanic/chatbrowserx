@@ -73,6 +73,7 @@ const taskSupplementSchema = z
     text: z.string().max(20_000),
     attachmentIds: z.array(idSchema).max(8),
     createdAt: timestampSchema,
+    applicationState: z.enum(['applied', 'pending']).optional(),
     detailIndex: z.number().int().positive().optional(),
   })
   .strict();

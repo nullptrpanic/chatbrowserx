@@ -309,6 +309,7 @@ export class PageObserver {
           'DOMSnapshot.captureSnapshot',
           {
             computedStyles: [...SEMANTIC_SNAPSHOT_STYLES],
+            includeDOMRects: true,
           },
         ),
         this.#dependencies.transport.send<Protocol.Page.GetFrameTreeResponse>(

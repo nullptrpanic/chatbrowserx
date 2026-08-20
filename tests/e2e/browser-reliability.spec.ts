@@ -326,3 +326,306 @@ extensionTest(
     }
   },
 );
+
+extensionTest(
+  'searches and sends through custom editors while scrolling a nested conversation',
+  async ({ extensionSession }) => {
+    const fixtureServer = createServer((_request, response) => {
+      response.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
+      response.end(`<!doctype html>
+        <html>
+          <head>
+            <style>
+              body { font: 16px sans-serif; margin: 24px; }
+              #open-search, .person-card { cursor: pointer; }
+              .editor-shell { align-items: center; border: 1px solid #ccc; display: flex;
+                min-height: 44px; padding: 0 12px; width: 420px; }
+              [contenteditable] { flex: 1; min-height: 30px; outline: none; }
+              .placeholder { color: #777; pointer-events: none; }
+              #history { border: 1px solid #ccc; height: 140px; overflow-y: auto; width: 520px; }
+              #history-content { height: 1200px; padding-top: 1000px; }
+              .person-card { border: 1px solid #ddd; margin-top: 12px; padding: 12px; width: 420px; }
+            </style>
+          </head>
+          <body>
+            <p id="open-search">Search</p>
+            <section id="search-panel" hidden>
+              <div class="editor-shell">
+                <div id="people-search" contenteditable="true"></div>
+                <span class="placeholder">Search people</span>
+              </div>
+              <div id="results"></div>
+            </section>
+            <section id="conversation" hidden>
+              <div id="history" aria-label="Message history">
+                <div id="history-content">Oldest visible message</div>
+              </div>
+              <div class="editor-shell">
+                <div id="composer" contenteditable="true" data-placeholder="Message Alex"></div>
+              </div>
+              <div id="sent"></div>
+            </section>
+            <script>
+              const openSearch = document.querySelector('#open-search');
+              const searchPanel = document.querySelector('#search-panel');
+              const peopleSearch = document.querySelector('#people-search');
+              const results = document.querySelector('#results');
+              const conversation = document.querySelector('#conversation');
+              const composer = document.querySelector('#composer');
+              const sent = document.querySelector('#sent');
+
+              openSearch.addEventListener('click', () => {
+                searchPanel.hidden = false;
+              });
+              peopleSearch.addEventListener('input', () => {
+                results.innerHTML = peopleSearch.textContent.includes('Alex')
+                  ? '<div class="person-card"><span>Alex Chen</span><span>Engineering</span></div>'
+                  : '';
+                results.querySelector('.person-card')?.addEventListener('click', () => {
+                  searchPanel.hidden = true;
+                  conversation.hidden = false;
+                });
+              });
+              composer.addEventListener('keydown', (event) => {
+                if (event.key !== 'Enter') return;
+                event.preventDefault();
+                const text = composer.textContent.trim();
+                if (!text) return;
+                const message = document.createElement('p');
+                message.textContent = text;
+                sent.append(message);
+                composer.textContent = '';
+              });
+            </script>
+          </body>
+        </html>`);
+    });
+    const port = await listen(fixtureServer);
+    const fixtureUrl = `http://127.0.0.1:${String(port)}/messenger`;
+    const page = await extensionSession.context.newPage();
+    await page.goto(fixtureUrl);
+    const foregroundPage = await extensionSession.context.newPage();
+    await foregroundPage.goto('about:blank');
+    await foregroundPage.bringToFront();
+
+    let providerTurn = 0;
+    let nestedScrollOutput: Readonly<Record<string, unknown>> | null = null;
+    let replayedSubmitOutput: Readonly<Record<string, unknown>> | null = null;
+    let composerRef = '';
+    await extensionSession.context.route(
+      'https://chatgpt.com/backend-api/codex/responses',
+      async (route) => {
+        providerTurn += 1;
+        const body = route.request().postDataJSON() as unknown;
+        const outputs = functionOutputs(body);
+        const latest = JSON.parse(outputs.at(-1) ?? '{}') as {
+          readonly data?: {
+            readonly elements?: readonly Record<string, unknown>[];
+          };
+        };
+        const elements = latest.data?.elements ?? [];
+        const refNamed = (name: string): string => {
+          const target = elements.find(
+            (element) =>
+              typeof element.n === 'string' &&
+              element.n.includes(name) &&
+              typeof element.ref === 'string',
+          );
+          return typeof target?.ref === 'string' ? target.ref : '';
+        };
+        let responseBody: string;
+        switch (providerTurn) {
+          case 1:
+            responseBody = toolResponse(
+              'resp_search_entry',
+              'item_search_entry',
+              'call_search_entry',
+              'browser_inspect',
+              { tabId: 0, mode: 'interactive', since: '' },
+            );
+            break;
+          case 2: {
+            const ref = refNamed('Search');
+            if (!ref) throw new Error('Search entry ref unavailable.');
+            responseBody = toolResponse(
+              'resp_open_search',
+              'item_open_search',
+              'call_open_search',
+              'browser_click',
+              { tabId: 0, ref, button: 'left', count: 1 },
+            );
+            break;
+          }
+          case 3:
+            responseBody = toolResponse(
+              'resp_search_editor',
+              'item_search_editor',
+              'call_search_editor',
+              'browser_inspect',
+              { tabId: 0, mode: 'interactive', since: '' },
+            );
+            break;
+          case 4: {
+            const ref = refNamed('Search people');
+            if (!ref) throw new Error('Custom search editor ref unavailable.');
+            responseBody = toolResponse(
+              'resp_type_search',
+              'item_type_search',
+              'call_type_search',
+              'browser_type',
+              { tabId: 0, ref, text: 'Alex', replace: true, submit: false },
+            );
+            break;
+          }
+          case 5:
+            responseBody = toolResponse(
+              'resp_person_result',
+              'item_person_result',
+              'call_person_result',
+              'browser_inspect',
+              { tabId: 0, mode: 'interactive', since: '' },
+            );
+            break;
+          case 6: {
+            const ref = refNamed('Alex Chen');
+            if (!ref) throw new Error('Person card ref unavailable.');
+            responseBody = toolResponse(
+              'resp_open_person',
+              'item_open_person',
+              'call_open_person',
+              'browser_click',
+              { tabId: 0, ref, button: 'left', count: 1 },
+            );
+            break;
+          }
+          case 7:
+            responseBody = toolResponse(
+              'resp_conversation',
+              'item_conversation',
+              'call_conversation',
+              'browser_inspect',
+              { tabId: 0, mode: 'interactive', since: '' },
+            );
+            break;
+          case 8: {
+            const ref = refNamed('Message history');
+            composerRef = refNamed('Message Alex');
+            if (!ref || !composerRef) throw new Error('Conversation targets unavailable.');
+            responseBody = toolResponse(
+              'resp_scroll',
+              'item_scroll',
+              'call_scroll',
+              'browser_scroll',
+              { tabId: 0, target: ref, deltaX: 0, deltaY: 200 },
+            );
+            break;
+          }
+          case 9:
+            nestedScrollOutput = JSON.parse(outputs.at(-1) ?? '{}') as Readonly<
+              Record<string, unknown>
+            >;
+            responseBody = toolResponse('resp_send', 'item_send', 'call_send', 'browser_type', {
+              tabId: 0,
+              ref: composerRef,
+              text: 'Hello Alex',
+              replace: true,
+              submit: true,
+            });
+            break;
+          case 10:
+            responseBody = toolResponse(
+              'resp_repeat_send',
+              'item_repeat_send',
+              'call_repeat_send',
+              'browser_type',
+              { tabId: 0, ref: composerRef, text: 'Hello Alex', replace: true, submit: true },
+            );
+            break;
+          default:
+            replayedSubmitOutput = JSON.parse(outputs.at(-1) ?? '{}') as Readonly<
+              Record<string, unknown>
+            >;
+            responseBody = finalTextResponse('resp_messenger_done', 'Message sent once.');
+        }
+        await route.fulfill({
+          status: 200,
+          headers: { 'Content-Type': 'text/event-stream' },
+          body: responseBody,
+        });
+      },
+    );
+
+    try {
+      const tabs = await extensionSession.sidePanelPage.evaluate(
+        async (url) => chrome.tabs.query({ url }),
+        fixtureUrl,
+      );
+      const tabId = tabs[0]?.id;
+      if (typeof tabId !== 'number') throw new Error('Fixture tab ID unavailable.');
+      await sendExtensionMessage(extensionSession.sidePanelPage, {
+        version: 1,
+        requestId: 'messenger_e2e_settings',
+        type: 'settings.save',
+        payload: {
+          reasoningEffort: 'low',
+          systemPrompt: 'Use the available browser tools to complete the requested page action.',
+          language: 'en',
+          historyMessageLimit: 50,
+          codexAccessToken: syntheticAccessToken(),
+        },
+      });
+      const submitted = await sendExtensionMessage<{ readonly task: { readonly id: string } }>(
+        extensionSession.sidePanelPage,
+        {
+          version: 1,
+          requestId: 'messenger_e2e_submit',
+          type: 'chat.submit',
+          payload: {
+            tabId,
+            text: 'Find Alex, review older messages, and send one greeting.',
+            attachmentIds: [],
+          },
+        },
+      );
+
+      await expect
+        .poll(
+          async () => {
+            const snapshot = await sendExtensionMessage<{
+              readonly task: { readonly status: string };
+            }>(extensionSession.sidePanelPage, {
+              version: 1,
+              requestId: `messenger_e2e_snapshot_${String(Date.now())}`,
+              type: 'task.getSnapshot',
+              payload: { taskId: submitted.task.id },
+            });
+            return snapshot.task.status;
+          },
+          { timeout: 30_000 },
+        )
+        .toBe('completed');
+
+      expect(providerTurn).toBe(11);
+      expect(nestedScrollOutput).toMatchObject({
+        ok: true,
+        data: {
+          action: 'scroll',
+          strategy: 'element',
+          moved: true,
+          actualDeltaY: 200,
+        },
+      });
+      expect(replayedSubmitOutput).toMatchObject({
+        ok: true,
+        data: { action: 'type', submitted: true, replayed: true },
+      });
+      await expect(page.locator('#history')).toHaveJSProperty('scrollTop', 200);
+      await expect(page.locator('#sent > p')).toHaveCount(1);
+      await expect(page.locator('#sent > p')).toHaveText('Hello Alex');
+    } finally {
+      await foregroundPage.close();
+      await page.close();
+      await new Promise<void>((resolve) => fixtureServer.close(() => resolve()));
+    }
+  },
+);

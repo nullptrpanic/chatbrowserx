@@ -56,6 +56,20 @@ function invalidContinuation(): never {
   throw new Error('Context continuation is invalid.');
 }
 
+/** Counts opaque and summarized model output that disappears with one compacted call. */
+function modelOutputCharacters(
+  call: Extract<ContinuationItem, { readonly type: 'function_call' }>,
+): number {
+  return (call.modelOutputItems ?? []).reduce((total, item) => {
+    if (item.type !== 'reasoning') return total;
+    return (
+      total +
+      item.encryptedContent.length +
+      item.summary.reduce((summaryTotal, summary) => summaryTotal + summary.text.length, 0)
+    );
+  }, 0);
+}
+
 function parsePendingCommit(pending: PendingToolCall): RecordedContextCommitToolInput | null {
   if (pending.executionState !== 'recorded') {
     return null;
@@ -159,7 +173,8 @@ export function shouldForceContextCommit(
     } else {
       if (hasUnconsumedImage) hasConsumedImage = true;
       rawPairCount += 1;
-      rawCharacters += pendingCall.argumentsJson.length + item.output.length;
+      rawCharacters +=
+        pendingCall.argumentsJson.length + item.output.length + modelOutputCharacters(pendingCall);
       if ((item.attachmentIds?.length ?? 0) > 0) hasUnconsumedImage = true;
     }
     pendingCall = undefined;
@@ -293,7 +308,10 @@ export function compactContextAtCommit(
       continue;
     }
     compactedCalls += 1;
-    releasedTextChars += unit.call.argumentsJson.length + unit.output.output.length;
+    releasedTextChars +=
+      unit.call.argumentsJson.length +
+      unit.output.output.length +
+      modelOutputCharacters(unit.call);
     for (const attachmentId of unit.output.attachmentIds ?? []) {
       releasedAttachmentIds.add(attachmentId);
     }

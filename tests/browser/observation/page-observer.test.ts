@@ -169,6 +169,17 @@ describe('PageObserver', () => {
     const result = await observer.inspect(7, 'interactive', new AbortController().signal);
 
     expect(sessionPort.ensure).toHaveBeenCalledOnce();
+    expect(transport.send).toHaveBeenCalledWith({ tabId: 7 }, 'DOMSnapshot.captureSnapshot', {
+      computedStyles: [
+        'cursor',
+        'display',
+        'visibility',
+        'pointer-events',
+        'overflow-x',
+        'overflow-y',
+      ],
+      includeDOMRects: true,
+    });
     expect(result).toMatchObject({
       url: 'https://top.test/',
       debuggerSession: 'ephemeral',

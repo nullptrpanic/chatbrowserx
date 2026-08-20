@@ -1,7 +1,11 @@
 import type { IDBPDatabase } from 'idb';
 import type { ConversationId, TaskId } from '../shared/ids';
 import type { Checkpoint } from '../tasks/checkpoint-types';
-import type { ContinuationItem, PendingToolCall } from '../tasks/continuation-types';
+import type {
+  ContinuationItem,
+  ModelOutputContinuationItem,
+  PendingToolCall,
+} from '../tasks/continuation-types';
 import type { TaskEvent, TaskLease, TaskRun, TaskStatus } from '../tasks/task-types';
 import type { ChatBrowserDatabase } from './database-schema';
 
@@ -81,6 +85,10 @@ function normalizeTask(task: TaskRun): TaskRun {
 }
 
 const validToolNamePattern = /^[a-zA-Z0-9_-]+$/;
+const MAX_MODEL_OUTPUT_ITEMS_PER_CALL = 8;
+const MAX_ENCRYPTED_REASONING_CHARACTERS = 8 * 1024 * 1024;
+const MAX_REASONING_SUMMARIES_PER_ITEM = 8;
+const MAX_REASONING_SUMMARY_CHARACTERS = 20_000;
 
 function normalizeAttachmentIds(value: unknown): readonly string[] {
   if (value === undefined) return [];
@@ -89,6 +97,69 @@ function normalizeAttachmentIds(value: unknown): readonly string[] {
     (id): id is string => typeof id === 'string' && id.length > 0 && id.length <= 256,
   );
   return ids.length === value.length ? [...new Set(ids)] : [];
+}
+
+/** Preserves only bounded opaque Provider output required for stateless continuation. */
+function normalizeModelOutputItems(
+  value: unknown,
+): readonly ModelOutputContinuationItem[] | null {
+  if (value === undefined) return [];
+  if (!Array.isArray(value) || value.length > MAX_MODEL_OUTPUT_ITEMS_PER_CALL) return null;
+  const normalized: ModelOutputContinuationItem[] = [];
+  const reasoningIds = new Set<string>();
+  const messageIds = new Set<string>();
+  for (const raw of value) {
+    if (typeof raw !== 'object' || raw === null) return null;
+    const item = raw as Record<string, unknown>;
+    if (item.type === 'reasoning') {
+      if (
+        typeof item.itemId !== 'string' ||
+        item.itemId.length === 0 ||
+        item.itemId.length > 256 ||
+        reasoningIds.has(item.itemId) ||
+        typeof item.encryptedContent !== 'string' ||
+        item.encryptedContent.length === 0 ||
+        item.encryptedContent.length > MAX_ENCRYPTED_REASONING_CHARACTERS ||
+        !Array.isArray(item.summary) ||
+        item.summary.length > MAX_REASONING_SUMMARIES_PER_ITEM
+      ) {
+        return null;
+      }
+      const summary: { readonly type: 'summary_text'; readonly text: string }[] = [];
+      for (const rawSummary of item.summary) {
+        if (typeof rawSummary !== 'object' || rawSummary === null) return null;
+        const entry = rawSummary as Record<string, unknown>;
+        if (
+          entry.type !== 'summary_text' ||
+          typeof entry.text !== 'string' ||
+          entry.text.length > MAX_REASONING_SUMMARY_CHARACTERS
+        ) {
+          return null;
+        }
+        summary.push({ type: 'summary_text', text: entry.text });
+      }
+      reasoningIds.add(item.itemId);
+      normalized.push({
+        type: 'reasoning',
+        itemId: item.itemId,
+        encryptedContent: item.encryptedContent,
+        summary,
+      });
+      continue;
+    }
+    if (
+      item.type !== 'assistant_message_ref' ||
+      typeof item.messageId !== 'string' ||
+      item.messageId.length === 0 ||
+      item.messageId.length > 256 ||
+      messageIds.has(item.messageId)
+    ) {
+      return null;
+    }
+    messageIds.add(item.messageId);
+    normalized.push({ type: 'assistant_message_ref', messageId: item.messageId });
+  }
+  return normalized;
 }
 
 /** Returns a safe completed result or null for malformed or removed legacy tool records. */
@@ -172,6 +243,7 @@ function normalizeStoredContinuation(
       continue;
     }
     if (item.type === 'function_call') {
+      const modelOutputItems = normalizeModelOutputItems(item.modelOutputItems);
       if (
         unresolvedCall !== null ||
         typeof item.callId !== 'string' ||
@@ -179,7 +251,8 @@ function normalizeStoredContinuation(
         usedCallIds.has(item.callId) ||
         typeof item.name !== 'string' ||
         !validToolNamePattern.test(item.name) ||
-        typeof item.argumentsJson !== 'string'
+        typeof item.argumentsJson !== 'string' ||
+        modelOutputItems === null
       ) {
         return null;
       }
@@ -188,6 +261,7 @@ function normalizeStoredContinuation(
         callId: item.callId,
         name: item.name,
         argumentsJson: item.argumentsJson,
+        ...(modelOutputItems.length === 0 ? {} : { modelOutputItems }),
       };
       usedCallIds.add(item.callId);
       items.push(unresolvedCall);

@@ -374,6 +374,14 @@ describe('PanelService', () => {
     const fixture = buildFixture();
     const runningTask = { ...fixture.task, status: 'planning' as const };
     fixture.dependencies.tasks.listByConversation.mockResolvedValue([runningTask]);
+    fixture.dependencies.tasks.getCheckpoint.mockResolvedValue({
+      ...fixture.checkpoint,
+      taskStatus: 'planning',
+      continuationItems: [
+        { type: 'message_ref', messageId: 'message_1' },
+        { type: 'message_ref', messageId: 'supplement_1' },
+      ],
+    });
     fixture.dependencies.tasks.listEvents.mockResolvedValue([
       {
         id: 'event_supplements',
@@ -424,11 +432,338 @@ describe('PanelService', () => {
         attachmentIds: ['attachment_1'],
         createdAt: 1_100,
         detailIndex: 1,
+        applicationState: 'applied',
       },
     ]);
     expect(snapshot.task?.events[0]?.supplementIds).toEqual(['supplement_1']);
     expect(snapshot.attachments).toEqual([
       expect.objectContaining({ id: 'attachment_1', fileName: 'photo.png' }),
+    ]);
+  });
+
+  it('keeps a newly queued supplement pending until a WorkSession checkpoint references it', async () => {
+    const fixture = buildFixture();
+    const runningTask = { ...fixture.task, status: 'planning' as const };
+    fixture.dependencies.tasks.listByConversation.mockResolvedValue([runningTask]);
+    fixture.dependencies.tasks.listEvents.mockResolvedValue([
+      {
+        id: 'event_other_supplement',
+        taskId: runningTask.id,
+        sequence: 1,
+        type: 'task.supplements-applied',
+        reason: 'user_supplements_applied',
+        at: 1_200,
+        error: null,
+        supplementIds: ['another_supplement'],
+      },
+    ]);
+    fixture.dependencies.conversations.listMessages.mockResolvedValue([
+      {
+        id: 'message_1',
+        kind: 'conversation',
+        conversationId: fixture.conversation.id,
+        taskId: runningTask.id,
+        role: 'user',
+        status: 'complete',
+        text: 'Research this',
+        attachmentIds: [],
+        createdAt: 1_010,
+        updatedAt: 1_010,
+      },
+      {
+        id: 'supplement_pending',
+        kind: 'supplement',
+        conversationId: fixture.conversation.id,
+        taskId: runningTask.id,
+        role: 'user',
+        status: 'complete',
+        text: 'Use Go instead.',
+        attachmentIds: [],
+        createdAt: 1_100,
+        updatedAt: 1_100,
+      },
+    ]);
+    const service = new PanelService(fixture.dependencies);
+
+    const snapshot = await service.getSnapshot(7);
+
+    expect(snapshot.task?.supplements).toEqual([
+      expect.objectContaining({ id: 'supplement_pending', applicationState: 'pending' }),
+    ]);
+  });
+
+  it('marks an earlier task supplement applied when a continued WorkSession references it', async () => {
+    const fixture = buildFixture();
+    const cancelledTask: TaskRun = {
+      ...fixture.task,
+      status: 'cancelled',
+      checkpointId: 'checkpoint_cancelled',
+    };
+    const continuedTask: TaskRun = {
+      ...fixture.task,
+      id: 'task_continued',
+      status: 'planning',
+      createdAt: 1_200,
+      updatedAt: 1_300,
+      checkpointId: 'checkpoint_continued',
+    };
+    fixture.dependencies.tasks.get.mockResolvedValue(cancelledTask);
+    fixture.dependencies.tasks.listByConversation.mockResolvedValue([cancelledTask, continuedTask]);
+    fixture.dependencies.tasks.listEvents.mockResolvedValue([]);
+    fixture.dependencies.tasks.getCheckpoint.mockImplementation(async (checkpointId) =>
+      checkpointId === 'checkpoint_continued'
+        ? {
+            ...fixture.checkpoint,
+            id: checkpointId,
+            taskId: continuedTask.id,
+            taskStatus: continuedTask.status,
+            continuationItems: [
+              { type: 'message_ref', messageId: 'message_1' },
+              { type: 'message_ref', messageId: 'supplement_from_cancelled' },
+            ],
+          }
+        : {
+            ...fixture.checkpoint,
+            id: checkpointId,
+            taskId: cancelledTask.id,
+            taskStatus: cancelledTask.status,
+          },
+    );
+    fixture.dependencies.conversations.listMessages.mockResolvedValue([
+      {
+        id: 'message_1',
+        kind: 'conversation',
+        conversationId: fixture.conversation.id,
+        taskId: cancelledTask.id,
+        role: 'user',
+        status: 'complete',
+        text: 'Research this',
+        attachmentIds: [],
+        createdAt: 1_010,
+        updatedAt: 1_010,
+      },
+      {
+        id: 'supplement_from_cancelled',
+        kind: 'supplement',
+        conversationId: fixture.conversation.id,
+        taskId: cancelledTask.id,
+        role: 'user',
+        status: 'complete',
+        text: 'Use Go instead.',
+        attachmentIds: [],
+        createdAt: 1_100,
+        updatedAt: 1_100,
+      },
+    ]);
+    const service = new PanelService(fixture.dependencies);
+
+    const details = await service.getTaskDetails(cancelledTask.id);
+
+    expect(details.supplements).toEqual([
+      expect.objectContaining({
+        id: 'supplement_from_cancelled',
+        applicationState: 'applied',
+      }),
+    ]);
+  });
+
+  it('projects each continued task as its cumulative WorkSession prefix with original event times', async () => {
+    const fixture = buildFixture();
+    const cancelledTask: TaskRun = {
+      ...fixture.task,
+      status: 'cancelled',
+      createdAt: 1_000,
+      updatedAt: 1_500,
+      checkpointId: 'checkpoint_cancelled',
+    };
+    const continuedTask: TaskRun = {
+      ...fixture.task,
+      id: 'task_continued',
+      status: 'completed',
+      createdAt: 2_000,
+      updatedAt: 2_500,
+      checkpointId: 'checkpoint_continued',
+    };
+    const oldResult = {
+      callId: 'call_old',
+      toolName: 'browser_inspect',
+      argumentsJson: '{"tabId":7}',
+      output: '{"ok":true,"page":"old"}',
+      resultRef: 'result_old',
+      attachmentIds: [],
+    };
+    const newResult = {
+      callId: 'call_new',
+      toolName: 'browser_click',
+      argumentsJson: '{"ref":"e2"}',
+      output: '{"ok":true,"page":"new"}',
+      resultRef: 'result_new',
+      attachmentIds: [],
+    };
+    fixture.dependencies.tasks.get.mockImplementation(async (taskId) =>
+      taskId === continuedTask.id ? continuedTask : cancelledTask,
+    );
+    fixture.dependencies.tasks.listByConversation.mockResolvedValue([continuedTask, cancelledTask]);
+    fixture.dependencies.tasks.listEvents.mockImplementation(async (taskId) =>
+      taskId === cancelledTask.id
+        ? [
+            {
+              id: 'event_old_result',
+              taskId,
+              sequence: 1,
+              type: 'tool.result-recorded',
+              reason: 'browser_inspect_result_recorded',
+              at: 1_100,
+              error: null,
+            },
+            {
+              id: 'event_old_supplement',
+              taskId,
+              sequence: 2,
+              type: 'task.supplements-applied',
+              reason: 'user_supplements_applied',
+              at: 1_300,
+              error: null,
+              supplementIds: ['supplement_old'],
+            },
+          ]
+        : [
+            {
+              id: 'event_new_result',
+              taskId,
+              sequence: 1,
+              type: 'tool.result-recorded',
+              reason: 'browser_click_result_recorded',
+              at: 2_100,
+              error: null,
+            },
+            {
+              id: 'event_new_supplement',
+              taskId,
+              sequence: 2,
+              type: 'task.supplements-applied',
+              reason: 'user_supplements_applied',
+              at: 2_300,
+              error: null,
+              supplementIds: ['supplement_new'],
+            },
+          ],
+    );
+    fixture.dependencies.tasks.getCheckpoint.mockImplementation(async (checkpointId) =>
+      checkpointId === cancelledTask.checkpointId
+        ? {
+            ...fixture.checkpoint,
+            id: checkpointId,
+            taskId: cancelledTask.id,
+            sequence: 2,
+            taskStatus: cancelledTask.status,
+            completedToolResults: [oldResult],
+            continuationItems: [
+              { type: 'message_ref', messageId: 'message_1' },
+              { type: 'message_ref', messageId: 'supplement_old' },
+            ],
+            createdAt: 1_500,
+          }
+        : {
+            ...fixture.checkpoint,
+            id: checkpointId,
+            taskId: continuedTask.id,
+            sequence: 2,
+            taskStatus: continuedTask.status,
+            completedToolResults: [oldResult, newResult],
+            continuationItems: [
+              { type: 'message_ref', messageId: 'message_1' },
+              { type: 'message_ref', messageId: 'supplement_old' },
+              { type: 'message_ref', messageId: 'supplement_new' },
+            ],
+            createdAt: 2_500,
+          },
+    );
+    fixture.dependencies.conversations.listMessages.mockResolvedValue([
+      {
+        id: 'message_1',
+        kind: 'conversation',
+        conversationId: fixture.conversation.id,
+        taskId: cancelledTask.id,
+        role: 'user',
+        status: 'complete',
+        text: 'Inspect this page',
+        attachmentIds: [],
+        createdAt: 1_010,
+        updatedAt: 1_010,
+      },
+      {
+        id: 'supplement_old',
+        kind: 'supplement',
+        conversationId: fixture.conversation.id,
+        taskId: cancelledTask.id,
+        role: 'user',
+        status: 'complete',
+        text: 'Use the old task context.',
+        attachmentIds: [],
+        createdAt: 1_250,
+        updatedAt: 1_250,
+      },
+      {
+        id: 'supplement_new',
+        kind: 'supplement',
+        conversationId: fixture.conversation.id,
+        taskId: continuedTask.id,
+        role: 'user',
+        status: 'complete',
+        text: 'Then continue from here.',
+        attachmentIds: [],
+        createdAt: 2_250,
+        updatedAt: 2_250,
+      },
+    ]);
+    const service = new PanelService(fixture.dependencies);
+
+    const snapshot = await service.getSnapshot(7);
+    const [cancelledDetails, continuedDetails] = await Promise.all([
+      service.getTaskDetails(cancelledTask.id),
+      service.getTaskDetails(continuedTask.id),
+    ]);
+
+    const continuedSummary = snapshot.tasks.find(({ id }) => id === continuedTask.id);
+    expect(continuedSummary?.events.map(({ type, at }) => ({ type, at }))).toEqual([
+      { type: 'tool.result-recorded', at: 2_100 },
+      { type: 'task.supplements-applied', at: 2_300 },
+    ]);
+    expect(continuedSummary?.supplements.map(({ id }) => id)).toEqual([
+      'supplement_old',
+      'supplement_new',
+    ]);
+    expect(
+      cancelledDetails.events.map(({ sequence, type, at }) => ({ sequence, type, at })),
+    ).toEqual([
+      { sequence: 1, type: 'tool.result-recorded', at: 1_100 },
+      { sequence: 2, type: 'task.supplements-applied', at: 1_300 },
+    ]);
+    expect(cancelledDetails.supplements.map(({ id }) => id)).toEqual(['supplement_old']);
+    expect(
+      continuedDetails.events.map(({ sequence, type, at }) => ({ sequence, type, at })),
+    ).toEqual([
+      { sequence: 1, type: 'tool.result-recorded', at: 1_100 },
+      { sequence: 2, type: 'task.supplements-applied', at: 1_300 },
+      { sequence: 1, type: 'tool.result-recorded', at: 2_100 },
+      { sequence: 2, type: 'task.supplements-applied', at: 2_300 },
+    ]);
+    expect(
+      continuedDetails.completedToolResults.map(({ callId, detailIndex }) => [callId, detailIndex]),
+    ).toEqual([
+      ['call_old', 1],
+      ['call_new', 3],
+    ]);
+    expect(
+      continuedDetails.supplements.map(({ id, detailIndex, createdAt }) => ({
+        id,
+        detailIndex,
+        createdAt,
+      })),
+    ).toEqual([
+      { id: 'supplement_old', detailIndex: 2, createdAt: 1_250 },
+      { id: 'supplement_new', detailIndex: 4, createdAt: 2_250 },
     ]);
   });
 

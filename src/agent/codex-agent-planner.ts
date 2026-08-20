@@ -9,6 +9,7 @@ import type { ModelStreamEvent, ModelUsage } from '../providers/stream-events';
 import type { IdGenerator } from '../shared/ids';
 import type { Clock } from '../shared/time';
 import type { MessageRecord } from '../tasks/message-types';
+import type { ModelOutputContinuationItem } from '../tasks/continuation-types';
 import { buildAgentContext } from './context/agent-context';
 import {
   contextCommitCandidateCallIds,
@@ -166,6 +167,7 @@ export class CodexAgentPlanner implements AgentPlanner {
     let buffer: StreamPersistenceBuffer | null = null;
     let bufferFinalized = false;
     let assistantMessageId: string | null = null;
+    const modelOutputItems: ModelOutputContinuationItem[] = [];
     const turnStartedAt = this.#dependencies.clock.now();
     let firstEventAt: number | null = null;
     let firstTextAt: number | null = null;
@@ -194,7 +196,14 @@ export class CodexAgentPlanner implements AgentPlanner {
         if (event.type === 'text.delta') firstTextAt ??= eventAt;
         inspectEnvelopeEvent(event, state);
         inspectToolEvent(event, state);
-        if (event.type === 'reasoning.summary') {
+        if (event.type === 'reasoning.encrypted') {
+          modelOutputItems.push({
+            type: 'reasoning',
+            itemId: event.itemId,
+            encryptedContent: event.encryptedContent,
+            summary: event.summary,
+          });
+        } else if (event.type === 'reasoning.summary') {
           if (state.responseId === null) {
             throw providerErrorFromCode('INVALID_RESPONSE');
           }
@@ -278,30 +287,29 @@ export class CodexAgentPlanner implements AgentPlanner {
           name: state.tool.name,
           argumentsJson: state.tool.argumentsJson,
         };
+        if (buffer !== null) {
+          await buffer.interrupt();
+          bufferFinalized = true;
+          if (assistantMessageId === null) {
+            throw providerErrorFromCode('INVALID_RESPONSE');
+          }
+          modelOutputItems.push({
+            type: 'assistant_message_ref',
+            messageId: assistantMessageId,
+          });
+        }
         if (state.tool.name === CONTEXT_COMMIT_TOOL_NAME) {
           const call = parseContextCommitToolCall(source);
-          if (buffer !== null) {
-            await buffer.interrupt();
-            bufferFinalized = true;
-          }
-          yield { type: 'context.commit', call, modelTurn };
+          yield { type: 'context.commit', call, modelTurn, modelOutputItems };
           return;
         }
         if (state.tool.name.startsWith('browser_')) {
           const call = parseBrowserToolCall(source);
-          if (buffer !== null) {
-            await buffer.interrupt();
-            bufferFinalized = true;
-          }
-          yield { type: 'browser.call', call, modelTurn };
+          yield { type: 'browser.call', call, modelTurn, modelOutputItems };
           return;
         }
         const call = parseTavilyToolCall(source);
-        if (buffer !== null) {
-          await buffer.interrupt();
-          bufferFinalized = true;
-        }
-        yield { type: 'tavily.call', ...call, modelTurn };
+        yield { type: 'tavily.call', ...call, modelTurn, modelOutputItems };
         return;
       }
       if (!state.hasText || buffer === null || assistantMessageId === null) {
@@ -335,9 +343,13 @@ export class CodexAgentPlanner implements AgentPlanner {
     const messages = await this.#dependencies.conversations.listMessages(input.task.conversationId);
     const now = this.#dependencies.clock.now();
     const checkpointMessageIds = new Set(
-      input.checkpoint.continuationItems.flatMap((item) =>
-        item.type === 'message_ref' ? [item.messageId] : [],
-      ),
+      input.checkpoint.continuationItems.flatMap((item) => {
+        if (item.type === 'message_ref') return [item.messageId];
+        if (item.type !== 'function_call') return [];
+        return (item.modelOutputItems ?? []).flatMap((output) =>
+          output.type === 'assistant_message_ref' ? [output.messageId] : [],
+        );
+      }),
     );
     const taskReplies = messages.filter(
       (message) =>

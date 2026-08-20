@@ -63,6 +63,8 @@ export const en = {
   cancel: 'Cancel task',
   noEvents: 'No execution events yet',
   userSupplement: 'User supplement',
+  userSupplementApplied: 'Applied',
+  userSupplementPending: 'Next turn',
   expandUserSupplement: 'Expand user supplement',
   collapseUserSupplement: 'Collapse user supplement',
   toolCompleted: 'Completed',

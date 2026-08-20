@@ -72,6 +72,8 @@ export interface PanelTaskSupplement {
   readonly text: string;
   readonly attachmentIds: readonly string[];
   readonly createdAt: number;
+  /** Whether this supplement is already part of the WorkSession continuation. */
+  readonly applicationState?: 'applied' | 'pending' | undefined;
   /** One-based position among every user-visible execution-detail item. */
   readonly detailIndex?: number | undefined;
 }

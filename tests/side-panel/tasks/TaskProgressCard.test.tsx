@@ -71,6 +71,7 @@ function runningTask(completedToolCallCount: number): PanelTask {
         attachmentIds: [],
         createdAt: 1_450,
         detailIndex: 2,
+        applicationState: 'applied',
       },
     ],
   };
@@ -119,5 +120,45 @@ describe('TaskProgressCard execution details', () => {
     );
 
     expect(screen.getByRole('button', { name: '收起执行详情(4)' })).toBeVisible();
+  });
+
+  it('labels supplements as applied or waiting for the next turn', async () => {
+    const user = userEvent.setup();
+    const appliedTask = runningTask(2);
+    const { rerender } = render(
+      <TaskProgressCard
+        task={appliedTask}
+        attachments={attachments}
+        t={createTranslator('zh-CN')}
+        onPause={vi.fn()}
+        onResume={vi.fn()}
+        onRetry={vi.fn()}
+        onCancel={vi.fn()}
+      />,
+    );
+
+    await user.click(screen.getByRole('button', { name: '查看执行详情(3)' }));
+    expect(screen.getByText('已应用')).toBeVisible();
+
+    rerender(
+      <TaskProgressCard
+        task={{
+          ...appliedTask,
+          supplements: appliedTask.supplements.map((supplement) => ({
+            ...supplement,
+            applicationState: 'pending' as const,
+          })),
+        }}
+        attachments={attachments}
+        t={createTranslator('zh-CN')}
+        onPause={vi.fn()}
+        onResume={vi.fn()}
+        onRetry={vi.fn()}
+        onCancel={vi.fn()}
+      />,
+    );
+
+    expect(screen.queryByText('已应用')).not.toBeInTheDocument();
+    expect(screen.getByText('待下一轮')).toBeVisible();
   });
 });

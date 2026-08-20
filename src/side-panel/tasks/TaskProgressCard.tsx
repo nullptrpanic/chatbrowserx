@@ -213,6 +213,7 @@ function TaskDetailContent({
                   </span>
                   <TaskSupplement
                     supplement={supplement}
+                    applicationState={supplement.applicationState ?? 'applied'}
                     attachments={attachments}
                     t={t}
                     onOpenImagePreview={onOpenImagePreview}
@@ -228,6 +229,7 @@ function TaskDetailContent({
               </span>
               <TaskSupplement
                 supplement={supplement}
+                applicationState={supplement.applicationState ?? 'pending'}
                 attachments={attachments}
                 t={t}
                 onOpenImagePreview={onOpenImagePreview}

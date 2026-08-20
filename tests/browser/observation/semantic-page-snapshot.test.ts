@@ -9,12 +9,17 @@ interface FixtureNode {
   readonly backendNodeId: number;
   readonly nodeName: string;
   readonly parentIndex: number;
+  readonly text?: string;
   readonly attributes?: Readonly<Record<string, string>>;
   readonly cursor?: string;
   readonly clickable?: boolean;
   readonly checked?: boolean;
   readonly selected?: boolean;
   readonly bounds?: readonly [number, number, number, number];
+  readonly overflowX?: string;
+  readonly overflowY?: string;
+  readonly scrollRect?: readonly [number, number, number, number];
+  readonly clientRect?: readonly [number, number, number, number];
 }
 
 function domSnapshot(nodes: readonly FixtureNode[]): Protocol.DOMSnapshot.CaptureSnapshotResponse {
@@ -34,6 +39,8 @@ function domSnapshot(nodes: readonly FixtureNode[]): Protocol.DOMSnapshot.Captur
   const layoutNodeIndexes: number[] = [];
   const layoutStyles: number[][] = [];
   const layoutBounds: number[][] = [];
+  const layoutScrollRects: number[][] = [];
+  const layoutClientRects: number[][] = [];
   nodes.forEach((node, nodeIndex) => {
     if (node.clickable) clickableIndexes.push(nodeIndex);
     if (node.checked) checkedIndexes.push(nodeIndex);
@@ -51,11 +58,17 @@ function domSnapshot(nodes: readonly FixtureNode[]): Protocol.DOMSnapshot.Captur
                   ? 'visible'
                   : property === 'pointer-events'
                     ? 'auto'
-                    : '',
+                    : property === 'overflow-x'
+                      ? (node.overflowX ?? 'visible')
+                      : property === 'overflow-y'
+                        ? (node.overflowY ?? 'visible')
+                        : '',
           ),
         ),
       );
       layoutBounds.push([...node.bounds]);
+      layoutScrollRects.push([...(node.scrollRect ?? node.bounds)]);
+      layoutClientRects.push([...(node.clientRect ?? node.bounds)]);
     }
   });
   return {
@@ -72,9 +85,11 @@ function domSnapshot(nodes: readonly FixtureNode[]): Protocol.DOMSnapshot.Captur
         frameId: stringIndex('frame-main'),
         nodes: {
           parentIndex: nodes.map((node) => node.parentIndex),
-          nodeType: nodes.map((node) => (node.nodeName === '#document' ? 9 : 1)),
+          nodeType: nodes.map((node) =>
+            node.nodeName === '#document' ? 9 : node.nodeName === '#text' ? 3 : 1,
+          ),
           nodeName: nodes.map((node) => stringIndex(node.nodeName)),
-          nodeValue: nodes.map(() => stringIndex('')),
+          nodeValue: nodes.map((node) => stringIndex(node.text ?? '')),
           backendNodeId: nodes.map((node) => node.backendNodeId),
           attributes: nodes.map((node) =>
             Object.entries(node.attributes ?? {}).flatMap(([name, value]) => [
@@ -92,6 +107,8 @@ function domSnapshot(nodes: readonly FixtureNode[]): Protocol.DOMSnapshot.Captur
           bounds: layoutBounds,
           text: layoutNodeIndexes.map(() => stringIndex('')),
           stackingContexts: { index: [] },
+          scrollRects: layoutScrollRects,
+          clientRects: layoutClientRects,
         },
         textBoxes: { layoutIndex: [], bounds: [], start: [], length: [] },
       },
@@ -182,6 +199,195 @@ function labeledCheckboxSnapshot(checked: boolean) {
 }
 
 describe('buildSemanticPageSnapshot', () => {
+  it('binds editable AX descendants to their nearest contenteditable host', () => {
+    const editable = {
+      name: 'editable',
+      value: { type: 'boolean', value: true },
+    } satisfies Protocol.Accessibility.AXProperty;
+    const result = buildSemanticPageSnapshot({
+      axNodes: [
+        axNode('root', 1, 'RootWebArea', 'Messenger', { childIds: ['editor'] }),
+        axNode('editor', 20, 'generic', '', {
+          parentId: 'root',
+          childIds: ['editor-text'],
+          properties: [editable],
+        }),
+        axNode('editor-text', 23, 'StaticText', '\u200b', {
+          parentId: 'editor',
+          properties: [editable],
+        }),
+      ],
+      domSnapshot: domSnapshot([
+        { backendNodeId: 1, nodeName: '#document', parentIndex: -1 },
+        {
+          backendNodeId: 10,
+          nodeName: 'DIV',
+          parentIndex: 0,
+          bounds: [100, 50, 700, 48],
+        },
+        {
+          backendNodeId: 11,
+          nodeName: 'SPAN',
+          parentIndex: 1,
+          bounds: [110, 60, 80, 28],
+        },
+        {
+          backendNodeId: 12,
+          nodeName: '#text',
+          parentIndex: 2,
+          text: 'Search',
+          bounds: [110, 60, 80, 28],
+        },
+        {
+          backendNodeId: 20,
+          nodeName: 'DIV',
+          parentIndex: 1,
+          attributes: { contenteditable: 'true' },
+          bounds: [200, 60, 580, 28],
+        },
+        {
+          backendNodeId: 21,
+          nodeName: 'DIV',
+          parentIndex: 4,
+          attributes: { class: 'ace-line' },
+          bounds: [200, 60, 580, 28],
+        },
+        {
+          backendNodeId: 22,
+          nodeName: 'SPAN',
+          parentIndex: 5,
+          bounds: [200, 60, 12, 28],
+        },
+        {
+          backendNodeId: 23,
+          nodeName: '#text',
+          parentIndex: 6,
+          text: '\u200b',
+          bounds: [200, 60, 12, 28],
+        },
+      ]),
+      frame: 'main',
+    });
+
+    expect(result.targets).toHaveLength(1);
+    expect(result.targets[0]).toEqual(
+      expect.objectContaining({
+        backendNodeId: 20,
+        role: 'textbox',
+        name: 'Search',
+        actions: ['click', 'type'],
+      }),
+    );
+    expect(result.targets).not.toContainEqual(expect.objectContaining({ backendNodeId: 23 }));
+    expect(result.entries).toContainEqual(
+      expect.objectContaining({
+        role: 'textbox',
+        name: 'Search',
+        targetIndex: 0,
+        actions: ['click', 'type'],
+      }),
+    );
+  });
+
+  it('synthesizes a named textbox target for an empty visible contenteditable missing from AX', () => {
+    const result = buildSemanticPageSnapshot({
+      axNodes: [axNode('root', 1, 'RootWebArea', 'Messenger')],
+      domSnapshot: domSnapshot([
+        { backendNodeId: 1, nodeName: '#document', parentIndex: -1 },
+        {
+          backendNodeId: 10,
+          nodeName: 'DIV',
+          parentIndex: 0,
+          bounds: [100, 50, 700, 48],
+        },
+        {
+          backendNodeId: 20,
+          nodeName: 'DIV',
+          parentIndex: 1,
+          attributes: { contenteditable: 'true' },
+          bounds: [140, 60, 600, 28],
+        },
+        {
+          backendNodeId: 30,
+          nodeName: 'SPAN',
+          parentIndex: 1,
+          bounds: [140, 60, 240, 28],
+        },
+        {
+          backendNodeId: 31,
+          nodeName: '#text',
+          parentIndex: 3,
+          text: 'Search people',
+          bounds: [140, 60, 120, 28],
+        },
+      ]),
+      frame: 'main',
+    });
+
+    expect(result.targets).toEqual([
+      expect.objectContaining({
+        backendNodeId: 20,
+        role: 'textbox',
+        name: 'Search people',
+        state: [],
+        actions: ['click', 'type'],
+      }),
+    ]);
+    expect(result.entries).toContainEqual(
+      expect.objectContaining({
+        role: 'textbox',
+        name: 'Search people',
+        targetIndex: 0,
+        actions: ['click', 'type'],
+      }),
+    );
+  });
+
+  it('exposes a nested overflow container as an explicit scroll target', () => {
+    const result = buildSemanticPageSnapshot({
+      axNodes: [
+        axNode('root', 1, 'RootWebArea', 'Messenger', { childIds: ['message'] }),
+        axNode('message', 20, 'StaticText', 'Newest message', { parentId: 'root' }),
+      ],
+      domSnapshot: domSnapshot([
+        { backendNodeId: 1, nodeName: '#document', parentIndex: -1 },
+        {
+          backendNodeId: 10,
+          nodeName: 'DIV',
+          parentIndex: 0,
+          attributes: { 'aria-label': 'Message history' },
+          overflowY: 'auto',
+          bounds: [400, 100, 600, 500],
+          clientRect: [400, 100, 600, 500],
+          scrollRect: [400, 100, 600, 4_000],
+        },
+        {
+          backendNodeId: 20,
+          nodeName: 'DIV',
+          parentIndex: 1,
+          bounds: [420, 560, 540, 30],
+        },
+      ]),
+      frame: 'main',
+    });
+
+    expect(result.targets).toContainEqual(
+      expect.objectContaining({
+        backendNodeId: 10,
+        role: 'region',
+        name: 'Message history',
+        actions: ['scroll'],
+      }),
+    );
+    expect(result.entries).toContainEqual(
+      expect.objectContaining({
+        role: 'region',
+        name: 'Message history',
+        actions: ['scroll'],
+      }),
+    );
+  });
+
   it('follows AX child order and preserves repeated labels in different groups', () => {
     const result = buildSemanticPageSnapshot({
       axNodes: [

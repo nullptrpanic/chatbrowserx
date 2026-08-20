@@ -22,6 +22,8 @@ import { readSelectionState } from '../selection-state';
 import { parseKeyChord, type ParsedKeyChord } from './key-chords';
 
 const POINTER_FEEDBACK_DEADLINE_MS = 250;
+const INPUT_SETTLE_TIMEOUT_MS = 1_500;
+const INPUT_POLL_INTERVAL_MS = 75;
 const SELECTION_SETTLE_TIMEOUT_MS = 1_500;
 const SELECTION_POLL_INTERVAL_MS = 75;
 
@@ -31,6 +33,38 @@ const SELECT_FUNCTION = `function(value) {
   this.dispatchEvent(new Event('input', { bubbles: true }));
   this.dispatchEvent(new Event('change', { bubbles: true }));
   return { ok: true, value: this.value };
+}`;
+
+const SCROLL_ELEMENT_FUNCTION = `function(deltaX, deltaY) {
+  const __chatbrowserxScrollTarget = true;
+  void __chatbrowserxScrollTarget;
+  const element = this;
+  const window_ = element?.ownerDocument?.defaultView;
+  if (!window_?.Element || !(element instanceof window_.Element)) return { found: false };
+  const scrollable = (candidate) => {
+    const style = window_.getComputedStyle(candidate);
+    const overflow = (value) => value === 'auto' || value === 'scroll' || value === 'overlay';
+    return (
+      (overflow(style.overflowX) && candidate.scrollWidth > candidate.clientWidth + 1) ||
+      (overflow(style.overflowY) && candidate.scrollHeight > candidate.clientHeight + 1)
+    );
+  };
+  let target = element;
+  while (target && !scrollable(target)) target = target.parentElement;
+  if (!target) return { found: false };
+  const beforeX = target.scrollLeft;
+  const beforeY = target.scrollTop;
+  target.scrollLeft = beforeX + deltaX;
+  target.scrollTop = beforeY + deltaY;
+  return {
+    found: true,
+    beforeX,
+    beforeY,
+    afterX: target.scrollLeft,
+    afterY: target.scrollTop,
+    maxX: Math.max(0, target.scrollWidth - target.clientWidth),
+    maxY: Math.max(0, target.scrollHeight - target.clientHeight),
+  };
 }`;
 
 const CLICK_ELEMENT_FUNCTION = `function() {
@@ -141,27 +175,74 @@ const FOCUSED_EDITABLE_VALUE_EXPRESSION = `(() => {
   return null;
 })()`;
 
-const INSERT_FOCUSED_TEXT_FUNCTION = `function(text) {
-  let element = this.document?.activeElement;
-  while (element?.shadowRoot?.activeElement) element = element.shadowRoot.activeElement;
+const INSERT_FOCUSED_TEXT_FUNCTION = `function(text, replace, customEditor) {
+  const __chatbrowserxInsertText = true;
+  void __chatbrowserxInsertText;
+  const isElement = (candidate) => candidate?.ownerDocument?.defaultView?.Element &&
+    candidate instanceof candidate.ownerDocument.defaultView.Element;
+  const composedParent = (candidate) => {
+    const root = candidate?.getRootNode?.();
+    return candidate?.parentElement || (root?.host && isElement(root.host) ? root.host : null);
+  };
+  const isEditable = (candidate) => {
+    const window_ = candidate?.ownerDocument?.defaultView;
+    return Boolean(
+      candidate &&
+      ((typeof window_?.HTMLInputElement === 'function' &&
+        candidate instanceof window_.HTMLInputElement) ||
+        (typeof window_?.HTMLTextAreaElement === 'function' &&
+          candidate instanceof window_.HTMLTextAreaElement) ||
+        (typeof window_?.HTMLElement === 'function' &&
+          candidate instanceof window_.HTMLElement &&
+          candidate.isContentEditable))
+    );
+  };
+  let source = isElement(this) ? this : this.document?.activeElement;
+  let active = source?.ownerDocument?.activeElement;
+  while (active?.shadowRoot?.activeElement) active = active.shadowRoot.activeElement;
+  let element = source;
+  while (element && !isEditable(element)) element = composedParent(element);
+  if (
+    !element &&
+    isEditable(active) &&
+    (!isElement(source) || source.contains(active) || active.contains(source))
+  ) {
+    element = active;
+  }
   const window_ = element?.ownerDocument?.defaultView;
   if (
     element &&
-    typeof window_?.HTMLTextAreaElement === 'function' &&
-    element instanceof window_.HTMLTextAreaElement &&
+    ((typeof window_?.HTMLInputElement === 'function' &&
+      element instanceof window_.HTMLInputElement) ||
+      (typeof window_?.HTMLTextAreaElement === 'function' &&
+        element instanceof window_.HTMLTextAreaElement)) &&
     typeof window_.InputEvent === 'function'
   ) {
-    element.value = text;
+    const before = element.value;
+    const start = replace ? 0 : (element.selectionStart ?? before.length);
+    const end = replace ? before.length : (element.selectionEnd ?? start);
+    const value = before.slice(0, start) + text + before.slice(end);
+    const prototype = element instanceof window_.HTMLTextAreaElement
+      ? window_.HTMLTextAreaElement.prototype
+      : window_.HTMLInputElement.prototype;
+    const setter = Object.getOwnPropertyDescriptor(prototype, 'value')?.set;
+    if (setter) setter.call(element, value);
+    else element.value = value;
+    element.setSelectionRange?.(start + text.length, start + text.length);
     const event = new window_.InputEvent('input', {
       bubbles: true,
       composed: true,
-      inputType: 'insertFromPaste',
+      inputType: customEditor
+        ? 'insertFromPaste'
+        : replace
+          ? 'insertReplacementText'
+          : 'insertText',
       data: text,
     });
     element.dispatchEvent(event);
     return {
       dispatched: true,
-      strategy: 'input_from_paste',
+      strategy: customEditor ? 'input_from_paste' : 'native_input',
       defaultPrevented: event.defaultPrevented,
     };
   }
@@ -177,46 +258,136 @@ const INSERT_FOCUSED_TEXT_FUNCTION = `function(text) {
     clipboardData,
   });
   element.dispatchEvent(event);
-  return { dispatched: true, strategy: 'synthetic_paste', defaultPrevented: event.defaultPrevented };
+  const content = () => element.innerText ?? element.textContent ?? '';
+  if (event.defaultPrevented || content().includes(text)) {
+    return {
+      dispatched: true,
+      strategy: 'synthetic_paste',
+      defaultPrevented: event.defaultPrevented,
+    };
+  }
+  if (!(element instanceof window_.HTMLElement) || !element.isContentEditable) {
+    return { dispatched: true, strategy: 'synthetic_paste', defaultPrevented: false };
+  }
+  const document_ = element.ownerDocument;
+  const selection = window_.getSelection();
+  let range = selection?.rangeCount ? selection.getRangeAt(0) : null;
+  const container = range?.commonAncestorContainer;
+  const rangeInside = container && (container === element || element.contains(container));
+  if (!range || replace || !rangeInside) {
+    range = document_.createRange();
+    range.selectNodeContents(element);
+    if (!replace) range.collapse(false);
+    selection?.removeAllRanges();
+    selection?.addRange(range);
+  }
+  const inserted = document_.execCommand?.('insertText', false, text) === true;
+  if (!inserted) {
+    range.deleteContents();
+    const textNode = document_.createTextNode(text);
+    range.insertNode(textNode);
+    range.setStartAfter(textNode);
+    range.collapse(true);
+    selection?.removeAllRanges();
+    selection?.addRange(range);
+    element.dispatchEvent(new window_.InputEvent('input', {
+      bubbles: true,
+      composed: true,
+      inputType: replace ? 'insertReplacementText' : 'insertText',
+      data: text,
+    }));
+  }
+  return { dispatched: true, strategy: inserted ? 'insert_text' : 'range_insert' };
 }`;
 
-const EDITOR_TARGET_INFO_FUNCTION = `function() {
+/** Self-contained DOM probe serialized into the target realm by Runtime.callFunctionOn. */
+export function inspectEditorTarget(this: unknown): {
+  readonly editor: boolean;
+  readonly custom: boolean;
+  readonly connected: boolean;
+  readonly value: string;
+} {
   const __chatbrowserxEditorTargetInfo = true;
   void __chatbrowserxEditorTargetInfo;
-  const element = this;
-  const window_ = element?.ownerDocument?.defaultView;
-  if (!window_?.Element || !(element instanceof window_.Element)) {
-    return { editor: false, value: '' };
+  const source = this as {
+    readonly ownerDocument?: Document;
+    readonly document?: Document;
+    readonly parentElement?: Element | null;
+    getRootNode?(): Node;
+  } | null;
+  const document_ = source?.ownerDocument ?? source?.document;
+  const window_ = document_?.defaultView;
+  if (!window_?.Node || !source || !(source instanceof window_.Node)) {
+    return { editor: false, custom: false, connected: false, value: '' };
   }
-  let current = element;
+  const isElement = (candidate: unknown): candidate is Element =>
+    Boolean(window_.Element && candidate instanceof window_.Element);
+  const composedParent = (candidate: Node): Element | null => {
+    if (candidate.parentElement) return candidate.parentElement;
+    const root = candidate.getRootNode();
+    return window_.ShadowRoot && root instanceof window_.ShadowRoot && isElement(root.host)
+      ? root.host
+      : null;
+  };
+  let current: Element | null = isElement(source) ? source : composedParent(source);
+  let editorElement: Element | null = null;
   let editor = false;
+  let custom = false;
   for (let depth = 0; current && depth < 8; depth += 1) {
     const role = (current.getAttribute('role') || '').trim().toLowerCase();
     const roleDescription = (current.getAttribute('aria-roledescription') || '')
       .trim()
       .toLowerCase();
     const classHint = current.getAttribute('class') || '';
+    const declaredContentEditable = current.getAttribute('contenteditable');
+    const contentEditable = (declaredContentEditable ?? '').trim().toLowerCase();
+    const contentEditableHost =
+      window_.HTMLElement &&
+      current instanceof window_.HTMLElement &&
+      (current.isContentEditable ||
+        (declaredContentEditable !== null &&
+          (contentEditable === '' ||
+            contentEditable === 'true' ||
+            contentEditable === 'plaintext-only')));
+    if (
+      contentEditableHost ||
+      (window_.HTMLInputElement && current instanceof window_.HTMLInputElement) ||
+      (window_.HTMLTextAreaElement && current instanceof window_.HTMLTextAreaElement)
+    ) {
+      editor = true;
+      editorElement ||= current;
+    }
     if (
       role === 'code' ||
       role === 'application' ||
-      roleDescription.includes('editor') ||
-      classHint.split(/\\s+/).some((token) =>
-        /(?:^|[-_])(editor|monaco|codemirror|ace)(?:$|[-_])/i.test(token)
-      )
+      roleDescription.includes('code editor') ||
+      classHint
+        .split(/\\s+/)
+        .some(
+          (token) =>
+            /(?:^|[-_])(?:monaco|codemirror)(?:$|[-_])/i.test(token) ||
+            /^ace[-_]editor(?:$|[-_])/i.test(token),
+        )
     ) {
       editor = true;
-      break;
+      custom = true;
     }
     const root = current.getRootNode();
-    current = current.parentElement || (window_.ShadowRoot && root instanceof window_.ShadowRoot
-      ? root.host
-      : null);
+    current =
+      current.parentElement ||
+      (window_.ShadowRoot && root instanceof window_.ShadowRoot && isElement(root.host)
+        ? root.host
+        : null);
   }
-  const value = typeof element.value === 'string'
-    ? element.value
-    : (element.innerText || element.textContent || '');
-  return { editor, value };
-}`;
+  const valueElement = editorElement ?? (isElement(source) ? source : composedParent(source));
+  const value =
+    valueElement && 'value' in valueElement && typeof valueElement.value === 'string'
+      ? valueElement.value
+      : ((valueElement as HTMLElement | null)?.innerText ?? valueElement?.textContent ?? '');
+  return { editor, custom, connected: valueElement?.isConnected === true, value };
+}
+
+const EDITOR_TARGET_INFO_FUNCTION = inspectEditorTarget.toString();
 
 export type PointerEffect = 'move' | 'click' | 'double_click' | 'drag';
 
@@ -276,11 +447,17 @@ export type BrowserActionErrorCode =
 
 export class BrowserActionError extends Error {
   readonly code: BrowserActionErrorCode;
+  readonly stage: 'focus' | 'insert' | 'readback' | 'submit' | undefined;
 
-  constructor(code: BrowserActionErrorCode, message: string) {
+  constructor(
+    code: BrowserActionErrorCode,
+    message: string,
+    stage?: 'focus' | 'insert' | 'readback' | 'submit',
+  ) {
     super(message);
     this.name = 'BrowserActionError';
     this.code = code;
+    this.stage = stage;
   }
 }
 
@@ -328,6 +505,8 @@ interface PreparedElementTarget {
 
 interface EditorTargetInfo {
   readonly editor: boolean;
+  readonly custom: boolean;
+  readonly connected?: boolean;
   readonly value: string;
 }
 
@@ -378,6 +557,10 @@ function axBoolean(value: Protocol.Accessibility.AXValue | undefined): boolean {
   return value?.value === true;
 }
 
+function axEditable(value: Protocol.Accessibility.AXValue | undefined): boolean {
+  return value?.value === true || value?.value === 'richtext' || value?.value === 'plaintext';
+}
+
 function focusedEditableValue(nodes: readonly Protocol.Accessibility.AXNode[]): string | null {
   const editable = nodes.filter((node) => {
     if (node.ignored) return false;
@@ -386,7 +569,7 @@ function focusedEditableValue(nodes: readonly Protocol.Accessibility.AXNode[]): 
       role === 'textbox' ||
       role === 'searchbox' ||
       (node.properties ?? []).some(
-        (property) => property.name === 'editable' && axBoolean(property.value),
+        (property) => property.name === 'editable' && axEditable(property.value),
       )
     );
   });
@@ -404,9 +587,51 @@ function evaluatedEditableValue(response: Protocol.Runtime.EvaluateResponse): st
     : null;
 }
 
+const EDITOR_PLACEHOLDER = /(?:\u200b|\u200c|\u200d|\u2060|\ufeff)/u;
+const EDITOR_PLACEHOLDER_GLOBAL = /(?:\u200b|\u200c|\u200d|\u2060|\ufeff)/gu;
+const EDITOR_PLACEHOLDER_SUFFIX = /^(?:\s|\u200b|\u200c|\u200d|\u2060|\ufeff)*$/u;
+
+function substantiveEditorLines(value: string): readonly string[] {
+  return value
+    .replace(/\r\n?/g, '\n')
+    .replace(/\u00a0/g, ' ')
+    .replace(EDITOR_PLACEHOLDER_GLOBAL, '')
+    .split('\n')
+    .filter((line) => line.trim().length > 0);
+}
+
+function verifiesRichTextReplacement(actual: string, expected: string): boolean {
+  const expectedLines = substantiveEditorLines(expected);
+  if (expectedLines.length === 0) return false;
+  const actualLines = substantiveEditorLines(actual);
+  return (
+    actualLines.length === expectedLines.length &&
+    actualLines.every((line, index) => line === expectedLines[index])
+  );
+}
+
+function verifiesReplacement(actual: string | null, expected: string): boolean {
+  if (actual === expected) return true;
+  if (actual === null) return false;
+  const expectedIndex = actual.indexOf(expected);
+  if (expectedIndex >= 0) {
+    const prefix = actual.slice(0, expectedIndex);
+    const suffix = actual.slice(expectedIndex + expected.length);
+    const boundary = `${prefix}${suffix}`;
+    if (
+      EDITOR_PLACEHOLDER.test(boundary) &&
+      EDITOR_PLACEHOLDER_SUFFIX.test(prefix) &&
+      EDITOR_PLACEHOLDER_SUFFIX.test(suffix)
+    ) {
+      return true;
+    }
+  }
+  return verifiesRichTextReplacement(actual, expected);
+}
+
 function verifiesInput(actual: string | null, expected: string, replace: boolean, before: string) {
   return replace
-    ? actual === expected
+    ? verifiesReplacement(actual, expected)
     : expected.length === 0 || (actual !== null && actual !== before && actual.includes(expected));
 }
 
@@ -732,8 +957,15 @@ export class BrowserActionExecutor implements BrowserActionPort {
           }
         }
         if (value.text.length > 0) {
-          if (trustedInput) await this.#insertFocusedText(targetSession, value.text);
-          else {
+          if (fallbackPoint || editorInfo?.custom === true) {
+            await this.#insertFocusedText(
+              targetSession,
+              value.text,
+              value.replace,
+              editorInfo?.custom ?? true,
+              target,
+            );
+          } else {
             await this.#dependencies.transport.send(targetSession, 'Input.insertText', {
               text: value.text,
             });
@@ -750,6 +982,8 @@ export class BrowserActionExecutor implements BrowserActionPort {
             value.text,
             value.replace,
             before.replace(/\r\n?/g, '\n'),
+            signal,
+            target,
           );
         } else if (target) {
           const before = editorInfo?.value.replace(/\r\n?/g, '\n') ?? '';
@@ -765,6 +999,7 @@ export class BrowserActionExecutor implements BrowserActionPort {
             throw new BrowserActionError(
               'TYPE_VERIFICATION_FAILED',
               'The target did not retain the requested text.',
+              'readback',
             );
           }
         }
@@ -775,12 +1010,19 @@ export class BrowserActionExecutor implements BrowserActionPort {
             code: 'Enter',
             modifiers: 0,
           });
+          await this.#verifySubmittedInput(
+            targetSession,
+            value.text,
+            signal,
+            target,
+          );
         }
         data = {
           action: 'type',
           dispatched: true,
           replaced: value.replace,
           submitted: value.submit,
+          ...(value.submit ? { submissionVerified: true } : {}),
           strategy: trustedInput ? 'trusted_input' : 'cdp_ref',
           verified: true,
         };
@@ -811,6 +1053,32 @@ export class BrowserActionExecutor implements BrowserActionPort {
           x: viewport.width / 2,
           y: viewport.height / 2,
         };
+        if (prepared) {
+          await this.#showPointer(tabId, point, point, 'move');
+          const elementScroll = await this.#scrollElement(prepared, value.deltaX, value.deltaY);
+          if (elementScroll) {
+            const actualDeltaX = elementScroll.afterX - elementScroll.beforeX;
+            const actualDeltaY = elementScroll.afterY - elementScroll.beforeY;
+            data = {
+              action: 'scroll',
+              dispatched: true,
+              strategy: 'element',
+              deltaX: value.deltaX,
+              deltaY: value.deltaY,
+              moved: actualDeltaX !== 0 || actualDeltaY !== 0,
+              actualDeltaX,
+              actualDeltaY,
+              position: {
+                x: elementScroll.afterX,
+                y: elementScroll.afterY,
+                maxX: elementScroll.maxX,
+                maxY: elementScroll.maxY,
+              },
+            };
+            targetPresent = true;
+            break;
+          }
+        }
         const scrollSession = prepared?.session ?? snapshot.root;
         const before =
           scrollSession === snapshot.root
@@ -1277,6 +1545,7 @@ export class BrowserActionExecutor implements BrowserActionPort {
     snapshot: BrowserSessionSnapshot,
     ref: string,
     tabId: number,
+    allowRefresh = true,
   ): Promise<PreparedElementTarget> {
     const reference = this.#dependencies.refs.resolve(ref, tabId);
     const session = this.#sessionForReference(snapshot, reference);
@@ -1326,7 +1595,71 @@ export class BrowserActionExecutor implements BrowserActionPort {
       return { reference, session, point, rect: pageBounds };
     } catch (error) {
       if (error instanceof ElementRefStoreError) throw error;
+      if (
+        allowRefresh &&
+        reference.semanticLocator &&
+        (await this.#refreshElementReference(session, reference, ref, tabId))
+      ) {
+        return this.#prepareElementTarget(snapshot, ref, tabId, false);
+      }
       throw new ElementRefStoreError('STALE_REF', 'The element ref is stale.');
+    }
+  }
+
+  async #refreshElementReference(
+    session: DebuggerSession,
+    reference: ResolvedElementRef,
+    ref: string,
+    tabId: number,
+  ): Promise<boolean> {
+    try {
+      const [tree, domSnapshot] = await Promise.all([
+        this.#dependencies.transport.send<Protocol.Accessibility.GetFullAXTreeResponse>(
+          session,
+          'Accessibility.getFullAXTree',
+        ),
+        this.#dependencies.transport.send<Protocol.DOMSnapshot.CaptureSnapshotResponse>(
+          session,
+          'DOMSnapshot.captureSnapshot',
+          {
+            computedStyles: [...SEMANTIC_SNAPSHOT_STYLES],
+            includeDOMRects: true,
+          },
+        ),
+      ]);
+      const semantic = buildSemanticPageSnapshot({
+        axNodes: tree.nodes,
+        domSnapshot,
+        frame: reference.frameTargetId ?? 'main',
+      });
+      const matches = semantic.targets.filter(
+        (target) =>
+          target.documentFrameId === reference.documentFrameId &&
+          target.semanticLocator === reference.semanticLocator,
+      );
+      if (matches.length !== 1) return false;
+      const [match] = matches;
+      if (!match) return false;
+      const observations = this.#dependencies.refs.updateObservedStates(tabId, [
+        {
+          frameTargetId: reference.frameTargetId,
+          documentFrameId: match.documentFrameId,
+          loaderId: reference.loaderId,
+          backendNodeId: match.backendNodeId,
+          ...(match.stateBackendNodeId === undefined
+            ? {}
+            : { stateBackendNodeId: match.stateBackendNodeId }),
+          role: match.role,
+          name: match.name,
+          semanticLocator: match.semanticLocator,
+          state: match.state,
+          actions: match.actions,
+          frame: reference.frameTargetId ?? 'main',
+        },
+      ]);
+      return observations.some((observation) => observation.ref === ref);
+    } catch {
+      return false;
     }
   }
 
@@ -1358,7 +1691,7 @@ export class BrowserActionExecutor implements BrowserActionPort {
         { backendNodeId: target.reference.backendNodeId },
       );
       objectId = resolved.object.objectId;
-      if (!objectId) return { editor: false, value: '' };
+      if (!objectId) return { editor: false, custom: false, value: '' };
       const response =
         await this.#dependencies.transport.send<Protocol.Runtime.CallFunctionOnResponse>(
           target.session,
@@ -1371,13 +1704,98 @@ export class BrowserActionExecutor implements BrowserActionPort {
           },
         );
       const value = response.result.value as
-        { readonly editor?: unknown; readonly value?: unknown } | undefined;
+        | {
+            readonly editor?: unknown;
+            readonly custom?: unknown;
+            readonly value?: unknown;
+          }
+        | undefined;
       return {
         editor: response.exceptionDetails === undefined && value?.editor === true,
+        custom: response.exceptionDetails === undefined && value?.custom === true,
         value: typeof value?.value === 'string' ? value.value.slice(0, 20_000) : '',
       };
     } catch {
-      return { editor: false, value: '' };
+      return { editor: false, custom: false, value: '' };
+    } finally {
+      if (objectId) {
+        await this.#dependencies.transport
+          .send(target.session, 'Runtime.releaseObject', { objectId })
+          .catch(() => undefined);
+      }
+    }
+  }
+
+  async #scrollElement(
+    target: PreparedElementTarget,
+    deltaX: number,
+    deltaY: number,
+  ): Promise<
+    | {
+        readonly beforeX: number;
+        readonly beforeY: number;
+        readonly afterX: number;
+        readonly afterY: number;
+        readonly maxX: number;
+        readonly maxY: number;
+      }
+    | undefined
+  > {
+    let objectId: string | undefined;
+    try {
+      const resolved = await this.#dependencies.transport.send<Protocol.DOM.ResolveNodeResponse>(
+        target.session,
+        'DOM.resolveNode',
+        { backendNodeId: target.reference.backendNodeId },
+      );
+      objectId = resolved.object.objectId;
+      if (!objectId) return undefined;
+      const response =
+        await this.#dependencies.transport.send<Protocol.Runtime.CallFunctionOnResponse>(
+          target.session,
+          'Runtime.callFunctionOn',
+          {
+            objectId,
+            functionDeclaration: SCROLL_ELEMENT_FUNCTION,
+            arguments: [{ value: deltaX }, { value: deltaY }],
+            awaitPromise: false,
+            returnByValue: true,
+            silent: true,
+          },
+        );
+      const result = response.result.value as
+        | {
+            readonly found?: unknown;
+            readonly beforeX?: unknown;
+            readonly beforeY?: unknown;
+            readonly afterX?: unknown;
+            readonly afterY?: unknown;
+            readonly maxX?: unknown;
+            readonly maxY?: unknown;
+          }
+        | undefined;
+      if (response.exceptionDetails !== undefined || result?.found !== true) return undefined;
+      const values = [
+        result.beforeX,
+        result.beforeY,
+        result.afterX,
+        result.afterY,
+        result.maxX,
+        result.maxY,
+      ];
+      if (values.some((value) => typeof value !== 'number' || !Number.isFinite(value))) {
+        return undefined;
+      }
+      return {
+        beforeX: result.beforeX as number,
+        beforeY: result.beforeY as number,
+        afterX: result.afterX as number,
+        afterY: result.afterY as number,
+        maxX: result.maxX as number,
+        maxY: result.maxY as number,
+      };
+    } catch {
+      return undefined;
     } finally {
       if (objectId) {
         await this.#dependencies.transport
@@ -1501,17 +1919,33 @@ export class BrowserActionExecutor implements BrowserActionPort {
     });
   }
 
-  async #insertFocusedText(session: DebuggerSession, text: string): Promise<void> {
-    const global = await this.#dependencies.transport.send<Protocol.Runtime.EvaluateResponse>(
-      session,
-      'Runtime.evaluate',
-      { expression: 'globalThis' },
-    );
-    const objectId = global.result.objectId;
+  async #insertFocusedText(
+    session: DebuggerSession,
+    text: string,
+    replace: boolean,
+    customEditor: boolean,
+    target: PreparedElementTarget | null,
+  ): Promise<void> {
+    const objectId = target
+      ? (
+          await this.#dependencies.transport.send<Protocol.DOM.ResolveNodeResponse>(
+            target.session,
+            'DOM.resolveNode',
+            { backendNodeId: target.reference.backendNodeId },
+          )
+        ).object.objectId
+      : (
+          await this.#dependencies.transport.send<Protocol.Runtime.EvaluateResponse>(
+            session,
+            'Runtime.evaluate',
+            { expression: 'globalThis' },
+          )
+        ).result.objectId;
     if (!objectId) {
       throw new BrowserActionError(
         'TYPE_VERIFICATION_FAILED',
         'The focused editor could not receive the requested text.',
+        'insert',
       );
     }
     try {
@@ -1522,7 +1956,7 @@ export class BrowserActionExecutor implements BrowserActionPort {
           {
             objectId,
             functionDeclaration: INSERT_FOCUSED_TEXT_FUNCTION,
-            arguments: [{ value: text }],
+            arguments: [{ value: text }, { value: replace }, { value: customEditor }],
             awaitPromise: false,
             returnByValue: true,
             userGesture: true,
@@ -1533,6 +1967,7 @@ export class BrowserActionExecutor implements BrowserActionPort {
         throw new BrowserActionError(
           'TYPE_VERIFICATION_FAILED',
           'The focused editor could not receive the requested text.',
+          'insert',
         );
       }
     } finally {
@@ -1547,31 +1982,48 @@ export class BrowserActionExecutor implements BrowserActionPort {
     text: string,
     replace: boolean,
     before: string,
+    signal: AbortSignal,
+    target: PreparedElementTarget | null,
   ): Promise<void> {
     await this.#selectAll(session);
     const expected = text.replace(/\r\n?/g, '\n');
     let verified = false;
+    const settleDeadline = Date.now() + INPUT_SETTLE_TIMEOUT_MS;
     try {
-      try {
-        const response = await this.#dependencies.transport.send<Protocol.Runtime.EvaluateResponse>(
-          session,
-          'Runtime.evaluate',
-          {
-            expression: FOCUSED_EDITABLE_VALUE_EXPRESSION,
-            returnByValue: true,
-          },
-        );
-        verified = verifiesInput(evaluatedEditableValue(response), expected, replace, before);
-      } catch {
-        // Some targets do not expose a usable main execution context; AX remains the fallback.
-      }
+      do {
+        if (target) {
+          const exact = await this.#editorTargetInfo(target);
+          verified = verifiesInput(exact.value.replace(/\r\n?/g, '\n'), expected, replace, before);
+        }
+        try {
+          if (!verified) {
+            const response =
+              await this.#dependencies.transport.send<Protocol.Runtime.EvaluateResponse>(
+                session,
+                'Runtime.evaluate',
+                {
+                  expression: FOCUSED_EDITABLE_VALUE_EXPRESSION,
+                  returnByValue: true,
+                },
+              );
+            verified = verifiesInput(evaluatedEditableValue(response), expected, replace, before);
+          }
+        } catch {
+          // Some targets do not expose a usable main execution context; AX remains the fallback.
+        }
+        if (!verified) {
+          const tree =
+            await this.#dependencies.transport.send<Protocol.Accessibility.GetFullAXTreeResponse>(
+              session,
+              'Accessibility.getFullAXTree',
+            );
+          verified = verifiesInput(focusedEditableValue(tree.nodes), expected, replace, before);
+        }
+        if (verified || Date.now() >= settleDeadline) break;
+        await this.#delay(Math.min(INPUT_POLL_INTERVAL_MS, settleDeadline - Date.now()), signal);
+      } while (!verified);
       if (!verified) {
-        const tree =
-          await this.#dependencies.transport.send<Protocol.Accessibility.GetFullAXTreeResponse>(
-            session,
-            'Accessibility.getFullAXTree',
-          );
-        verified = verifiesInput(focusedEditableValue(tree.nodes), expected, replace, before);
+        throwIfAborted(signal);
       }
     } finally {
       await this.#dispatchKey(session, {
@@ -1585,8 +2037,77 @@ export class BrowserActionExecutor implements BrowserActionPort {
       throw new BrowserActionError(
         'TYPE_VERIFICATION_FAILED',
         'The focused editable value did not contain the requested input.',
+        'readback',
       );
     }
+  }
+
+  /** Requires submitted text to leave the editable surface before reporting mutation success. */
+  async #verifySubmittedInput(
+    session: DebuggerSession,
+    text: string,
+    signal: AbortSignal,
+    target: PreparedElementTarget | null,
+  ): Promise<void> {
+    if (text.length === 0) return;
+    const expected = text.replace(/\r\n?/g, '\n');
+    const settleDeadline = Date.now() + INPUT_SETTLE_TIMEOUT_MS;
+    let polling = true;
+    do {
+      throwIfAborted(signal);
+      let observed: string | null = null;
+      let observable = false;
+      if (target) {
+        try {
+          const exact = await this.#editorTargetInfo(target);
+          if (exact.connected === false) return;
+          observed = exact.value.replace(/\r\n?/g, '\n');
+          observable = true;
+        } catch {
+          return;
+        }
+      } else {
+        try {
+          const response =
+            await this.#dependencies.transport.send<Protocol.Runtime.EvaluateResponse>(
+              session,
+              'Runtime.evaluate',
+              {
+                expression: FOCUSED_EDITABLE_VALUE_EXPRESSION,
+                returnByValue: true,
+              },
+            );
+          observed = evaluatedEditableValue(response);
+          observable = observed !== null;
+        } catch {
+          // The focused AX editable remains the fallback when the page realm is unavailable.
+        }
+        if (!observable) {
+          try {
+            const tree =
+              await this.#dependencies.transport.send<Protocol.Accessibility.GetFullAXTreeResponse>(
+                session,
+                'Accessibility.getFullAXTree',
+              );
+            observed = focusedEditableValue(tree.nodes);
+            observable = observed !== null;
+          } catch {
+            return;
+          }
+        }
+      }
+      if (!observable || !verifiesReplacement(observed, expected)) return;
+      if (Date.now() >= settleDeadline) {
+        polling = false;
+      } else {
+        await this.#delay(Math.min(INPUT_POLL_INTERVAL_MS, settleDeadline - Date.now()), signal);
+      }
+    } while (polling);
+    throw new BrowserActionError(
+      'ACTION_STATE_MISMATCH',
+      'The submitted editable still contains the requested text.',
+      'submit',
+    );
   }
 
   async #click(
@@ -1655,17 +2176,46 @@ export class BrowserActionExecutor implements BrowserActionPort {
     session: DebuggerSession,
     chord: Extract<ParsedKeyChord, { readonly kind: 'key' }>,
   ): Promise<void> {
+    const virtualKeyCode = (() => {
+      if (chord.code === 'Enter') return 13;
+      if (chord.code === 'Tab') return 9;
+      if (chord.code === 'Escape') return 27;
+      if (chord.code === 'Space') return 32;
+      if (chord.code === 'Backspace') return 8;
+      if (chord.code === 'Delete') return 46;
+      if (chord.code.startsWith('Key') && chord.code.length === 4) {
+        return chord.code.charCodeAt(3);
+      }
+      if (chord.code.startsWith('Digit') && chord.code.length === 6) {
+        return chord.code.charCodeAt(5);
+      }
+      return undefined;
+    })();
+    const text = chord.modifiers === 0 && chord.key === 'Enter' ? '\r' : undefined;
     await this.#dependencies.transport.send(session, 'Input.dispatchKeyEvent', {
       type: 'keyDown',
       key: chord.key,
       code: chord.code,
       modifiers: chord.modifiers,
+      ...(virtualKeyCode === undefined
+        ? {}
+        : {
+            windowsVirtualKeyCode: virtualKeyCode,
+            nativeVirtualKeyCode: virtualKeyCode,
+          }),
+      ...(text === undefined ? {} : { text, unmodifiedText: text }),
     });
     await this.#dependencies.transport.send(session, 'Input.dispatchKeyEvent', {
       type: 'keyUp',
       key: chord.key,
       code: chord.code,
       modifiers: chord.modifiers,
+      ...(virtualKeyCode === undefined
+        ? {}
+        : {
+            windowsVirtualKeyCode: virtualKeyCode,
+            nativeVirtualKeyCode: virtualKeyCode,
+          }),
     });
   }
 

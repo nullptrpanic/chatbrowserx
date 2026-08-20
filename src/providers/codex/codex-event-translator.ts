@@ -57,6 +57,21 @@ const functionCallItemSchema = z
     arguments: z.string(),
   })
   .passthrough();
+const reasoningItemSchema = z
+  .object({
+    id: z.string().min(1),
+    type: z.literal('reasoning'),
+    encrypted_content: z.string().min(1),
+    summary: z.array(
+      z
+        .object({
+          type: z.literal('summary_text'),
+          text: z.string(),
+        })
+        .passthrough(),
+    ),
+  })
+  .passthrough();
 const outputItemSchema = objectSchema.extend({
   item: z.object({ type: z.string() }).passthrough(),
 });
@@ -231,6 +246,7 @@ function normalizeUsage(usage: z.infer<typeof usageSchema> | null | undefined): 
 
 export class CodexEventTranslator {
   readonly #calls = new Map<string, FunctionCallState>();
+  readonly #encryptedReasoningItems = new Set<string>();
   readonly #reasoningSummaries = new Set<string>();
   readonly #outputTexts = new Map<string, ContentTextState>();
   readonly #refusals = new Map<string, ContentTextState>();
@@ -520,6 +536,21 @@ export class CodexEventTranslator {
     const output = parsePayload(outputItemSchema, data);
     if (output.item.type === 'message') {
       return this.#messageOutputDone(data);
+    }
+    if (output.item.type === 'reasoning') {
+      const item = parsePayload(reasoningItemSchema, output.item);
+      if (this.#encryptedReasoningItems.has(item.id)) {
+        throw providerErrorFromCode('INVALID_RESPONSE');
+      }
+      this.#encryptedReasoningItems.add(item.id);
+      return [
+        {
+          type: 'reasoning.encrypted',
+          itemId: item.id,
+          encryptedContent: item.encrypted_content,
+          summary: item.summary,
+        },
+      ];
     }
     if (output.item.type !== 'function_call') {
       return [];

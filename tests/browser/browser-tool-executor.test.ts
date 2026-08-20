@@ -441,7 +441,12 @@ describe('BrowserToolExecutor', () => {
       retain: vi.fn(async () => undefined),
       releaseOwner: vi.fn(async () => undefined),
     };
-    const executor = new BrowserToolExecutor({ tabs: tabPort(), observer, actions, sessions });
+    const executor = new BrowserToolExecutor({
+      tabs: tabPort(),
+      observer,
+      actions,
+      sessions,
+    });
     const context = { currentTabId: 7, sessionOwnerId: 'runner_1' };
 
     await executor.execute(
@@ -450,7 +455,12 @@ describe('BrowserToolExecutor', () => {
       context,
     );
     await executor.execute(
-      call('browser_click', { tabId: 7, ref: 'ref_1', button: 'left', count: 1 }),
+      call('browser_click', {
+        tabId: 7,
+        ref: 'ref_1',
+        button: 'left',
+        count: 1,
+      }),
       new AbortController().signal,
       context,
     );
@@ -1034,7 +1044,11 @@ describe('BrowserToolExecutor', () => {
         observation: null,
       })),
     };
-    const executor = new BrowserToolExecutor({ tabs: tabPort(), observer, actions });
+    const executor = new BrowserToolExecutor({
+      tabs: tabPort(),
+      observer,
+      actions,
+    });
     const signal = new AbortController().signal;
     const context = { currentTabId: 7 };
 
@@ -1108,7 +1122,10 @@ describe('BrowserToolExecutor', () => {
 
     expect(receivedArguments[0]).toMatchObject({ x: 20, y: 40 });
     expect(receivedArguments).toHaveLength(1);
-    expect(JSON.parse(stale.output)).toMatchObject({ ok: false, code: 'STALE_SCREENSHOT' });
+    expect(JSON.parse(stale.output)).toMatchObject({
+      ok: false,
+      code: 'STALE_SCREENSHOT',
+    });
   });
 
   it('drops screenshot coordinate state when the task runner is released', async () => {
@@ -1155,7 +1172,10 @@ describe('BrowserToolExecutor', () => {
     );
 
     expect(actions.execute).not.toHaveBeenCalled();
-    expect(JSON.parse(stale.output)).toMatchObject({ ok: false, code: 'STALE_SCREENSHOT' });
+    expect(JSON.parse(stale.output)).toMatchObject({
+      ok: false,
+      code: 'STALE_SCREENSHOT',
+    });
   });
 
   it.each([
@@ -1205,7 +1225,10 @@ describe('BrowserToolExecutor', () => {
     );
 
     expect(actions.execute).not.toHaveBeenCalled();
-    expect(JSON.parse(stale.output)).toMatchObject({ ok: false, code: 'STALE_SCREENSHOT' });
+    expect(JSON.parse(stale.output)).toMatchObject({
+      ok: false,
+      code: 'STALE_SCREENSHOT',
+    });
   });
 
   it('returns an actionable failure when the page observation bridge is unavailable', async () => {
@@ -1569,5 +1592,73 @@ describe('BrowserToolExecutor', () => {
 
     expect(JSON.parse(output.output)).toEqual({ ok: false, ...expected });
     expect(output.output).not.toContain('private page details');
+  });
+
+  it('preserves only a safe browser action failure stage for diagnosis', async () => {
+    const executor = new BrowserToolExecutor({
+      tabs: tabPort(),
+      actions: {
+        execute: vi.fn(async () => {
+          throw Object.assign(new Error('private editor state'), {
+            code: 'TYPE_VERIFICATION_FAILED',
+            stage: 'insert',
+            value: 'secret typed content',
+          });
+        }),
+      },
+    });
+
+    const output = await executor.execute(
+      call('browser_type', {
+        tabId: 7,
+        ref: 'ref_1',
+        text: 'hello',
+        replace: true,
+        submit: false,
+      }),
+      new AbortController().signal,
+    );
+
+    expect(JSON.parse(output.output)).toEqual({
+      ok: false,
+      code: 'TYPE_VERIFICATION_FAILED',
+      message: 'The page did not retain the requested text. Inspect the editor and try again.',
+      retryable: true,
+      needsInspect: true,
+      stage: 'insert',
+    });
+    expect(output.output).not.toContain('private editor state');
+    expect(output.output).not.toContain('secret typed content');
+  });
+
+  it('recovers a missing stage only from a known internal type-verification message', async () => {
+    const executor = new BrowserToolExecutor({
+      tabs: tabPort(),
+      actions: {
+        execute: vi.fn(async () => {
+          throw Object.assign(
+            new Error('The focused editable value did not contain the requested input.'),
+            { code: 'TYPE_VERIFICATION_FAILED' },
+          );
+        }),
+      },
+    });
+
+    const output = await executor.execute(
+      call('browser_type', {
+        tabId: 7,
+        ref: 'ref_1',
+        text: 'hello',
+        replace: true,
+        submit: false,
+      }),
+      new AbortController().signal,
+    );
+
+    expect(JSON.parse(output.output)).toMatchObject({
+      code: 'TYPE_VERIFICATION_FAILED',
+      stage: 'readback',
+    });
+    expect(output.output).not.toContain('focused editable value');
   });
 });

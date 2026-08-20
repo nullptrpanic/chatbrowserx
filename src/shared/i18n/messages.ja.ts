@@ -65,6 +65,8 @@ export const ja = {
   cancel: 'タスクをキャンセル',
   noEvents: '実行記録はまだありません',
   userSupplement: 'ユーザーの補足',
+  userSupplementApplied: '適用済み',
+  userSupplementPending: '次のターン待ち',
   expandUserSupplement: 'ユーザーの補足を表示',
   collapseUserSupplement: 'ユーザーの補足を閉じる',
   toolCompleted: '実行完了',

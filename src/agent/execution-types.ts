@@ -8,6 +8,7 @@ import type {
 import type { ParsedBrowserToolCall } from './tools/browser-tool-schema';
 import type { ParsedContextCommitToolCall } from './tools/context-commit-tool-schema';
 import type { ModelUsage } from '../providers/stream-events';
+import type { ModelOutputContinuationItem } from '../tasks/continuation-types';
 
 export interface AgentPlanInput {
   readonly task: TaskRun;
@@ -25,6 +26,7 @@ export interface AgentModelTurn {
 
 interface AgentOutcomeMetadata {
   readonly modelTurn?: AgentModelTurn;
+  readonly modelOutputItems?: readonly ModelOutputContinuationItem[];
 }
 
 export type AgentEvent =

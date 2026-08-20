@@ -10,6 +10,15 @@ export interface ModelUsage {
 export type ModelStreamEvent =
   | { readonly type: 'response.started'; readonly responseId: string }
   | {
+      readonly type: 'reasoning.encrypted';
+      readonly itemId: string;
+      readonly encryptedContent: string;
+      readonly summary: readonly {
+        readonly type: 'summary_text';
+        readonly text: string;
+      }[];
+    }
+  | {
       readonly type: 'reasoning.summary';
       readonly itemId: string;
       readonly summaryIndex: number;

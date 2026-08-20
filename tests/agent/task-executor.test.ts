@@ -125,6 +125,14 @@ describe('TaskExecutor', () => {
         if (plannerTurn === 1) {
           yield {
             ...searchCall('call_search'),
+            modelOutputItems: [
+              {
+                type: 'reasoning',
+                itemId: 'reasoning_search',
+                encryptedContent: 'opaque-encrypted-content',
+                summary: [{ type: 'summary_text', text: 'Search official sources.' }],
+              },
+            ],
             modelTurn: {
               responseId: 'resp_search',
               inputItemCount: 1,
@@ -174,6 +182,17 @@ describe('TaskExecutor', () => {
     expect(interrupted.checkpoint.pendingToolCall).toMatchObject({
       callId: 'call_search',
       name: 'tavily_search',
+    });
+    expect(interrupted.checkpoint.continuationItems.at(-1)).toMatchObject({
+      type: 'function_call',
+      callId: 'call_search',
+      modelOutputItems: [
+        {
+          type: 'reasoning',
+          itemId: 'reasoning_search',
+          encryptedContent: 'opaque-encrypted-content',
+        },
+      ],
     });
     expect(interrupted.events.at(-1)?.modelTurn).toEqual({
       inputItemCount: 1,
@@ -424,6 +443,84 @@ describe('TaskExecutor', () => {
         'The same editor input already failed on this page state. Inspect the page before trying again.',
       retryable: false,
       needsInspect: true,
+    });
+    database.close();
+  });
+
+  it('does not submit the same successful editor input twice in consecutive model turns', async () => {
+    const database = await openChatBrowserDatabase(
+      createTestDatabaseName('duplicate-browser-submit-success'),
+    );
+    const repository = new IndexedDbTaskRepository(database);
+    const dependencies = sources();
+    const commands = new TaskCommandService(
+      repository,
+      dependencies.clock,
+      dependencies.ids,
+      dependencies.conversations,
+    );
+    const created = await commands.create({
+      conversationId: 'conversation_1',
+      tabId: 7,
+      goal: 'Send one message',
+    });
+    let turn = 0;
+    const typeArguments = {
+      ref: 'ref_editor',
+      text: 'Hello',
+      replace: true,
+      submit: true,
+    };
+    const plan = vi.fn<(input: AgentPlanInput) => AsyncGenerator<AgentEvent>>(() =>
+      (async function* () {
+        turn += 1;
+        if (turn <= 2) {
+          yield browserCall(`call_submit_${turn}`, 'browser_type', typeArguments);
+          return;
+        }
+        yield {
+          type: 'task.completed',
+          reason: 'model_response_completed',
+          messageId: 'message_answer',
+        };
+      })(),
+    );
+    const execute = vi.fn(async () => ({
+      output: JSON.stringify({
+        ok: true,
+        tabId: 7,
+        url: 'https://example.test/chat',
+        data: {
+          action: 'type',
+          submitted: true,
+          verified: true,
+        },
+        observation: null,
+      }),
+      attachmentIds: [],
+    }));
+    const executor = new TaskExecutor({
+      repository,
+      conversations: dependencies.conversations,
+      planner: { plan },
+      tavily: tavilyPort(),
+      browser: browserPort({ execute }),
+      clock: dependencies.clock,
+      ids: dependencies.ids,
+    });
+
+    const result = await executor.run(created.task.id, new AbortController().signal);
+
+    expect(result.task.status).toBe('completed');
+    expect(execute).toHaveBeenCalledOnce();
+    expect(JSON.parse(result.checkpoint.completedToolResults[1]?.output ?? '')).toMatchObject({
+      ok: true,
+      data: {
+        action: 'type',
+        submitted: true,
+        verified: true,
+        replayed: true,
+      },
     });
     database.close();
   });

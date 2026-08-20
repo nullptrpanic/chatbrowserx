@@ -128,6 +128,30 @@ describe('PanelClient', () => {
     });
   });
 
+  it('accepts the projected WorkSession application state on a user supplement', () => {
+    const base = snapshot();
+    const task = {
+      ...base.tasks[0],
+      supplements: [
+        {
+          id: 'supplement_pending',
+          text: 'Use Go instead.',
+          attachmentIds: [],
+          createdAt: 1_100,
+          applicationState: 'pending' as const,
+        },
+      ],
+    };
+
+    expect(
+      parsePanelSnapshot({
+        ...base,
+        tasks: [task],
+        task,
+      }).task?.supplements[0]?.applicationState,
+    ).toBe('pending');
+  });
+
   it('defaults an older settings projection to 50 history messages', () => {
     expect(
       parsePanelSettings({

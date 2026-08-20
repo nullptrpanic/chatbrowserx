@@ -21,6 +21,15 @@ export type ModelInputItem =
       readonly content: readonly ModelMessageContent[];
     }
   | {
+      readonly type: 'reasoning';
+      readonly itemId: string;
+      readonly encryptedContent: string;
+      readonly summary: readonly {
+        readonly type: 'summary_text';
+        readonly text: string;
+      }[];
+    }
+  | {
       readonly type: 'function_call';
       readonly callId: string;
       readonly name: string;
