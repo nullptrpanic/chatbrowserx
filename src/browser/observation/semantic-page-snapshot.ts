@@ -20,6 +20,8 @@ export interface SemanticPageEntry {
   readonly state?: readonly string[];
   readonly actions?: readonly SemanticAction[];
   readonly frame?: string;
+  /** Internal selection evidence only; compact model entries never serialize geometry. */
+  readonly inViewport?: boolean;
 }
 
 export interface SemanticPageTarget {
@@ -43,6 +45,12 @@ interface BuildSemanticPageSnapshotInput {
   readonly axNodes: readonly Protocol.Accessibility.AXNode[];
   readonly domSnapshot: Protocol.DOMSnapshot.CaptureSnapshotResponse;
   readonly frame: string;
+  readonly viewport?: {
+    readonly x: number;
+    readonly y: number;
+    readonly width: number;
+    readonly height: number;
+  };
 }
 
 interface SnapshotDomNode {
@@ -82,7 +90,14 @@ const OMITTED_ROLES = new Set(['inlinetextbox', 'none', 'presentation', 'rootweb
 const UNSAFE_CLICK_NODE_NAMES = new Set(['#DOCUMENT', 'HTML', 'BODY', 'HEAD']);
 const STATE_ATTRIBUTES = ['checked', 'selected', 'expanded', 'pressed', 'disabled'] as const;
 const ARIA_STATE_ATTRIBUTES = [...STATE_ATTRIBUTES, 'readonly'] as const;
-const MODEL_AX_STATES = new Set([...STATE_ATTRIBUTES, 'busy', 'invalid', 'readonly', 'required']);
+const MODEL_AX_STATES = new Set([
+  ...STATE_ATTRIBUTES,
+  'busy',
+  'focused',
+  'invalid',
+  'readonly',
+  'required',
+]);
 const PURE_CLASS_STATE_PATTERN =
   /^(?:(?:is|state)[-_])?(checked|selected|active|disabled)(?:$|[-_])/i;
 const EXPLICIT_CLASS_STATE_PATTERN = /(?:^|[-_])(checked|selected|disabled)(?:$|[-_])/i;
@@ -203,6 +218,9 @@ function compactTargetEntries(
       ...(existing.frame === undefined && entry.frame === undefined
         ? {}
         : { frame: existing.frame ?? entry.frame }),
+      ...(existing.inViewport === undefined && entry.inViewport === undefined
+        ? {}
+        : { inViewport: existing.inViewport === true || entry.inViewport === true }),
     };
   }
 
@@ -220,6 +238,21 @@ function compactTargetEntries(
         };
   });
   return { entries: compactedEntries, targets: compactedTargets };
+}
+
+function viewportMembership(
+  node: SnapshotDomNode | undefined,
+  viewport: BuildSemanticPageSnapshotInput['viewport'],
+): boolean | undefined {
+  if (!node?.bounds || !viewport) return undefined;
+  const [x, y, width, height] = node.bounds;
+  if (width <= 0 || height <= 0 || viewport.width <= 0 || viewport.height <= 0) return false;
+  return (
+    x + width > viewport.x &&
+    y + height > viewport.y &&
+    x < viewport.x + viewport.width &&
+    y < viewport.y + viewport.height
+  );
 }
 
 function isVisualSurface(node: SnapshotDomNode): boolean {
@@ -916,6 +949,7 @@ export function buildSemanticPageSnapshot(
         : `target:${String(targetIndex)}:${name}`;
     if (seenEntries.has(dedupeKey)) continue;
     seenEntries.add(dedupeKey);
+    const inViewport = viewportMembership(targetDomNode ?? domNode, input.viewport);
     entries.push({
       depth: depthOf(node, axById),
       role: effectiveRole,
@@ -924,6 +958,7 @@ export function buildSemanticPageSnapshot(
       ...(state.length === 0 ? {} : { state }),
       ...(actions.length === 0 ? {} : { actions }),
       ...(input.frame === 'main' ? {} : { frame: input.frame }),
+      ...(inViewport === undefined ? {} : { inViewport }),
     });
   }
 
@@ -949,6 +984,7 @@ export function buildSemanticPageSnapshot(
         : 'Editable field'
       : 'Scrollable area';
     const name = syntheticTargetName(domNode, fallback);
+    const inViewport = viewportMembership(domNode, input.viewport);
     const targetIndex = targets.length;
     targetIndexes.set(domNode.backendNodeId, targetIndex);
     targets.push({
@@ -968,6 +1004,7 @@ export function buildSemanticPageSnapshot(
       ...(state.length === 0 ? {} : { state }),
       actions,
       ...(input.frame === 'main' ? {} : { frame: input.frame }),
+      ...(inViewport === undefined ? {} : { inViewport }),
     });
   }
 

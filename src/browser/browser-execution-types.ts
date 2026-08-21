@@ -2,7 +2,12 @@ import type { ParsedBrowserToolCall } from '../agent/tools/browser-tool-schema';
 
 export interface BrowserToolExecutionResult {
   readonly output: string;
+  /** Optional compact receipt replayed to the model while output remains the audit source. */
+  readonly modelOutput?: string;
+  /** Every durable attachment retained for audit details and later task-owned use. */
   readonly attachmentIds: readonly string[];
+  /** Optional subset rehydrated into the next model request; defaults to attachmentIds. */
+  readonly modelAttachmentIds?: readonly string[];
 }
 
 export interface BrowserExecutionContext {
@@ -10,6 +15,8 @@ export interface BrowserExecutionContext {
   readonly currentTabId: number | null;
   /** One ephemeral runner owner whose debugger sessions are released when the run stops. */
   readonly sessionOwnerId?: string;
+  /** Task-owned assets that this WorkSession may deliver through browser actions. */
+  readonly availableAssetIds?: readonly string[];
 }
 
 export interface BrowserSessionLifecyclePort {
@@ -32,6 +39,8 @@ export interface BrowserExecutionPort {
 export type BrowserToolFailureCode =
   | 'CURRENT_TAB_UNAVAILABLE'
   | 'TAB_SCOPE_MISMATCH'
+  | 'ASSET_NOT_AVAILABLE'
+  | 'ATTACHMENT_VERIFICATION_FAILED'
   | 'INVALID_TAB'
   | 'TAB_NOT_FOUND'
   | 'TAB_NOT_CONTROLLABLE'

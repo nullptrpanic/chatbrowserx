@@ -1,12 +1,17 @@
 import { describe, expect, it } from 'vitest';
 import {
+  MAX_PROJECTED_PROVIDER_INPUT_CHARACTERS,
   compactContextAtCommit,
   hasContextCommitCandidate,
   shouldForceContextCommit,
+  shouldForceContextCommitForRequest,
 } from '../../../src/agent/context/context-commit';
 import type { ContinuationItem, PendingToolCall } from '../../../src/tasks/continuation-types';
 
-const userMessage: ContinuationItem = { type: 'message_ref', messageId: 'message_user' };
+const userMessage: ContinuationItem = {
+  type: 'message_ref',
+  messageId: 'message_user',
+};
 const supplement: ContinuationItem = {
   type: 'message_ref',
   messageId: 'message_supplement',
@@ -103,28 +108,28 @@ describe('shouldForceContextCommit', () => {
       ];
     }).flat();
 
-  it('forces at sixteen raw tool pairs but not before the boundary', () => {
+  it('forces at twenty-four raw tool pairs but not before the boundary', () => {
     expect(
       shouldForceContextCommit({
-        continuationItems: [userMessage, ...toolPairs(15)],
+        continuationItems: [userMessage, ...toolPairs(23)],
         completedToolResults: [],
       }),
     ).toBe(false);
     expect(
       shouldForceContextCommit({
-        continuationItems: [userMessage, ...toolPairs(16)],
+        continuationItems: [userMessage, ...toolPairs(24)],
         completedToolResults: [],
       }),
     ).toBe(true);
   });
 
-  it('forces when raw tool text reaches 32 KiB', () => {
+  it('forces when raw tool text reaches 64 KiB', () => {
     expect(
       shouldForceContextCommit({
         continuationItems: [
           userMessage,
           shortCall,
-          { ...shortOutput, output: 'x'.repeat(32 * 1024) },
+          { ...shortOutput, output: 'x'.repeat(64 * 1024) },
         ],
         completedToolResults: [],
       }),
@@ -142,7 +147,7 @@ describe('shouldForceContextCommit', () => {
               {
                 type: 'reasoning',
                 itemId: 'reasoning_large',
-                encryptedContent: 'x'.repeat(32 * 1024),
+                encryptedContent: 'x'.repeat(64 * 1024),
                 summary: [],
               },
             ],
@@ -166,8 +171,197 @@ describe('shouldForceContextCommit', () => {
     const continuationItems = [userMessage, shortCall, shortOutput];
 
     expect(
-      shouldForceContextCommit({ continuationItems, completedToolResults: browserResults }),
+      shouldForceContextCommit({
+        continuationItems,
+        completedToolResults: browserResults,
+      }),
     ).toBe(false);
+  });
+
+  it('forces after a screenshot result has already been consumed by a later tool pair', () => {
+    expect(
+      shouldForceContextCommit({
+        continuationItems: [
+          userMessage,
+          shortCall,
+          { ...shortOutput, attachmentIds: ['attachment_screenshot'] },
+        ],
+        completedToolResults: [],
+      }),
+    ).toBe(false);
+    expect(
+      shouldForceContextCommit({
+        continuationItems: [
+          userMessage,
+          shortCall,
+          { ...shortOutput, attachmentIds: ['attachment_screenshot'] },
+          ...toolPairs(1).map((item) =>
+            item.type === 'function_call' || item.type === 'function_call_output'
+              ? { ...item, callId: `${item.callId}_later` }
+              : item,
+          ),
+        ],
+        completedToolResults: [],
+      }),
+    ).toBe(true);
+  });
+});
+
+describe('shouldForceContextCommitForRequest', () => {
+  const checkpoint = {
+    continuationItems: [userMessage, shortCall, shortOutput],
+    completedToolResults: [],
+  };
+  const shape = (systemPrompt: string) => ({
+    systemPrompt,
+    input: [],
+    tools: [],
+  });
+  const emptyShapeCharacters = JSON.stringify(shape('')).length;
+
+  it('uses an inclusive 80,000-character projected request boundary', () => {
+    expect(
+      shouldForceContextCommitForRequest(
+        checkpoint,
+        shape('x'.repeat(MAX_PROJECTED_PROVIDER_INPUT_CHARACTERS - emptyShapeCharacters - 1)),
+      ),
+    ).toBe(false);
+    expect(
+      shouldForceContextCommitForRequest(
+        checkpoint,
+        shape('x'.repeat(MAX_PROJECTED_PROVIDER_INPUT_CHARACTERS - emptyShapeCharacters)),
+      ),
+    ).toBe(true);
+  });
+
+  it.each([
+    {
+      name: 'history',
+      request: {
+        systemPrompt: '',
+        input: [
+          {
+            type: 'message',
+            role: 'user',
+            content: [{ type: 'input_text', text: 'h'.repeat(80_000) }],
+          },
+        ],
+        tools: [],
+      },
+    },
+    {
+      name: 'tool definitions',
+      request: {
+        systemPrompt: '',
+        input: [],
+        tools: [
+          {
+            type: 'function',
+            name: 'large_tool',
+            description: 'd'.repeat(80_000),
+            parameters: { type: 'object', properties: {} },
+            strict: true,
+          },
+        ],
+      },
+    },
+    {
+      name: 'encrypted reasoning',
+      request: {
+        systemPrompt: '',
+        input: [
+          {
+            type: 'reasoning',
+            itemId: 'reasoning_large',
+            encryptedContent: 'r'.repeat(80_000),
+            summary: [],
+          },
+        ],
+        tools: [],
+      },
+    },
+    {
+      name: 'compact tool receipts',
+      request: {
+        systemPrompt: '',
+        input: [
+          {
+            type: 'function_call_output',
+            callId: 'call_large',
+            output: 'o'.repeat(80_000),
+          },
+        ],
+        tools: [],
+      },
+    },
+    {
+      name: 'image URLs',
+      request: {
+        systemPrompt: '',
+        input: [
+          {
+            type: 'message',
+            role: 'user',
+            content: [
+              {
+                type: 'input_image',
+                imageUrl: `data:image/png;base64,${'a'.repeat(80_000)}`,
+                detail: 'high',
+              },
+            ],
+          },
+        ],
+        tools: [],
+      },
+    },
+  ])('counts large $name without inspecting or logging its content', ({ request }) => {
+    expect(shouldForceContextCommitForRequest(checkpoint, request)).toBe(true);
+  });
+
+  it('keeps the existing raw-pair trigger even for a tiny projected request', () => {
+    const continuationItems = [
+      userMessage,
+      ...Array.from({ length: 24 }, (_, index) => {
+        const callId = `call_force_${String(index)}`;
+        return [
+          {
+            type: 'function_call' as const,
+            callId,
+            name: 'browser_click',
+            argumentsJson: '{}',
+          },
+          {
+            type: 'function_call_output' as const,
+            callId,
+            output: '{}',
+            resultRef: `result_force_${String(index)}`,
+            attachmentIds: [],
+          },
+        ];
+      }).flat(),
+    ];
+    expect(
+      shouldForceContextCommitForRequest(
+        { continuationItems, completedToolResults: [] },
+        shape(''),
+      ),
+    ).toBe(true);
+  });
+
+  it('rejects cyclic request shapes instead of traversing forever', () => {
+    const request: {
+      systemPrompt: string;
+      input: unknown[];
+      tools: unknown[];
+    } = {
+      systemPrompt: '',
+      input: [],
+      tools: [],
+    };
+    request.input.push(request);
+    expect(() => shouldForceContextCommitForRequest(checkpoint, request)).toThrow(
+      'Projected Provider request contains a cycle.',
+    );
   });
 });
 
@@ -367,7 +561,10 @@ describe('compactContextAtCommit', () => {
 
   it('rejects malformed or empty commit boundaries', () => {
     const current = currentCommit('call_short');
-    const wrongPending: PendingToolCall = { ...current.pending, callId: 'call_wrong' };
+    const wrongPending: PendingToolCall = {
+      ...current.pending,
+      callId: 'call_wrong',
+    };
 
     expect(() =>
       compactContextAtCommit(

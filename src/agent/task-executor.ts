@@ -76,6 +76,7 @@ type AgentOutcome = Exclude<AgentEvent, { readonly type: 'reasoning.summary' }>;
 const runnableStatuses = new Set<TaskRun['status']>(['queued', 'planning']);
 const TAVILY_TOOL_CALL_LIMIT = 8;
 const BROWSER_TOOL_CALL_LIMIT = 256;
+const MODEL_TRANSIENT_RETRY_LIMIT = 1;
 const tavilyToolNames = new Set(['tavily_search', 'tavily_extract', 'tavily_crawl']);
 const readOnlyBrowserToolNames = new Set([
   'browser_get_current_tab',
@@ -86,6 +87,7 @@ const readOnlyBrowserToolNames = new Set([
   'browser_network_get',
 ]);
 const browserProgressDynamicKeys = new Set([
+  'base',
   'snapshot',
   'snapshotId',
   'timestamp',
@@ -316,6 +318,52 @@ interface CompletedBrowserProgress {
   readonly eligible: boolean;
 }
 
+interface VerifiedSelectionProgress {
+  readonly tabId: number;
+  readonly ref: string;
+  readonly checked: boolean;
+  readonly pageEpoch: string;
+  readonly mutationVersion: number;
+  readonly output: Readonly<Record<string, unknown>>;
+}
+
+interface ImmobileScrollProgress {
+  readonly callFingerprint: string;
+  readonly pageEpoch: string | null;
+  readonly mutationVersion: number;
+  readonly position?: unknown;
+  readonly direction: Readonly<{ deltaX: number; deltaY: number }>;
+}
+
+interface BrowserProgressState {
+  readonly completed: readonly CompletedBrowserProgress[];
+  readonly pageEpoch: string | null;
+  readonly mutationVersion: number;
+  readonly verifiedSelection?: VerifiedSelectionProgress;
+  readonly immobileScroll?: ImmobileScrollProgress;
+}
+
+const browserPageChangeToolNames = new Set([
+  'browser_open_tab',
+  'browser_switch_tab',
+  'browser_close_tab',
+  'browser_navigate',
+  'browser_reload',
+]);
+const browserSemanticMutationToolNames = new Set([
+  'browser_click',
+  'browser_set_checked',
+  'browser_set_checked_many',
+  'browser_paste_image',
+  'browser_type',
+  'browser_keypress',
+  'browser_scroll',
+  'browser_select',
+  'browser_drag',
+  'browser_click_point',
+  'browser_drag_point',
+]);
+
 /** Removes transport-only churn while preserving page semantics for progress comparisons. */
 function canonicalBrowserProgressValue(value: unknown): unknown {
   if (Array.isArray(value)) return value.map(canonicalBrowserProgressValue);
@@ -362,10 +410,78 @@ function browserOutputFailed(output: string): boolean {
   }
 }
 
-/** Reconstructs completed browser pairs since the latest user/compaction boundary. */
-function recentBrowserProgress(items: readonly ContinuationItem[]): CompletedBrowserProgress[] {
+function jsonRecord(raw: string): Readonly<Record<string, unknown>> | null {
+  try {
+    const value: unknown = JSON.parse(raw);
+    return typeof value === 'object' && value !== null && !Array.isArray(value)
+      ? (value as Readonly<Record<string, unknown>>)
+      : null;
+  } catch {
+    return null;
+  }
+}
+
+function childRecord(
+  value: Readonly<Record<string, unknown>>,
+  key: string,
+): Readonly<Record<string, unknown>> | null {
+  const child = value[key];
+  return typeof child === 'object' && child !== null && !Array.isArray(child)
+    ? (child as Readonly<Record<string, unknown>>)
+    : null;
+}
+
+function outputSnapshot(record: Readonly<Record<string, unknown>>): string | null {
+  const data = childRecord(record, 'data');
+  if (!data) return null;
+  if (typeof data.snapshot === 'string' && data.snapshot.length > 0) return data.snapshot;
+  const verification = childRecord(data, 'verification');
+  return typeof verification?.snapshot === 'string' && verification.snapshot.length > 0
+    ? verification.snapshot
+    : null;
+}
+
+function outputSelection(
+  record: Readonly<Record<string, unknown>>,
+): Readonly<{ tabId: number; ref: string; checked: boolean }> | null {
+  if (record.ok !== true || typeof record.tabId !== 'number') return null;
+  const data = childRecord(record, 'data');
+  const observation = childRecord(record, 'observation');
+  const target = observation === null ? null : childRecord(observation, 'target');
+  if (
+    data?.action !== 'set_checked' ||
+    data.verified !== true ||
+    typeof data.requested !== 'boolean' ||
+    typeof target?.ref !== 'string'
+  ) {
+    return null;
+  }
+  const targetState = Array.isArray(target.state) ? target.state : [];
+  const selected = targetState.some((state) => state === 'checked' || state === 'selected');
+  const unselected = targetState.some(
+    (state) => state === 'checked=false' || state === 'selected=false',
+  );
+  if ((data.requested && !selected) || (!data.requested && !unselected)) return null;
+  return { tabId: record.tabId, ref: target.ref, checked: data.requested };
+}
+
+function outputImmobileScroll(
+  record: Readonly<Record<string, unknown>>,
+): Readonly<{ position?: unknown }> | null {
+  if (record.ok !== true) return null;
+  const data = childRecord(record, 'data');
+  if (data?.action !== 'scroll' || data.moved !== false) return null;
+  return data.position === undefined ? {} : { position: data.position };
+}
+
+/** Reconstructs page-state evidence while keeping user supplements as non-destructive boundaries. */
+function recentBrowserProgress(items: readonly ContinuationItem[]): BrowserProgressState {
   const calls = new Map<string, Extract<ContinuationItem, { readonly type: 'function_call' }>>();
   const completed: CompletedBrowserProgress[] = [];
+  let pageEpoch: string | null = null;
+  let mutationVersion = 0;
+  let verifiedSelection: VerifiedSelectionProgress | undefined;
+  let immobileScroll: ImmobileScrollProgress | undefined;
   for (const item of items) {
     if (item.type === 'message_ref') {
       calls.clear();
@@ -376,6 +492,10 @@ function recentBrowserProgress(items: readonly ContinuationItem[]): CompletedBro
       if (item.name === CONTEXT_COMMIT_TOOL_NAME) {
         calls.clear();
         completed.length = 0;
+        pageEpoch = null;
+        mutationVersion = 0;
+        verifiedSelection = undefined;
+        immobileScroll = undefined;
         continue;
       }
       calls.set(item.callId, item);
@@ -391,8 +511,130 @@ function recentBrowserProgress(items: readonly ContinuationItem[]): CompletedBro
       pairFingerprint: `${callFingerprint}=>${outputFingerprint}`,
       eligible: readOnlyBrowserToolNames.has(call.name) || browserOutputFailed(item.output),
     });
+
+    const output = jsonRecord(item.output);
+    if (output?.ok !== true) continue;
+    if (browserPageChangeToolNames.has(call.name)) {
+      completed.length = 0;
+      pageEpoch = null;
+      mutationVersion += 1;
+      verifiedSelection = undefined;
+      immobileScroll = undefined;
+      continue;
+    }
+
+    const nextEpoch = outputSnapshot(output);
+    if (call.name === 'browser_inspect') {
+      if (nextEpoch !== null && nextEpoch !== pageEpoch) {
+        pageEpoch = nextEpoch;
+        verifiedSelection = undefined;
+        immobileScroll = undefined;
+      }
+      continue;
+    }
+
+    const immobile = call.name === 'browser_scroll' ? outputImmobileScroll(output) : null;
+    if (browserSemanticMutationToolNames.has(call.name) && immobile === null) {
+      mutationVersion += 1;
+      verifiedSelection = undefined;
+      immobileScroll = undefined;
+    }
+    if (nextEpoch !== null && nextEpoch !== pageEpoch) {
+      pageEpoch = nextEpoch;
+      verifiedSelection = undefined;
+      immobileScroll = undefined;
+    }
+
+    const selection = outputSelection(output);
+    if (selection !== null && pageEpoch !== null) {
+      verifiedSelection = {
+        ...selection,
+        pageEpoch,
+        mutationVersion,
+        output,
+      };
+    }
+    if (immobile !== null) {
+      const arguments_ = jsonRecord(call.argumentsJson);
+      const deltaX = arguments_?.deltaX;
+      const deltaY = arguments_?.deltaY;
+      if (typeof deltaX === 'number' && typeof deltaY === 'number') {
+        immobileScroll = {
+          callFingerprint,
+          pageEpoch,
+          mutationVersion,
+          ...(immobile.position === undefined ? {} : { position: immobile.position }),
+          direction: { deltaX, deltaY },
+        };
+      }
+    }
   }
-  return completed;
+  return {
+    completed,
+    pageEpoch,
+    mutationVersion,
+    ...(verifiedSelection === undefined ? {} : { verifiedSelection }),
+    ...(immobileScroll === undefined ? {} : { immobileScroll }),
+  };
+}
+
+function replayVerifiedSelectionOutput(
+  progress: BrowserProgressState,
+  pending: PendingToolCall,
+): string | null {
+  if (pending.name !== 'browser_set_checked') return null;
+  const evidence = progress.verifiedSelection;
+  const arguments_ = jsonRecord(pending.argumentsJson);
+  if (
+    evidence === undefined ||
+    progress.pageEpoch !== evidence.pageEpoch ||
+    progress.mutationVersion !== evidence.mutationVersion ||
+    arguments_?.ref !== evidence.ref ||
+    arguments_?.checked !== evidence.checked ||
+    (typeof arguments_.tabId === 'number' &&
+      arguments_.tabId !== 0 &&
+      arguments_.tabId !== evidence.tabId)
+  ) {
+    return null;
+  }
+  const data = childRecord(evidence.output, 'data') ?? {};
+  return JSON.stringify({
+    ...evidence.output,
+    data: {
+      ...data,
+      dispatched: false,
+      strategy: 'already_verified',
+      replayed: true,
+    },
+  });
+}
+
+function immobileScrollOutput(
+  progress: BrowserProgressState,
+  pending: PendingToolCall,
+): string | null {
+  const evidence = progress.immobileScroll;
+  if (
+    pending.name !== 'browser_scroll' ||
+    evidence === undefined ||
+    evidence.callFingerprint !== browserCallFingerprint(pending.name, pending.argumentsJson) ||
+    evidence.pageEpoch !== progress.pageEpoch ||
+    evidence.mutationVersion !== progress.mutationVersion
+  ) {
+    return null;
+  }
+  return JSON.stringify({
+    ok: false,
+    code: 'NO_PROGRESS',
+    message:
+      'The same scroll direction already stopped at this position. Choose another direction, target, or page region.',
+    retryable: false,
+    needsInspect: false,
+    data: {
+      direction: evidence.direction,
+      ...(evidence.position === undefined ? {} : { position: evidence.position }),
+    },
+  });
 }
 
 /** Stops a repeated read/failure strategy only after two semantically identical cycles. */
@@ -400,7 +642,13 @@ function noProgressBrowserOutput(
   items: readonly ContinuationItem[],
   pending: PendingToolCall,
 ): string | null {
-  const completed = recentBrowserProgress(items);
+  const progress = recentBrowserProgress(items);
+  const replayedSelection = replayVerifiedSelectionOutput(progress, pending);
+  if (replayedSelection !== null) return replayedSelection;
+  const stoppedScroll = immobileScrollOutput(progress, pending);
+  if (stoppedScroll !== null) return stoppedScroll;
+
+  const completed = progress.completed;
   const pendingFingerprint = browserCallFingerprint(pending.name, pending.argumentsJson);
   for (let cycleLength = 1; cycleLength <= 4; cycleLength += 1) {
     if (completed.length < cycleLength * 2) continue;
@@ -415,13 +663,15 @@ function noProgressBrowserOutput(
       ) &&
       previous[0]?.callFingerprint === pendingFingerprint
     ) {
+      const repeatedInspect = pending.name === 'browser_inspect';
       return JSON.stringify({
         ok: false,
         code: 'NO_PROGRESS',
-        message:
-          'The same browser strategy repeated without a semantic state change. Inspect fresh state or choose a different action.',
+        message: repeatedInspect
+          ? 'The same inspection repeated without a semantic state change. Inspect another region or use a different action strategy.'
+          : 'The same browser strategy repeated without a semantic state change. Inspect fresh state or choose a different action.',
         retryable: false,
-        needsInspect: true,
+        needsInspect: !repeatedInspect,
       });
     }
   }
@@ -529,6 +779,7 @@ export class TaskExecutor {
         });
       }
 
+      let transientModelRetryCount = 0;
       while (true) {
         throwIfAborted(signal);
         if (snapshot.checkpoint.pendingToolCall !== null) {
@@ -547,8 +798,17 @@ export class TaskExecutor {
             });
           });
         } catch (error) {
+          if (
+            isProviderError(error) &&
+            error.code === 'TRANSIENT' &&
+            transientModelRetryCount < MODEL_TRANSIENT_RETRY_LIMIT
+          ) {
+            transientModelRetryCount += 1;
+            continue;
+          }
           return await this.#handleFailure(snapshot, ownerId, signal, error, 'model');
         }
+        transientModelRetryCount = 0;
 
         if (result.type === 'task.completed') {
           const continuationItems = snapshot.checkpoint.continuationItems.some(
@@ -802,6 +1062,13 @@ export class TaskExecutor {
       const toolResult = await this.#dependencies.browser.execute(call, signal, {
         currentTabId: currentBrowserTarget(snapshot),
         sessionOwnerId: ownerId,
+        availableAssetIds: [
+          ...new Set(
+            snapshot.checkpoint.completedToolResults.flatMap((result) => [
+              ...(result.attachmentIds ?? []),
+            ]),
+          ),
+        ],
       });
       return this.#recordToolResult(
         snapshot,
@@ -810,7 +1077,9 @@ export class TaskExecutor {
         pending,
         toolResult.output,
         toolResult.attachmentIds,
+        toolResult.modelAttachmentIds,
         browserTargetAfterCall(snapshot, call, toolResult.output),
+        toolResult.modelOutput,
       );
     } catch (error) {
       return this.#handleFailure(snapshot, ownerId, signal, error, 'browser');
@@ -824,12 +1093,19 @@ export class TaskExecutor {
     pending: PendingToolCall,
     output: string,
     attachmentIds: readonly string[] = [],
+    modelAttachmentIds: readonly string[] | undefined = undefined,
     browserTargetTabId?: number | null,
+    modelOutput: string | undefined = undefined,
   ): Promise<TaskSnapshot> {
     const durableAttachmentIds = [...new Set(attachmentIds)];
+    const continuationAttachmentIds = [...new Set(modelAttachmentIds ?? durableAttachmentIds)];
     if (
       durableAttachmentIds.length > 8 ||
-      durableAttachmentIds.some((id) => id.length === 0 || id.length > 256)
+      durableAttachmentIds.some((id) => id.length === 0 || id.length > 256) ||
+      continuationAttachmentIds.length > 8 ||
+      continuationAttachmentIds.some(
+        (id) => id.length === 0 || id.length > 256 || !durableAttachmentIds.includes(id),
+      )
     ) {
       throw new Error('Browser tool attachment references are invalid.');
     }
@@ -863,9 +1139,9 @@ export class TaskExecutor {
           {
             type: 'function_call_output',
             callId: pending.callId,
-            output,
+            output: modelOutput ?? output,
             resultRef: completedResult.resultRef,
-            attachmentIds: durableAttachmentIds,
+            attachmentIds: continuationAttachmentIds,
           },
         ],
         pendingToolCall: null,

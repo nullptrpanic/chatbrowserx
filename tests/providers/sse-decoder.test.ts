@@ -120,4 +120,20 @@ describe('decodeSseStream', () => {
       code: 'INVALID_RESPONSE',
     } satisfies Partial<ProviderError>);
   });
+
+  it('cancels and rejects a stream that stays idle past the configured timeout', async () => {
+    let cancelled = false;
+    const stream = new ReadableStream<Uint8Array>({
+      cancel() {
+        cancelled = true;
+      },
+    });
+
+    await expect(collect(decodeSseStream(stream, { idleTimeoutMs: 5 }))).rejects.toMatchObject({
+      name: 'ProviderError',
+      code: 'TRANSIENT',
+      retryable: true,
+    } satisfies Partial<ProviderError>);
+    expect(cancelled).toBe(true);
+  });
 });

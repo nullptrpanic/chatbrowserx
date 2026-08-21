@@ -18,8 +18,27 @@ const CASES = [
   ['browser_navigate', 'navigate', 'mutation', { tabId: 7, url: 'https://example.com/a' }],
   ['browser_reload', 'reload', 'mutation', { tabId: 7 }],
   ['browser_inspect', 'inspect', 'safe', { tabId: 7, mode: 'interactive', since: '' }],
+  ['browser_capture_screenshot', 'capture_screenshot', 'safe', { tabId: 7 }],
+  [
+    'browser_paste_image',
+    'paste_image',
+    'mutation',
+    { tabId: 7, ref: 'ref_1', assetId: 'attachment_1' },
+  ],
   ['browser_click', 'click', 'mutation', { tabId: 7, ref: 'ref_1', button: 'left', count: 1 }],
   ['browser_set_checked', 'set_checked', 'mutation', { tabId: 7, ref: 'ref_1', checked: true }],
+  [
+    'browser_set_checked_many',
+    'set_checked_many',
+    'mutation',
+    {
+      tabId: 7,
+      items: [
+        { ref: 'ref_1', checked: true },
+        { ref: 'ref_2', checked: false },
+      ],
+    },
+  ],
   [
     'browser_type',
     'type',
@@ -92,7 +111,32 @@ describe('BROWSER_TOOL_DEFINITIONS', () => {
     }
   });
 
-  it('advertises one native interactive mode while still parsing legacy deep calls', () => {
+  it('advertises a bounded strict batch selection array without uniqueItems', () => {
+    const definition = BROWSER_TOOL_DEFINITIONS.find(
+      ({ name }) => name === 'browser_set_checked_many',
+    );
+    const parameters = definition?.parameters as {
+      readonly properties: Readonly<Record<string, Readonly<Record<string, unknown>>>>;
+    };
+
+    expect(parameters.properties.items).toMatchObject({
+      type: 'array',
+      minItems: 1,
+      maxItems: 20,
+      items: {
+        type: 'object',
+        properties: {
+          ref: { type: 'string', minLength: 1, maxLength: 128 },
+          checked: { type: 'boolean' },
+        },
+        required: ['ref', 'checked'],
+        additionalProperties: false,
+      },
+    });
+    expect(JSON.stringify(parameters.properties.items)).not.toContain('uniqueItems');
+  });
+
+  it('advertises bounded and explicit deep native interactive modes', () => {
     const inspect = BROWSER_TOOL_DEFINITIONS.find(
       (definition) => definition.name === 'browser_inspect',
     );
@@ -103,7 +147,7 @@ describe('BROWSER_TOOL_DEFINITIONS', () => {
       | undefined;
     const mode = parameters?.properties.mode as { readonly enum?: readonly string[] };
 
-    expect(mode.enum).toEqual(['content', 'interactive', 'screenshot']);
+    expect(mode.enum).toEqual(['content', 'interactive', 'interactive_deep', 'screenshot']);
   });
 
   it('documents AX-first inspection and idempotent selectable actions', () => {
@@ -142,8 +186,11 @@ describe('BROWSER_TOOL_DEFINITIONS', () => {
       'browser_navigate',
       'browser_reload',
       'browser_inspect',
+      'browser_capture_screenshot',
+      'browser_paste_image',
       'browser_click',
       'browser_set_checked',
+      'browser_set_checked_many',
       'browser_type',
       'browser_keypress',
       'browser_scroll',
@@ -184,8 +231,11 @@ describe('parseBrowserToolCall', () => {
     ['browser_navigate', { url: 'https://example.com/a' }],
     ['browser_reload', {}],
     ['browser_inspect', { mode: 'interactive' }],
+    ['browser_capture_screenshot', {}],
+    ['browser_paste_image', { ref: 'ref_1', assetId: 'attachment_1' }],
     ['browser_click', { ref: 'ref_1', button: 'left', count: 1 }],
     ['browser_set_checked', { ref: 'ref_1', checked: true }],
+    ['browser_set_checked_many', { items: [{ ref: 'ref_1', checked: true }] }],
     ['browser_type', { ref: 'ref_1', text: 'hello', replace: true, submit: false }],
     ['browser_network_list', { urlPattern: '/api/', limit: 25 }],
   ])('accepts task-bound %s without a model-provided tabId', (name, arguments_) => {
@@ -272,6 +322,31 @@ describe('parseBrowserToolCall', () => {
     ['browser_click_point', { tabId: 7, x: -1, y: 1, button: 'left', count: 1 }],
     ['browser_network_list', { tabId: 7, urlPattern: '', limit: 101 }],
     ['browser_network_get', { tabId: 7, requestId: '', includeBody: false }],
+    ['browser_set_checked_many', { tabId: 7, items: [] }],
+    [
+      'browser_set_checked_many',
+      {
+        tabId: 7,
+        items: Array.from({ length: 21 }, (_, index) => ({
+          ref: `ref_${String(index)}`,
+          checked: true,
+        })),
+      },
+    ],
+    [
+      'browser_set_checked_many',
+      {
+        tabId: 7,
+        items: [
+          { ref: 'ref_1', checked: true },
+          { ref: 'ref_1', checked: false },
+        ],
+      },
+    ],
+    [
+      'browser_set_checked_many',
+      { tabId: 7, items: [{ ref: 'ref_1', checked: true, unexpected: true }] },
+    ],
   ])('rejects bounded input for %s without exposing its contents', (name, arguments_) => {
     let thrown: unknown;
     try {

@@ -78,6 +78,7 @@ describe('BrowserToolExecutor', () => {
       data: { title: 'Current page', active: true, taskBound: true },
       observation: null,
     });
+    expect(result.modelOutput).toBeUndefined();
   });
 
   it('inspects an explicitly selected background tab without activating it', async () => {
@@ -509,6 +510,105 @@ describe('BrowserToolExecutor', () => {
     expect(sessions.releaseOwner).toHaveBeenCalledWith('runner_1');
   });
 
+  it('captures a delivery asset without requiring or changing model screenshot fallback state', async () => {
+    const observer = {
+      inspect: vi.fn(),
+      capture: vi.fn(async () => ({
+        tabId: 7,
+        url: 'https://example.com/current',
+        data: {
+          mode: 'screenshot',
+          mimeType: 'image/png',
+          width: 800,
+          height: 600,
+          attachmentId: 'attachment_capture',
+        },
+        observation: null,
+        attachmentIds: ['attachment_capture'],
+        debuggerSession: 'ephemeral' as const,
+      })),
+    };
+    const sessions = {
+      retain: vi.fn(async () => undefined),
+      releaseOwner: vi.fn(async () => undefined),
+    };
+    const executor = new BrowserToolExecutor({ tabs: tabPort(), observer, sessions });
+
+    const result = await executor.execute(
+      call('browser_capture_screenshot', { tabId: 0 }),
+      new AbortController().signal,
+      { currentTabId: 7, sessionOwnerId: 'runner_1' },
+    );
+
+    expect(observer.capture).toHaveBeenCalledWith(7, expect.any(AbortSignal));
+    expect(observer.inspect).not.toHaveBeenCalled();
+    expect(sessions.retain).toHaveBeenCalledWith(7, 'runner_1');
+    expect(JSON.parse(result.output)).toEqual({
+      ok: true,
+      tabId: 7,
+      url: 'https://example.com/current',
+      data: {
+        mimeType: 'image/png',
+        width: 800,
+        height: 600,
+        assetId: 'attachment_capture',
+      },
+      observation: null,
+    });
+    expect(result.attachmentIds).toEqual(['attachment_capture']);
+    expect(result.modelAttachmentIds).toEqual([]);
+  });
+
+  it('pastes only a screenshot asset owned by the current WorkSession', async () => {
+    const actions = {
+      execute: vi.fn(async () => ({
+        tabId: 7,
+        url: 'https://example.com/messages',
+        data: { action: 'paste_image', dispatched: true, fileCount: 1 },
+        observation: { targetPresent: true },
+      })),
+    };
+    const sessions = {
+      retain: vi.fn(async () => undefined),
+      releaseOwner: vi.fn(async () => undefined),
+    };
+    const executor = new BrowserToolExecutor({ tabs: tabPort(), actions, sessions });
+    const signal = new AbortController().signal;
+    const toolCall = call('browser_paste_image', {
+      tabId: 0,
+      ref: 'ref_editor',
+      assetId: 'attachment_capture',
+    });
+
+    const denied = await executor.execute(toolCall, signal, {
+      currentTabId: 7,
+      sessionOwnerId: 'runner_1',
+      availableAssetIds: [],
+    });
+    expect(JSON.parse(denied.output)).toMatchObject({
+      ok: false,
+      code: 'ASSET_NOT_AVAILABLE',
+    });
+    expect(actions.execute).not.toHaveBeenCalled();
+
+    const allowed = await executor.execute(toolCall, signal, {
+      currentTabId: 7,
+      sessionOwnerId: 'runner_1',
+      availableAssetIds: ['attachment_capture'],
+    });
+    expect(actions.execute).toHaveBeenCalledWith(
+      expect.objectContaining({
+        operation: 'paste_image',
+        arguments: expect.objectContaining({ tabId: 7, assetId: 'attachment_capture' }),
+      }),
+      signal,
+    );
+    expect(JSON.parse(allowed.output)).toMatchObject({
+      ok: true,
+      data: { action: 'paste_image', dispatched: true, fileCount: 1 },
+    });
+  });
+
   it('requires native interactive inspection before a model screenshot', async () => {
     const observer = {
       inspect: vi.fn(async () => ({
@@ -849,6 +949,135 @@ describe('BrowserToolExecutor', () => {
       }),
       signal,
     );
+  });
+
+  it.each([
+    ['browser_click', { ref: 'ref_action', button: 'left', count: 1 }],
+    ['browser_scroll', { target: 'ref_action', deltaX: 0, deltaY: 600 }],
+  ])(
+    'leaves the current semantic snapshot available for an explicit inspection after %s',
+    async (name, input) => {
+      const observer = {
+        inspect: vi.fn(
+          async (
+            _tabId: number,
+            _mode: string,
+            _signal: AbortSignal,
+            options?: { readonly since?: string },
+          ) => ({
+            tabId: 7,
+            url: 'https://example.com/form',
+            data:
+              options?.since === 'snapshot_before'
+                ? {
+                    mode: 'interactive',
+                    snapshot: 'snapshot_after',
+                    base: 'snapshot_before',
+                    upsert: [
+                      {
+                        k: 'ref:ref_action',
+                        e: { d: 1, r: 'button', n: 'Continue', ref: 'ref_action' },
+                      },
+                    ],
+                  }
+                : {
+                    mode: 'interactive',
+                    snapshot: 'snapshot_before',
+                    elements: [{ d: 1, r: 'button', n: 'Continue', ref: 'ref_action' }],
+                  },
+            observation: null,
+            attachmentIds: [],
+            debuggerSession: 'ephemeral' as const,
+            visualFallbackAllowed: false,
+          }),
+        ),
+      };
+      const actions = {
+        execute: vi.fn(async () => ({
+          tabId: 7,
+          url: 'https://example.com/form',
+          data: { action: name.replace('browser_', ''), completed: true },
+          observation: null,
+        })),
+      };
+      const executor = new BrowserToolExecutor({ tabs: tabPort(), observer, actions });
+      const signal = new AbortController().signal;
+      const context = { currentTabId: 7 };
+
+      await executor.execute(call('browser_inspect', { mode: 'interactive' }), signal, context);
+      const acted = await executor.execute(call(name, input), signal, context);
+      const inspected = await executor.execute(
+        call('browser_inspect', { mode: 'interactive', since: 'snapshot_before' }),
+        signal,
+        context,
+      );
+
+      expect(JSON.parse(acted.output)).toMatchObject({
+        ok: true,
+        data: { completed: true },
+      });
+      expect(JSON.parse(acted.output).data).not.toHaveProperty('verification');
+      expect(JSON.parse(inspected.output)).toMatchObject({
+        ok: true,
+        data: {
+          snapshot: 'snapshot_after',
+          base: 'snapshot_before',
+        },
+      });
+      expect(observer.inspect).toHaveBeenCalledTimes(2);
+      expect(observer.inspect).toHaveBeenLastCalledWith(7, 'interactive', signal, {
+        since: 'snapshot_before',
+      });
+    },
+  );
+
+  it('returns a failed batch receipt without losing its verified selection prefix', async () => {
+    const actions = {
+      execute: vi.fn(async () => ({
+        tabId: 7,
+        url: 'https://example.com/form',
+        data: {
+          action: 'set_checked_many',
+          complete: false,
+          completedItems: [
+            {
+              ref: 'ref_1',
+              requested: true,
+              actual: true,
+              dispatched: false,
+              strategy: 'already_set',
+            },
+          ],
+          failedIndex: 1,
+          failure: { code: 'UNSUPPORTED_ACTION' },
+        },
+        observation: { targetPresent: true },
+        failure: { code: 'UNSUPPORTED_ACTION' },
+      })),
+    };
+    const executor = new BrowserToolExecutor({ tabs: tabPort(), actions });
+
+    const result = await executor.execute(
+      call('browser_set_checked_many', {
+        items: [
+          { ref: 'ref_1', checked: true },
+          { ref: 'ref_2', checked: false },
+        ],
+      }),
+      new AbortController().signal,
+      { currentTabId: 7 },
+    );
+
+    expect(JSON.parse(result.output)).toMatchObject({
+      ok: false,
+      code: 'UNSUPPORTED_ACTION',
+      data: {
+        complete: false,
+        failedIndex: 1,
+        completedItems: [{ ref: 'ref_1', actual: true }],
+      },
+    });
+    expect(actions.execute).toHaveBeenCalledOnce();
   });
 
   it('returns an interactive state delta after a screenshot coordinate click', async () => {

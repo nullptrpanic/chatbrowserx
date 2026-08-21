@@ -25,7 +25,9 @@ export const contextCommitToolSchema = z
 
 export type ContextCommitToolInput = z.infer<typeof contextCommitToolSchema>;
 
-const legacyContextCommitToolSchema = contextCommitToolSchema.omit({ throughCallId: true });
+const legacyContextCommitToolSchema = contextCommitToolSchema.omit({
+  throughCallId: true,
+});
 
 export interface RecordedContextCommitToolInput {
   readonly state: string;
@@ -64,7 +66,11 @@ function contextCommitToolDefinition(validThroughCallIds?: readonly string[]): M
       'model requests will omit tool pairs through that call inclusively, retain later tool ' +
       'pairs in raw form, and retain this checkpoint at that boundary. The state must preserve ' +
       'everything important through throughCallId. Prioritize completeness over brevity within ' +
-      'the state limit. Retain all relevant user requirements and runtime supplements, verified ' +
+      'the state limit. Prefer a boundary that keeps recent raw tool pairs when their exact ' +
+      'outputs may still affect the next action. Choose the boundary based on the task state: ' +
+      'compress older, completed phases while retaining recent, unresolved, or actively used ' +
+      'evidence in raw form. ' +
+      'Retain all relevant user requirements and runtime supplements, verified ' +
       'facts, decisions, exact identifiers or URLs, current browser or task state, unresolved ' +
       'issues, important evidence, and failed actions. Remove only redundant raw logs and details ' +
       'that cannot affect correct continuation. Record only evidence-backed state: do not turn ' +

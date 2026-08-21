@@ -1213,4 +1213,35 @@ describe('buildSemanticPageSnapshot', () => {
       ]);
     },
   );
+
+  it('marks viewport membership for local prioritization without changing page semantics', () => {
+    const result = buildSemanticPageSnapshot({
+      axNodes: [
+        axNode('visible', 11, 'StaticText', 'Visible question'),
+        axNode('offscreen', 12, 'StaticText', 'Offscreen appendix'),
+      ],
+      domSnapshot: domSnapshot([
+        { backendNodeId: 1, nodeName: '#document', parentIndex: -1 },
+        {
+          backendNodeId: 11,
+          nodeName: 'DIV',
+          parentIndex: 0,
+          bounds: [20, 40, 500, 40],
+        },
+        {
+          backendNodeId: 12,
+          nodeName: 'DIV',
+          parentIndex: 0,
+          bounds: [20, 1_400, 500, 40],
+        },
+      ]),
+      frame: 'main',
+      viewport: { x: 0, y: 0, width: 1_000, height: 800 },
+    });
+
+    expect(result.entries).toEqual([
+      expect.objectContaining({ name: 'Visible question', inViewport: true }),
+      expect.objectContaining({ name: 'Offscreen appendix', inViewport: false }),
+    ]);
+  });
 });

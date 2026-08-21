@@ -24,8 +24,11 @@ const TASK_SCOPED_OPERATIONS = new Set<ParsedBrowserToolCall['operation']>([
   'navigate',
   'reload',
   'inspect',
+  'capture_screenshot',
+  'paste_image',
   'click',
   'set_checked',
+  'set_checked_many',
   'type',
   'keypress',
   'scroll',
@@ -56,6 +59,7 @@ export interface BrowserToolExecutorDependencies {
       signal: AbortSignal,
       options?: PageInspectionOptions,
     ): Promise<PageObservationResult>;
+    capture?(tabId: number, signal: AbortSignal): Promise<PageObservationResult>;
     invalidateInteractiveSnapshots?(): void;
   };
   readonly actions?: BrowserActionPort;
@@ -119,6 +123,20 @@ function failureFor(error: unknown): BrowserToolFailure {
   switch (code) {
     case 'INVALID_TAB':
       return failure('INVALID_TAB', 'The browser tab ID is invalid.', false, false);
+    case 'ASSET_NOT_AVAILABLE':
+      return failure(
+        'ASSET_NOT_AVAILABLE',
+        'This image asset is not available in the current WorkSession.',
+        false,
+        false,
+      );
+    case 'ATTACHMENT_VERIFICATION_FAILED':
+      return failure(
+        'ATTACHMENT_VERIFICATION_FAILED',
+        'The editor handled the image paste, but an attachment preview could not be verified. Do not paste the same asset again; inspect the current page.',
+        false,
+        true,
+      );
     case 'TAB_NOT_FOUND':
       return failure('TAB_NOT_FOUND', 'The browser tab no longer exists.', true, true);
     case 'TAB_NOT_CONTROLLABLE':
@@ -269,12 +287,18 @@ function success(tab: BrowserTabState, data: Readonly<Record<string, unknown>>) 
 }
 
 function result(
+  _operation: ParsedBrowserToolCall['operation'],
   output: unknown,
   attachmentIds: readonly string[] = [],
+  modelAttachmentIds?: readonly string[],
 ): BrowserToolExecutionResult {
   const serialized = JSON.stringify(output);
   if (serialized.length <= MAX_OUTPUT_CHARACTERS) {
-    return { output: serialized, attachmentIds };
+    return {
+      output: serialized,
+      attachmentIds,
+      ...(modelAttachmentIds === undefined ? {} : { modelAttachmentIds }),
+    };
   }
   return {
     output: JSON.stringify(
@@ -577,10 +601,11 @@ export class BrowserToolExecutor implements BrowserExecutionPort {
     let recoveryTabId: number | null = null;
     try {
       const taskTarget = resolveTaskTarget(call, context);
-      if (taskTarget.failure !== null) return result(taskTarget.failure);
+      if (taskTarget.failure !== null) return result(call.operation, taskTarget.failure);
       recoveryTabId = taskTarget.tabId;
       let output: unknown;
       let attachmentIds: readonly string[] = [];
+      let modelAttachmentIds: readonly string[] | undefined;
       switch (call.operation) {
         case 'get_current_tab': {
           if (context?.currentTabId === undefined || context.currentTabId === null) {
@@ -768,8 +793,47 @@ export class BrowserToolExecutor implements BrowserExecutionPort {
           attachmentIds = observed.attachmentIds;
           break;
         }
+        case 'capture_screenshot': {
+          const capture = this.#dependencies.observer?.capture;
+          if (!capture) {
+            output = failure(
+              'OPERATION_UNAVAILABLE',
+              'This browser operation is not connected yet.',
+              false,
+              false,
+            );
+            break;
+          }
+          const targetTabId = requiredTaskTabId(taskTarget);
+          await this.#retainRunner(targetTabId, context?.sessionOwnerId);
+          const observed = await capture.call(this.#dependencies.observer, targetTabId, signal);
+          const attachmentId =
+            typeof observed.data.attachmentId === 'string'
+              ? observed.data.attachmentId
+              : observed.attachmentIds[0];
+          if (!attachmentId || !observed.attachmentIds.includes(attachmentId)) {
+            throw new Error('Screenshot capture returned no durable asset.');
+          }
+          output = {
+            ok: true,
+            tabId: observed.tabId,
+            url: observed.url,
+            data: {
+              mimeType: observed.data.mimeType,
+              width: observed.data.width,
+              height: observed.data.height,
+              assetId: attachmentId,
+            },
+            observation: null,
+          };
+          attachmentIds = observed.attachmentIds;
+          modelAttachmentIds = [];
+          break;
+        }
         case 'click':
         case 'set_checked':
+        case 'set_checked_many':
+        case 'paste_image':
         case 'type':
         case 'keypress':
         case 'scroll':
@@ -787,6 +851,18 @@ export class BrowserToolExecutor implements BrowserExecutionPort {
               false,
             );
             break;
+          }
+          if (call.operation === 'paste_image') {
+            const { assetId } = call.arguments as { readonly assetId: string };
+            if (!context?.availableAssetIds?.includes(assetId)) {
+              output = failure(
+                'ASSET_NOT_AVAILABLE',
+                'This image asset is not available in the current WorkSession.',
+                false,
+                false,
+              );
+              break;
+            }
           }
           const targetTabId = requiredTaskTabId(taskTarget);
           if (this.#isDuplicateFailedSelection(call, targetTabId)) {
@@ -817,40 +893,48 @@ export class BrowserToolExecutor implements BrowserExecutionPort {
           this.#screenshotScales.delete(targetTabId);
           await this.#retainRunner(targetTabId, context?.sessionOwnerId);
           const action = await this.#dependencies.actions.execute(boundCall, signal);
+          if (action.failure !== undefined) {
+            const normalized = failureFor(action.failure);
+            if (normalized.code === 'ACTION_STATE_MISMATCH') {
+              this.#stateMismatchFallbackByTab.add(targetTabId);
+            }
+            output = {
+              ...normalized,
+              tabId: action.tabId,
+              url: action.url,
+              data: action.data,
+              observation: action.observation,
+            };
+            break;
+          }
           this.#clearFailedSelection(call, targetTabId);
           this.#stateMismatchFallbackByTab.delete(targetTabId);
           let verification: Readonly<Record<string, unknown>> | undefined;
+          let verificationUnavailable = false;
           const baseSnapshot = this.#interactiveSnapshotByTab.get(targetTabId);
           if (
             call.operation === 'click_point' &&
             baseSnapshot !== undefined &&
             this.#dependencies.observer
           ) {
-            await this.#retainRunner(targetTabId, context?.sessionOwnerId);
-            try {
-              const observed = await this.#dependencies.observer.inspect(
+            verification =
+              (await this.#observeAfterAction(
                 targetTabId,
-                'interactive',
+                baseSnapshot,
                 signal,
-                { since: baseSnapshot },
-              );
-              verification = observed.data;
-              const snapshotId = interactiveSnapshotId(observed.data);
-              if (snapshotId === null) this.#interactiveSnapshotByTab.delete(targetTabId);
-              else this.#interactiveSnapshotByTab.set(targetTabId, snapshotId);
-              this.#visualFallbackByTab.set(
-                targetTabId,
-                observed.visualFallbackAllowed ?? this.#fallbackFromElements(observed.data),
-              );
-            } catch {
-              // The coordinate action already completed; a failed best-effort recheck must not replay it.
-            }
+                context?.sessionOwnerId,
+              )) ?? undefined;
+            verificationUnavailable = verification === undefined;
           }
           output = {
             ok: true,
             tabId: action.tabId,
             url: action.url,
-            data: verification === undefined ? action.data : { ...action.data, verification },
+            data: {
+              ...action.data,
+              ...(verification === undefined ? {} : { verification }),
+              ...(verificationUnavailable ? { verificationUnavailable: true } : {}),
+            },
             observation: action.observation,
           };
           break;
@@ -966,7 +1050,7 @@ export class BrowserToolExecutor implements BrowserExecutionPort {
       }
       throwIfAborted(signal);
       this.#recordRecoveryOutcome(call.operation, recoveryTabId, output);
-      return result(output, attachmentIds);
+      return result(call.operation, output, attachmentIds, modelAttachmentIds);
     } catch (error) {
       if (signal.aborted || (error instanceof Error && error.name === 'AbortError')) throw error;
       const normalized = failureFor(error);
@@ -975,7 +1059,7 @@ export class BrowserToolExecutor implements BrowserExecutionPort {
         this.#rememberFailedSelection(call, recoveryTabId);
       }
       this.#recordRecoveryOutcome(call.operation, recoveryTabId, normalized);
-      return result(normalized);
+      return result(call.operation, normalized);
     }
   }
 
@@ -1084,6 +1168,35 @@ export class BrowserToolExecutor implements BrowserExecutionPort {
         this.#reloadRecoveryByTab.get(tabId_)?.operation === operation)
     ) {
       this.#reloadRecoveryByTab.delete(tabId_);
+    }
+  }
+
+  async #observeAfterAction(
+    tabId_: number,
+    baseSnapshot: string,
+    signal: AbortSignal,
+    runnerId: string | undefined,
+  ): Promise<Readonly<Record<string, unknown>> | null> {
+    const observer = this.#dependencies.observer;
+    if (!observer) return null;
+    try {
+      await this.#retainRunner(tabId_, runnerId);
+      const observed = await observer.inspect(tabId_, 'interactive', signal, {
+        since: baseSnapshot,
+      });
+      this.#rememberSelectableRefs(tabId_, observed.data);
+      const snapshotId = interactiveSnapshotId(observed.data);
+      if (snapshotId === null) this.#interactiveSnapshotByTab.delete(tabId_);
+      else this.#interactiveSnapshotByTab.set(tabId_, snapshotId);
+      this.#visualFallbackByTab.set(
+        tabId_,
+        observed.visualFallbackAllowed ?? this.#fallbackFromElements(observed.data),
+      );
+      if (hasSelectableRef(observed.data)) this.#stateMismatchFallbackByTab.delete(tabId_);
+      return observed.data;
+    } catch {
+      // The mutation already completed. Surface observation loss without replaying it.
+      return null;
     }
   }
 

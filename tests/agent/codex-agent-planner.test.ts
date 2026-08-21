@@ -207,6 +207,7 @@ const BROWSER_TOOL_NAMES = [
   'browser_navigate',
   'browser_reload',
   'browser_inspect',
+  'browser_capture_screenshot',
   'browser_click',
   'browser_set_checked',
   'browser_type',
@@ -216,12 +217,7 @@ const BROWSER_TOOL_NAMES = [
   'browser_select',
   'browser_drag',
   'browser_wait',
-  'browser_click_point',
-  'browser_drag_point',
   'browser_network_start',
-  'browser_network_list',
-  'browser_network_get',
-  'browser_network_stop',
 ] as const;
 
 const CONFIGURED_TAVILY = { isConfigured: async () => true } as const;
@@ -423,7 +419,10 @@ describe('CodexAgentPlanner', () => {
       ids: { create: (prefix) => `${prefix}_${++id}` },
       clock: { now: () => 500 + id },
     });
-    const messageRef = { type: 'message_ref' as const, messageId: USER_MESSAGE.id };
+    const messageRef = {
+      type: 'message_ref' as const,
+      messageId: USER_MESSAGE.id,
+    };
     const resultPair = [
       {
         type: 'function_call' as const,
@@ -476,25 +475,33 @@ describe('CodexAgentPlanner', () => {
     expect(model.requests[1]?.toolChoice).toBeUndefined();
   });
 
-  it('forces a context commit after sixteen raw tool results while retaining the full tool catalog', async () => {
+  it('forces a context commit after twenty-four raw tool results while retaining the checkpoint-safe catalog', async () => {
     const eligibleCallIds = Array.from(
-      { length: 16 },
+      { length: 24 },
       (_, index) => `call_browser_${String(index + 1)}`,
     );
     const throughCallId = eligibleCallIds.at(-1) ?? '';
     const model = provider(async function* () {
       yield { type: 'response.started', responseId: 'resp_forced_commit' };
-      yield { type: 'tool.started', callId: 'call_commit', name: 'commit_context' };
+      yield {
+        type: 'tool.started',
+        callId: 'call_commit',
+        name: 'commit_context',
+      };
       yield {
         type: 'tool.completed',
         callId: 'call_commit',
         name: 'commit_context',
         argumentsJson: JSON.stringify({
-          state: 'Sixteen browser observations are summarized. Continue with the next page action.',
+          state: 'Older browser observations are summarized. Continue with the next page action.',
           throughCallId,
         }),
       };
-      yield { type: 'response.completed', responseId: 'resp_forced_commit', usage: null };
+      yield {
+        type: 'response.completed',
+        responseId: 'resp_forced_commit',
+        usage: null,
+      };
     });
     const storage = repositories();
     const planner = new CodexAgentPlanner({
@@ -509,7 +516,7 @@ describe('CodexAgentPlanner', () => {
     });
     const continuationItems = [
       { type: 'message_ref' as const, messageId: USER_MESSAGE.id },
-      ...Array.from({ length: 16 }, (_, index) => {
+      ...Array.from({ length: 24 }, (_, index) => {
         const callId = `call_browser_${String(index + 1)}`;
         return [
           {
@@ -553,11 +560,125 @@ describe('CodexAgentPlanner', () => {
     ).toEqual(eligibleCallIds);
   });
 
+  it('forces a context commit before a projected Provider request crosses the size budget', async () => {
+    const model = provider(async function* () {
+      yield { type: 'response.started', responseId: 'resp_projected_commit' };
+      yield {
+        type: 'tool.started',
+        callId: 'call_projected_commit',
+        name: 'commit_context',
+      };
+      yield {
+        type: 'tool.completed',
+        callId: 'call_projected_commit',
+        name: 'commit_context',
+        argumentsJson: JSON.stringify({
+          state: 'The current browser state is preserved for the next action.',
+          throughCallId: 'call_short',
+        }),
+      };
+      yield {
+        type: 'response.completed',
+        responseId: 'resp_projected_commit',
+        usage: null,
+      };
+    });
+    const storage = repositories();
+    const planner = new CodexAgentPlanner({
+      provider: model.instance,
+      tavilyAvailability: { isConfigured: vi.fn(async () => false) },
+      settings: {
+        get: vi.fn(async () => ({
+          model: 'ignored-model-setting',
+          reasoningEffort: 'medium' as const,
+          systemPrompt: 'x'.repeat(80_000),
+          language: 'system' as const,
+          historyMessageLimit: 50,
+        })),
+      },
+      conversations: storage.conversations,
+      tasks: storage.tasks,
+      attachments: storage.attachments,
+      ids: { create: (prefix) => `${prefix}_projected_commit` },
+      clock: { now: () => 625 },
+    });
+    const continuationItems = [
+      { type: 'message_ref' as const, messageId: USER_MESSAGE.id },
+      {
+        type: 'function_call' as const,
+        callId: 'call_short',
+        name: 'browser_get_current_tab',
+        argumentsJson: '{"tabId":0}',
+      },
+      {
+        type: 'function_call_output' as const,
+        callId: 'call_short',
+        output: '{"ok":true}',
+        resultRef: 'result_short',
+        attachmentIds: [],
+      },
+    ];
+
+    await collect(planner, new AbortController().signal, {
+      ...PLAN_INPUT,
+      checkpoint: { ...CHECKPOINT, continuationItems },
+    });
+
+    expect(model.requests[0]?.toolChoice).toEqual({
+      type: 'function',
+      name: 'commit_context',
+    });
+  });
+
+  it('sends an oversized request intact when no completed tool result can be committed', async () => {
+    const model = provider(async function* () {
+      yield {
+        type: 'response.started',
+        responseId: 'resp_no_commit_candidate',
+      };
+      yield { type: 'text.delta', delta: 'Still complete.' };
+      yield {
+        type: 'response.completed',
+        responseId: 'resp_no_commit_candidate',
+        usage: null,
+      };
+    });
+    const storage = repositories();
+    const planner = new CodexAgentPlanner({
+      provider: model.instance,
+      tavilyAvailability: { isConfigured: vi.fn(async () => false) },
+      settings: {
+        get: vi.fn(async () => ({
+          model: 'ignored-model-setting',
+          reasoningEffort: 'medium' as const,
+          systemPrompt: 'x'.repeat(80_000),
+          language: 'system' as const,
+          historyMessageLimit: 50,
+        })),
+      },
+      conversations: storage.conversations,
+      tasks: storage.tasks,
+      attachments: storage.attachments,
+      ids: { create: (prefix) => `${prefix}_no_commit_candidate` },
+      clock: { now: () => 640 },
+    });
+
+    await collect(planner, new AbortController().signal, PLAN_INPUT);
+
+    expect(model.requests[0]?.toolChoice).toBeUndefined();
+    expect(model.requests[0]?.tools.some(({ name }) => name === 'commit_context')).toBe(false);
+    expect(model.requests[0]?.systemPrompt).toContain('x'.repeat(80_000));
+  });
+
   it('keeps a forced commit available after an invalid cursor result', async () => {
     const model = provider(async function* () {
       yield { type: 'response.started', responseId: 'resp_retry_commit' };
       yield { type: 'text.delta', delta: 'Unexpected provider fallback.' };
-      yield { type: 'response.completed', responseId: 'resp_retry_commit', usage: null };
+      yield {
+        type: 'response.completed',
+        responseId: 'resp_retry_commit',
+        usage: null,
+      };
     });
     const storage = repositories();
     const planner = new CodexAgentPlanner({
@@ -571,7 +692,7 @@ describe('CodexAgentPlanner', () => {
       clock: { now: () => 650 },
     });
     const eligibleCallIds = Array.from(
-      { length: 16 },
+      { length: 24 },
       (_, index) => `call_browser_${String(index + 1)}`,
     );
     const rawPairs = eligibleCallIds.flatMap((callId) => [
@@ -729,14 +850,22 @@ describe('CodexAgentPlanner', () => {
     const argumentsJson = JSON.stringify({ state, throughCallId });
     const commitEvents = async function* (): AsyncGenerator<ModelStreamEvent> {
       yield { type: 'response.started', responseId: 'resp_commit' };
-      yield { type: 'tool.started', callId: 'call_commit', name: 'commit_context' };
+      yield {
+        type: 'tool.started',
+        callId: 'call_commit',
+        name: 'commit_context',
+      };
       yield {
         type: 'tool.completed',
         callId: 'call_commit',
         name: 'commit_context',
         argumentsJson,
       };
-      yield { type: 'response.completed', responseId: 'resp_commit', usage: null };
+      yield {
+        type: 'response.completed',
+        responseId: 'resp_commit',
+        usage: null,
+      };
     };
     const eligibleContinuation = [
       { type: 'message_ref' as const, messageId: USER_MESSAGE.id },
@@ -773,7 +902,10 @@ describe('CodexAgentPlanner', () => {
         new AbortController().signal,
         {
           ...PLAN_INPUT,
-          checkpoint: { ...CHECKPOINT, continuationItems: eligibleContinuation },
+          checkpoint: {
+            ...CHECKPOINT,
+            continuationItems: eligibleContinuation,
+          },
         },
       ),
     ).resolves.toMatchObject([

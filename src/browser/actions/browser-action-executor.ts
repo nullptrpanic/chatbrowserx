@@ -1,5 +1,7 @@
 import type { Protocol } from 'devtools-protocol';
 import type { ParsedBrowserToolCall } from '../../agent/tools/browser-tool-schema';
+import { IMAGE_POLICY } from '../../attachments/attachment-policy';
+import type { AttachmentRepository } from '../../persistence/attachment-repository';
 import type { PageCommand } from '../../shared/protocol/message-types';
 import type { DebuggerSession, DebuggerTransport } from '../debugger/debugger-transport';
 import type {
@@ -300,6 +302,186 @@ const INSERT_FOCUSED_TEXT_FUNCTION = `function(text, replace, customEditor) {
   return { dispatched: true, strategy: inserted ? 'insert_text' : 'range_insert' };
 }`;
 
+export async function pasteImageIntoEditor(
+  this: unknown,
+  base64: string,
+  mimeType: string,
+  fileName: string,
+  settleMs = 1_200,
+): Promise<Readonly<Record<string, unknown>>> {
+  const __chatbrowserxPasteImage = true;
+  void __chatbrowserxPasteImage;
+  const source = this as (Node & { readonly document?: Document }) | null;
+  const document_ = source?.ownerDocument ?? source?.document;
+  const window_ = document_?.defaultView;
+  if (!document_ || !window_?.DataTransfer || !window_.File || typeof window_.atob !== 'function') {
+    return { dispatched: false, reason: 'clipboard_api_unavailable' };
+  }
+  const isElement = (candidate: unknown): candidate is Element =>
+    Boolean(window_.Element && candidate instanceof window_.Element);
+  const composedParent = (candidate: Node): Element | null => {
+    const root = candidate?.getRootNode?.();
+    return (
+      candidate?.parentElement ||
+      (window_.ShadowRoot && root instanceof window_.ShadowRoot ? root.host : null)
+    );
+  };
+  const acceptsPaste = (candidate: unknown): candidate is Element => {
+    if (!isElement(candidate)) return false;
+    if (window_.HTMLInputElement && candidate instanceof window_.HTMLInputElement) return true;
+    if (window_.HTMLTextAreaElement && candidate instanceof window_.HTMLTextAreaElement)
+      return true;
+    return Boolean(
+      window_.HTMLElement &&
+      candidate instanceof window_.HTMLElement &&
+      (candidate.isContentEditable ||
+        ['', 'true', 'plaintext-only'].includes(
+          (candidate.getAttribute('contenteditable') ?? 'false').trim().toLowerCase(),
+        ) ||
+        candidate.getAttribute('role') === 'textbox'),
+    );
+  };
+  let element: Element | null = isElement(source)
+    ? source
+    : source instanceof window_.Node
+      ? composedParent(source)
+      : null;
+  let target: Element | null = null;
+  for (let depth = 0; element && depth < 10; depth += 1) {
+    if (acceptsPaste(element)) {
+      target = element;
+      break;
+    }
+    element = composedParent(element);
+  }
+  if (!target && isElement(source) && typeof source.querySelector === 'function') {
+    target = source.querySelector(
+      'input[type="file"], [contenteditable="true"], [contenteditable="plaintext-only"], textarea, [role="textbox"]',
+    );
+  }
+  if (!target || !target.isConnected) return { dispatched: false, reason: 'target_not_editable' };
+  let bytes: Uint8Array<ArrayBuffer>;
+  try {
+    const binary = window_.atob(base64);
+    bytes = new Uint8Array(binary.length);
+    for (let index = 0; index < binary.length; index += 1) bytes[index] = binary.charCodeAt(index);
+  } catch {
+    return { dispatched: false, reason: 'invalid_image_data' };
+  }
+  const file = new window_.File([bytes], fileName, { type: mimeType, lastModified: Date.now() });
+  const clipboardData = new window_.DataTransfer();
+  clipboardData.items.add(file);
+  if (target instanceof window_.HTMLElement) target.focus({ preventScroll: true });
+  if (
+    window_.HTMLInputElement &&
+    target instanceof window_.HTMLInputElement &&
+    target.type.toLowerCase() === 'file'
+  ) {
+    try {
+      target.files = clipboardData.files;
+    } catch {
+      return { dispatched: false, reason: 'file_input_rejected' };
+    }
+    target.dispatchEvent(new window_.Event('input', { bubbles: true, composed: true }));
+    target.dispatchEvent(new window_.Event('change', { bubbles: true, composed: true }));
+    const fileCount = target.files?.length || 0;
+    return {
+      dispatched: true,
+      strategy: 'file_input',
+      fileCount,
+      handled: fileCount === 1,
+      verified: fileCount === 1,
+      mutations: 0,
+    };
+  }
+  let observationRoot = target;
+  for (let depth = 0; depth < 6; depth += 1) {
+    const parent = composedParent(observationRoot);
+    if (!parent) break;
+    observationRoot = parent;
+  }
+  const mediaSelector = 'img, canvas, video, object, embed, [role="img"]';
+  const beforeLocalElements = new Set(observationRoot.querySelectorAll('*'));
+  const beforeMedia = new Set(document_.querySelectorAll(mediaSelector));
+  const targetRect = target.getBoundingClientRect();
+  const countElements = () => observationRoot.querySelectorAll('*').length;
+  const beforeElements = countElements();
+  let mutations = 0;
+  let addedElements = 0;
+  const observer = window_.MutationObserver
+    ? new window_.MutationObserver((records) => {
+        mutations += records.length;
+        for (const record of records) {
+          for (const node of record.addedNodes || []) {
+            if (node.nodeType === 1) addedElements += 1;
+          }
+        }
+      })
+    : null;
+  observer?.observe(observationRoot, {
+    childList: true,
+    subtree: true,
+    attributes: true,
+    attributeFilter: ['src', 'class', 'aria-label', 'data-state'],
+  });
+  let event: Event;
+  try {
+    event = new window_.ClipboardEvent('paste', {
+      bubbles: true,
+      cancelable: true,
+      composed: true,
+      clipboardData,
+    });
+  } catch {
+    event = new window_.Event('paste', { bubbles: true, cancelable: true, composed: true });
+    Object.defineProperty(event, 'clipboardData', { value: clipboardData });
+  }
+  const propagated = target.dispatchEvent(event);
+  const boundedSettleMs = Number.isFinite(settleMs)
+    ? Math.max(0, Math.min(5_000, settleMs))
+    : 1_200;
+  await new Promise((resolve) => window_.setTimeout(resolve, boundedSettleMs));
+  observer?.disconnect();
+  const handled = event.defaultPrevented || propagated === false;
+  const isNearTarget = (candidate: Element): boolean => {
+    const rect = candidate.getBoundingClientRect();
+    if (rect.width <= 0 || rect.height <= 0) return false;
+    const horizontalOverlap = rect.right >= targetRect.left && rect.left <= targetRect.right;
+    const verticalDistance = Math.max(
+      0,
+      targetRect.top - rect.bottom,
+      rect.top - targetRect.bottom,
+    );
+    return horizontalOverlap && verticalDistance <= 480;
+  };
+  const isVisualElement = (candidate: Element): boolean => {
+    if (candidate.matches(mediaSelector)) return true;
+    const backgroundImage = window_.getComputedStyle(candidate).backgroundImage;
+    return backgroundImage !== 'none' && /url\s*\(/i.test(backgroundImage);
+  };
+  const localPreviews = Array.from(observationRoot.querySelectorAll('*')).filter(
+    (candidate) => !beforeLocalElements.has(candidate) && isVisualElement(candidate),
+  );
+  const nearbyMediaPreviews = Array.from(document_.querySelectorAll(mediaSelector)).filter(
+    (candidate) => !beforeMedia.has(candidate) && isNearTarget(candidate),
+  );
+  const previews = new Set([...localPreviews, ...nearbyMediaPreviews]);
+  const verified = previews.size > 0;
+  return {
+    dispatched: true,
+    strategy: 'clipboard_event',
+    fileCount: clipboardData.files.length,
+    handled,
+    verified,
+    mutations,
+    addedElements,
+    localChanged: countElements() !== beforeElements,
+    previewCount: previews.size,
+  };
+}
+
+const PASTE_IMAGE_FUNCTION = pasteImageIntoEditor.toString();
+
 /** Self-contained DOM probe serialized into the target realm by Runtime.callFunctionOn. */
 export function inspectEditorTarget(this: unknown): {
   readonly editor: boolean;
@@ -331,6 +513,7 @@ export function inspectEditorTarget(this: unknown): {
   };
   let current: Element | null = isElement(source) ? source : composedParent(source);
   let editorElement: Element | null = null;
+  let monacoRoot: Element | null = null;
   let editor = false;
   let custom = false;
   for (let depth = 0; current && depth < 8; depth += 1) {
@@ -339,6 +522,9 @@ export function inspectEditorTarget(this: unknown): {
       .trim()
       .toLowerCase();
     const classHint = current.getAttribute('class') || '';
+    const classTokens = classHint.split(/\s+/);
+    const monaco = classTokens.some((token) => /(?:^|[-_])monaco(?:$|[-_])/i.test(token));
+    if (monaco) monacoRoot ||= current;
     const declaredContentEditable = current.getAttribute('contenteditable');
     const contentEditable = (declaredContentEditable ?? '').trim().toLowerCase();
     const contentEditableHost =
@@ -361,13 +547,11 @@ export function inspectEditorTarget(this: unknown): {
       role === 'code' ||
       role === 'application' ||
       roleDescription.includes('code editor') ||
-      classHint
-        .split(/\\s+/)
-        .some(
-          (token) =>
-            /(?:^|[-_])(?:monaco|codemirror)(?:$|[-_])/i.test(token) ||
-            /^ace[-_]editor(?:$|[-_])/i.test(token),
-        )
+      classTokens.some(
+        (token) =>
+          /(?:^|[-_])(?:monaco|codemirror)(?:$|[-_])/i.test(token) ||
+          /^ace[-_]editor(?:$|[-_])/i.test(token),
+      )
     ) {
       editor = true;
       custom = true;
@@ -380,10 +564,35 @@ export function inspectEditorTarget(this: unknown): {
         : null);
   }
   const valueElement = editorElement ?? (isElement(source) ? source : composedParent(source));
-  const value =
+  let value =
     valueElement && 'value' in valueElement && typeof valueElement.value === 'string'
       ? valueElement.value
       : ((valueElement as HTMLElement | null)?.innerText ?? valueElement?.textContent ?? '');
+  const monacoApi = (
+    window_ as typeof window_ & {
+      readonly monaco?: {
+        readonly editor?: {
+          getEditors?(): readonly {
+            getDomNode?(): HTMLElement | null;
+            getModel?(): { getValue?(): unknown } | null;
+          }[];
+        };
+      };
+    }
+  ).monaco?.editor;
+  if (monacoRoot && typeof monacoApi?.getEditors === 'function') {
+    const matchingEditors = monacoApi.getEditors().filter((candidate) => {
+      const domNode = candidate.getDomNode?.();
+      return Boolean(
+        domNode &&
+        (domNode === monacoRoot || domNode.contains(source) || monacoRoot.contains(domNode)),
+      );
+    });
+    if (matchingEditors.length === 1) {
+      const modelValue = matchingEditors[0]?.getModel?.()?.getValue?.();
+      if (typeof modelValue === 'string') value = modelValue;
+    }
+  }
   return { editor, custom, connected: valueElement?.isConnected === true, value };
 }
 
@@ -413,6 +622,11 @@ export interface BrowserActionResult {
   readonly url: string | null;
   readonly data: Readonly<Record<string, unknown>>;
   readonly observation: Readonly<Record<string, unknown>> | null;
+  /** A batch mutation may preserve a verified prefix while reporting its first failure. */
+  readonly failure?: {
+    readonly code: string;
+    readonly stage?: BrowserActionError['stage'];
+  };
 }
 
 export interface BrowserActionPort {
@@ -436,6 +650,8 @@ export interface BrowserPageActionPort {
 
 export type BrowserActionErrorCode =
   | 'UNSUPPORTED_ACTION'
+  | 'ASSET_NOT_AVAILABLE'
+  | 'ATTACHMENT_VERIFICATION_FAILED'
   | 'SELECTABLE_ACTION_REQUIRED'
   | 'ACTION_STATE_MISMATCH'
   | 'ACTION_STATE_UNAVAILABLE'
@@ -468,6 +684,7 @@ export interface BrowserActionExecutorDependencies {
   readonly pointer: PointerPagePort;
   readonly platform: BrowserPlatformPort;
   readonly page?: BrowserPageActionPort;
+  readonly attachments?: Pick<AttachmentRepository, 'get'>;
 }
 
 interface Point {
@@ -477,6 +694,15 @@ interface Point {
 
 function throwIfAborted(signal: AbortSignal): void {
   if (signal.aborted) throw new DOMException('Browser action was aborted.', 'AbortError');
+}
+
+function encodeBase64(bytes: Uint8Array): string {
+  let binary = '';
+  const chunkSize = 32 * 1_024;
+  for (let offset = 0; offset < bytes.length; offset += chunkSize) {
+    binary += String.fromCharCode(...bytes.subarray(offset, offset + chunkSize));
+  }
+  return btoa(binary);
 }
 
 function quadRect(quad: readonly number[] | undefined): ViewportRect | undefined {
@@ -522,6 +748,17 @@ interface RefStateObservation {
 interface RuntimeSelectionState {
   readonly observable: boolean;
   readonly selected?: boolean;
+}
+
+interface SetCheckedExecutionResult {
+  readonly ref: string;
+  readonly requested: boolean;
+  readonly actual: boolean;
+  readonly dispatched: boolean;
+  readonly strategy: string;
+  readonly state: readonly string[];
+  readonly target: ObservedElementRefState;
+  readonly changes: readonly Readonly<{ ref: string; state: readonly string[] }>[];
 }
 
 function input<T>(call: ParsedBrowserToolCall): T {
@@ -635,6 +872,30 @@ function verifiesInput(actual: string | null, expected: string, replace: boolean
     : expected.length === 0 || (actual !== null && actual !== before && actual.includes(expected));
 }
 
+function normalizeInputValue(value: string): string {
+  return value.replace(/\r\n?/g, '\n');
+}
+
+function inputValueHash(value: string): string {
+  let hash = 0x811c9dc5;
+  for (let index = 0; index < value.length; index += 1) {
+    hash ^= value.charCodeAt(index);
+    hash = Math.imul(hash, 0x01000193);
+  }
+  return (hash >>> 0).toString(16).padStart(8, '0');
+}
+
+function inputVerification(actual: string, expected: string) {
+  const normalizedActual = normalizeInputValue(actual);
+  const normalizedExpected = normalizeInputValue(expected);
+  return {
+    valueLength: normalizedActual.length,
+    valueHash: inputValueHash(normalizedActual),
+    prefixMatch: normalizedActual.startsWith(normalizedExpected),
+    suffixMatch: normalizedActual.endsWith(normalizedExpected),
+  };
+}
+
 function expectedSelectionAfterClick(role: string, selected: boolean): boolean {
   return role === 'radio' || role === 'option' ? true : !selected;
 }
@@ -708,6 +969,7 @@ export class BrowserActionExecutor implements BrowserActionPort {
     const pageResult = await this.#performPageAction(call, tabId);
     if (pageResult?.applied) {
       const { url, ...rawData } = pageResult;
+      const observedValue = typeof pageResult.value === 'string' ? pageResult.value : '';
       const data =
         pageResult.action === 'type'
           ? {
@@ -718,7 +980,11 @@ export class BrowserActionExecutor implements BrowserActionPort {
               verified: true,
               replaced: input<{ readonly replace: boolean }>(call).replace,
               submitted: pageResult.submitted,
-              valueLength: typeof pageResult.value === 'string' ? pageResult.value.length : 0,
+              valueLength: observedValue.length,
+              verification: inputVerification(
+                observedValue,
+                input<{ readonly text: string }>(call).text,
+              ),
             }
           : rawData;
       return {
@@ -751,8 +1017,127 @@ export class BrowserActionExecutor implements BrowserActionPort {
     let targetState: readonly string[] | undefined;
     let observedTarget: ObservedElementRefState | undefined;
     let stateChanges: readonly Readonly<{ ref: string; state: readonly string[] }>[] | undefined;
+    let actionFailure: BrowserActionResult['failure'];
 
     switch (call.operation) {
+      case 'paste_image': {
+        const value = input<{ tabId: number; ref: string; assetId: string }>(call);
+        const attachments = this.#dependencies.attachments;
+        if (!attachments) {
+          throw new BrowserActionError(
+            'ASSET_NOT_AVAILABLE',
+            'Browser image delivery is unavailable.',
+          );
+        }
+        const attachment = await attachments.get(value.assetId);
+        const mimeType = attachment?.mimeType.toLowerCase() ?? '';
+        if (
+          !attachment ||
+          !IMAGE_POLICY.acceptedMimeTypes.some((accepted) => accepted === mimeType) ||
+          attachment.byteSize <= 0 ||
+          attachment.byteSize > IMAGE_POLICY.maxBytesPerImage ||
+          attachment.byteSize !== attachment.blob.size ||
+          attachment.blob.type.toLowerCase() !== mimeType
+        ) {
+          throw new BrowserActionError(
+            'ASSET_NOT_AVAILABLE',
+            'The requested image asset is unavailable or invalid.',
+          );
+        }
+        throwIfAborted(signal);
+        const target = await this.#prepareElementTarget(snapshot, value.ref, tabId);
+        await this.#showPointer(tabId, target.point, target.point, 'click');
+        const bytes = new Uint8Array(await attachment.blob.arrayBuffer());
+        throwIfAborted(signal);
+        const base64 = encodeBase64(bytes);
+        const extension =
+          mimeType === 'image/jpeg'
+            ? 'jpg'
+            : mimeType === 'image/webp'
+              ? 'webp'
+              : mimeType === 'image/gif'
+                ? 'gif'
+                : 'png';
+        const fileName =
+          attachment.fileName?.trim().slice(0, 200) || `chatbrowserx-screenshot.${extension}`;
+        const resolved = await this.#dependencies.transport.send<Protocol.DOM.ResolveNodeResponse>(
+          target.session,
+          'DOM.resolveNode',
+          { backendNodeId: target.reference.backendNodeId },
+        );
+        const objectId = resolved.object.objectId;
+        if (!objectId) {
+          throw new BrowserActionError('UNSUPPORTED_ACTION', 'The paste target is unavailable.');
+        }
+        try {
+          const response =
+            await this.#dependencies.transport.send<Protocol.Runtime.CallFunctionOnResponse>(
+              target.session,
+              'Runtime.callFunctionOn',
+              {
+                objectId,
+                functionDeclaration: PASTE_IMAGE_FUNCTION,
+                arguments: [{ value: base64 }, { value: mimeType }, { value: fileName }],
+                awaitPromise: true,
+                returnByValue: true,
+                silent: true,
+                userGesture: true,
+              },
+            );
+          const pasted = response.result.value as
+            | {
+                readonly dispatched?: unknown;
+                readonly strategy?: unknown;
+                readonly fileCount?: unknown;
+                readonly handled?: unknown;
+                readonly verified?: unknown;
+                readonly mutations?: unknown;
+                readonly addedElements?: unknown;
+                readonly localChanged?: unknown;
+                readonly previewCount?: unknown;
+              }
+            | undefined;
+          if (
+            response.exceptionDetails !== undefined ||
+            pasted?.dispatched !== true ||
+            pasted.fileCount !== 1 ||
+            (pasted.strategy !== 'clipboard_event' && pasted.strategy !== 'file_input')
+          ) {
+            throw new BrowserActionError(
+              'UNSUPPORTED_ACTION',
+              'The target did not accept the pasted image.',
+            );
+          }
+          if (pasted.verified !== true) {
+            throw new BrowserActionError(
+              'ATTACHMENT_VERIFICATION_FAILED',
+              'The editor handled the image paste, but no attachment preview change was measured.',
+            );
+          }
+          data = {
+            action: 'paste_image',
+            dispatched: true,
+            strategy: pasted.strategy,
+            fileCount: 1,
+            handled: pasted.handled === true,
+            verified: true,
+            mutations:
+              typeof pasted.mutations === 'number' && Number.isSafeInteger(pasted.mutations)
+                ? pasted.mutations
+                : 0,
+            previewCount:
+              typeof pasted.previewCount === 'number' && Number.isSafeInteger(pasted.previewCount)
+                ? pasted.previewCount
+                : 0,
+          };
+        } finally {
+          await this.#dependencies.transport
+            .send(target.session, 'Runtime.releaseObject', { objectId })
+            .catch(() => undefined);
+        }
+        targetPresent = true;
+        break;
+      }
       case 'click': {
         const value = input<{
           tabId: number;
@@ -847,77 +1232,79 @@ export class BrowserActionExecutor implements BrowserActionPort {
       }
       case 'set_checked': {
         const value = input<{ tabId: number; ref: string; checked: boolean }>(call);
-        const target = await this.#prepareElementTarget(snapshot, value.ref, tabId);
-        const before = await this.#readRefStates(target, tabId, value.ref);
-        const beforeTarget = before.target;
-        const role = beforeTarget?.role ?? target.reference.role;
-        if (!target.reference.actions.includes('set_checked')) {
-          throw new BrowserActionError(
-            'UNSUPPORTED_ACTION',
-            'The ref does not advertise set_checked.',
-          );
-        }
-        if (role === 'radio' && !value.checked) {
-          throw new BrowserActionError(
-            'UNSUPPORTED_ACTION',
-            'A radio target can only be selected; choose another radio to clear it.',
-          );
-        }
-        const current = readSelectionState(beforeTarget?.state ?? target.reference.state);
-        let dispatched = false;
-        let strategy = 'already_set';
-        let after = before;
-        if (current !== value.checked && !(current === undefined && !value.checked)) {
-          const actionPoint = await this.#actionablePoint(target);
-          await this.#showPointer(tabId, actionPoint, actionPoint, 'click');
-          await this.#click(target.session, actionPoint, 'left', 1);
-          dispatched = true;
-          strategy = 'pointer';
-          after = await this.#waitForSelectionState(
-            target,
-            tabId,
-            value.ref,
-            value.checked,
-            signal,
-          );
-          const afterPointerState = readSelectionState(after.target?.state ?? []);
-          if (
-            afterPointerState !== undefined &&
-            afterPointerState !== value.checked &&
-            !after.rebound &&
-            (await this.#clickElementByRef(snapshot, tabId, value.ref))
-          ) {
-            strategy = 'dom_fallback';
-            after = await this.#waitForSelectionState(
-              target,
-              tabId,
-              value.ref,
-              value.checked,
-              signal,
-            );
-          }
-        }
-        observedTarget = after.target ?? beforeTarget;
-        stateChanges = after.changes;
-        targetState = observedTarget?.state;
-        const actual = readSelectionState(targetState ?? []);
-        const verified = actual === value.checked;
-        if (!verified) {
-          throw new BrowserActionError(
-            'ACTION_STATE_MISMATCH',
-            actual === undefined
-              ? 'The requested selection state could not be observed.'
-              : 'The requested selection state did not settle.',
-          );
-        }
+        const selected = await this.#setChecked(snapshot, tabId, value.ref, value.checked, signal);
+        observedTarget = selected.target;
+        stateChanges = selected.changes;
+        targetState = selected.state;
         data = {
           action: 'set_checked',
-          dispatched,
-          requested: value.checked,
-          verified,
-          strategy,
+          dispatched: selected.dispatched,
+          requested: selected.requested,
+          verified: true,
+          strategy: selected.strategy,
         };
-        targetPresent = observedTarget !== undefined;
+        targetPresent = true;
+        break;
+      }
+      case 'set_checked_many': {
+        const value = input<{
+          tabId: number;
+          items: readonly { readonly ref: string; readonly checked: boolean }[];
+        }>(call);
+        const completedItems: SetCheckedExecutionResult[] = [];
+        const changesByRef = new Map<string, readonly string[]>();
+        let failedIndex: number | undefined;
+        for (const [index, item] of value.items.entries()) {
+          throwIfAborted(signal);
+          try {
+            const selected = await this.#setChecked(
+              snapshot,
+              tabId,
+              item.ref,
+              item.checked,
+              signal,
+            );
+            completedItems.push(selected);
+            observedTarget = selected.target;
+            targetState = selected.state;
+            for (const change of selected.changes) changesByRef.set(change.ref, change.state);
+          } catch (error) {
+            if (signal.aborted || (error instanceof Error && error.name === 'AbortError')) {
+              throw error;
+            }
+            failedIndex = index;
+            actionFailure = {
+              code:
+                typeof error === 'object' &&
+                error !== null &&
+                'code' in error &&
+                typeof error.code === 'string'
+                  ? error.code
+                  : 'BROWSER_OPERATION_FAILED',
+              ...(error instanceof BrowserActionError && error.stage !== undefined
+                ? { stage: error.stage }
+                : {}),
+            };
+            break;
+          }
+        }
+        stateChanges = [...changesByRef].map(([ref, state]) => ({ ref, state }));
+        data = {
+          action: 'set_checked_many',
+          complete: actionFailure === undefined,
+          completedItems: completedItems.map((item) => ({
+            ref: item.ref,
+            requested: item.requested,
+            actual: item.actual,
+            dispatched: item.dispatched,
+            strategy: item.strategy,
+            state: item.state,
+            changes: item.changes,
+          })),
+          ...(failedIndex === undefined ? {} : { failedIndex }),
+          ...(actionFailure === undefined ? {} : { failure: actionFailure }),
+        };
+        targetPresent = completedItems.length > 0;
         break;
       }
       case 'type': {
@@ -935,6 +1322,7 @@ export class BrowserActionExecutor implements BrowserActionPort {
         const targetSession = target?.session ?? snapshot.root;
         const editorInfo = target ? await this.#editorTargetInfo(target) : null;
         const trustedInput = fallbackPoint !== null || editorInfo?.editor === true;
+        let verifiedValue = '';
         if (fallbackPoint) {
           await this.#validatePoint(snapshot.root, fallbackPoint);
           await this.#showPointer(tabId, fallbackPoint, fallbackPoint, 'click');
@@ -977,7 +1365,7 @@ export class BrowserActionExecutor implements BrowserActionPort {
               ? pageResult.value
               : ''
             : (editorInfo?.value ?? '');
-          await this.#verifyTrustedInput(
+          verifiedValue = await this.#verifyTrustedInput(
             targetSession,
             value.text,
             value.replace,
@@ -988,14 +1376,8 @@ export class BrowserActionExecutor implements BrowserActionPort {
         } else if (target) {
           const before = editorInfo?.value.replace(/\r\n?/g, '\n') ?? '';
           const observed = await this.#editorTargetInfo(target);
-          if (
-            !verifiesInput(
-              observed.value.replace(/\r\n?/g, '\n'),
-              value.text,
-              value.replace,
-              before,
-            )
-          ) {
+          verifiedValue = normalizeInputValue(observed.value);
+          if (!verifiesInput(verifiedValue, value.text, value.replace, before)) {
             throw new BrowserActionError(
               'TYPE_VERIFICATION_FAILED',
               'The target did not retain the requested text.',
@@ -1010,12 +1392,7 @@ export class BrowserActionExecutor implements BrowserActionPort {
             code: 'Enter',
             modifiers: 0,
           });
-          await this.#verifySubmittedInput(
-            targetSession,
-            value.text,
-            signal,
-            target,
-          );
+          await this.#verifySubmittedInput(targetSession, value.text, signal, target);
         }
         data = {
           action: 'type',
@@ -1025,6 +1402,7 @@ export class BrowserActionExecutor implements BrowserActionPort {
           ...(value.submit ? { submissionVerified: true } : {}),
           strategy: trustedInput ? 'trusted_input' : 'cdp_ref',
           verified: true,
+          verification: inputVerification(verifiedValue, value.text),
         };
         targetPresent = true;
         break;
@@ -1254,6 +1632,72 @@ export class BrowserActionExecutor implements BrowserActionPort {
             }),
         ...(stateChanges === undefined ? {} : { changes: stateChanges }),
       },
+      ...(actionFailure === undefined ? {} : { failure: actionFailure }),
+    };
+  }
+
+  async #setChecked(
+    snapshot: BrowserSessionSnapshot,
+    tabId: number,
+    ref: string,
+    checked: boolean,
+    signal: AbortSignal,
+  ): Promise<SetCheckedExecutionResult> {
+    const target = await this.#prepareElementTarget(snapshot, ref, tabId);
+    const before = await this.#readRefStates(target, tabId, ref);
+    const beforeTarget = before.target;
+    const role = beforeTarget?.role ?? target.reference.role;
+    if (!target.reference.actions.includes('set_checked')) {
+      throw new BrowserActionError('UNSUPPORTED_ACTION', 'The ref does not advertise set_checked.');
+    }
+    if (role === 'radio' && !checked) {
+      throw new BrowserActionError(
+        'UNSUPPORTED_ACTION',
+        'A radio target can only be selected; choose another radio to clear it.',
+      );
+    }
+    const current = readSelectionState(beforeTarget?.state ?? target.reference.state);
+    let dispatched = false;
+    let strategy = 'already_set';
+    let after = before;
+    if (current !== checked && !(current === undefined && !checked)) {
+      const actionPoint = await this.#actionablePoint(target);
+      await this.#showPointer(tabId, actionPoint, actionPoint, 'click');
+      await this.#click(target.session, actionPoint, 'left', 1);
+      dispatched = true;
+      strategy = 'pointer';
+      after = await this.#waitForSelectionState(target, tabId, ref, checked, signal);
+      const afterPointerState = readSelectionState(after.target?.state ?? []);
+      if (
+        afterPointerState !== undefined &&
+        afterPointerState !== checked &&
+        !after.rebound &&
+        (await this.#clickElementByRef(snapshot, tabId, ref))
+      ) {
+        strategy = 'dom_fallback';
+        after = await this.#waitForSelectionState(target, tabId, ref, checked, signal);
+      }
+    }
+    const observedTarget = after.target ?? beforeTarget;
+    const state = observedTarget?.state ?? [];
+    const actual = readSelectionState(state);
+    if (actual !== checked || observedTarget === undefined) {
+      throw new BrowserActionError(
+        'ACTION_STATE_MISMATCH',
+        actual === undefined
+          ? 'The requested selection state could not be observed.'
+          : 'The requested selection state did not settle.',
+      );
+    }
+    return {
+      ref,
+      requested: checked,
+      actual,
+      dispatched,
+      strategy,
+      state,
+      target: observedTarget,
+      changes: after.changes,
     };
   }
 
@@ -1984,16 +2428,19 @@ export class BrowserActionExecutor implements BrowserActionPort {
     before: string,
     signal: AbortSignal,
     target: PreparedElementTarget | null,
-  ): Promise<void> {
+  ): Promise<string> {
     await this.#selectAll(session);
-    const expected = text.replace(/\r\n?/g, '\n');
+    const expected = normalizeInputValue(text);
     let verified = false;
+    let verifiedValue: string | null = null;
     const settleDeadline = Date.now() + INPUT_SETTLE_TIMEOUT_MS;
     try {
       do {
         if (target) {
           const exact = await this.#editorTargetInfo(target);
-          verified = verifiesInput(exact.value.replace(/\r\n?/g, '\n'), expected, replace, before);
+          const candidate = normalizeInputValue(exact.value);
+          verified = verifiesInput(candidate, expected, replace, before);
+          if (verified) verifiedValue = candidate;
         }
         try {
           if (!verified) {
@@ -2006,7 +2453,9 @@ export class BrowserActionExecutor implements BrowserActionPort {
                   returnByValue: true,
                 },
               );
-            verified = verifiesInput(evaluatedEditableValue(response), expected, replace, before);
+            const candidate = evaluatedEditableValue(response);
+            verified = verifiesInput(candidate, expected, replace, before);
+            if (verified) verifiedValue = candidate ?? before;
           }
         } catch {
           // Some targets do not expose a usable main execution context; AX remains the fallback.
@@ -2017,7 +2466,9 @@ export class BrowserActionExecutor implements BrowserActionPort {
               session,
               'Accessibility.getFullAXTree',
             );
-          verified = verifiesInput(focusedEditableValue(tree.nodes), expected, replace, before);
+          const candidate = focusedEditableValue(tree.nodes);
+          verified = verifiesInput(candidate, expected, replace, before);
+          if (verified) verifiedValue = candidate ?? before;
         }
         if (verified || Date.now() >= settleDeadline) break;
         await this.#delay(Math.min(INPUT_POLL_INTERVAL_MS, settleDeadline - Date.now()), signal);
@@ -2040,6 +2491,7 @@ export class BrowserActionExecutor implements BrowserActionPort {
         'readback',
       );
     }
+    return verifiedValue ?? before;
   }
 
   /** Requires submitted text to leave the editable surface before reporting mutation success. */

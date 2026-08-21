@@ -6,7 +6,11 @@ import {
 
 function call(
   state: string,
-  overrides: Partial<{ callId: string; name: string; throughCallId: string }> = {},
+  overrides: Partial<{
+    callId: string;
+    name: string;
+    throughCallId: string;
+  }> = {},
 ) {
   const throughCallId = overrides.throughCallId ?? 'call_previous';
   return {
@@ -47,6 +51,12 @@ describe('CONTEXT_COMMIT_TOOL_DEFINITION', () => {
       'Prioritize completeness over brevity',
     );
     expect(CONTEXT_COMMIT_TOOL_DEFINITION.description).toContain('runtime supplements');
+    expect(CONTEXT_COMMIT_TOOL_DEFINITION.description).toContain(
+      'Prefer a boundary that keeps recent raw tool pairs',
+    );
+    expect(CONTEXT_COMMIT_TOOL_DEFINITION.description).toContain(
+      'Choose the boundary based on the task state',
+    );
     expect(CONTEXT_COMMIT_TOOL_DEFINITION.description).not.toContain('exact next step');
     expect(parameters.properties.state.description).toContain('evidence-backed');
     expect(parameters.properties.state.description).toContain('Do not omit important');
@@ -60,7 +70,10 @@ describe('parseContextCommitToolCall', () => {
       expect(parseContextCommitToolCall(call(state))).toEqual({
         callId: 'call_commit',
         name: 'commit_context',
-        argumentsJson: JSON.stringify({ state, throughCallId: 'call_previous' }),
+        argumentsJson: JSON.stringify({
+          state,
+          throughCallId: 'call_previous',
+        }),
         arguments: { state, throughCallId: 'call_previous' },
       });
     },

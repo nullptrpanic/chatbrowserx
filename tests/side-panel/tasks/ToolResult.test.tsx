@@ -81,6 +81,30 @@ describe('ToolResult reviewed labels', () => {
     );
   });
 
+  it.each([
+    ['zh-CN', '设置多个选中状态'],
+    ['en', 'Set multiple selections'],
+    ['ja', '複数の選択状態を設定'],
+  ] as const)('localizes batch selection in %s', (language, label) => {
+    render(
+      <ToolResult
+        result={{
+          callId: 'call_batch',
+          toolName: 'browser_set_checked_many',
+          argumentsJson: '{"items":[{"ref":"ref_1","checked":true}]}',
+          output: '{"ok":true}',
+          resultRef: 'result_batch',
+          attachmentIds: [],
+        }}
+        attachments={attachments}
+        t={createTranslator(language)}
+      />,
+    );
+
+    expect(screen.getByText(label)).toBeVisible();
+    expect(screen.queryByText('browser_set_checked_many')).not.toBeInTheDocument();
+  });
+
   it('keeps an unknown tool name visible instead of inventing a label', () => {
     render(
       <ToolResult
@@ -98,6 +122,48 @@ describe('ToolResult reviewed labels', () => {
     );
 
     expect(screen.getByText('custom_browser_tool')).toBeVisible();
+  });
+
+  it('shows a captured screenshot inside its own expanded tool details', async () => {
+    class TestUrl extends URL {
+      static override createObjectURL = vi.fn(() => 'blob:test-screenshot');
+      static override revokeObjectURL = vi.fn();
+    }
+    vi.stubGlobal('URL', TestUrl);
+    const user = userEvent.setup();
+    const screenshotAttachments = {
+      addFiles: vi.fn(async () => []),
+      get: vi.fn(async (id: string) => ({
+        id,
+        blob: new Blob(['png'], { type: 'image/png' }),
+        mimeType: 'image/png',
+        byteSize: 3,
+        width: 1440,
+        height: 790,
+        source: 'viewport_capture' as const,
+        createdAt: 1_000,
+        fileName: 'chatbrowserx-screenshot.png',
+      })),
+    };
+    render(
+      <ToolResult
+        result={{
+          callId: 'call_capture',
+          toolName: 'browser_capture_screenshot',
+          argumentsJson: '{"tabId":7}',
+          output: '{"ok":true,"data":{"assetId":"result_image"}}',
+          resultRef: 'result_capture',
+          attachmentIds: ['result_image'],
+        }}
+        attachments={screenshotAttachments}
+        t={createTranslator('zh-CN')}
+      />,
+    );
+
+    await user.click(screen.getByRole('button', { name: /展开\s*截取页面\s*结果/ }));
+
+    expect(await screen.findByRole('img', { name: 'chatbrowserx-screenshot.png' })).toBeVisible();
+    expect(screenshotAttachments.get).toHaveBeenCalledWith('result_image');
   });
 
   it.each([

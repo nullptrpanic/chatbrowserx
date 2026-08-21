@@ -102,8 +102,8 @@ async function createBackgroundServices(
     transport: debuggerTransport,
     content: browserPage,
     refs: browserRefs,
-    persistScreenshot: async (blob) => {
-      const attachment = await attachmentService.addImageBlob(blob, 'visual_fallback');
+    persistScreenshot: async (blob, source) => {
+      const attachment = await attachmentService.addImageBlob(blob, source);
       return { id: attachment.id };
     },
   });
@@ -114,6 +114,7 @@ async function createBackgroundServices(
     pointer: new ChromePointerPagePort({ installer, tabs: chrome.tabs, ids: cryptoIds }),
     platform: { getOs: async () => (await chrome.runtime.getPlatformInfo()).os },
     page: browserPage,
+    attachments,
   });
   const browserNetwork = new NetworkCaptureRegistry({
     sessions: browserSessions,

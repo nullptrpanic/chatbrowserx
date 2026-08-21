@@ -100,6 +100,68 @@ function contextCommitCall(callId: string, state: string, throughCallId: string)
   };
 }
 
+async function runBrowserProgressScenario(
+  databaseName: string,
+  calls: readonly AgentEvent[],
+  execute: BrowserExecutionPort['execute'],
+  configure?: (context: {
+    readonly taskId: string;
+    readonly appendMessage: (message: MessageRecord) => Promise<void>;
+    readonly now: () => number;
+  }) => void,
+) {
+  const database = await openChatBrowserDatabase(createTestDatabaseName(databaseName));
+  const repository = new IndexedDbTaskRepository(database);
+  const dependencies = sources();
+  const commands = new TaskCommandService(
+    repository,
+    dependencies.clock,
+    dependencies.ids,
+    dependencies.conversations,
+  );
+  const created = await commands.create({
+    conversationId: 'conversation_1',
+    tabId: 7,
+    goal: 'Complete browser work without repeating unchanged actions',
+  });
+  configure?.({
+    taskId: created.task.id,
+    appendMessage: dependencies.conversations.appendMessage,
+    now: dependencies.clock.now,
+  });
+  let turn = 0;
+  const planner = {
+    plan: () =>
+      (async function* () {
+        const next = calls[turn++];
+        if (next) {
+          yield next;
+          return;
+        }
+        yield {
+          type: 'task.completed',
+          reason: 'model_response_completed',
+          messageId: 'message_answer',
+        } as const;
+      })(),
+  };
+  const executor = new TaskExecutor({
+    repository,
+    conversations: dependencies.conversations,
+    planner,
+    tavily: tavilyPort(),
+    browser: browserPort({ execute }),
+    clock: dependencies.clock,
+    ids: dependencies.ids,
+  });
+
+  try {
+    return await executor.run(created.task.id, new AbortController().signal);
+  } finally {
+    database.close();
+  }
+}
+
 describe('TaskExecutor', () => {
   it('persists model telemetry and resumes a pending tool from the local checkpoint', async () => {
     const database = await openChatBrowserDatabase(
@@ -263,7 +325,9 @@ describe('TaskExecutor', () => {
       },
       checkpoint: planningCheckpoint,
     });
-    const argumentsJson = JSON.stringify({ state: 'Search completed. Next: answer.' });
+    const argumentsJson = JSON.stringify({
+      state: 'Search completed. Next: answer.',
+    });
     const pendingCheckpoint = {
       ...planningCheckpoint,
       id: 'checkpoint_pending_commit',
@@ -542,9 +606,15 @@ describe('TaskExecutor', () => {
     });
     const calls = [
       browserCall('call_inspect_1', 'browser_inspect', { mode: 'interactive' }),
-      browserCall('call_select_1', 'browser_set_checked', { ref: 'e12345678a', checked: true }),
+      browserCall('call_select_1', 'browser_set_checked', {
+        ref: 'e12345678a',
+        checked: true,
+      }),
       browserCall('call_inspect_2', 'browser_inspect', { mode: 'interactive' }),
-      browserCall('call_select_2', 'browser_set_checked', { ref: 'e12345678a', checked: true }),
+      browserCall('call_select_2', 'browser_set_checked', {
+        ref: 'e12345678a',
+        checked: true,
+      }),
       browserCall('call_inspect_3', 'browser_inspect', { mode: 'interactive' }),
     ];
     let turn = 0;
@@ -574,7 +644,14 @@ describe('TaskExecutor', () => {
               data: {
                 mode: 'interactive',
                 snapshot: inspectCount++ === 0 ? 's1111111111111111' : 's2222222222222222',
-                elements: [{ r: 'checkbox', n: 'A', ref: 'e12345678a', s: ['checked=false'] }],
+                elements: [
+                  {
+                    r: 'checkbox',
+                    n: 'A',
+                    ref: 'e12345678a',
+                    s: ['checked=false'],
+                  },
+                ],
                 truncated: false,
               },
             })
@@ -603,9 +680,327 @@ describe('TaskExecutor', () => {
     expect(JSON.parse(result.checkpoint.completedToolResults.at(-1)?.output ?? '')).toMatchObject({
       ok: false,
       code: 'NO_PROGRESS',
-      needsInspect: true,
+      needsInspect: false,
     });
     database.close();
+  });
+
+  it('blocks a third unchanged inspect even when snapshot and base IDs rotate', async () => {
+    const calls = Array.from({ length: 3 }, (_, index) =>
+      browserCall(`call_unchanged_inspect_${String(index + 1)}`, 'browser_inspect', {
+        mode: 'interactive',
+      }),
+    );
+    let inspect = 0;
+    const execute = vi.fn<BrowserExecutionPort['execute']>(async () => {
+      inspect += 1;
+      return {
+        output: JSON.stringify({
+          ok: true,
+          tabId: 7,
+          url: 'https://example.test/form',
+          data: {
+            mode: 'interactive',
+            snapshot: `snapshot_${String(inspect)}`,
+            base: `snapshot_${String(inspect - 1)}`,
+            unchanged: true,
+          },
+          observation: null,
+        }),
+        attachmentIds: [],
+      };
+    });
+
+    const result = await runBrowserProgressScenario(
+      'unchanged-inspect-rotating-snapshot',
+      calls,
+      execute,
+    );
+
+    expect(execute).toHaveBeenCalledTimes(2);
+    expect(JSON.parse(result.checkpoint.completedToolResults.at(-1)?.output ?? '')).toMatchObject({
+      ok: false,
+      code: 'NO_PROGRESS',
+      retryable: false,
+      needsInspect: false,
+    });
+  });
+
+  it('blocks a repeated immobile scroll at the same position before redispatch', async () => {
+    const calls = [1, 2].map((index) =>
+      browserCall(`call_immobile_scroll_${String(index)}`, 'browser_scroll', {
+        target: 'viewport',
+        deltaX: 0,
+        deltaY: 600,
+      }),
+    );
+    const execute = vi.fn<BrowserExecutionPort['execute']>(async () => ({
+      output: JSON.stringify({
+        ok: true,
+        tabId: 7,
+        url: 'https://example.test/form',
+        data: {
+          action: 'scroll',
+          dispatched: true,
+          moved: false,
+          actualDeltaX: 0,
+          actualDeltaY: 0,
+          position: { x: 0, y: 1200, maxX: 0, maxY: 1200 },
+        },
+        observation: { targetPresent: null },
+      }),
+      attachmentIds: [],
+    }));
+
+    const result = await runBrowserProgressScenario('immobile-scroll', calls, execute);
+
+    expect(execute).toHaveBeenCalledOnce();
+    expect(JSON.parse(result.checkpoint.completedToolResults.at(-1)?.output ?? '')).toMatchObject({
+      ok: false,
+      code: 'NO_PROGRESS',
+      retryable: false,
+      needsInspect: false,
+      data: {
+        direction: { deltaX: 0, deltaY: 600 },
+        position: { x: 0, y: 1200, maxX: 0, maxY: 1200 },
+      },
+    });
+  });
+
+  it('replays an already verified selection on the same ref and page epoch', async () => {
+    const calls = [
+      browserCall('call_selection_inspect', 'browser_inspect', {
+        mode: 'interactive',
+      }),
+      browserCall('call_selection_first', 'browser_set_checked', {
+        ref: 'answer_group_1_a',
+        checked: true,
+      }),
+      browserCall('call_selection_duplicate', 'browser_set_checked', {
+        ref: 'answer_group_1_a',
+        checked: true,
+      }),
+    ];
+    const execute = vi.fn<BrowserExecutionPort['execute']>(async (call) => ({
+      output:
+        call.operation === 'inspect'
+          ? JSON.stringify({
+              ok: true,
+              tabId: 7,
+              url: 'https://example.test/form',
+              data: {
+                mode: 'interactive',
+                snapshot: 'snapshot_selection_1',
+                elements: [],
+              },
+              observation: null,
+            })
+          : JSON.stringify({
+              ok: true,
+              tabId: 7,
+              url: 'https://example.test/form',
+              data: {
+                action: 'set_checked',
+                dispatched: true,
+                requested: true,
+                verified: true,
+                strategy: 'pointer',
+              },
+              observation: {
+                targetPresent: true,
+                state: ['checked'],
+                target: {
+                  ref: 'answer_group_1_a',
+                  role: 'checkbox',
+                  state: ['checked'],
+                },
+              },
+            }),
+      attachmentIds: [],
+    }));
+
+    const result = await runBrowserProgressScenario('verified-selection-replay', calls, execute);
+
+    expect(execute).toHaveBeenCalledTimes(2);
+    expect(JSON.parse(result.checkpoint.completedToolResults.at(-1)?.output ?? '')).toMatchObject({
+      ok: true,
+      data: {
+        action: 'set_checked',
+        requested: true,
+        verified: true,
+        dispatched: false,
+        replayed: true,
+        strategy: 'already_verified',
+      },
+      observation: {
+        target: { ref: 'answer_group_1_a', state: ['checked'] },
+      },
+    });
+  });
+
+  it('allows the same selection after a fresh page epoch and a different ref in the same epoch', async () => {
+    const calls = [
+      browserCall('call_epoch_inspect_1', 'browser_inspect', {
+        mode: 'interactive',
+      }),
+      browserCall('call_epoch_select_1', 'browser_set_checked', {
+        ref: 'answer_group_1_a',
+        checked: true,
+      }),
+      browserCall('call_epoch_inspect_2', 'browser_inspect', {
+        mode: 'interactive',
+      }),
+      browserCall('call_epoch_select_2', 'browser_set_checked', {
+        ref: 'answer_group_1_a',
+        checked: true,
+      }),
+      browserCall('call_other_group_select', 'browser_set_checked', {
+        ref: 'answer_group_2_a',
+        checked: true,
+      }),
+    ];
+    let inspect = 0;
+    const execute = vi.fn<BrowserExecutionPort['execute']>(async (call) => {
+      if (call.operation === 'inspect') {
+        inspect += 1;
+        return {
+          output: JSON.stringify({
+            ok: true,
+            tabId: 7,
+            url: 'https://example.test/form',
+            data: {
+              mode: 'interactive',
+              snapshot: `snapshot_epoch_${String(inspect)}`,
+              elements: [],
+            },
+            observation: null,
+          }),
+          attachmentIds: [],
+        };
+      }
+      const ref = (call.arguments as { readonly ref: string }).ref;
+      return {
+        output: JSON.stringify({
+          ok: true,
+          tabId: 7,
+          url: 'https://example.test/form',
+          data: {
+            action: 'set_checked',
+            dispatched: true,
+            requested: true,
+            verified: true,
+            strategy: 'pointer',
+          },
+          observation: {
+            targetPresent: true,
+            state: ['checked'],
+            target: { ref, role: 'checkbox', state: ['checked'] },
+          },
+        }),
+        attachmentIds: [],
+      };
+    });
+
+    const result = await runBrowserProgressScenario(
+      'selection-new-epoch-and-group',
+      calls,
+      execute,
+    );
+
+    expect(result.task.status).toBe('completed');
+    expect(execute).toHaveBeenCalledTimes(5);
+  });
+
+  it('retains page evidence across a user supplement while allowing a different action', async () => {
+    const calls = [
+      browserCall('call_supplement_inspect', 'browser_inspect', {
+        mode: 'interactive',
+      }),
+      browserCall('call_supplement_select_a', 'browser_set_checked', {
+        ref: 'answer_group_1_a',
+        checked: true,
+      }),
+      browserCall('call_supplement_select_b', 'browser_set_checked', {
+        ref: 'answer_group_1_b',
+        checked: true,
+      }),
+    ];
+    let appendSupplement = async () => undefined;
+    let supplementAdded = false;
+    const execute = vi.fn<BrowserExecutionPort['execute']>(async (call) => {
+      if (call.operation === 'inspect') {
+        return {
+          output: JSON.stringify({
+            ok: true,
+            tabId: 7,
+            url: 'https://example.test/form',
+            data: {
+              mode: 'interactive',
+              snapshot: 'snapshot_supplement',
+              elements: [],
+            },
+            observation: null,
+          }),
+          attachmentIds: [],
+        };
+      }
+      const ref = (call.arguments as { readonly ref: string }).ref;
+      if (!supplementAdded) {
+        supplementAdded = true;
+        await appendSupplement();
+      }
+      return {
+        output: JSON.stringify({
+          ok: true,
+          tabId: 7,
+          url: 'https://example.test/form',
+          data: {
+            action: 'set_checked',
+            dispatched: true,
+            requested: true,
+            verified: true,
+            strategy: 'pointer',
+          },
+          observation: {
+            targetPresent: true,
+            state: ['checked'],
+            target: { ref, role: 'radio', state: ['checked'] },
+          },
+        }),
+        attachmentIds: [],
+      };
+    });
+
+    const result = await runBrowserProgressScenario(
+      'supplement-preserves-page-evidence',
+      calls,
+      execute,
+      ({ taskId, appendMessage, now }) => {
+        appendSupplement = async () => {
+          const at = now();
+          await appendMessage({
+            id: 'supplement_progress_detail',
+            kind: 'supplement',
+            conversationId: 'conversation_1',
+            taskId,
+            role: 'user',
+            status: 'complete',
+            text: 'Use the second answer for the next group.',
+            attachmentIds: [],
+            createdAt: at,
+            updatedAt: at,
+          });
+        };
+      },
+    );
+
+    expect(result.task.status).toBe('completed');
+    expect(execute).toHaveBeenCalledTimes(3);
+    expect(
+      result.checkpoint.continuationItems.some(
+        (item) => item.type === 'message_ref' && item.messageId === 'supplement_progress_detail',
+      ),
+    ).toBe(true);
   });
 
   it('retains browser screenshot attachment IDs and gives them a durable result reference', async () => {
@@ -682,6 +1077,162 @@ describe('TaskExecutor', () => {
     expect(removeReference).not.toHaveBeenCalled();
     expect(release).toHaveBeenCalledOnce();
     expect(release).toHaveBeenCalledWith(expect.stringMatching(/^runner_/));
+    database.close();
+  });
+
+  it('keeps full browser audit output while replaying the compact model output', async () => {
+    const database = await openChatBrowserDatabase(createTestDatabaseName('browser-model-output'));
+    const repository = new IndexedDbTaskRepository(database);
+    const dependencies = sources();
+    const commands = new TaskCommandService(
+      repository,
+      dependencies.clock,
+      dependencies.ids,
+      dependencies.conversations,
+    );
+    const created = await commands.create({
+      conversationId: 'conversation_1',
+      tabId: 7,
+      goal: 'Inspect the page without replaying audit-only metadata',
+    });
+    let turn = 0;
+    const executor = new TaskExecutor({
+      repository,
+      conversations: dependencies.conversations,
+      planner: {
+        plan: () =>
+          (async function* () {
+            turn += 1;
+            if (turn === 1) {
+              yield browserCall('call_inspect', 'browser_inspect', {
+                tabId: 7,
+                mode: 'interactive',
+                since: '',
+              });
+              return;
+            }
+            yield {
+              type: 'task.completed',
+              reason: 'model_response_completed',
+              messageId: 'message_answer',
+            } as const;
+          })(),
+      },
+      tavily: tavilyPort(),
+      browser: browserPort({
+        execute: vi.fn(async () => ({
+          output: '{"ok":true,"data":{"full":"audit"}}',
+          modelOutput: '{"ok":true,"verified":true}',
+          attachmentIds: [],
+        })),
+      }),
+      clock: dependencies.clock,
+      ids: dependencies.ids,
+    });
+
+    const result = await executor.run(created.task.id, new AbortController().signal);
+
+    expect(result.checkpoint.completedToolResults[0]?.output).toBe(
+      '{"ok":true,"data":{"full":"audit"}}',
+    );
+    expect(
+      result.checkpoint.continuationItems.find(
+        (item) => item.type === 'function_call_output' && item.callId === 'call_inspect',
+      ),
+    ).toMatchObject({
+      type: 'function_call_output',
+      output: '{"ok":true,"verified":true}',
+    });
+    database.close();
+  });
+
+  it('keeps captured delivery assets durable without replaying their bytes to the model', async () => {
+    const database = await openChatBrowserDatabase(createTestDatabaseName('browser-capture-asset'));
+    const repository = new IndexedDbTaskRepository(database);
+    const dependencies = sources();
+    const commands = new TaskCommandService(
+      repository,
+      dependencies.clock,
+      dependencies.ids,
+      dependencies.conversations,
+    );
+    const created = await commands.create({
+      conversationId: 'conversation_1',
+      tabId: 7,
+      goal: 'Capture and send the current page',
+    });
+    let turn = 0;
+    const planner = {
+      plan: () =>
+        (async function* () {
+          turn += 1;
+          if (turn === 1) {
+            yield browserCall('call_capture', 'browser_capture_screenshot', {
+              tabId: 7,
+            });
+          } else if (turn === 2) {
+            yield browserCall('call_paste', 'browser_paste_image', {
+              tabId: 7,
+              ref: 'ref_editor',
+              assetId: 'attachment_capture',
+            });
+          } else {
+            yield {
+              type: 'task.completed',
+              reason: 'model_response_completed',
+              messageId: 'message_answer',
+            } as const;
+          }
+        })(),
+    };
+    const addReference = vi.fn(async () => undefined);
+    const executeBrowser = vi.fn(async (call_) =>
+      call_.operation === 'capture_screenshot'
+        ? {
+            output: '{"ok":true,"assetId":"attachment_capture"}',
+            attachmentIds: ['attachment_capture'],
+            modelAttachmentIds: [],
+          }
+        : {
+            output: '{"ok":true,"pasted":true}',
+            attachmentIds: [],
+          },
+    );
+    const executor = new TaskExecutor({
+      repository,
+      conversations: dependencies.conversations,
+      planner,
+      tavily: tavilyPort(),
+      browser: browserPort({
+        execute: executeBrowser,
+      }),
+      attachments: {
+        addReference,
+        removeReference: vi.fn(async () => undefined),
+      },
+      clock: dependencies.clock,
+      ids: dependencies.ids,
+    });
+
+    const result = await executor.run(created.task.id, new AbortController().signal);
+    const completed = result.checkpoint.completedToolResults[0];
+    const continuation = result.checkpoint.continuationItems.find(
+      (item) => item.type === 'function_call_output' && item.callId === 'call_capture',
+    );
+
+    expect(completed?.attachmentIds).toEqual(['attachment_capture']);
+    expect(continuation).toMatchObject({
+      type: 'function_call_output',
+      callId: 'call_capture',
+      attachmentIds: [],
+    });
+    expect(addReference).toHaveBeenCalledWith('attachment_capture', completed?.resultRef);
+    expect(executeBrowser).toHaveBeenNthCalledWith(
+      2,
+      expect.objectContaining({ operation: 'paste_image' }),
+      expect.any(AbortSignal),
+      expect.objectContaining({ availableAssetIds: ['attachment_capture'] }),
+    );
     database.close();
   });
 
@@ -803,10 +1354,10 @@ describe('TaskExecutor', () => {
     expect(execute).toHaveBeenCalledWith(
       expect.objectContaining({ name: 'browser_open_tab' }),
       expect.any(AbortSignal),
-      {
+      expect.objectContaining({
         currentTabId: 7,
         sessionOwnerId: expect.stringMatching(/^runner_/),
-      },
+      }),
     );
     expect(result.events.map(({ type }) => type)).toEqual([
       'planning.started',
@@ -1025,7 +1576,57 @@ describe('TaskExecutor', () => {
     database.close();
   });
 
-  it('keeps a completed reasoning summary when the same model turn later fails', async () => {
+  it('retries one transient model failure without pausing the task', async () => {
+    const database = await openChatBrowserDatabase(createTestDatabaseName('transient-retry'));
+    const repository = new IndexedDbTaskRepository(database);
+    const dependencies = sources();
+    const commands = new TaskCommandService(
+      repository,
+      dependencies.clock,
+      dependencies.ids,
+      dependencies.conversations,
+    );
+    const created = await commands.create({
+      conversationId: 'conversation_1',
+      tabId: 7,
+      goal: 'Retry one stalled model response',
+    });
+    let attempt = 0;
+    const plan = vi.fn(() =>
+      (async function* () {
+        attempt += 1;
+        if (attempt === 1) {
+          throw providerErrorFromCode('TRANSIENT');
+        }
+        yield {
+          type: 'task.completed' as const,
+          reason: 'retried',
+          messageId: 'message_retry',
+        };
+      })(),
+    );
+    const executor = new TaskExecutor({
+      repository,
+      conversations: dependencies.conversations,
+      planner: { plan },
+      tavily: tavilyPort(),
+      browser: browserPort(),
+      clock: dependencies.clock,
+      ids: dependencies.ids,
+    });
+
+    const result = await executor.run(created.task.id, new AbortController().signal);
+
+    expect(result.task.status).toBe('completed');
+    expect(result.events.map((event) => event.type)).toEqual([
+      'planning.started',
+      'task.completed',
+    ]);
+    expect(plan).toHaveBeenCalledTimes(2);
+    database.close();
+  });
+
+  it('keeps a completed reasoning summary and pauses after two transient failures', async () => {
     const database = await openChatBrowserDatabase(createTestDatabaseName('reasoning-failure'));
     const repository = new IndexedDbTaskRepository(database);
     const dependencies = sources();
@@ -1040,19 +1641,23 @@ describe('TaskExecutor', () => {
       tabId: 7,
       goal: 'Keep the reasoning summary',
     });
+    let attempt = 0;
+    const plan = vi.fn(() =>
+      (async function* () {
+        attempt += 1;
+        if (attempt === 1) {
+          yield {
+            type: 'reasoning.summary' as const,
+            text: 'Checked the source before the outage.',
+          };
+        }
+        throw providerErrorFromCode('TRANSIENT');
+      })(),
+    );
     const executor = new TaskExecutor({
       repository,
       conversations: dependencies.conversations,
-      planner: {
-        plan: () =>
-          (async function* () {
-            yield {
-              type: 'reasoning.summary',
-              text: 'Checked the source before the outage.',
-            };
-            throw providerErrorFromCode('TRANSIENT');
-          })(),
-      },
+      planner: { plan },
       tavily: tavilyPort(),
       browser: browserPort(),
       clock: dependencies.clock,
@@ -1070,6 +1675,7 @@ describe('TaskExecutor', () => {
     expect(result.events[1]).toMatchObject({
       reasoningSummary: 'Checked the source before the outage.',
     });
+    expect(plan).toHaveBeenCalledTimes(2);
     database.close();
   });
 
@@ -1279,7 +1885,10 @@ describe('TaskExecutor', () => {
     expect(commitBoundary?.checkpoint.pendingToolCall).toEqual({
       callId: 'call_commit',
       name: 'commit_context',
-      argumentsJson: JSON.stringify({ state: commitState, throughCallId: 'call_search_1' }),
+      argumentsJson: JSON.stringify({
+        state: commitState,
+        throughCallId: 'call_search_1',
+      }),
       executionState: 'recorded',
     });
     expect(result.checkpoint.completedToolResults.map(({ toolName }) => toolName)).toEqual([
@@ -1293,7 +1902,10 @@ describe('TaskExecutor', () => {
         type: 'function_call',
         callId: 'call_commit',
         name: 'commit_context',
-        argumentsJson: JSON.stringify({ state: commitState, throughCallId: 'call_search_1' }),
+        argumentsJson: JSON.stringify({
+          state: commitState,
+          throughCallId: 'call_search_1',
+        }),
       },
       expect.objectContaining({
         type: 'function_call_output',
@@ -2079,7 +2691,10 @@ describe('TaskExecutor', () => {
     let browserResult = 0;
     const browser = browserPort({
       execute: vi.fn(async () => ({
-        output: JSON.stringify({ ok: true, data: { sequence: ++browserResult } }),
+        output: JSON.stringify({
+          ok: true,
+          data: { sequence: ++browserResult },
+        }),
         attachmentIds: [],
       })),
     });
@@ -2192,7 +2807,9 @@ describe('TaskExecutor', () => {
 
     expect(completed.task.status).toBe('completed');
     expect(browser.execute).toHaveBeenCalledOnce();
-    expect(completed.checkpoint).toMatchObject({ browserToolCallsInAttempt: 1 });
+    expect(completed.checkpoint).toMatchObject({
+      browserToolCallsInAttempt: 1,
+    });
     database.close();
   });
 

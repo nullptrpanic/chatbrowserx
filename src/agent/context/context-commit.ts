@@ -27,9 +27,10 @@ export class ContextCommitCursorError extends Error {
   }
 }
 
-const MAX_RAW_TOOL_PAIRS_BEFORE_COMMIT = 16;
-const MAX_RAW_TOOL_CHARACTERS_BEFORE_COMMIT = 32 * 1024;
+const MAX_RAW_TOOL_PAIRS_BEFORE_COMMIT = 24;
+const MAX_RAW_TOOL_CHARACTERS_BEFORE_COMMIT = 64 * 1024;
 const MAX_COMMITTED_STATE_CHARACTERS = 8_192;
+export const MAX_PROJECTED_PROVIDER_INPUT_CHARACTERS = 80_000;
 const ELEMENT_REF_PATTERN =
   /\b(?:ref_[a-z0-9_-]{1,64}|e(?=[a-z0-9]{8,32}\b)(?=[a-z0-9]*\d)[a-z0-9]{8,32})\b/gi;
 const SNAPSHOT_ID_PATTERN = /\bs(?=[a-f0-9]{16,32}\b)(?=[a-f0-9]*\d)[a-f0-9]{16,32}\b/gi;
@@ -188,6 +189,96 @@ export function shouldForceContextCommit(
   );
 }
 
+interface ProjectedProviderRequestShape {
+  readonly systemPrompt: unknown;
+  readonly input: unknown;
+  readonly tools: unknown;
+}
+
+function boundedCharacterCount(current: number, added: number): number {
+  return Math.min(MAX_PROJECTED_PROVIDER_INPUT_CHARACTERS, current + added);
+}
+
+function serializedStringCharacters(value: string): number {
+  let characters = 2;
+  for (let index = 0; index < value.length; index += 1) {
+    const code = value.charCodeAt(index);
+    const shortEscape =
+      code === 0x08 || code === 0x09 || code === 0x0a || code === 0x0c || code === 0x0d;
+    characters = boundedCharacterCount(
+      characters,
+      code === 0x22 || code === 0x5c || shortEscape
+        ? 2
+        : code <= 0x1f || (code >= 0xd800 && code <= 0xdfff)
+          ? 6
+          : 1,
+    );
+    if (characters >= MAX_PROJECTED_PROVIDER_INPUT_CHARACTERS) break;
+  }
+  return characters;
+}
+
+/** Estimates JSON request characters without materializing or exposing Provider content. */
+function projectedSerializedCharacters(
+  value: unknown,
+  active: WeakSet<object>,
+): number | undefined {
+  if (value === null) return 4;
+  if (typeof value === 'string') return serializedStringCharacters(value);
+  if (typeof value === 'boolean') return value ? 4 : 5;
+  if (typeof value === 'number') return Number.isFinite(value) ? String(value).length : 4;
+  if (typeof value === 'undefined' || typeof value === 'function' || typeof value === 'symbol') {
+    return undefined;
+  }
+  if (typeof value === 'bigint') {
+    throw new Error('Projected Provider request contains an unsupported value.');
+  }
+  if (active.has(value)) {
+    throw new Error('Projected Provider request contains a cycle.');
+  }
+
+  active.add(value);
+  try {
+    let characters = 2;
+    if (Array.isArray(value)) {
+      for (const [index, item] of value.entries()) {
+        if (index > 0) characters = boundedCharacterCount(characters, 1);
+        characters = boundedCharacterCount(
+          characters,
+          projectedSerializedCharacters(item, active) ?? 4,
+        );
+      }
+      return characters;
+    }
+
+    let propertyCount = 0;
+    for (const [key, item] of Object.entries(value)) {
+      const itemCharacters = projectedSerializedCharacters(item, active);
+      if (itemCharacters === undefined) continue;
+      if (propertyCount > 0) characters = boundedCharacterCount(characters, 1);
+      characters = boundedCharacterCount(characters, serializedStringCharacters(key));
+      characters = boundedCharacterCount(characters, 1);
+      characters = boundedCharacterCount(characters, itemCharacters);
+      propertyCount += 1;
+    }
+    return characters;
+  } finally {
+    active.delete(value);
+  }
+}
+
+/** Schedules the existing model-authored commit before the next Provider request grows too large. */
+export function shouldForceContextCommitForRequest(
+  checkpoint: Pick<Checkpoint, 'continuationItems' | 'completedToolResults'>,
+  requestShape: ProjectedProviderRequestShape,
+): boolean {
+  return (
+    shouldForceContextCommit(checkpoint) ||
+    (projectedSerializedCharacters(requestShape, new WeakSet()) ?? 0) >=
+      MAX_PROJECTED_PROVIDER_INPUT_CHARACTERS
+  );
+}
+
 /** Replaces completed tool pairs through the requested cursor with one durable boundary. */
 export function compactContextAtCommit(
   items: readonly ContinuationItem[],
@@ -309,9 +400,7 @@ export function compactContextAtCommit(
     }
     compactedCalls += 1;
     releasedTextChars +=
-      unit.call.argumentsJson.length +
-      unit.output.output.length +
-      modelOutputCharacters(unit.call);
+      unit.call.argumentsJson.length + unit.output.output.length + modelOutputCharacters(unit.call);
     for (const attachmentId of unit.output.attachmentIds ?? []) {
       releasedAttachmentIds.add(attachmentId);
     }

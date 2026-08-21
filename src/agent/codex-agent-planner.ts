@@ -14,11 +14,12 @@ import { buildAgentContext } from './context/agent-context';
 import {
   contextCommitCandidateCallIds,
   hasContextCommitCandidate,
-  shouldForceContextCommit,
+  shouldForceContextCommitForRequest,
 } from './context/context-commit';
 import type { AgentEvent, AgentModelTurn, AgentPlanInput, AgentPlanner } from './execution-types';
 import { StreamPersistenceBuffer } from './stream-persistence-buffer';
-import { BROWSER_TOOL_DEFINITIONS, parseBrowserToolCall } from './tools/browser-tool-schema';
+import { browserToolDefinitionsForCheckpoint } from './tools/browser-tool-availability';
+import { parseBrowserToolCall } from './tools/browser-tool-schema';
 import {
   CONTEXT_COMMIT_TOOL_NAME,
   createContextCommitToolDefinition,
@@ -136,13 +137,16 @@ export class CodexAgentPlanner implements AgentPlanner {
     const contextCommitCallIds = contextCommitAvailable
       ? contextCommitCandidateCallIds(input.checkpoint.continuationItems)
       : [];
+    const browserTools = browserToolDefinitionsForCheckpoint(input.checkpoint);
     const tools = [
-      ...BROWSER_TOOL_DEFINITIONS,
+      ...browserTools,
       ...(tavilyConfigured ? TAVILY_TOOL_DEFINITIONS : []),
       ...(contextCommitAvailable ? [createContextCommitToolDefinition(contextCommitCallIds)] : []),
     ];
-    const forceContextCommit = contextCommitAvailable && shouldForceContextCommit(input.checkpoint);
     const availableToolNames = new Set(tools.map(({ name }) => name));
+    if (availableToolNames.size !== tools.length) {
+      throw new Error('Model tool definitions contain duplicate names.');
+    }
     const context = await buildAgentContext(
       {
         task: input.task,
@@ -156,6 +160,16 @@ export class CodexAgentPlanner implements AgentPlanner {
         attachments: this.#dependencies.attachments,
       },
     );
+    const forceContextCommit =
+      contextCommitAvailable &&
+      shouldForceContextCommitForRequest(input.checkpoint, {
+        systemPrompt: context.systemPrompt,
+        input: context.input,
+        tools,
+      });
+    if (forceContextCommit && !availableToolNames.has(CONTEXT_COMMIT_TOOL_NAME)) {
+      throw new Error('The forced context commit tool is unavailable.');
+    }
     const state: ModelTurnState = {
       responseId: null,
       completed: false,

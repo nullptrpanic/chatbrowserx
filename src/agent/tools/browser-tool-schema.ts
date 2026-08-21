@@ -8,6 +8,7 @@ const MAX_TAB_ID = 2_147_483_647;
 const MAX_COORDINATE = 1_000_000;
 const MAX_SCROLL_DELTA = 10_000;
 const MAX_SNAPSHOT_ID_CHARACTERS = 64;
+const MAX_ATTACHMENT_ID_CHARACTERS = 256;
 
 const tabIdSchema = z.number().int().min(0).max(MAX_TAB_ID);
 const refSchema = z
@@ -57,6 +58,18 @@ export const browserInspectSchema = z
       .optional(),
   })
   .strict();
+export const browserCaptureScreenshotSchema = z.object({ tabId: tabIdSchema.optional() }).strict();
+export const browserPasteImageSchema = z
+  .object({
+    tabId: tabIdSchema.optional(),
+    ref: refSchema,
+    assetId: z
+      .string()
+      .min(1)
+      .max(MAX_ATTACHMENT_ID_CHARACTERS)
+      .refine((value) => value.trim() === value),
+  })
+  .strict();
 export const browserClickSchema = z
   .object({
     tabId: tabIdSchema.optional(),
@@ -72,6 +85,14 @@ export const browserSetCheckedSchema = z
     checked: z.boolean(),
   })
   .strict();
+const browserSetCheckedItemSchema = z.object({ ref: refSchema, checked: z.boolean() }).strict();
+export const browserSetCheckedManySchema = z
+  .object({
+    tabId: tabIdSchema.optional(),
+    items: z.array(browserSetCheckedItemSchema).min(1).max(20),
+  })
+  .strict()
+  .refine(({ items }) => new Set(items.map(({ ref }) => ref)).size === items.length);
 export const browserTypeSchema = z
   .object({
     tabId: tabIdSchema.optional(),
@@ -172,8 +193,11 @@ const BROWSER_SCHEMAS = {
   browser_navigate: browserNavigateSchema,
   browser_reload: browserReloadSchema,
   browser_inspect: browserInspectSchema,
+  browser_capture_screenshot: browserCaptureScreenshotSchema,
+  browser_paste_image: browserPasteImageSchema,
   browser_click: browserClickSchema,
   browser_set_checked: browserSetCheckedSchema,
+  browser_set_checked_many: browserSetCheckedManySchema,
   browser_type: browserTypeSchema,
   browser_keypress: browserKeypressSchema,
   browser_scroll: browserScrollSchema,
@@ -199,8 +223,11 @@ export type BrowserOperation =
   | 'navigate'
   | 'reload'
   | 'inspect'
+  | 'capture_screenshot'
+  | 'paste_image'
   | 'click'
   | 'set_checked'
+  | 'set_checked_many'
   | 'type'
   | 'keypress'
   | 'scroll'
@@ -242,8 +269,11 @@ const OPERATIONS: Readonly<Record<BrowserToolName, BrowserOperation>> = {
   browser_navigate: 'navigate',
   browser_reload: 'reload',
   browser_inspect: 'inspect',
+  browser_capture_screenshot: 'capture_screenshot',
+  browser_paste_image: 'paste_image',
   browser_click: 'click',
   browser_set_checked: 'set_checked',
+  browser_set_checked_many: 'set_checked_many',
   browser_type: 'type',
   browser_keypress: 'keypress',
   browser_scroll: 'scroll',
@@ -264,6 +294,7 @@ const SAFE_TO_REPLAY = new Set<BrowserToolName>([
   'browser_list_tabs',
   'browser_switch_tab',
   'browser_inspect',
+  'browser_capture_screenshot',
   'browser_wait',
   'browser_network_list',
   'browser_network_get',
@@ -350,15 +381,32 @@ export const BROWSER_TOOL_DEFINITIONS: readonly ModelToolDefinition[] = [
   taskToolDefinition('browser_reload', 'Reload one task page and wait for stability.', {}),
   taskToolDefinition(
     'browser_inspect',
-    'Inspect readable content, a compact native accessibility tree with actionable refs across frames, or a viewport screenshot. Always inspect interactive before requesting a screenshot. Continue with refs and interactive deltas whenever the accessibility tree contains the needed content or controls. Do not use screenshots to verify semantic form state. Screenshot fallback is accepted only when interactive inspection lacks actionable targets or detects a visual surface such as canvas. Set since to an empty string for a full result. Reuse only the latest interactive snapshot ID when its base elements remain in context. A delta applies to that base: changes items use zero-based i and replacement state s, where null removes state.',
+    'Inspect readable content, a compact native accessibility tree with actionable refs across frames, or a viewport screenshot. Use interactive for a viewport-prioritized bounded tree. Use interactive_deep only when the needed offscreen target or context was truncated. Always inspect interactive before requesting a screenshot. Continue with refs and interactive deltas whenever the accessibility tree contains the needed content or controls. Do not use screenshots to verify semantic form state. Screenshot fallback is accepted only when interactive inspection lacks actionable targets or detects a visual surface such as canvas. Set since to an empty string for a full result. Reuse only the latest interactive snapshot ID when its base elements remain in context. A keyed delta applies to that base: upsert items contain identity k and replacement element e; remove contains deleted identities.',
     {
       mode: {
         type: 'string',
-        enum: ['content', 'interactive', 'screenshot'],
+        enum: ['content', 'interactive', 'interactive_deep', 'screenshot'],
       },
       since: {
         type: 'string',
         maxLength: MAX_SNAPSHOT_ID_CHARACTERS,
+      },
+    },
+  ),
+  taskToolDefinition(
+    'browser_capture_screenshot',
+    'Capture the current webpage viewport as a task-owned image asset for later delivery through the page. This is not a visual inspection: use browser_inspect mode screenshot when the model must see pixels. The returned assetId can be passed only to browser_paste_image in this WorkSession.',
+    {},
+  ),
+  taskToolDefinition(
+    'browser_paste_image',
+    'Paste a task-owned screenshot into a recent semantic editable message or file-input ref without using the system clipboard. Continue only when the result reports verified=true; that means the editor consumed the image and a local attachment-preview change was measured. After sending, inspect again to verify remote delivery. Never paste the same asset twice after an ambiguous result.',
+    {
+      ref: REF_PROPERTY,
+      assetId: {
+        type: 'string',
+        minLength: 1,
+        maxLength: MAX_ATTACHMENT_ID_CHARACTERS,
       },
     },
   ),
@@ -377,6 +425,26 @@ export const BROWSER_TOOL_DEFINITIONS: readonly ModelToolDefinition[] = [
     {
       ref: REF_PROPERTY,
       checked: { type: 'boolean' },
+    },
+  ),
+  taskToolDefinition(
+    'browser_set_checked_many',
+    'Set 1 to 20 distinct recent refs to requested selection states in order. Each item is idempotently re-resolved and verified before the next item. The result keeps the verified prefix and stops at the first failure; never replay completed items.',
+    {
+      items: {
+        type: 'array',
+        minItems: 1,
+        maxItems: 20,
+        items: {
+          type: 'object',
+          properties: {
+            ref: REF_PROPERTY,
+            checked: { type: 'boolean' },
+          },
+          required: ['ref', 'checked'],
+          additionalProperties: false,
+        },
+      },
     },
   ),
   taskToolDefinition('browser_type', 'Automatically reveal and type into a recent semantic ref.', {
@@ -478,6 +546,11 @@ export const BROWSER_TOOL_DEFINITIONS: readonly ModelToolDefinition[] = [
     {},
   ),
 ];
+
+/** Stable registry used to select a checkpoint-safe subset without cloning schemas. */
+export const BROWSER_TOOL_DEFINITION_BY_NAME = Object.freeze(
+  Object.fromEntries(BROWSER_TOOL_DEFINITIONS.map((definition) => [definition.name, definition])),
+) as Readonly<Record<BrowserToolName, ModelToolDefinition>>;
 
 /** Parses one browser call while replacing all unsafe validation details. */
 export function parseBrowserToolCall(input: BrowserToolCallSource): ParsedBrowserToolCall {

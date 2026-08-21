@@ -3,6 +3,7 @@ import { parseBrowserToolCall } from '../../../src/agent/tools/browser-tool-sche
 import {
   BrowserActionExecutor,
   inspectEditorTarget,
+  pasteImageIntoEditor,
   type BrowserActionExecutorDependencies,
 } from '../../../src/browser/actions/browser-action-executor';
 import type {
@@ -161,6 +162,7 @@ function harness(
     readonly pointerPending?: boolean;
     readonly pointerRejects?: boolean;
     readonly page?: BrowserActionExecutorDependencies['page'];
+    readonly attachments?: BrowserActionExecutorDependencies['attachments'];
     readonly targets?: readonly ObservedElementTarget[];
     readonly onEvent?: DebuggerTransport['onEvent'];
     readonly responder?: (
@@ -314,6 +316,7 @@ function harness(
     pointer,
     platform: { getOs: vi.fn(async () => options.os ?? 'linux') },
     ...(options.page ? { page: options.page } : {}),
+    ...(options.attachments ? { attachments: options.attachments } : {}),
   });
   return {
     executor,
@@ -328,7 +331,246 @@ function harness(
 
 afterEach(() => vi.useRealTimers());
 
+describe('pasteImageIntoEditor', () => {
+  it('verifies a newly inserted editor image even when the global media count is unchanged', async () => {
+    const originalDataTransfer = window.DataTransfer;
+    const originalClipboardEvent = window.ClipboardEvent;
+    class TestDataTransfer {
+      readonly files: File[] = [];
+      readonly items = {
+        add: (file: File) => {
+          this.files.push(file);
+        },
+      };
+    }
+    class TestClipboardEvent extends Event {
+      readonly clipboardData: TestDataTransfer;
+
+      constructor(type: string, init: EventInit & { clipboardData: TestDataTransfer }) {
+        super(type, init);
+        this.clipboardData = init.clipboardData;
+      }
+    }
+    Object.defineProperty(window, 'DataTransfer', {
+      configurable: true,
+      value: TestDataTransfer,
+    });
+    Object.defineProperty(window, 'ClipboardEvent', {
+      configurable: true,
+      value: TestClipboardEvent,
+    });
+
+    try {
+      document.body.innerHTML = `
+        <main>
+          <img id="old-image" alt="old">
+          <section id="composer"><div id="editor" contenteditable="true"></div></section>
+        </main>
+      `;
+      const editor = document.querySelector<HTMLElement>('#editor');
+      if (!editor) throw new Error('Test editor was not created.');
+      editor.getBoundingClientRect = () =>
+        ({
+          x: 100,
+          y: 500,
+          width: 500,
+          height: 40,
+          top: 500,
+          right: 600,
+          bottom: 540,
+          left: 100,
+          toJSON: () => ({}),
+        }) as DOMRect;
+      editor.addEventListener('paste', (event) => {
+        event.preventDefault();
+        document.querySelector('#old-image')?.remove();
+        const image = document.createElement('img');
+        image.src = 'data:image/png;base64,aW1hZ2U=';
+        image.getBoundingClientRect = () =>
+          ({
+            x: 100,
+            y: 460,
+            width: 80,
+            height: 40,
+            top: 460,
+            right: 180,
+            bottom: 500,
+            left: 100,
+            toJSON: () => ({}),
+          }) as DOMRect;
+        editor.append(image);
+      });
+
+      await expect(
+        pasteImageIntoEditor.call(editor, 'aW1hZ2U=', 'image/png', 'capture.png', 0),
+      ).resolves.toMatchObject({
+        dispatched: true,
+        handled: true,
+        verified: true,
+        previewCount: 1,
+      });
+      expect(document.querySelectorAll('img')).toHaveLength(1);
+    } finally {
+      Object.defineProperty(window, 'DataTransfer', {
+        configurable: true,
+        value: originalDataTransfer,
+      });
+      Object.defineProperty(window, 'ClipboardEvent', {
+        configurable: true,
+        value: originalClipboardEvent,
+      });
+      document.body.innerHTML = '';
+    }
+  });
+});
+
 describe('BrowserActionExecutor', () => {
+  it('pastes a task-owned image into a semantic editor ref without the system clipboard', async () => {
+    const get = vi.fn(async () => ({
+      id: 'attachment_capture',
+      blob: new Blob(['image-bytes'], { type: 'image/png' }),
+      mimeType: 'image/png',
+      byteSize: 11,
+      width: 640,
+      height: 480,
+      source: 'viewport_capture' as const,
+      createdAt: 1,
+      fileName: 'capture.png',
+    }));
+    const { executor, send } = harness({
+      attachments: { get },
+      targets: [
+        {
+          frameTargetId: null,
+          documentFrameId: 'frame-main',
+          loaderId: 'loader-1',
+          backendNodeId: 42,
+          role: 'textbox',
+          name: 'Message',
+          state: ['editable'],
+          actions: ['type'],
+          frame: 'main',
+        },
+      ],
+      responder: (_session, method, params) => {
+        if (
+          method === 'Runtime.callFunctionOn' &&
+          typeof params?.functionDeclaration === 'string' &&
+          params.functionDeclaration.includes('__chatbrowserxPasteImage')
+        ) {
+          return {
+            result: {
+              type: 'object',
+              value: {
+                dispatched: true,
+                strategy: 'clipboard_event',
+                fileCount: 1,
+                handled: true,
+                verified: true,
+                mutations: 2,
+              },
+            },
+          };
+        }
+        return undefined;
+      },
+    });
+
+    await expect(
+      executor.execute(
+        call('browser_paste_image', {
+          tabId: 7,
+          ref: 'ref_1',
+          assetId: 'attachment_capture',
+        }),
+        new AbortController().signal,
+      ),
+    ).resolves.toMatchObject({
+      data: {
+        action: 'paste_image',
+        dispatched: true,
+        strategy: 'clipboard_event',
+        fileCount: 1,
+        handled: true,
+        verified: true,
+      },
+      observation: { targetPresent: true },
+    });
+
+    expect(get).toHaveBeenCalledWith('attachment_capture');
+    expect(send).toHaveBeenCalledWith(
+      SNAPSHOT.root,
+      'Runtime.callFunctionOn',
+      expect.objectContaining({
+        arguments: [
+          { value: 'aW1hZ2UtYnl0ZXM=' },
+          { value: 'image/png' },
+          { value: 'capture.png' },
+        ],
+        userGesture: true,
+      }),
+    );
+  });
+
+  it('does not report a handled image paste as successful without preview evidence', async () => {
+    const { executor } = harness({
+      attachments: {
+        get: vi.fn(async () => ({
+          id: 'attachment_capture',
+          blob: new Blob(['image-bytes'], { type: 'image/png' }),
+          mimeType: 'image/png',
+          byteSize: 11,
+          width: 640,
+          height: 480,
+          source: 'viewport_capture' as const,
+          createdAt: 1,
+        })),
+      },
+      targets: [
+        {
+          frameTargetId: null,
+          documentFrameId: 'frame-main',
+          loaderId: 'loader-1',
+          backendNodeId: 42,
+          role: 'textbox',
+          name: 'Message',
+          state: ['editable'],
+          actions: ['type'],
+          frame: 'main',
+        },
+      ],
+      responder: (_session, method, params) =>
+        method === 'Runtime.callFunctionOn' &&
+        typeof params?.functionDeclaration === 'string' &&
+        params.functionDeclaration.includes('__chatbrowserxPasteImage')
+          ? {
+              result: {
+                type: 'object',
+                value: {
+                  dispatched: true,
+                  strategy: 'clipboard_event',
+                  fileCount: 1,
+                  handled: true,
+                  verified: false,
+                  mutations: 0,
+                },
+              },
+            }
+          : undefined,
+    });
+
+    await expect(
+      executor.execute(
+        call('browser_paste_image', {
+          tabId: 7,
+          ref: 'ref_1',
+          assetId: 'attachment_capture',
+        }),
+        new AbortController().signal,
+      ),
+    ).rejects.toMatchObject({ code: 'ATTACHMENT_VERIFICATION_FAILED' });
+  });
+
   it('uses the page bridge for a DOM ref without attaching a debugger session', async () => {
     const page = {
       performAction: vi.fn(async () => ({
@@ -397,6 +639,12 @@ describe('BrowserActionExecutor', () => {
         replaced: true,
         submitted: false,
         valueLength: 5,
+        verification: {
+          valueLength: 5,
+          valueHash: '4f9f2cab',
+          prefixMatch: true,
+          suffixMatch: true,
+        },
       },
     });
     expect(JSON.stringify(result)).not.toContain('"value":"hello"');
@@ -459,6 +707,12 @@ describe('BrowserActionExecutor', () => {
         dispatched: true,
         replaced: true,
         verified: true,
+        verification: {
+          valueLength: replacement.length,
+          valueHash: expect.stringMatching(/^[0-9a-f]{8}$/),
+          prefixMatch: true,
+          suffixMatch: true,
+        },
       },
     });
     expect(sessions.ensure).toHaveBeenCalledOnce();
@@ -874,10 +1128,7 @@ describe('BrowserActionExecutor', () => {
                 role: { type: 'role', value: 'generic' },
                 value: {
                   type: 'string',
-                  value:
-                    accessibilityReads === 1
-                      ? `${text} \u200b \u200b \u200b`
-                      : '',
+                  value: accessibilityReads === 1 ? `${text} \u200b \u200b \u200b` : '',
                 },
                 properties: [
                   { name: 'focused', value: { type: 'boolean', value: true } },
@@ -1646,6 +1897,164 @@ describe('BrowserActionExecutor', () => {
         changes: [],
       },
     });
+  });
+
+  it('sets multiple distinct refs sequentially and verifies every item', async () => {
+    const targets: readonly ObservedElementTarget[] = [42, 43].map((backendNodeId, index) => ({
+      frameTargetId: null,
+      documentFrameId: 'frame-main',
+      loaderId: 'loader-1',
+      backendNodeId,
+      role: 'checkbox',
+      name: `Option ${String(index + 1)}`,
+      state: ['checked'],
+      actions: ['click', 'set_checked'],
+      frame: 'main',
+    }));
+    const { executor, send } = harness({
+      targets,
+      responder: (_session, method, params) => {
+        if (method === 'Accessibility.getPartialAXTree') {
+          const backendNodeId = Number(params?.backendNodeId);
+          const target = targets.find((candidate) => candidate.backendNodeId === backendNodeId);
+          if (!target) throw new Error('Expected batch target fixture.');
+          return {
+            nodes: [
+              {
+                nodeId: `node_${String(backendNodeId)}`,
+                backendDOMNodeId: backendNodeId,
+                ignored: false,
+                role: { value: target.role },
+                name: { value: target.name },
+                properties: [{ name: 'checked', value: { type: 'boolean', value: true } }],
+              },
+            ],
+          };
+        }
+        return undefined;
+      },
+    });
+
+    const result = await executor.execute(
+      call('browser_set_checked_many', {
+        tabId: 7,
+        items: [
+          { ref: 'ref_1', checked: true },
+          { ref: 'ref_2', checked: true },
+        ],
+      }),
+      new AbortController().signal,
+    );
+
+    expect(result).toMatchObject({
+      data: {
+        action: 'set_checked_many',
+        complete: true,
+        completedItems: [
+          { ref: 'ref_1', requested: true, actual: true, dispatched: false },
+          { ref: 'ref_2', requested: true, actual: true, dispatched: false },
+        ],
+      },
+    });
+    expect(
+      send.mock.calls.filter(
+        ([, method, params]) =>
+          method === 'Input.dispatchMouseEvent' && params?.type === 'mousePressed',
+      ),
+    ).toHaveLength(0);
+  });
+
+  it('stops a selection batch at the first failure and preserves its verified prefix', async () => {
+    const targets: readonly ObservedElementTarget[] = [
+      {
+        frameTargetId: null,
+        documentFrameId: 'frame-main',
+        loaderId: 'loader-1',
+        backendNodeId: 42,
+        role: 'checkbox',
+        name: 'Ready',
+        state: ['checked'],
+        actions: ['click', 'set_checked'],
+        frame: 'main',
+      },
+      {
+        frameTargetId: null,
+        documentFrameId: 'frame-main',
+        loaderId: 'loader-1',
+        backendNodeId: 43,
+        role: 'radio',
+        name: 'Cannot clear',
+        state: ['checked'],
+        actions: ['click', 'set_checked'],
+        frame: 'main',
+      },
+      {
+        frameTargetId: null,
+        documentFrameId: 'frame-main',
+        loaderId: 'loader-1',
+        backendNodeId: 44,
+        role: 'checkbox',
+        name: 'Must not run',
+        state: ['checked=false'],
+        actions: ['click', 'set_checked'],
+        frame: 'main',
+      },
+    ];
+    const { executor, send } = harness({
+      targets,
+      responder: (_session, method, params) => {
+        if (method === 'Accessibility.getPartialAXTree') {
+          const backendNodeId = Number(params?.backendNodeId);
+          const target = targets.find((candidate) => candidate.backendNodeId === backendNodeId);
+          if (!target) throw new Error('Expected batch target fixture.');
+          return {
+            nodes: [
+              {
+                nodeId: `node_${String(backendNodeId)}`,
+                backendDOMNodeId: backendNodeId,
+                ignored: false,
+                role: { value: target.role },
+                name: { value: target.name },
+                properties: [
+                  {
+                    name: 'checked',
+                    value: { type: 'boolean', value: target.state.includes('checked') },
+                  },
+                ],
+              },
+            ],
+          };
+        }
+        return undefined;
+      },
+    });
+
+    const result = await executor.execute(
+      call('browser_set_checked_many', {
+        tabId: 7,
+        items: [
+          { ref: 'ref_1', checked: true },
+          { ref: 'ref_2', checked: false },
+          { ref: 'ref_3', checked: true },
+        ],
+      }),
+      new AbortController().signal,
+    );
+
+    expect(result).toMatchObject({
+      data: {
+        action: 'set_checked_many',
+        complete: false,
+        failedIndex: 1,
+        completedItems: [{ ref: 'ref_1', requested: true, actual: true }],
+      },
+      failure: expect.objectContaining({ code: 'UNSUPPORTED_ACTION' }),
+    });
+    expect(send).not.toHaveBeenCalledWith(
+      { tabId: 7 },
+      'DOM.getBoxModel',
+      expect.objectContaining({ backendNodeId: 44 }),
+    );
   });
 
   it('sets one selectable target and returns every observed selection change', async () => {
@@ -2751,6 +3160,60 @@ describe('BrowserActionExecutor', () => {
 
     editor.className = 'ace_editor';
     expect(inspectEditorTarget.call(text)).toMatchObject({ editor: true, custom: true });
+  });
+
+  it('reads the full Monaco model matched to the target instead of its partial textarea buffer', () => {
+    const otherRoot = document.createElement('div');
+    otherRoot.className = 'monaco-editor';
+    const otherInput = document.createElement('textarea');
+    otherInput.value = 'other partial buffer';
+    otherRoot.append(otherInput);
+    const targetRoot = document.createElement('div');
+    targetRoot.className = 'monaco-editor';
+    const targetInput = document.createElement('textarea');
+    targetInput.value = 'target partial buffer';
+    targetRoot.append(targetInput);
+    document.body.append(otherRoot, targetRoot);
+    const expected = 'class Solution {\n    return complete_model_value;\n};';
+    const windowWithMonaco = window as typeof window & {
+      monaco?: {
+        editor: {
+          getEditors(): readonly {
+            getDomNode(): HTMLElement;
+            getModel(): { getValue(): string };
+          }[];
+        };
+      };
+    };
+    const previousMonaco = windowWithMonaco.monaco;
+    windowWithMonaco.monaco = {
+      editor: {
+        getEditors: () => [
+          {
+            getDomNode: () => otherRoot,
+            getModel: () => ({ getValue: () => 'other complete model' }),
+          },
+          {
+            getDomNode: () => targetRoot,
+            getModel: () => ({ getValue: () => expected }),
+          },
+        ],
+      },
+    };
+
+    try {
+      expect(inspectEditorTarget.call(targetInput)).toEqual({
+        editor: true,
+        custom: true,
+        connected: true,
+        value: expected,
+      });
+    } finally {
+      if (previousMonaco === undefined) delete windowWithMonaco.monaco;
+      else windowWithMonaco.monaco = previousMonaco;
+      otherRoot.remove();
+      targetRoot.remove();
+    }
   });
 
   it('rejects ordinary input when the target value does not retain inserted text', async () => {

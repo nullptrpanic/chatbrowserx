@@ -7,6 +7,10 @@ export interface DecodedSseEvent {
   readonly data: unknown;
 }
 
+export interface DecodeSseStreamOptions {
+  readonly idleTimeoutMs?: number;
+}
+
 interface PendingEvent {
   event: string;
   dataLines: string[];
@@ -102,20 +106,63 @@ function assertEventSize(pending: PendingEvent, lineBuffer: string, encoder: Tex
   }
 }
 
+/** Reads one chunk while converting a silent upstream stream into a retryable failure. */
+function readWithIdleTimeout(
+  reader: ReadableStreamDefaultReader<Uint8Array>,
+  idleTimeoutMs: number | undefined,
+): Promise<ReadableStreamReadResult<Uint8Array>> {
+  if (idleTimeoutMs === undefined) return reader.read();
+  if (!Number.isSafeInteger(idleTimeoutMs) || idleTimeoutMs <= 0) {
+    throw new TypeError('SSE idle timeout must be a positive safe integer.');
+  }
+
+  return new Promise((resolve, reject) => {
+    let settled = false;
+    const timeout = setTimeout(() => {
+      if (settled) return;
+      settled = true;
+      void reader
+        .cancel()
+        .catch(() => undefined)
+        .then(() => reject(providerErrorFromCode('TRANSIENT')));
+    }, idleTimeoutMs);
+
+    void reader.read().then(
+      (read) => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timeout);
+        resolve(read);
+      },
+      (error: unknown) => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timeout);
+        reject(error);
+      },
+    );
+  });
+}
+
 /** Decodes a streaming HTTP SSE body into parsed JSON events. */
 export async function* decodeSseStream(
   stream: ReadableStream<Uint8Array>,
+  options: DecodeSseStreamOptions = {},
 ): AsyncGenerator<DecodedSseEvent> {
   const reader = stream.getReader();
   const decoder = new TextDecoder();
   const encoder = new TextEncoder();
-  const pending: PendingEvent = { event: '', dataLines: [], completedLineBytes: 0 };
+  const pending: PendingEvent = {
+    event: '',
+    dataLines: [],
+    completedLineBytes: 0,
+  };
   let lineBuffer = '';
   let reachedDone = false;
 
   try {
     while (!reachedDone) {
-      const read = await reader.read();
+      const read = await readWithIdleTimeout(reader, options.idleTimeoutMs);
       lineBuffer += decoder.decode(read.value, { stream: !read.done });
       assertEventSize(pending, lineBuffer, encoder);
 

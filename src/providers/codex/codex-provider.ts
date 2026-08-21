@@ -10,6 +10,8 @@ import { buildCodexRequest } from './codex-request';
 
 export type FetchPort = (input: RequestInfo | URL, init?: RequestInit) => Promise<Response>;
 
+const CODEX_STREAM_IDLE_TIMEOUT_MS = 90_000;
+
 export class CodexProvider implements ModelProvider {
   readonly #credentials: CredentialStore;
   readonly #fetch: FetchPort;
@@ -66,12 +68,16 @@ export class CodexProvider implements ModelProvider {
       (contentType.length > 0 && !contentType.includes('text/event-stream'))
     ) {
       await response.body?.cancel().catch(() => undefined);
-      throw providerErrorFromCode('INVALID_RESPONSE', { status: response.status });
+      throw providerErrorFromCode('INVALID_RESPONSE', {
+        status: response.status,
+      });
     }
 
     const translator = new CodexEventTranslator();
     try {
-      for await (const decoded of decodeSseStream(response.body)) {
+      for await (const decoded of decodeSseStream(response.body, {
+        idleTimeoutMs: CODEX_STREAM_IDLE_TIMEOUT_MS,
+      })) {
         if (signal.aborted) {
           throw providerErrorFromCode('ABORTED');
         }

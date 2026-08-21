@@ -1,4 +1,5 @@
 import type { Protocol } from 'devtools-protocol';
+import type { AttachmentSource } from '../../attachments/attachment-types';
 import type { DebuggerSession, DebuggerTransport } from '../debugger/debugger-transport';
 import type { TargetSessionRegistry } from '../debugger/target-session-registry';
 import type { ReadablePageContent } from './content-extractor';
@@ -11,9 +12,9 @@ import {
   type SemanticPageEntry,
 } from './semantic-page-snapshot';
 
-const MAX_INTERACTIVE_ELEMENTS = 500;
-const MAX_INTERACTIVE_TARGETS = 200;
-const MAX_INTERACTIVE_JSON_CHARACTERS = 60_000;
+const INTERACTIVE_BUDGET = { elements: 240, targets: 120, characters: 32_000 } as const;
+const DEEP_INTERACTIVE_BUDGET = { elements: 500, targets: 200, characters: 60_000 } as const;
+const MAX_KEYED_DELTA_CHANGE_RATIO = 0.35;
 const MAX_INTERACTIVE_SNAPSHOT_TABS = 50;
 const INTERACTIVE_ENTRY_KEYS =
   'd=depth,r=role(default generic),n=name,s=state,a=extra actions(ref defaults click),f=frame';
@@ -42,7 +43,10 @@ export interface PageObserverDependencies {
   readonly transport: DebuggerTransport;
   readonly content: PageObservationContentPort;
   readonly refs: ElementRefStore;
-  readonly persistScreenshot?: (blob: Blob) => Promise<{ readonly id: string }>;
+  readonly persistScreenshot?: (
+    blob: Blob,
+    source: Extract<AttachmentSource, 'viewport_capture' | 'visual_fallback'>,
+  ) => Promise<{ readonly id: string }>;
 }
 
 interface CompactSemanticPageEntry {
@@ -61,8 +65,9 @@ export interface PageInspectionOptions {
 
 interface InteractiveSnapshot {
   readonly id: string;
-  readonly structure: string;
+  readonly documentEpoch: string;
   readonly elements: readonly CompactSemanticPageEntry[];
+  readonly identities: readonly string[] | null;
 }
 
 function compactSemanticEntry(entry: SemanticPageEntry, ref?: string): CompactSemanticPageEntry {
@@ -82,32 +87,68 @@ function createInteractiveSnapshotId(): string {
   return `s${crypto.randomUUID().replaceAll('-', '').slice(0, 20)}`;
 }
 
-function interactiveStructure(
-  elements: readonly CompactSemanticPageEntry[],
-  truncated: boolean,
-): string {
-  return JSON.stringify({
-    elements: elements.map((entry) => {
-      const structure: Record<string, unknown> = { ...entry };
-      delete structure.s;
-      return structure;
-    }),
-    ...(truncated ? { truncated: true } : {}),
-  });
+function passiveEntryIdentity(entry: CompactSemanticPageEntry): string {
+  return JSON.stringify([entry.f ?? 'main', entry.d, entry.r ?? 'generic', entry.n]);
 }
 
-function interactiveStateChanges(
-  previous: readonly CompactSemanticPageEntry[],
-  current: readonly CompactSemanticPageEntry[],
-): readonly Readonly<{ i: number; s: readonly string[] | null }>[] {
-  const changes: Readonly<{ i: number; s: readonly string[] | null }>[] = [];
-  current.forEach((entry, index) => {
-    const prior = previous[index];
-    const before = prior?.s ?? null;
-    const after = entry.s ?? null;
-    if (JSON.stringify(before) !== JSON.stringify(after)) changes.push({ i: index, s: after });
+function compactEntryIdentities(
+  elements: readonly CompactSemanticPageEntry[],
+): readonly string[] | null {
+  const passiveCounts = new Map<string, number>();
+  for (const entry of elements) {
+    if (entry.ref) continue;
+    const identity = passiveEntryIdentity(entry);
+    passiveCounts.set(identity, (passiveCounts.get(identity) ?? 0) + 1);
+  }
+  if ([...passiveCounts.values()].some((count) => count > 1)) return null;
+  const identities = elements.map((entry) =>
+    entry.ref ? `ref:${entry.ref}` : `entry:${passiveEntryIdentity(entry)}:0`,
+  );
+  return new Set(identities).size === identities.length ? identities : null;
+}
+
+interface KeyedInteractiveDelta {
+  readonly unchanged?: true;
+  readonly upsert?: readonly Readonly<{
+    k: string;
+    e: CompactSemanticPageEntry;
+  }>[];
+  readonly remove?: readonly string[];
+}
+
+function keyedInteractiveDelta(
+  previous: InteractiveSnapshot,
+  current: InteractiveSnapshot,
+): KeyedInteractiveDelta | null {
+  if (
+    previous.documentEpoch !== current.documentEpoch ||
+    previous.identities === null ||
+    current.identities === null
+  ) {
+    return null;
+  }
+  const previousByIdentity = new Map(
+    previous.identities.map((identity, index) => [identity, previous.elements[index]]),
+  );
+  const currentByIdentity = new Map(
+    current.identities.map((identity, index) => [identity, current.elements[index]]),
+  );
+  const upsert = current.identities.flatMap((identity, index) => {
+    const entry = current.elements[index];
+    if (!entry || JSON.stringify(previousByIdentity.get(identity)) === JSON.stringify(entry)) {
+      return [];
+    }
+    return [{ k: identity, e: entry }];
   });
-  return changes;
+  const remove = previous.identities.filter((identity) => !currentByIdentity.has(identity));
+  const changedIdentityCount = upsert.length + remove.length;
+  if (changedIdentityCount === 0) return { unchanged: true };
+  const population = Math.max(previous.elements.length, current.elements.length, 1);
+  if (changedIdentityCount / population > MAX_KEYED_DELTA_CHANGE_RATIO) return null;
+  return {
+    ...(upsert.length === 0 ? {} : { upsert }),
+    ...(remove.length === 0 ? {} : { remove }),
+  };
 }
 
 /** Gives deep inspection's bounded budget to actionable entries and their nearby context first. */
@@ -115,7 +156,28 @@ function interactiveCandidateIndexes(
   entries: readonly SemanticPageEntry[],
   deep: boolean,
 ): readonly number[] {
-  if (!deep) return entries.map((_entry, index) => index);
+  if (!deep) {
+    const priority = (entry: SemanticPageEntry): number => {
+      if (entry.inViewport && entry.targetIndex !== undefined) return 0;
+      if (entry.inViewport) return 1;
+      if (
+        entry.state?.some((state) =>
+          ['focused', 'selected', 'checked', 'invalid'].includes(state.split('=', 1)[0] ?? ''),
+        )
+      ) {
+        return 2;
+      }
+      return entry.targetIndex === undefined ? 4 : 3;
+    };
+    return entries
+      .map((_entry, index) => index)
+      .toSorted((left, right) => {
+        const leftEntry = entries[left];
+        const rightEntry = entries[right];
+        if (!leftEntry || !rightEntry) return left - right;
+        return priority(leftEntry) - priority(rightEntry) || left - right;
+      });
+  }
   const indexes: number[] = [];
   const included = new Set<number>();
   const include = (index: number): void => {
@@ -132,6 +194,31 @@ function interactiveCandidateIndexes(
   });
   entries.forEach((_entry, index) => include(index));
   return indexes;
+}
+
+function viewportFromLayoutMetrics(
+  metrics: Partial<Protocol.Page.GetLayoutMetricsResponse>,
+): BuildViewport | undefined {
+  const viewport = metrics.visualViewport ?? metrics.layoutViewport;
+  if (!viewport) return undefined;
+  const { pageX, pageY, clientWidth, clientHeight } = viewport;
+  if (
+    ![pageX, pageY, clientWidth, clientHeight].every(
+      (value) => typeof value === 'number' && Number.isFinite(value),
+    ) ||
+    clientWidth <= 0 ||
+    clientHeight <= 0
+  ) {
+    return undefined;
+  }
+  return { x: pageX, y: pageY, width: clientWidth, height: clientHeight };
+}
+
+interface BuildViewport {
+  readonly x: number;
+  readonly y: number;
+  readonly width: number;
+  readonly height: number;
 }
 
 function throwIfAborted(signal: AbortSignal): void {
@@ -185,10 +272,20 @@ export class PageObserver {
     if (mode === 'interactive' || mode === 'interactive_deep') {
       return this.#inspectInteractive(tabId, mode === 'interactive_deep', signal, options);
     }
-    return this.#inspectScreenshot(tabId, signal);
+    return this.#inspectScreenshot(tabId, signal, 'visual_fallback');
   }
 
-  async #inspectScreenshot(tabId: number, signal: AbortSignal): Promise<PageObservationResult> {
+  /** Captures one task-owned viewport image without changing model-vision fallback state. */
+  async capture(tabId: number, signal: AbortSignal): Promise<PageObservationResult> {
+    throwIfAborted(signal);
+    return this.#inspectScreenshot(tabId, signal, 'viewport_capture');
+  }
+
+  async #inspectScreenshot(
+    tabId: number,
+    signal: AbortSignal,
+    source: Extract<AttachmentSource, 'viewport_capture' | 'visual_fallback'>,
+  ): Promise<PageObservationResult> {
     const persist = this.#dependencies.persistScreenshot;
     if (!persist) throw new Error('Screenshot persistence is unavailable.');
     const browserSession = await this.#dependencies.sessions.ensure(tabId, signal);
@@ -224,7 +321,7 @@ export class PageObserver {
       const viewportWidth = Math.max(1, Math.round(metrics.visualViewport.clientWidth));
       const viewportHeight = Math.max(1, Math.round(metrics.visualViewport.clientHeight));
       const prepared = await prepareModelScreenshot(blob);
-      const attachment = await persist(prepared.blob);
+      const attachment = await persist(prepared.blob, source);
       if (attachment.id.trim().length === 0 || attachment.id.length > 256) {
         throw new Error('Screenshot persistence returned an invalid reference.');
       }
@@ -283,6 +380,7 @@ export class PageObserver {
     throwIfAborted(signal);
     const targets: ObservedElementTarget[] = [];
     const entries: SemanticPageEntry[] = [];
+    const documentEpochParts: string[] = [];
     let hasVisualSurface = false;
     const sessionTargets: readonly {
       session: DebuggerSession;
@@ -299,7 +397,7 @@ export class PageObserver {
 
     for (const sessionTarget of sessionTargets) {
       throwIfAborted(signal);
-      const [tree, domSnapshot, frameTree] = await Promise.all([
+      const [tree, domSnapshot, frameTree, metrics] = await Promise.all([
         this.#dependencies.transport.send<Protocol.Accessibility.GetFullAXTreeResponse>(
           sessionTarget.session,
           'Accessibility.getFullAXTree',
@@ -316,12 +414,26 @@ export class PageObserver {
           sessionTarget.session,
           'Page.getFrameTree',
         ),
+        this.#dependencies.transport
+          .send<Protocol.Page.GetLayoutMetricsResponse>(
+            sessionTarget.session,
+            'Page.getLayoutMetrics',
+          )
+          .catch(() => ({}) as Protocol.Page.GetLayoutMetricsResponse),
       ]);
       const loaders = this.#frameLoaders(frameTree.frameTree);
+      documentEpochParts.push(
+        JSON.stringify([
+          sessionTarget.frame,
+          [...loaders.entries()].toSorted(([left], [right]) => left.localeCompare(right)),
+        ]),
+      );
+      const viewport = viewportFromLayoutMetrics(metrics);
       const semantic = buildSemanticPageSnapshot({
         axNodes: tree.nodes,
         domSnapshot,
         frame: sessionTarget.frame,
+        ...(viewport === undefined ? {} : { viewport }),
       });
       hasVisualSurface ||= semantic.hasVisualSurface;
       const localTargetIndexes = new Map<number, number>();
@@ -361,16 +473,17 @@ export class PageObserver {
     }
 
     const originalCount = entries.length;
+    const budget = deep ? DEEP_INTERACTIVE_BUDGET : INTERACTIVE_BUDGET;
     const selectedEntryIndexes: number[] = [];
     const usedTargetIndexes = new Set<number>();
     for (const entryIndex of interactiveCandidateIndexes(entries, deep)) {
-      if (selectedEntryIndexes.length >= MAX_INTERACTIVE_ELEMENTS) break;
+      if (selectedEntryIndexes.length >= budget.elements) break;
       const entry = entries[entryIndex];
       if (!entry) continue;
       if (
         entry.targetIndex !== undefined &&
         !usedTargetIndexes.has(entry.targetIndex) &&
-        usedTargetIndexes.size >= MAX_INTERACTIVE_TARGETS
+        usedTargetIndexes.size >= budget.targets
       ) {
         continue;
       }
@@ -380,7 +493,7 @@ export class PageObserver {
         JSON.stringify({
           mode: 'interactive',
           elements: selectedEntryIndexes.map((index) => entries[index]),
-        }).length > MAX_INTERACTIVE_JSON_CHARACTERS
+        }).length > budget.characters
       ) {
         selectedEntryIndexes.pop();
         if (entry.targetIndex !== undefined) {
@@ -418,32 +531,32 @@ export class PageObserver {
     const previous = this.#interactiveSnapshots.get(tabId);
     const current: InteractiveSnapshot = {
       id: snapshotId,
-      structure: interactiveStructure(elements, truncated),
+      documentEpoch: JSON.stringify(documentEpochParts),
       elements,
+      identities: compactEntryIdentities(elements),
     };
     const visualFallbackAllowed = selectedTargets.length === 0 || hasVisualSurface;
     this.#rememberInteractiveSnapshot(tabId, current);
     const canReturnDelta =
-      options.since !== undefined &&
-      options.since.length > 0 &&
-      previous?.id === options.since &&
-      previous.structure === current.structure;
+      options.since !== undefined && options.since.length > 0 && previous?.id === options.since;
     if (canReturnDelta) {
-      const changes = interactiveStateChanges(previous.elements, elements);
-      return {
-        tabId,
-        url: metadata.url,
-        data: {
-          mode: 'interactive',
-          snapshot: snapshotId,
-          base: previous.id,
-          ...(changes.length === 0 ? { unchanged: true } : { changes }),
-        },
-        observation: null,
-        attachmentIds: [],
-        debuggerSession: 'ephemeral',
-        visualFallbackAllowed,
-      };
+      const delta = keyedInteractiveDelta(previous, current);
+      if (delta !== null) {
+        return {
+          tabId,
+          url: metadata.url,
+          data: {
+            mode: 'interactive',
+            snapshot: snapshotId,
+            base: previous.id,
+            ...delta,
+          },
+          observation: null,
+          attachmentIds: [],
+          debuggerSession: 'ephemeral',
+          visualFallbackAllowed,
+        };
+      }
     }
     return {
       tabId,
