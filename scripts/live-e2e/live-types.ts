@@ -12,6 +12,11 @@ export interface LiveScenario {
   readonly forbidScreenshotInspect: boolean;
   readonly forbidSubmittedType: boolean;
   readonly expectedSubmittedTypeCount?: number;
+  readonly expectedToolCounts?: Readonly<Record<string, number>>;
+  /** Tools whose every recorded result must report ok=true and data.verified=true. */
+  readonly requiredVerifiedTools?: readonly string[];
+  /** Maximum durable image references expected across tool results; defaults to zero. */
+  readonly maxAttachmentCount?: number;
   readonly requiredTypedTextIncludes?: readonly string[];
   readonly requiredToolOutputIncludes?: readonly string[];
   readonly finalTextIncludes: readonly string[];

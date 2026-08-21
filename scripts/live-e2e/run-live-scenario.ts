@@ -13,9 +13,39 @@ import type { ExtensionMessage, ExtensionResponse } from '../../src/shared/proto
 
 const TERMINAL_STATUSES = new Set(['completed', 'failed', 'cancelled']);
 const POLL_INTERVAL_MS = 500;
+const CLEANUP_REQUEST_TIMEOUT_MS = 10_000;
 const MAX_REPORTED_ARGUMENT_CHARACTERS = 20_000;
 const MAX_REPORTED_OUTPUT_CHARACTERS = 50_000;
 const MAX_REPORTED_ERROR_CHARACTERS = 2_000;
+
+class LiveRequestTimeoutError extends Error {
+  constructor(label: string, timeoutMs: number) {
+    super(`${label} did not complete within ${String(timeoutMs)} ms.`);
+    this.name = 'LiveRequestTimeoutError';
+  }
+}
+
+async function withRequestTimeout<T>(
+  request: Promise<T>,
+  timeoutMs: number,
+  label: string,
+): Promise<T> {
+  const boundedTimeout = Math.max(1, Math.floor(timeoutMs));
+  let deadline: ReturnType<typeof globalThis.setTimeout> | undefined;
+  try {
+    return await Promise.race([
+      request,
+      new Promise<never>((_resolve, reject) => {
+        deadline = globalThis.setTimeout(
+          () => reject(new LiveRequestTimeoutError(label, boundedTimeout)),
+          boundedTimeout,
+        );
+      }),
+    ]);
+  } finally {
+    if (deadline !== undefined) globalThis.clearTimeout(deadline);
+  }
+}
 
 export interface LiveTarget {
   readonly tabId: number;
@@ -33,6 +63,7 @@ export interface LiveRunDependencies {
   readonly now: () => number;
   readonly sleep: (milliseconds: number) => Promise<void>;
   readonly createRunId: () => string;
+  readonly cleanupRequestTimeoutMs?: number;
 }
 
 interface RuntimeTask {
@@ -242,6 +273,8 @@ export async function runLiveScenario(
   let providerTrace: LiveProviderTrace = { requestCount: 0, requests: [] };
   let harnessError: string | null = null;
   let requestSequence = 0;
+  const cleanupRequestTimeoutMs =
+    dependencies.cleanupRequestTimeoutMs ?? CLEANUP_REQUEST_TIMEOUT_MS;
   const request = <TType extends ExtensionMessage['type']>(
     type: TType,
     payload: Extract<ExtensionMessage, { readonly type: TType }>['payload'],
@@ -260,36 +293,64 @@ export async function runLiveScenario(
         `Target origin ${new URL(target.url).origin} does not match ${expandedScenario.expectedOrigin}.`,
       );
     }
-    const preflight = await runtime.send(request('panel.getSnapshot', { tabId: target.tabId }));
+    const preflight = await withRequestTimeout(
+      runtime.send(request('panel.getSnapshot', { tabId: target.tabId })),
+      expandedScenario.readinessTimeoutMs,
+      'Live preflight request',
+    );
     readPreflightSnapshot(preflight, target.tabId);
     runtime.startProviderTrace?.(expandedScenario.taskText);
+    const deadline = dependencies.now() + expandedScenario.taskTimeoutMs;
 
     latestSnapshot = readTaskSnapshot(
-      await runtime.send(
-        request('chat.submit', {
-          tabId: target.tabId,
-          text: expandedScenario.taskText,
-          attachmentIds: [],
-        }),
+      await withRequestTimeout(
+        runtime.send(
+          request('chat.submit', {
+            tabId: target.tabId,
+            text: expandedScenario.taskText,
+            attachmentIds: [],
+          }),
+        ),
+        Math.max(1, deadline - dependencies.now()),
+        'Live task submission',
       ),
     );
     taskId = latestSnapshot.task.id;
     conversationId = latestSnapshot.task.conversationId;
     terminalStatus = latestSnapshot.task.status;
-    const deadline = dependencies.now() + expandedScenario.taskTimeoutMs;
 
     while (!TERMINAL_STATUSES.has(terminalStatus) && dependencies.now() < deadline) {
       await dependencies.sleep(POLL_INTERVAL_MS);
-      latestSnapshot = readTaskSnapshot(
-        await runtime.send(request('task.getSnapshot', { taskId })),
-      );
+      if (dependencies.now() >= deadline) break;
+      try {
+        latestSnapshot = readTaskSnapshot(
+          await withRequestTimeout(
+            runtime.send(request('task.getSnapshot', { taskId })),
+            Math.max(1, deadline - dependencies.now()),
+            'Live task polling',
+          ),
+        );
+      } catch (error) {
+        if (error instanceof LiveRequestTimeoutError) break;
+        throw error;
+      }
       terminalStatus = latestSnapshot.task.status;
     }
 
     if (!TERMINAL_STATUSES.has(terminalStatus)) {
-      latestSnapshot = readTaskSnapshot(await runtime.send(request('task.cancel', { taskId })));
       terminalStatus = 'timed_out';
       harnessError = `Live task timed out after ${String(expandedScenario.taskTimeoutMs)} ms and was cancelled.`;
+      try {
+        latestSnapshot = readTaskSnapshot(
+          await withRequestTimeout(
+            runtime.send(request('task.cancel', { taskId })),
+            cleanupRequestTimeoutMs,
+            'Live task cancellation',
+          ),
+        );
+      } catch (cancelError) {
+        harnessError = addError(harnessError, cancelError);
+      }
     } else if (terminalStatus !== 'completed') {
       const userMessage = latestSnapshot.task.lastError?.userMessage;
       harnessError =
@@ -304,7 +365,13 @@ export async function runLiveScenario(
       (latestSnapshot === null || !TERMINAL_STATUSES.has(latestSnapshot.task.status))
     ) {
       try {
-        latestSnapshot = readTaskSnapshot(await runtime.send(request('task.cancel', { taskId })));
+        latestSnapshot = readTaskSnapshot(
+          await withRequestTimeout(
+            runtime.send(request('task.cancel', { taskId })),
+            cleanupRequestTimeoutMs,
+            'Live task cancellation',
+          ),
+        );
       } catch (cancelError) {
         harnessError = addError(harnessError, cancelError);
       }
@@ -315,7 +382,11 @@ export async function runLiveScenario(
   if (taskId.length > 0) {
     try {
       toolResults = readToolResults(
-        await runtime.send(request('panel.getTaskDetails', { taskId })),
+        await withRequestTimeout(
+          runtime.send(request('panel.getTaskDetails', { taskId })),
+          cleanupRequestTimeoutMs,
+          'Live task details request',
+        ),
       );
     } catch (error) {
       harnessError = addError(harnessError, error);
@@ -323,11 +394,15 @@ export async function runLiveScenario(
     if (target !== null && conversationId.length > 0) {
       try {
         finalText = readFinalText(
-          await runtime.send(
-            request('panel.getSnapshot', {
-              tabId: target.tabId,
-              conversationId,
-            }),
+          await withRequestTimeout(
+            runtime.send(
+              request('panel.getSnapshot', {
+                tabId: target.tabId,
+                conversationId,
+              }),
+            ),
+            cleanupRequestTimeoutMs,
+            'Live final snapshot request',
           ),
           taskId,
         );
@@ -339,7 +414,11 @@ export async function runLiveScenario(
 
   if (runtime.finishProviderTrace !== undefined) {
     try {
-      providerTrace = await runtime.finishProviderTrace();
+      providerTrace = await withRequestTimeout(
+        runtime.finishProviderTrace(),
+        cleanupRequestTimeoutMs,
+        'Live provider trace collection',
+      );
     } catch (error) {
       harnessError = addError(harnessError, error);
     }

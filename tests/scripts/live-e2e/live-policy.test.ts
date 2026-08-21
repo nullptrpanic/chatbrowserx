@@ -114,6 +114,76 @@ describe('live E2E acceptance policy', () => {
     );
   });
 
+  it('allows one declared screenshot asset and requires exact delivery tool counts', () => {
+    const deliveryScenario: LiveScenario = {
+      ...scenario,
+      allowRemoteMutation: true,
+      maxAttachmentCount: 1,
+      expectedToolCounts: {
+        browser_capture_screenshot: 1,
+        browser_paste_image: 1,
+      },
+    };
+    const toolResults = [
+      ...completedInput().toolResults,
+      tool('browser_capture_screenshot', { tabId: 0 }, { attachmentIds: ['attachment_capture'] }),
+      tool('browser_paste_image', {
+        tabId: 0,
+        ref: 'ref_editor',
+        assetId: 'attachment_capture',
+      }),
+    ];
+    const accepted = evaluateLiveRun(deliveryScenario, {
+      ...completedInput(),
+      toolResults,
+    });
+
+    expect(accepted.passed).toBe(true);
+
+    const duplicatePaste = evaluateLiveRun(deliveryScenario, {
+      ...completedInput(),
+      toolResults: [...toolResults, tool('browser_paste_image', {})],
+    });
+    expect(duplicatePaste.checks).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ name: 'expected-tool-counts', passed: false }),
+      ]),
+    );
+  });
+
+  it('rejects a required verified tool when the model reports success after its action failed', () => {
+    const verifiedScenario: LiveScenario = {
+      ...scenario,
+      requiredTools: ['browser_type'],
+      requiredVerifiedTools: ['browser_type'],
+      finalTextIncludes: ['replacement complete'],
+    };
+    const result = evaluateLiveRun(verifiedScenario, {
+      ...completedInput(),
+      finalText: 'replacement complete according to the model',
+      toolResults: [
+        tool(
+          'browser_type',
+          { tabId: 0, ref: 'editor', text: 'replacement', replace: true, submit: false },
+          {
+            output: JSON.stringify({
+              ok: false,
+              code: 'TYPE_VERIFICATION_FAILED',
+              message: 'The page did not retain the requested text.',
+            }),
+          },
+        ),
+      ],
+    });
+
+    expect(result.passed).toBe(false);
+    expect(result.checks).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ name: 'required-tool-verification', passed: false }),
+      ]),
+    );
+  });
+
   it('rejects non-completed tasks and incomplete final answers', () => {
     const result = evaluateLiveRun(scenario, {
       ...completedInput(),
@@ -137,6 +207,7 @@ describe('live E2E acceptance policy', () => {
       ...scenario,
       allowRemoteMutation: true,
       forbidSubmittedType: false,
+      requiredTools: ['browser_type'],
       expectedSubmittedTypeCount: 1,
       requiredTypedTextIncludes: [marker],
       requiredToolOutputIncludes: [marker],
@@ -240,6 +311,43 @@ describe('live E2E acceptance policy', () => {
         expect.objectContaining({ name: 'submitted-state-readback', passed: false }),
       ]),
     );
+  });
+
+  it('accepts a required typed marker contained inside a longer submitted message', () => {
+    const marker = 'ChatBrowserX summary live_123';
+    const mutationScenario: LiveScenario = {
+      ...scenario,
+      allowRemoteMutation: true,
+      forbidSubmittedType: false,
+      requiredTools: ['browser_type'],
+      expectedSubmittedTypeCount: 1,
+      requiredTypedTextIncludes: [marker, '| Group | Summary |'],
+      finalTextIncludes: [marker],
+    };
+    const input: LiveRunInput = {
+      terminalStatus: 'completed',
+      finalText: `Sent and verified ${marker}`,
+      toolResults: [
+        tool(
+          'browser_type',
+          {
+            tabId: 0,
+            ref: 'message-editor',
+            text: `${marker}\n| Group | Summary |\n| --- | --- |\n| A | Recent content |`,
+            replace: true,
+            submit: true,
+          },
+          {
+            output: JSON.stringify({
+              ok: true,
+              data: { submitted: true, submissionVerified: true },
+            }),
+          },
+        ),
+      ],
+    };
+
+    expect(evaluateLiveRun(mutationScenario, input).passed).toBe(true);
   });
 
   it('requires five distinct markdown table rows when the scenario declares them', () => {

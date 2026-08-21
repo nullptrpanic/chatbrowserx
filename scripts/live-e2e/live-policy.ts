@@ -132,7 +132,7 @@ export function evaluateLiveRun(scenario: LiveScenario, input: LiveRunInput): Li
       : [],
   );
   const missingTypedText = (scenario.requiredTypedTextIncludes ?? []).filter(
-    (value) => !typedTexts.includes(value),
+    (value) => !typedTexts.some((text) => text.includes(value)),
   );
   const lastSubmittedIndex = parsedCalls.findLastIndex(
     ({ result, arguments_ }) => result.toolName === 'browser_type' && arguments_?.submit === true,
@@ -144,9 +144,7 @@ export function evaluateLiveRun(scenario: LiveScenario, input: LiveRunInput): Li
   const requiredReadback = scenario.requiredToolOutputIncludes ?? [];
   const missingToolOutput = requiredReadback.filter(
     (value) =>
-      !postSubmitElements.some(
-        (element) => element.r === 'statictext' && element.n === value,
-      ),
+      !postSubmitElements.some((element) => element.r === 'statictext' && element.n === value),
   );
   const retainedSubmittedText = requiredReadback.filter((value) =>
     postSubmitElements.some(
@@ -170,6 +168,27 @@ export function evaluateLiveRun(scenario: LiveScenario, input: LiveRunInput): Li
     (total, result) => total + result.attachmentIds.length,
     0,
   );
+  const expectedToolCounts = Object.entries(scenario.expectedToolCounts ?? {});
+  const mismatchedToolCounts = expectedToolCounts.filter(
+    ([name, expected]) => toolNames.filter((candidate) => candidate === name).length !== expected,
+  );
+  const unverifiedRequiredTools = (scenario.requiredVerifiedTools ?? []).filter((name) => {
+    const calls = parsedCalls.filter(({ result }) => result.toolName === name);
+    return (
+      calls.length === 0 ||
+      calls.some(({ output }) => {
+        const data = output?.data;
+        return (
+          output?.ok !== true ||
+          typeof data !== 'object' ||
+          data === null ||
+          Array.isArray(data) ||
+          (data as Readonly<Record<string, unknown>>).verified !== true
+        );
+      })
+    );
+  });
+  const maxAttachmentCount = scenario.maxAttachmentCount ?? 0;
   const missingFinalText = scenario.finalTextIncludes.filter(
     (value) => !input.finalText.includes(value),
   );
@@ -242,8 +261,27 @@ export function evaluateLiveRun(scenario: LiveScenario, input: LiveRunInput): Li
     ),
     check(
       'no-image-attachments',
-      attachmentCount === 0,
-      `${String(attachmentCount)} image attachments.`,
+      attachmentCount <= maxAttachmentCount,
+      `${String(attachmentCount)} image attachments; maximum ${String(maxAttachmentCount)}.`,
+    ),
+    check(
+      'expected-tool-counts',
+      mismatchedToolCounts.length === 0,
+      mismatchedToolCounts.length === 0
+        ? 'Every exact tool-count requirement was met.'
+        : `Mismatched: ${mismatchedToolCounts
+            .map(
+              ([name, expected]) =>
+                `${name}=${String(toolNames.filter((candidate) => candidate === name).length)} (expected ${String(expected)})`,
+            )
+            .join(', ')}.`,
+    ),
+    check(
+      'required-tool-verification',
+      unverifiedRequiredTools.length === 0,
+      unverifiedRequiredTools.length === 0
+        ? 'Every required tool result was independently verified.'
+        : `Unverified: ${unverifiedRequiredTools.join(', ')}.`,
     ),
     check(
       'no-submitted-typing',
@@ -260,8 +298,8 @@ export function evaluateLiveRun(scenario: LiveScenario, input: LiveRunInput): Li
       'required-typed-text',
       missingTypedText.length === 0,
       missingTypedText.length === 0
-        ? 'Every required message was typed exactly.'
-        : `Missing exact typed text: ${missingTypedText.join(', ')}.`,
+        ? 'Every required text fragment was typed.'
+        : `Missing required typed text: ${missingTypedText.join(', ')}.`,
     ),
     check(
       'required-tool-readback',
@@ -272,8 +310,7 @@ export function evaluateLiveRun(scenario: LiveScenario, input: LiveRunInput): Li
     ),
     check(
       'submitted-state-readback',
-      submittedTypes.length === 0 ||
-        (submittedStateVerified && retainedSubmittedText.length === 0),
+      submittedTypes.length === 0 || (submittedStateVerified && retainedSubmittedText.length === 0),
       submittedTypes.length === 0
         ? 'No submitted typing required state verification.'
         : submittedStateVerified && retainedSubmittedText.length === 0

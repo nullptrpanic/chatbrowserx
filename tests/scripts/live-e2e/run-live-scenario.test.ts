@@ -276,6 +276,98 @@ describe('live scenario orchestration', () => {
     expect(report.harnessError).toMatch(/timed out/i);
   });
 
+  it('bounds a polling request that never resolves by the task deadline', async () => {
+    const pendingSnapshot = new Promise<never>(() => undefined);
+    const runtime = liveRuntime((message) => {
+      switch (message.type) {
+        case 'panel.getSnapshot':
+          return panelSnapshot();
+        case 'chat.submit':
+          return taskSnapshot('queued');
+        case 'task.getSnapshot':
+          return pendingSnapshot;
+        case 'task.cancel':
+          return taskSnapshot('cancelled');
+        case 'panel.getTaskDetails':
+          return {
+            id: 'task_live',
+            status: 'cancelled',
+            completedToolResults: [],
+          };
+        default:
+          throw new Error(`Unexpected message: ${message.type}`);
+      }
+    });
+    const boundedScenario: LiveScenario = { ...scenario, taskTimeoutMs: 25 };
+
+    const outcome = await Promise.race([
+      runLiveScenario(runtime, boundedScenario, {
+        now: () => Date.now(),
+        sleep: async () => undefined,
+        createRunId: () => 'run_stalled_poll',
+      }),
+      new Promise<'test-timeout'>((resolve) => {
+        globalThis.setTimeout(() => resolve('test-timeout'), 150);
+      }),
+    ]);
+
+    expect(outcome).not.toBe('test-timeout');
+    if (outcome === 'test-timeout') return;
+    expect(outcome.terminalStatus).toBe('timed_out');
+    expect(outcome.harnessError).toMatch(/timed out/i);
+    expect(runtime.messages.filter(({ type }) => type === 'task.cancel')).toHaveLength(1);
+  });
+
+  it('returns a timed-out report when cancellation itself never resolves', async () => {
+    const pendingCancellation = new Promise<never>(() => undefined);
+    const runtime = liveRuntime((message) => {
+      switch (message.type) {
+        case 'panel.getSnapshot':
+          return panelSnapshot();
+        case 'chat.submit':
+          return taskSnapshot('queued');
+        case 'task.getSnapshot':
+          return taskSnapshot('planning');
+        case 'task.cancel':
+          return pendingCancellation;
+        case 'panel.getTaskDetails':
+          return {
+            id: 'task_live',
+            status: 'planning',
+            completedToolResults: [],
+          };
+        default:
+          throw new Error(`Unexpected message: ${message.type}`);
+      }
+    });
+    let currentTime = 40_000;
+
+    const outcome = await Promise.race([
+      runLiveScenario(
+        runtime,
+        { ...scenario, taskTimeoutMs: 500 },
+        {
+          now: () => currentTime,
+          sleep: async (milliseconds) => {
+            currentTime += milliseconds;
+          },
+          createRunId: () => 'run_stalled_cancel',
+          cleanupRequestTimeoutMs: 25,
+        },
+      ),
+      new Promise<'test-timeout'>((resolve) => {
+        globalThis.setTimeout(() => resolve('test-timeout'), 150);
+      }),
+    ]);
+
+    expect(outcome).not.toBe('test-timeout');
+    if (outcome === 'test-timeout') return;
+    expect(outcome.terminalStatus).toBe('timed_out');
+    expect(outcome.harnessError).toMatch(/timed out/i);
+    expect(outcome.harnessError).toMatch(/cancellation/i);
+    expect(runtime.messages.filter(({ type }) => type === 'task.cancel')).toHaveLength(1);
+  });
+
   it('cancels its submitted task when polling fails before a terminal state', async () => {
     const runtime = liveRuntime((message) => {
       switch (message.type) {

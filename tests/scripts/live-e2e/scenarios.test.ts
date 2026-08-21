@@ -36,8 +36,53 @@ describe('live E2E scenario registry', () => {
   it('lists stable scenario names without exposing a mutable registry', () => {
     const scenarios = listLiveScenarios();
 
-    expect(scenarios.map(({ name }) => name)).toEqual(['lark-messenger-read', 'lark-self-send']);
+    expect(scenarios.map(({ name }) => name)).toEqual([
+      'lark-messenger-read',
+      'lark-self-send',
+      'lark-self-send-screenshot',
+      'lark-five-groups-summary-screenshot-send',
+    ]);
     expect(() => (scenarios as unknown[]).push({})).toThrow();
+  });
+
+  it('registers one screenshot-to-Feishu delivery scenario with exact mutation tools', () => {
+    const scenario = getLiveScenario('lark-self-send-screenshot');
+
+    expect(scenario.allowRemoteMutation).toBe(true);
+    expect(scenario.requiredTools).toEqual(
+      expect.arrayContaining(['browser_capture_screenshot', 'browser_paste_image', 'browser_type']),
+    );
+    expect(scenario.expectedToolCounts).toMatchObject({
+      browser_capture_screenshot: 1,
+      browser_paste_image: 1,
+    });
+    expect(scenario.maxAttachmentCount).toBe(1);
+    expect(scenario.taskText).toContain('caoyang.001');
+    expect(scenario.taskText).toContain('{{RUN_ID}}');
+  });
+
+  it('registers one strict five-group summary and screenshot delivery scenario', () => {
+    const scenario = getLiveScenario('lark-five-groups-summary-screenshot-send');
+
+    expect(scenario.allowRemoteMutation).toBe(true);
+    expect(scenario.requiredTools).toEqual(
+      expect.arrayContaining([
+        'browser_inspect',
+        'browser_capture_screenshot',
+        'browser_paste_image',
+        'browser_type',
+      ]),
+    );
+    expect(scenario.expectedToolCounts).toMatchObject({
+      browser_capture_screenshot: 1,
+      browser_paste_image: 1,
+    });
+    expect(scenario.expectedSubmittedTypeCount).toBe(2);
+    expect(scenario.minimumMarkdownTableRows).toBe(5);
+    expect(scenario.maxAttachmentCount).toBe(1);
+    expect(scenario.taskText).toContain('5 个不同的真实群聊');
+    expect(scenario.taskText).toContain('caoyang.001');
+    expect(scenario.taskText).toContain('{{RUN_ID}}');
   });
 
   it('registers one explicitly authorized self-send scenario with verifiable output', () => {
