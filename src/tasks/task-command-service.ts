@@ -38,6 +38,7 @@ export interface TaskCommandPort {
   resume(taskId: TaskId): Promise<TaskSnapshot>;
   retry(taskId: TaskId): Promise<TaskSnapshot>;
   cancel(taskId: TaskId): Promise<TaskSnapshot>;
+  clearContext(taskId: TaskId): Promise<TaskSnapshot>;
 }
 
 export class TaskCommandError extends Error {
@@ -155,6 +156,12 @@ export class TaskCommandService implements TaskCommandPort {
       throw new TaskCommandError(
         'TASK_STATE_INVALID',
         'Only a cancelled task can start a WorkSession continuation.',
+      );
+    }
+    if (source.events.some((event) => event.type === 'task.context-cleared')) {
+      throw new TaskCommandError(
+        'TASK_STATE_INVALID',
+        'Cleared task context cannot start a WorkSession continuation.',
       );
     }
 
@@ -332,6 +339,39 @@ export class TaskCommandService implements TaskCommandPort {
     return cancelled;
   }
 
+  /** Discards only continuation state for the latest cancelled task and retains its audit trail. */
+  async clearContext(taskId: TaskId): Promise<TaskSnapshot> {
+    const snapshot = await this.getSnapshot(taskId);
+    if (snapshot.task.status !== 'cancelled') {
+      throw new TaskCommandError(
+        'TASK_STATE_INVALID',
+        'Only a cancelled task can clear its continuation context.',
+      );
+    }
+    if (snapshot.events.some((event) => event.type === 'task.context-cleared')) return snapshot;
+    const conversationTasks = await this.#repository.listByConversation(
+      snapshot.task.conversationId,
+    );
+    const latestInWorkSession = conversationTasks
+      .filter((task) => task.workSessionId === snapshot.task.workSessionId)
+      .at(-1);
+    if (latestInWorkSession?.id !== snapshot.task.id) {
+      throw new TaskCommandError(
+        'TASK_STATE_INVALID',
+        'Only the latest cancelled task can clear its continuation context.',
+      );
+    }
+    return this.#saveTransition(
+      snapshot,
+      'task.context-cleared',
+      'user_clear_task_context',
+      [],
+      0,
+      null,
+      true,
+    );
+  }
+
   /**
    * Writes one command transition, event, and cloned checkpoint as one durable transaction.
    */
@@ -341,6 +381,8 @@ export class TaskCommandService implements TaskCommandPort {
     reason: string,
     continuationItems = snapshot.checkpoint.continuationItems,
     browserToolCallsInAttempt = snapshot.checkpoint.browserToolCallsInAttempt ?? 0,
+    pendingToolCall: PendingToolCall | null = snapshot.checkpoint.pendingToolCall,
+    clearModelInputTokens = false,
   ): Promise<TaskSnapshot> {
     const latestEventSequence = snapshot.events.at(-1)?.sequence ?? 0;
     if (latestEventSequence !== snapshot.checkpoint.sequence) {
@@ -368,12 +410,15 @@ export class TaskCommandService implements TaskCommandPort {
       at,
       error: null,
     };
+    const checkpointBase = { ...snapshot.checkpoint };
+    if (clearModelInputTokens) delete checkpointBase.lastModelInputTokens;
     const checkpoint: Checkpoint = {
-      ...snapshot.checkpoint,
+      ...checkpointBase,
       id: checkpointId,
       sequence,
       taskStatus: task.status,
       continuationItems,
+      pendingToolCall,
       browserToolCallsInAttempt,
       createdAt: at,
     };

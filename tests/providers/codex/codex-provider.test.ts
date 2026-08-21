@@ -1,6 +1,9 @@
 import { describe, expect, it, vi } from 'vitest';
 import { CodexProvider } from '../../../src/providers/codex/codex-provider';
-import { CODEX_RESPONSES_URL } from '../../../src/providers/codex/codex-constants';
+import {
+  CODEX_COMPACT_URL,
+  CODEX_RESPONSES_URL,
+} from '../../../src/providers/codex/codex-constants';
 import type { CredentialStore } from '../../../src/persistence/credential-store';
 import type { ModelRequest } from '../../../src/providers/provider-types';
 import type { ModelStreamEvent } from '../../../src/providers/stream-events';
@@ -69,6 +72,100 @@ const ACCESS_TOKEN = jwt({
 });
 
 describe('CodexProvider', () => {
+  it('compacts through the fixed unary endpoint and returns only the opaque boundary', async () => {
+    const fetchMock = vi.fn<typeof fetch>(
+      async () =>
+        new Response(
+          JSON.stringify({
+            output: [
+              {
+                type: 'message',
+                role: 'user',
+                content: [{ type: 'input_text', text: 'Click the result.' }],
+              },
+              {
+                type: 'compaction',
+                id: 'cmp_1',
+                encrypted_content: 'opaque-compacted-context',
+              },
+            ],
+          }),
+          { status: 200, headers: { 'Content-Type': 'application/json' } },
+        ),
+    );
+    const provider = new CodexProvider(credentialStore(ACCESS_TOKEN), fetchMock);
+
+    await expect(provider.compact(REQUEST, new AbortController().signal)).resolves.toEqual({
+      itemId: 'cmp_1',
+      encryptedContent: 'opaque-compacted-context',
+    });
+    expect(fetchMock).toHaveBeenCalledWith(
+      CODEX_COMPACT_URL,
+      expect.objectContaining({ method: 'POST' }),
+    );
+    const init = fetchMock.mock.calls[0]?.[1];
+    const body = JSON.parse(String(init?.body)) as Record<string, unknown>;
+    expect(body).not.toHaveProperty('store');
+    expect(body).not.toHaveProperty('stream');
+  });
+
+  it.each([
+    { output: [] },
+    {
+      output: [
+        { type: 'compaction', id: 'cmp_1', encrypted_content: 'first' },
+        { type: 'compaction', id: 'cmp_2', encrypted_content: 'second' },
+      ],
+    },
+    {
+      output: [
+        { type: 'compaction', id: 'cmp_1', encrypted_content: 'opaque' },
+        { type: 'message', role: 'user', content: [] },
+      ],
+    },
+    {
+      output: [{ type: 'compaction', id: 'cmp_1', encrypted_content: '' }],
+    },
+  ])('rejects malformed native compact output %#', async (payload) => {
+    const provider = new CodexProvider(
+      credentialStore(ACCESS_TOKEN),
+      vi.fn<typeof fetch>(
+        async () =>
+          new Response(JSON.stringify(payload), {
+            status: 200,
+            headers: { 'Content-Type': 'application/json' },
+          }),
+      ),
+    );
+
+    await expect(provider.compact(REQUEST, new AbortController().signal)).rejects.toMatchObject({
+      code: 'INVALID_RESPONSE',
+    });
+  });
+
+  it('treats a compact response body read failure as transient', async () => {
+    const body = new ReadableStream<Uint8Array>({
+      start(controller) {
+        controller.error(new Error('synthetic connection reset'));
+      },
+    });
+    const provider = new CodexProvider(
+      credentialStore(ACCESS_TOKEN),
+      vi.fn<typeof fetch>(
+        async () =>
+          new Response(body, {
+            status: 200,
+            headers: { 'Content-Type': 'application/json' },
+          }),
+      ),
+    );
+
+    await expect(provider.compact(REQUEST, new AbortController().signal)).rejects.toMatchObject({
+      code: 'TRANSIENT',
+      retryable: true,
+    });
+  });
+
   it('streams valid SSE when the fixed endpoint omits Content-Type', async () => {
     const events = [
       {

@@ -34,6 +34,7 @@ export interface AgentContextDependencies {
 export interface AgentContext {
   readonly systemPrompt: string;
   readonly input: readonly ModelInputItem[];
+  readonly activeInput: readonly ModelInputItem[];
 }
 
 /** Selects the persisted ordinary user message that created one task. */
@@ -231,7 +232,7 @@ function continuationItems(
   }
   if (
     checkpoint.completedToolResults.length > 0 &&
-    !items.some((item) => item.type === 'function_call')
+    !items.some((item) => item.type === 'function_call' || item.type === 'compaction')
   ) {
     for (const result of checkpoint.completedToolResults) {
       items.push(
@@ -266,6 +267,7 @@ function validateContinuation(
   const seenMessages = new Set<string>();
   const seenCalls = new Set<string>();
   const seenReasoningItems = new Set<string>();
+  let seenCompaction = false;
   let unresolvedCall: Extract<ContinuationItem, { type: 'function_call' }> | null = null;
 
   for (const item of items) {
@@ -334,6 +336,19 @@ function validateContinuation(
       seenCalls.add(item.callId);
       continue;
     }
+    if (item.type === 'compaction') {
+      if (
+        unresolvedCall !== null ||
+        seenCompaction ||
+        item.itemId.length === 0 ||
+        item.itemId.length > 256 ||
+        item.encryptedContent.length === 0
+      ) {
+        throw new Error('WorkSession compaction is invalid.');
+      }
+      seenCompaction = true;
+      continue;
+    }
     if (unresolvedCall === null || unresolvedCall.callId !== item.callId) {
       throw new Error('WorkSession tool output is invalid.');
     }
@@ -392,21 +407,22 @@ export async function buildAgentContext(
   );
   await resolveMessageImages(history, dependencies.attachments, imageBudget, images);
 
-  const input: ModelInputItem[] = [];
+  const historyInput: ModelInputItem[] = [];
   for (const message of history) {
     const item = modelMessage(message, images.get(message.id));
-    if (item) input.push(item);
+    if (item) historyInput.push(item);
   }
+  const activeInput: ModelInputItem[] = [];
   for (const item of orderedItems) {
     if (item.type === 'message_ref') {
       const message = messagesById.get(item.messageId);
       if (message === undefined) throw new Error('WorkSession message reference is invalid.');
       const modelItem = modelMessage(message, images.get(message.id));
-      if (modelItem) input.push(modelItem);
+      if (modelItem) activeInput.push(modelItem);
     } else if (item.type === 'function_call') {
       for (const outputItem of item.modelOutputItems ?? []) {
         if (outputItem.type === 'reasoning') {
-          input.push({
+          activeInput.push({
             type: 'reasoning',
             itemId: outputItem.itemId,
             encryptedContent: outputItem.encryptedContent,
@@ -422,17 +438,17 @@ export async function buildAgentContext(
         if (modelItem === undefined) {
           throw new Error('WorkSession model output is invalid.');
         }
-        input.push(modelItem);
+        activeInput.push(modelItem);
       }
-      input.push({
+      activeInput.push({
         type: 'function_call',
         callId: item.callId,
         name: item.name,
         argumentsJson: item.argumentsJson,
       });
-    } else {
+    } else if (item.type === 'function_call_output') {
       const imageUrls = functionOutputImages.get(item.resultRef) ?? [];
-      input.push({
+      activeInput.push({
         type: 'function_call_output',
         callId: item.callId,
         output:
@@ -450,11 +466,18 @@ export async function buildAgentContext(
                 ),
               ],
       });
+    } else {
+      activeInput.push({
+        type: 'compaction',
+        itemId: item.itemId,
+        encryptedContent: item.encryptedContent,
+      });
     }
   }
 
   return {
     systemPrompt: context.customSystemPrompt,
-    input,
+    input: [...historyInput, ...activeInput],
+    activeInput,
   };
 }

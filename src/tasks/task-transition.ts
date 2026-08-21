@@ -7,6 +7,8 @@ const eventTargetStatus: Readonly<Record<TaskEventType, TaskStatus>> = {
   'tool.execution-started': 'planning',
   'tool.result-recorded': 'planning',
   'task.supplements-applied': 'planning',
+  'task.context-compacted': 'planning',
+  'task.context-cleared': 'cancelled',
   'task.auth-required': 'waiting_for_auth',
   'task.paused': 'paused',
   'task.resumed': 'queued',
@@ -31,6 +33,7 @@ const allowedEvents: Readonly<Record<TaskStatus, ReadonlySet<TaskEventType>>> = 
     'tool.execution-started',
     'tool.result-recorded',
     'task.supplements-applied',
+    'task.context-compacted',
     'task.completed',
     ...waitingEvents,
   ]),
@@ -38,7 +41,7 @@ const allowedEvents: Readonly<Record<TaskStatus, ReadonlySet<TaskEventType>>> = 
   paused: new Set(['task.resumed', 'task.failed', 'task.cancelled']),
   completed: new Set(),
   failed: new Set(['task.retried']),
-  cancelled: new Set(),
+  cancelled: new Set(['task.context-cleared']),
 };
 
 /**

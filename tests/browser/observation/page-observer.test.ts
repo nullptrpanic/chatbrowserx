@@ -157,7 +157,12 @@ describe('PageObserver', () => {
         return {
           currentIndex: 0,
           entries: [
-            { id: 1, url: 'https://top.test/', title: 'Top page', transitionType: 'typed' },
+            {
+              id: 1,
+              url: 'https://top.test/',
+              title: 'Top page',
+              transitionType: 'typed',
+            },
           ],
         };
       }
@@ -214,7 +219,7 @@ describe('PageObserver', () => {
     });
   });
 
-  it('keeps interactive_deep as a compatibility alias for native interactive inspection', async () => {
+  it('allows visual fallback after deep native inspection exhausts semantic discovery', async () => {
     const snapshot: BrowserSessionSnapshot = {
       tabId: 7,
       generation: 1,
@@ -242,7 +247,12 @@ describe('PageObserver', () => {
         return {
           currentIndex: 0,
           entries: [
-            { id: 1, url: 'https://top.test/', title: 'Top page', transitionType: 'typed' },
+            {
+              id: 1,
+              url: 'https://top.test/',
+              title: 'Top page',
+              transitionType: 'typed',
+            },
           ],
         };
       }
@@ -260,6 +270,7 @@ describe('PageObserver', () => {
     expect(sessionPort.ensure).toHaveBeenCalledOnce();
     expect(result).toMatchObject({
       debuggerSession: 'ephemeral',
+      visualFallbackAllowed: true,
       data: {
         mode: 'interactive',
         elements: [expect.objectContaining({ ref: 'ref_1', n: 'Submit' })],
@@ -311,14 +322,24 @@ describe('PageObserver', () => {
       if (method === 'Page.getFrameTree') return mainFrameTree();
       if (method === 'Page.getLayoutMetrics') {
         return {
-          visualViewport: { pageX: 0, pageY: 0, clientWidth: 1_000, clientHeight: 800 },
+          visualViewport: {
+            pageX: 0,
+            pageY: 0,
+            clientWidth: 1_000,
+            clientHeight: 800,
+          },
         };
       }
       if (method === 'Page.getNavigationHistory') {
         return {
           currentIndex: 0,
           entries: [
-            { id: 1, url: 'https://top.test/', title: 'Top page', transitionType: 'typed' },
+            {
+              id: 1,
+              url: 'https://top.test/',
+              title: 'Top page',
+              transitionType: 'typed',
+            },
           ],
         };
       }
@@ -388,7 +409,12 @@ describe('PageObserver', () => {
       if (method === 'Page.getFrameTree') return mainFrameTree();
       if (method === 'Page.getLayoutMetrics') {
         return {
-          visualViewport: { pageX: 0, pageY: 0, clientWidth: 1_000, clientHeight: 800 },
+          visualViewport: {
+            pageX: 0,
+            pageY: 0,
+            clientWidth: 1_000,
+            clientHeight: 800,
+          },
         };
       }
       if (method === 'Page.getNavigationHistory') {
@@ -407,11 +433,147 @@ describe('PageObserver', () => {
 
     expect(ordinary.data.elements).toEqual(
       expect.arrayContaining([
-        expect.objectContaining({ n: 'Continue visible form', ref: 'ref_visible' }),
+        expect.objectContaining({
+          n: 'Continue visible form',
+          ref: 'ref_visible',
+        }),
       ]),
     );
     expect(JSON.stringify(ordinary.data)).not.toContain('bounds');
     expect(JSON.stringify(ordinary.data)).not.toContain('inViewport');
+  });
+
+  it('retains a scrollable traversal target when many in-viewport controls exhaust the target budget', async () => {
+    const snapshot: BrowserSessionSnapshot = {
+      tabId: 7,
+      generation: 1,
+      root: { tabId: 7 },
+      children: new Map(),
+    };
+    const buttonCount = 241;
+    const buttonBackendIds = Array.from({ length: buttonCount }, (_, index) => 1_000 + index);
+    const scrollBackendId = 9_999;
+    const strings = [
+      'https://top.test/',
+      'Crowded controls',
+      '',
+      'frame-main',
+      '#document',
+      'BUTTON',
+      'DIV',
+      'pointer',
+      'block',
+      'visible',
+      'auto',
+      'scroll',
+    ];
+    const transport = debuggerTransport((_session, method) => {
+      if (method === 'Accessibility.getFullAXTree') {
+        return {
+          nodes: [
+            {
+              nodeId: 'root',
+              backendDOMNodeId: 1,
+              ignored: false,
+              role: { value: 'RootWebArea' },
+              name: { value: 'Crowded controls' },
+              childIds: buttonBackendIds.map((id) => `button_${String(id)}`),
+            },
+            ...buttonBackendIds.map((backendDOMNodeId, index) => ({
+              nodeId: `button_${String(backendDOMNodeId)}`,
+              parentId: 'root',
+              backendDOMNodeId,
+              ignored: false,
+              role: { value: 'button' },
+              name: { value: `Action ${String(index)}` },
+            })),
+          ],
+        };
+      }
+      if (method === 'DOMSnapshot.captureSnapshot') {
+        const elementCount = buttonCount + 1;
+        return {
+          strings,
+          documents: [
+            {
+              documentURL: 0,
+              title: 1,
+              baseURL: 0,
+              contentLanguage: 2,
+              encodingName: 2,
+              publicId: 2,
+              systemId: 2,
+              frameId: 3,
+              nodes: {
+                parentIndex: [-1, ...Array.from({ length: elementCount }, () => 0)],
+                nodeType: [9, ...Array.from({ length: elementCount }, () => 1)],
+                nodeName: [4, ...Array.from({ length: buttonCount }, () => 5), 6],
+                nodeValue: Array.from({ length: elementCount + 1 }, () => 2),
+                backendNodeId: [1, ...buttonBackendIds, scrollBackendId],
+                attributes: Array.from({ length: elementCount + 1 }, () => []),
+                isClickable: {
+                  index: Array.from({ length: buttonCount }, (_, index) => index + 1),
+                },
+                inputChecked: { index: [] },
+              },
+              layout: {
+                nodeIndex: Array.from({ length: elementCount }, (_, index) => index + 1),
+                styles: [
+                  ...Array.from({ length: buttonCount }, () => [7, 8, 9, 7, 10, 10]),
+                  [7, 8, 9, 7, 10, 11],
+                ],
+                bounds: Array.from({ length: elementCount }, () => [10, 20, 100, 30]),
+                clientRects: [
+                  ...Array.from({ length: buttonCount }, () => [10, 20, 100, 30]),
+                  [10, 20, 100, 300],
+                ],
+                scrollRects: [
+                  ...Array.from({ length: buttonCount }, () => [10, 20, 100, 30]),
+                  [10, 20, 100, 1_000],
+                ],
+                text: Array.from({ length: elementCount }, () => 2),
+                stackingContexts: { index: [] },
+              },
+              textBoxes: { layoutIndex: [], bounds: [], start: [], length: [] },
+            },
+          ],
+        };
+      }
+      if (method === 'Page.getFrameTree') return mainFrameTree();
+      if (method === 'Page.getLayoutMetrics') {
+        return {
+          visualViewport: {
+            pageX: 0,
+            pageY: 0,
+            clientWidth: 1_000,
+            clientHeight: 800,
+          },
+        };
+      }
+      if (method === 'Page.getNavigationHistory') return { currentIndex: 0, entries: [] };
+      return {};
+    });
+    let refSequence = 0;
+    const observer = new PageObserver({
+      sessions: sessions(snapshot),
+      transport,
+      content: CONTENT,
+      refs: new ElementRefStore({
+        create: () => `ref_${String(++refSequence)}`,
+      }),
+    });
+
+    const result = await observer.inspect(7, 'interactive', new AbortController().signal);
+
+    expect(result.data.elements).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          r: 'region',
+          a: ['scroll'],
+          ref: expect.any(String),
+        }),
+      ]),
+    );
   });
 
   it('omits the default generic role and does not expose long semantic field names', async () => {
@@ -441,7 +603,12 @@ describe('PageObserver', () => {
         return {
           currentIndex: 0,
           entries: [
-            { id: 1, url: 'https://top.test/', title: 'Top page', transitionType: 'typed' },
+            {
+              id: 1,
+              url: 'https://top.test/',
+              title: 'Top page',
+              transitionType: 'typed',
+            },
           ],
         };
       }
@@ -498,7 +665,12 @@ describe('PageObserver', () => {
         return {
           currentIndex: 0,
           entries: [
-            { id: 1, url: 'https://top.test/', title: 'Top page', transitionType: 'typed' },
+            {
+              id: 1,
+              url: 'https://top.test/',
+              title: 'Top page',
+              transitionType: 'typed',
+            },
           ],
         };
       }
@@ -568,21 +740,33 @@ describe('PageObserver', () => {
       if (method === 'Page.getFrameTree') return mainFrameTree(loaderId);
       if (method === 'Page.getLayoutMetrics') {
         return {
-          visualViewport: { pageX: 0, pageY: 0, clientWidth: 1_000, clientHeight: 800 },
+          visualViewport: {
+            pageX: 0,
+            pageY: 0,
+            clientWidth: 1_000,
+            clientHeight: 800,
+          },
         };
       }
       if (method === 'Page.getNavigationHistory') {
         return {
           currentIndex: 0,
           entries: [
-            { id: 1, url: 'https://top.test/', title: 'Top page', transitionType: 'typed' },
+            {
+              id: 1,
+              url: 'https://top.test/',
+              title: 'Top page',
+              transitionType: 'typed',
+            },
           ],
         };
       }
       return {};
     });
     let refId = 0;
-    const refs = new ElementRefStore({ create: () => `ref_${String(++refId)}` });
+    const refs = new ElementRefStore({
+      create: () => `ref_${String(++refId)}`,
+    });
     const observer = new PageObserver({
       sessions: sessions(snapshot),
       transport,
@@ -739,7 +923,7 @@ describe('PageObserver', () => {
     expect(result.data).not.toHaveProperty('changes');
   });
 
-  it('falls back to a full tree when passive semantic identities are ambiguous', async () => {
+  it('returns an unchanged delta for duplicate passive labels with stable native identities', async () => {
     const snapshot: BrowserSessionSnapshot = {
       tabId: 7,
       generation: 1,
@@ -808,12 +992,17 @@ describe('PageObserver', () => {
       since: first.data.snapshot as string,
     });
 
-    expect(second.data).toMatchObject({ elements: expect.any(Array) });
-    expect(second.data).not.toHaveProperty('base');
-    expect(second.data).not.toHaveProperty('unchanged');
+    expect(second.data).toEqual({
+      mode: 'interactive',
+      snapshot: expect.any(String),
+      base: first.data.snapshot,
+      unchanged: true,
+    });
+    expect(JSON.stringify(second.data)).not.toContain('text_a');
+    expect(JSON.stringify(second.data)).not.toContain('text_b');
   });
 
-  it('falls back to a full tree when more than 35 percent of identities change', async () => {
+  it('returns a keyed delta above the old change ratio when it is smaller than a full tree', async () => {
     const snapshot: BrowserSessionSnapshot = {
       tabId: 7,
       generation: 1,
@@ -824,12 +1013,12 @@ describe('PageObserver', () => {
     const transport = debuggerTransport((_session, method) => {
       if (method === 'Accessibility.getFullAXTree') {
         return {
-          nodes: Array.from({ length: 4 }, (_, index) => ({
+          nodes: Array.from({ length: 20 }, (_, index) => ({
             nodeId: `text_${String(index)}`,
             ignored: false,
             role: { value: 'StaticText' },
             name: {
-              value: changed && index < 2 ? `Changed ${String(index)}` : `Stable ${String(index)}`,
+              value: changed && index < 8 ? `Changed ${String(index)}` : `Stable ${String(index)}`,
             },
           })),
         };
@@ -853,9 +1042,19 @@ describe('PageObserver', () => {
       since: first.data.snapshot as string,
     });
 
-    expect(second.data).toMatchObject({ elements: expect.any(Array) });
-    expect(second.data).not.toHaveProperty('base');
-    expect(second.data).not.toHaveProperty('upsert');
+    expect(second.data).toMatchObject({
+      base: first.data.snapshot,
+      upsert: expect.arrayContaining([
+        expect.objectContaining({
+          e: expect.objectContaining({ n: 'Changed 0' }),
+        }),
+        expect.objectContaining({
+          e: expect.objectContaining({ n: 'Changed 7' }),
+        }),
+      ]),
+    });
+    expect(second.data).not.toHaveProperty('elements');
+    expect(JSON.stringify(second.data)).not.toContain('"identity"');
   });
 
   it('retains the truncation marker when interactive elements were omitted', async () => {
@@ -882,7 +1081,12 @@ describe('PageObserver', () => {
         return {
           currentIndex: 0,
           entries: [
-            { id: 1, url: 'https://top.test/', title: 'Top page', transitionType: 'typed' },
+            {
+              id: 1,
+              url: 'https://top.test/',
+              title: 'Top page',
+              transitionType: 'typed',
+            },
           ],
         };
       }
@@ -1020,7 +1224,12 @@ describe('PageObserver', () => {
     const transport = debuggerTransport((_session, method) => {
       if (method === 'Page.getLayoutMetrics') {
         return {
-          visualViewport: { pageX: 0, pageY: 0, clientWidth: 800, clientHeight: 600 },
+          visualViewport: {
+            pageX: 0,
+            pageY: 0,
+            clientWidth: 800,
+            clientHeight: 600,
+          },
         };
       }
       if (method === 'Page.captureScreenshot') return { data: pngBase64 };
@@ -1098,14 +1307,18 @@ describe('PageObserver', () => {
       return {};
     });
     const setOverlaysHidden = vi.fn(async () => {
-      throw Object.assign(new Error('page bridge unavailable'), { code: 'PAGE_UNAVAILABLE' });
+      throw Object.assign(new Error('page bridge unavailable'), {
+        code: 'PAGE_UNAVAILABLE',
+      });
     });
     const close = vi.fn();
     vi.stubGlobal(
       'createImageBitmap',
       vi.fn(async () => ({ width: 1, height: 1, close })),
     );
-    const persistScreenshot = vi.fn(async () => ({ id: 'attachment_screenshot' }));
+    const persistScreenshot = vi.fn(async () => ({
+      id: 'attachment_screenshot',
+    }));
     const observer = new PageObserver({
       sessions: sessions(snapshot),
       transport,
@@ -1172,7 +1385,14 @@ describe('PageObserver', () => {
       if (method === 'Page.getNavigationHistory')
         return {
           currentIndex: 0,
-          entries: [{ id: 1, url: 'https://top.test/', title: 'Top', transitionType: 'typed' }],
+          entries: [
+            {
+              id: 1,
+              url: 'https://top.test/',
+              title: 'Top',
+              transitionType: 'typed',
+            },
+          ],
         };
       return {};
     });

@@ -1,7 +1,14 @@
 import { describe, expect, it } from 'vitest';
 import { CONTEXT_COMMIT_TOOL_DEFINITION } from '../../../src/agent/tools/context-commit-tool-schema';
-import { CODEX_MODEL, CODEX_RESPONSES_URL } from '../../../src/providers/codex/codex-constants';
-import { buildCodexRequest } from '../../../src/providers/codex/codex-request';
+import {
+  CODEX_COMPACT_URL,
+  CODEX_MODEL,
+  CODEX_RESPONSES_URL,
+} from '../../../src/providers/codex/codex-constants';
+import {
+  buildCodexCompactRequest,
+  buildCodexRequest,
+} from '../../../src/providers/codex/codex-request';
 import type { ModelRequest } from '../../../src/providers/provider-types';
 
 const GENERIC_TOOL_NAMES = ['lookup', 'lookup_record', 'lookup-record'] as const;
@@ -57,6 +64,53 @@ const MODEL_REQUEST: ModelRequest = {
 };
 
 describe('buildCodexRequest', () => {
+  it('replays one opaque native compaction item without exposing or modifying it', () => {
+    const request = buildCodexRequest({
+      accessToken: 'synthetic-token-value',
+      accountId: 'acct_123',
+      request: {
+        ...MODEL_REQUEST,
+        tools: [],
+        input: [
+          {
+            type: 'compaction',
+            itemId: 'cmp_1',
+            encryptedContent: 'opaque-compacted-context',
+          },
+        ],
+      },
+    });
+
+    expect(request.body.input).toEqual([
+      {
+        type: 'compaction',
+        id: 'cmp_1',
+        encrypted_content: 'opaque-compacted-context',
+      },
+    ]);
+  });
+
+  it('builds the native compact contract without response-stream state fields', () => {
+    const request = buildCodexCompactRequest({
+      accessToken: 'synthetic-token-value',
+      accountId: 'acct_123',
+      request: MODEL_REQUEST,
+    });
+
+    expect(request.url).toBe(CODEX_COMPACT_URL);
+    expect(request.headers.Accept).toBe('application/json');
+    expect(request.body).toMatchObject({
+      model: CODEX_MODEL,
+      instructions: MODEL_REQUEST.systemPrompt,
+      parallel_tool_calls: false,
+      reasoning: { effort: MODEL_REQUEST.reasoningEffort, summary: 'auto' },
+    });
+    expect(request.body).not.toHaveProperty('store');
+    expect(request.body).not.toHaveProperty('stream');
+    expect(request.body).not.toHaveProperty('include');
+    expect(request.body).not.toHaveProperty('tool_choice');
+  });
+
   it('replays encrypted reasoning output items for stateless continuation', () => {
     const request = buildCodexRequest({
       accessToken: 'synthetic-token-value',

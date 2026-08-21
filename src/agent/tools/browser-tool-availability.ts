@@ -1,4 +1,4 @@
-import type { ModelToolDefinition } from '../../providers/provider-types';
+import type { ModelToolChoice, ModelToolDefinition } from '../../providers/provider-types';
 import type { Checkpoint } from '../../tasks/checkpoint-types';
 import type { ContinuationItem } from '../../tasks/continuation-types';
 import {
@@ -17,6 +17,7 @@ const CORE_TOOL_NAMES = new Set<BrowserToolName>([
   'browser_reload',
   'browser_inspect',
   'browser_capture_screenshot',
+  'browser_paste_image',
   'browser_click',
   'browser_set_checked',
   'browser_type',
@@ -57,6 +58,56 @@ interface CapabilityState {
   readonly usedTools: Set<BrowserToolName>;
 }
 
+export interface BrowserScrollContinuation {
+  readonly next: 'inspect' | 'scroll';
+  readonly tabId: number;
+  readonly target: string;
+  readonly remainingDeltaX: number;
+  readonly remainingDeltaY: number;
+  readonly boundaryProbeDeltaX?: number;
+  readonly boundaryProbeDeltaY?: number;
+}
+
+export interface BrowserToolContract {
+  readonly tools: readonly ModelToolDefinition[];
+  readonly toolChoice?: ModelToolChoice;
+  readonly scrollContinuation?: BrowserScrollContinuation;
+}
+
+const MAX_EXPOSED_ASSET_IDS = 8;
+
+function availableAssetIds(
+  completedToolResults: Pick<Checkpoint, 'completedToolResults'>['completedToolResults'],
+): readonly string[] {
+  const ids = [
+    ...new Set(
+      completedToolResults.flatMap((result) =>
+        result.toolName.startsWith('browser_') ? [...(result.attachmentIds ?? [])] : [],
+      ),
+    ),
+  ];
+  return ids.slice(-MAX_EXPOSED_ASSET_IDS);
+}
+
+function bindAvailableAssets(
+  definition: ModelToolDefinition,
+  assetIds: readonly string[],
+): ModelToolDefinition {
+  if (definition.name !== 'browser_paste_image' || assetIds.length === 0) return definition;
+  const properties = definition.parameters.properties as Readonly<Record<string, unknown>>;
+  const assetId = properties.assetId as Readonly<Record<string, unknown>>;
+  return {
+    ...definition,
+    parameters: {
+      ...definition.parameters,
+      properties: {
+        ...properties,
+        assetId: { ...assetId, enum: [...assetIds] },
+      },
+    },
+  };
+}
+
 function successfulRecord(output: string): Readonly<Record<string, unknown>> | null {
   try {
     const value: unknown = JSON.parse(output);
@@ -66,6 +117,222 @@ function successfulRecord(output: string): Readonly<Record<string, unknown>> | n
   } catch {
     return null;
   }
+}
+
+function jsonRecord(value: string): Readonly<Record<string, unknown>> | null {
+  try {
+    const parsed: unknown = JSON.parse(value);
+    return typeof parsed === 'object' && parsed !== null && !Array.isArray(parsed)
+      ? (parsed as Readonly<Record<string, unknown>>)
+      : null;
+  } catch {
+    return null;
+  }
+}
+
+function childRecord(
+  value: Readonly<Record<string, unknown>>,
+  key: string,
+): Readonly<Record<string, unknown>> | null {
+  const child = value[key];
+  return typeof child === 'object' && child !== null && !Array.isArray(child)
+    ? (child as Readonly<Record<string, unknown>>)
+    : null;
+}
+
+function integerContinuationDelta(value: unknown): number | null {
+  if (typeof value !== 'number' || !Number.isFinite(value)) return null;
+  return Math.sign(value) * Math.ceil(Math.abs(value));
+}
+
+function embeddedInteractiveObservations(
+  data: Readonly<Record<string, unknown>> | null,
+): readonly Readonly<Record<string, unknown>>[] {
+  if (data === null) return [];
+  const direct = [childRecord(data, 'verification'), childRecord(data, 'pageVerification')].filter(
+    (value): value is Readonly<Record<string, unknown>> => value !== null,
+  );
+  const segmented = Array.isArray(data.observations)
+    ? data.observations.filter(
+        (value): value is Readonly<Record<string, unknown>> =>
+          typeof value === 'object' && value !== null && !Array.isArray(value),
+      )
+    : [];
+  return [...direct, ...segmented].filter(
+    (value) => value.mode === 'interactive' && typeof value.snapshot === 'string',
+  );
+}
+
+const SCROLL_INVALIDATING_TOOLS = new Set([
+  'browser_open_tab',
+  'browser_switch_tab',
+  'browser_close_tab',
+  'browser_navigate',
+  'browser_reload',
+]);
+
+/** Reconstructs one unfinished virtualized scroll without adding mutable checkpoint state. */
+export function browserScrollContinuationForCheckpoint(
+  checkpoint: Pick<Checkpoint, 'continuationItems'>,
+): BrowserScrollContinuation | null {
+  const calls = new Map<string, Extract<ContinuationItem, { readonly type: 'function_call' }>>();
+  const state: {
+    continuation: BrowserScrollContinuation | null;
+    continuationFailures: number;
+  } = { continuation: null, continuationFailures: 0 };
+  for (const item of checkpoint.continuationItems) {
+    if (item.type === 'compaction') {
+      calls.clear();
+      state.continuation = null;
+      state.continuationFailures = 0;
+      continue;
+    }
+    if (item.type === 'function_call') {
+      calls.set(item.callId, item);
+      continue;
+    }
+    if (item.type !== 'function_call_output') continue;
+    const call = calls.get(item.callId);
+    calls.delete(item.callId);
+    if (!call) continue;
+    const output = successfulRecord(item.output);
+    if (SCROLL_INVALIDATING_TOOLS.has(call.name) && output !== null) {
+      state.continuation = null;
+      state.continuationFailures = 0;
+      continue;
+    }
+    if (call.name === 'browser_inspect' && state.continuation !== null) {
+      if (output === null) {
+        state.continuation = { ...state.continuation, next: 'inspect' };
+      } else if (
+        state.continuation.remainingDeltaX !== 0 ||
+        state.continuation.remainingDeltaY !== 0 ||
+        state.continuation.boundaryProbeDeltaX !== undefined ||
+        state.continuation.boundaryProbeDeltaY !== undefined
+      ) {
+        if (state.continuationFailures >= 2) {
+          state.continuation = null;
+          state.continuationFailures = 0;
+        } else if (state.continuationFailures > 0) {
+          const refs = scrollableRefs(childRecord(output, 'data'));
+          const target = refs.includes(state.continuation.target)
+            ? state.continuation.target
+            : refs.length === 1
+              ? refs[0]
+              : undefined;
+          if (target === undefined) {
+            state.continuation = null;
+            state.continuationFailures = 0;
+          } else {
+            state.continuation = {
+              ...state.continuation,
+              target,
+              next: 'scroll',
+            };
+          }
+        } else {
+          state.continuation = { ...state.continuation, next: 'scroll' };
+        }
+      } else {
+        state.continuation = null;
+        state.continuationFailures = 0;
+      }
+      continue;
+    }
+    if (call.name !== 'browser_scroll') continue;
+    if (output === null) {
+      if (state.continuation !== null) {
+        state.continuationFailures += 1;
+        state.continuation = { ...state.continuation, next: 'inspect' };
+      }
+      continue;
+    }
+    state.continuationFailures = 0;
+    const data = childRecord(output, 'data');
+    const arguments_ = jsonRecord(call.argumentsJson);
+    const remainingDeltaX = integerContinuationDelta(data?.remainingDeltaX);
+    const remainingDeltaY = integerContinuationDelta(data?.remainingDeltaY);
+    const requestedDeltaX = arguments_?.deltaX;
+    const requestedDeltaY = arguments_?.deltaY;
+    const needsBoundaryProbe = data?.needsBoundaryProbe === true;
+    const hasInteractiveEvidence =
+      embeddedInteractiveObservations(data).length > 0 &&
+      data?.verificationUnavailable !== true &&
+      data?.continuationFailure === undefined;
+    const incomplete =
+      data?.action === 'scroll' &&
+      data.requestedDeltaApplied === false &&
+      data.boundaryVerified !== true &&
+      remainingDeltaX !== null &&
+      remainingDeltaY !== null &&
+      (remainingDeltaX !== 0 || remainingDeltaY !== 0) &&
+      typeof arguments_?.target === 'string';
+    if (data?.action !== 'scroll' || typeof arguments_?.target !== 'string') {
+      state.continuation = null;
+      continue;
+    }
+    state.continuation = {
+      next: hasInteractiveEvidence ? 'scroll' : 'inspect',
+      tabId:
+        typeof arguments_?.tabId === 'number' && Number.isInteger(arguments_.tabId)
+          ? arguments_.tabId
+          : 0,
+      target: arguments_.target as string,
+      remainingDeltaX: incomplete ? (remainingDeltaX ?? 0) : 0,
+      remainingDeltaY: incomplete ? (remainingDeltaY ?? 0) : 0,
+      ...(needsBoundaryProbe &&
+      typeof requestedDeltaX === 'number' &&
+      Number.isFinite(requestedDeltaX) &&
+      typeof requestedDeltaY === 'number' &&
+      Number.isFinite(requestedDeltaY) &&
+      (requestedDeltaX !== 0 || requestedDeltaY !== 0)
+        ? {
+            boundaryProbeDeltaX: requestedDeltaX,
+            boundaryProbeDeltaY: requestedDeltaY,
+          }
+        : {}),
+    };
+    if (
+      hasInteractiveEvidence &&
+      state.continuation.remainingDeltaX === 0 &&
+      state.continuation.remainingDeltaY === 0 &&
+      state.continuation.boundaryProbeDeltaX === undefined &&
+      state.continuation.boundaryProbeDeltaY === undefined
+    ) {
+      state.continuation = null;
+    }
+  }
+  return state.continuation;
+}
+
+function scrollableRefFromEntry(value: unknown): string | null {
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) return null;
+  const entry = value as Readonly<Record<string, unknown>>;
+  const actions = Array.isArray(entry.a)
+    ? entry.a
+    : Array.isArray(entry.actions)
+      ? entry.actions
+      : [];
+  return typeof entry.ref === 'string' && actions.includes('scroll') ? entry.ref : null;
+}
+
+function scrollableRefs(data: Readonly<Record<string, unknown>> | null): readonly string[] {
+  if (data === null || data.mode !== 'interactive') return [];
+  const refs = new Set<string>();
+  if (Array.isArray(data.elements)) {
+    for (const entry of data.elements) {
+      const ref = scrollableRefFromEntry(entry);
+      if (ref) refs.add(ref);
+    }
+  }
+  if (Array.isArray(data.upsert)) {
+    for (const item of data.upsert) {
+      if (typeof item !== 'object' || item === null || Array.isArray(item)) continue;
+      const ref = scrollableRefFromEntry((item as Readonly<Record<string, unknown>>).e);
+      if (ref) refs.add(ref);
+    }
+  }
+  return [...refs];
 }
 
 function browserToolName(value: string): BrowserToolName | null {
@@ -136,7 +403,9 @@ function applySuccessfulBrowserResult(
   }
   if (name === 'browser_network_start') state.networkActive = true;
   else if (name === 'browser_network_stop') state.networkActive = false;
-  applySemanticState(data?.verification, state.selectableRefs);
+  for (const observation of embeddedInteractiveObservations(data)) {
+    applySemanticState(observation, state.selectableRefs);
+  }
 }
 
 function successfulCommit(call: ContinuationItem, output: ContinuationItem): boolean {
@@ -149,7 +418,7 @@ function successfulCommit(call: ContinuationItem, output: ContinuationItem): boo
 }
 
 /** Selects only tools justified by durable executor state, while keeping replay compatibility. */
-export function browserToolDefinitionsForCheckpoint(
+function availableBrowserToolDefinitions(
   checkpoint: Pick<Checkpoint, 'continuationItems' | 'completedToolResults'>,
 ): readonly ModelToolDefinition[] {
   const state: CapabilityState = {
@@ -163,6 +432,14 @@ export function browserToolDefinitionsForCheckpoint(
     Extract<ContinuationItem, { readonly type: 'function_call' }>
   >();
   for (const item of checkpoint.continuationItems) {
+    if (item.type === 'compaction') {
+      state.visualSnapshotCurrent = false;
+      state.networkActive = false;
+      state.selectableRefs.clear();
+      state.usedTools.clear();
+      pendingCalls.clear();
+      continue;
+    }
     if (item.type === 'function_call') {
       pendingCalls.set(item.callId, item);
       continue;
@@ -195,14 +472,95 @@ export function browserToolDefinitionsForCheckpoint(
     enabled.add('browser_network_get');
     enabled.add('browser_network_stop');
   }
-  if (
-    checkpoint.completedToolResults.some(
-      (result) => result.toolName.startsWith('browser_') && (result.attachmentIds?.length ?? 0) > 0,
-    )
-  ) {
-    enabled.add('browser_paste_image');
-  }
   if (state.selectableRefs.size >= 2) enabled.add('browser_set_checked_many');
 
-  return BROWSER_TOOL_DEFINITIONS.filter(({ name }) => enabled.has(name as BrowserToolName));
+  const assetIds = availableAssetIds(checkpoint.completedToolResults);
+  return BROWSER_TOOL_DEFINITIONS.filter(({ name }) => enabled.has(name as BrowserToolName)).map(
+    (definition) => bindAvailableAssets(definition, assetIds),
+  );
+}
+
+function constrainedContinuationDefinition(
+  continuation: BrowserScrollContinuation,
+): ModelToolDefinition {
+  const name = continuation.next === 'inspect' ? 'browser_inspect' : 'browser_scroll';
+  const definition = BROWSER_TOOL_DEFINITION_BY_NAME[name];
+  const properties = definition.parameters.properties as Readonly<Record<string, unknown>>;
+  const hasRemainingDistance =
+    continuation.remainingDeltaX !== 0 || continuation.remainingDeltaY !== 0;
+  const requiresBoundaryProbe =
+    continuation.boundaryProbeDeltaX !== undefined ||
+    continuation.boundaryProbeDeltaY !== undefined;
+  const nextDeltaX = hasRemainingDistance
+    ? continuation.remainingDeltaX
+    : (continuation.boundaryProbeDeltaX ?? 0);
+  const nextDeltaY = hasRemainingDistance
+    ? continuation.remainingDeltaY
+    : (continuation.boundaryProbeDeltaY ?? 0);
+  return {
+    ...definition,
+    description:
+      continuation.next === 'inspect'
+        ? hasRemainingDistance
+          ? 'A virtualized scroll still has unconsumed distance. Inspect the newly exposed interactive batch before any further scrolling or final answer.'
+          : requiresBoundaryProbe
+            ? 'The scroll only just reached an apparent boundary. Inspect the exposed batch, then verify the boundary with one same-direction probe before any final answer.'
+            : 'The page was scrolled. Inspect the resulting interactive state before any further action or final answer.'
+        : requiresBoundaryProbe && !hasRemainingDistance
+          ? 'Verify the apparent boundary with one same-direction scroll probe. Use the schema-constrained distance and current scrollable ref; do not finish yet.'
+          : 'Continue the unfinished virtualized scroll after reading the exposed batch. Use the schema-constrained distance and the current scrollable ref; do not finish yet.',
+    parameters: {
+      ...definition.parameters,
+      properties: {
+        ...properties,
+        tabId: {
+          ...(properties.tabId as Readonly<Record<string, unknown>>),
+          enum: [continuation.tabId],
+        },
+        ...(continuation.next === 'inspect'
+          ? {
+              mode: {
+                ...(properties.mode as Readonly<Record<string, unknown>>),
+                enum: ['interactive'],
+              },
+            }
+          : {
+              target: {
+                ...(properties.target as Readonly<Record<string, unknown>>),
+                enum: [continuation.target],
+              },
+              deltaX: {
+                ...(properties.deltaX as Readonly<Record<string, unknown>>),
+                enum: [nextDeltaX],
+              },
+              deltaY: {
+                ...(properties.deltaY as Readonly<Record<string, unknown>>),
+                enum: [nextDeltaY],
+              },
+            }),
+      },
+    },
+  };
+}
+
+/** Preserves unconsumed virtualized distance and forces only genuinely missing evidence. */
+export function browserToolContractForCheckpoint(
+  checkpoint: Pick<Checkpoint, 'continuationItems' | 'completedToolResults'>,
+): BrowserToolContract {
+  const scrollContinuation = browserScrollContinuationForCheckpoint(checkpoint);
+  if (scrollContinuation !== null) {
+    const name = scrollContinuation.next === 'inspect' ? 'browser_inspect' : 'browser_scroll';
+    return {
+      tools: [constrainedContinuationDefinition(scrollContinuation)],
+      toolChoice: { type: 'function', name },
+      scrollContinuation,
+    };
+  }
+  return { tools: availableBrowserToolDefinitions(checkpoint) };
+}
+
+export function browserToolDefinitionsForCheckpoint(
+  checkpoint: Pick<Checkpoint, 'continuationItems' | 'completedToolResults'>,
+): readonly ModelToolDefinition[] {
+  return browserToolContractForCheckpoint(checkpoint).tools;
 }

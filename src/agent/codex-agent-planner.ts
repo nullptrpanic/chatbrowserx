@@ -12,19 +12,13 @@ import type { MessageRecord } from '../tasks/message-types';
 import type { ModelOutputContinuationItem } from '../tasks/continuation-types';
 import { buildAgentContext } from './context/agent-context';
 import {
-  contextCommitCandidateCallIds,
-  hasContextCommitCandidate,
-  shouldForceContextCommitForRequest,
-} from './context/context-commit';
+  createNativeCompactionContinuation,
+  shouldUseNativeContextCompaction,
+} from './context/native-context-compaction';
 import type { AgentEvent, AgentModelTurn, AgentPlanInput, AgentPlanner } from './execution-types';
 import { StreamPersistenceBuffer } from './stream-persistence-buffer';
-import { browserToolDefinitionsForCheckpoint } from './tools/browser-tool-availability';
+import { browserToolContractForCheckpoint } from './tools/browser-tool-availability';
 import { parseBrowserToolCall } from './tools/browser-tool-schema';
-import {
-  CONTEXT_COMMIT_TOOL_NAME,
-  createContextCommitToolDefinition,
-  parseContextCommitToolCall,
-} from './tools/context-commit-tool-schema';
 import { TAVILY_TOOL_DEFINITIONS, parseTavilyToolCall } from './tools/tavily-tool-schema';
 
 export interface TavilyAvailabilityPort {
@@ -125,24 +119,17 @@ export class CodexAgentPlanner implements AgentPlanner {
 
   /** Runs one model turn that yields either one validated Tavily call or final text. */
   async *plan(input: AgentPlanInput, signal: AbortSignal): AsyncGenerator<AgentEvent> {
-    const reusableMessage = await this.#prepareReusableMessage(input);
     const settings = await this.#dependencies.settings.get();
-    let tavilyConfigured: boolean;
-    try {
-      tavilyConfigured = await this.#dependencies.tavilyAvailability.isConfigured();
-    } catch {
-      tavilyConfigured = false;
+    const browserContract = browserToolContractForCheckpoint(input.checkpoint);
+    let tavilyConfigured = false;
+    if (browserContract.toolChoice === undefined) {
+      try {
+        tavilyConfigured = await this.#dependencies.tavilyAvailability.isConfigured();
+      } catch {
+        tavilyConfigured = false;
+      }
     }
-    const contextCommitAvailable = hasContextCommitCandidate(input.checkpoint.continuationItems);
-    const contextCommitCallIds = contextCommitAvailable
-      ? contextCommitCandidateCallIds(input.checkpoint.continuationItems)
-      : [];
-    const browserTools = browserToolDefinitionsForCheckpoint(input.checkpoint);
-    const tools = [
-      ...browserTools,
-      ...(tavilyConfigured ? TAVILY_TOOL_DEFINITIONS : []),
-      ...(contextCommitAvailable ? [createContextCommitToolDefinition(contextCommitCallIds)] : []),
-    ];
+    const tools = [...browserContract.tools, ...(tavilyConfigured ? TAVILY_TOOL_DEFINITIONS : [])];
     const availableToolNames = new Set(tools.map(({ name }) => name));
     if (availableToolNames.size !== tools.length) {
       throw new Error('Model tool definitions contain duplicate names.');
@@ -160,16 +147,31 @@ export class CodexAgentPlanner implements AgentPlanner {
         attachments: this.#dependencies.attachments,
       },
     );
-    const forceContextCommit =
-      contextCommitAvailable &&
-      shouldForceContextCommitForRequest(input.checkpoint, {
-        systemPrompt: context.systemPrompt,
-        input: context.input,
-        tools,
-      });
-    if (forceContextCommit && !availableToolNames.has(CONTEXT_COMMIT_TOOL_NAME)) {
-      throw new Error('The forced context commit tool is unavailable.');
+    if (
+      this.#dependencies.provider.compact !== undefined &&
+      browserContract.scrollContinuation === undefined &&
+      shouldUseNativeContextCompaction(input.checkpoint)
+    ) {
+      const compacted = await this.#dependencies.provider.compact(
+        {
+          model: CODEX_MODEL,
+          reasoningEffort: settings.reasoningEffort,
+          systemPrompt: context.systemPrompt,
+          input: context.activeInput,
+          tools,
+        },
+        signal,
+      );
+      yield {
+        type: 'context.compacted',
+        continuationItems: createNativeCompactionContinuation(
+          input.checkpoint.continuationItems,
+          compacted,
+        ),
+      };
+      return;
     }
+    const reusableMessage = await this.#prepareReusableMessage(input);
     const state: ModelTurnState = {
       responseId: null,
       completed: false,
@@ -194,14 +196,9 @@ export class CodexAgentPlanner implements AgentPlanner {
           systemPrompt: context.systemPrompt,
           input: context.input,
           tools,
-          ...(forceContextCommit
-            ? {
-                toolChoice: {
-                  type: 'function' as const,
-                  name: CONTEXT_COMMIT_TOOL_NAME,
-                },
-              }
-            : {}),
+          ...(browserContract.toolChoice === undefined
+            ? {}
+            : { toolChoice: browserContract.toolChoice }),
         },
         signal,
       )) {
@@ -311,11 +308,6 @@ export class CodexAgentPlanner implements AgentPlanner {
             type: 'assistant_message_ref',
             messageId: assistantMessageId,
           });
-        }
-        if (state.tool.name === CONTEXT_COMMIT_TOOL_NAME) {
-          const call = parseContextCommitToolCall(source);
-          yield { type: 'context.commit', call, modelTurn, modelOutputItems };
-          return;
         }
         if (state.tool.name.startsWith('browser_')) {
           const call = parseBrowserToolCall(source);

@@ -17,6 +17,7 @@ const MODIFIERS = new Map([
 const NAMED_KEYS: Readonly<Record<string, { readonly key: string; readonly code: string }>> = {
   ENTER: { key: 'Enter', code: 'Enter' },
   TAB: { key: 'Tab', code: 'Tab' },
+  ESC: { key: 'Escape', code: 'Escape' },
   ESCAPE: { key: 'Escape', code: 'Escape' },
   SPACE: { key: ' ', code: 'Space' },
   BACKSPACE: { key: 'Backspace', code: 'Backspace' },

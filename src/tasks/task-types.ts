@@ -32,6 +32,8 @@ export type TaskEventType =
   | 'tool.execution-started'
   | 'tool.result-recorded'
   | 'task.supplements-applied'
+  | 'task.context-compacted'
+  | 'task.context-cleared'
   | 'task.auth-required'
   | 'task.paused'
   | 'task.resumed'

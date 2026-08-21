@@ -9,7 +9,7 @@ import type {
 } from './browser-execution-types';
 import { BrowserTabError, type BrowserTabPort, type BrowserTabState } from './tab-service';
 import type { PageInspectionOptions, PageObservationResult } from './observation/page-observer';
-import type { BrowserActionPort } from './actions/browser-action-executor';
+import type { BrowserActionPort, BrowserActionResult } from './actions/browser-action-executor';
 import type { NetworkCapturePort } from './network/network-capture-registry';
 import { readSelectionState } from './selection-state';
 
@@ -43,6 +43,29 @@ const TASK_SCOPED_OPERATIONS = new Set<ParsedBrowserToolCall['operation']>([
   'network_get',
   'network_stop',
 ]);
+const POST_ACTION_OBSERVATION_OPERATIONS = new Set<ParsedBrowserToolCall['operation']>([
+  'click',
+  'type',
+  'keypress',
+  'scroll',
+  'select',
+  'drag',
+  'wait',
+  'click_point',
+  'drag_point',
+]);
+const POST_ACTION_SETTLE_OPERATIONS = new Set<ParsedBrowserToolCall['operation']>([
+  'click',
+  'keypress',
+  'select',
+  'drag',
+  'click_point',
+  'drag_point',
+]);
+const POST_ACTION_SETTLE_TIMEOUT_MS = 1_500;
+const MAX_SCROLL_SEGMENTS_PER_CALL = 8;
+const MAX_SCROLL_OBSERVATION_CHARACTERS = 68 * 1_024;
+const RESERVED_SCROLL_OBSERVATION_CHARACTERS = 34 * 1_024;
 
 interface ReloadRecoveryState {
   readonly operation: ParsedBrowserToolCall['operation'];
@@ -540,6 +563,64 @@ function bindTaskTarget(call: ParsedBrowserToolCall, targetTabId: number): Parse
   };
 }
 
+function bindScrollDelta(
+  call: ParsedBrowserToolCall,
+  targetTabId: number,
+  deltaX: number,
+  deltaY: number,
+): ParsedBrowserToolCall {
+  const arguments_ = {
+    ...(call.arguments as Readonly<Record<string, unknown>>),
+    tabId: targetTabId,
+    deltaX,
+    deltaY,
+  } as ParsedBrowserToolCall['arguments'];
+  return {
+    ...call,
+    arguments: arguments_,
+    argumentsJson: JSON.stringify(arguments_),
+  };
+}
+
+function finiteNumber(value: unknown): number | null {
+  return typeof value === 'number' && Number.isFinite(value) ? value : null;
+}
+
+function continuationDelta(value: unknown): number | null {
+  const measured = finiteNumber(value);
+  return measured === null ? null : Math.sign(measured) * Math.ceil(Math.abs(measured));
+}
+
+function scrollCanContinue(data: Readonly<Record<string, unknown>>): boolean {
+  const remainingDeltaX = finiteNumber(data.remainingDeltaX);
+  const remainingDeltaY = finiteNumber(data.remainingDeltaY);
+  if (
+    data.action !== 'scroll' ||
+    data.requestedDeltaApplied !== false ||
+    data.boundaryVerified === true ||
+    remainingDeltaX === null ||
+    remainingDeltaY === null ||
+    (remainingDeltaX === 0 && remainingDeltaY === 0)
+  ) {
+    return false;
+  }
+  return (
+    (finiteNumber(data.actualDeltaX) ?? 0) !== 0 ||
+    (finiteNumber(data.actualDeltaY) ?? 0) !== 0 ||
+    data.contentChanged === true ||
+    data.extentChanged === true ||
+    data.loadedMore === true ||
+    data.needsBoundaryProbe === true
+  );
+}
+
+interface ScrollSegmentAggregate {
+  readonly action: BrowserActionResult;
+  readonly data: Readonly<Record<string, unknown>>;
+  readonly observations: readonly Readonly<Record<string, unknown>>[];
+  readonly verificationUnavailable: boolean;
+}
+
 function requiredTaskTabId(resolution: TaskTargetResolution): number {
   if (resolution.tabId === null) throw new Error('Task-scoped browser target is unavailable.');
   return resolution.tabId;
@@ -892,7 +973,7 @@ export class BrowserToolExecutor implements BrowserExecutionPort {
           );
           this.#screenshotScales.delete(targetTabId);
           await this.#retainRunner(targetTabId, context?.sessionOwnerId);
-          const action = await this.#dependencies.actions.execute(boundCall, signal);
+          let action = await this.#dependencies.actions.execute(boundCall, signal);
           if (action.failure !== undefined) {
             const normalized = failureFor(action.failure);
             if (normalized.code === 'ACTION_STATE_MISMATCH') {
@@ -910,13 +991,32 @@ export class BrowserToolExecutor implements BrowserExecutionPort {
           this.#clearFailedSelection(call, targetTabId);
           this.#stateMismatchFallbackByTab.delete(targetTabId);
           let verification: Readonly<Record<string, unknown>> | undefined;
+          let observations: readonly Readonly<Record<string, unknown>>[] = [];
+          let actionData = action.data;
           let verificationUnavailable = false;
           const baseSnapshot = this.#interactiveSnapshotByTab.get(targetTabId);
           if (
-            call.operation === 'click_point' &&
+            POST_ACTION_OBSERVATION_OPERATIONS.has(call.operation) &&
             baseSnapshot !== undefined &&
             this.#dependencies.observer
           ) {
+            if (
+              POST_ACTION_SETTLE_OPERATIONS.has(call.operation) &&
+              this.#dependencies.actions.settle
+            ) {
+              try {
+                await this.#dependencies.actions.settle(
+                  targetTabId,
+                  signal,
+                  POST_ACTION_SETTLE_TIMEOUT_MS,
+                );
+              } catch (error) {
+                if (signal.aborted || (error instanceof Error && error.name === 'AbortError')) {
+                  throw error;
+                }
+                // The action already completed; the following observation is still useful.
+              }
+            }
             verification =
               (await this.#observeAfterAction(
                 targetTabId,
@@ -926,13 +1026,33 @@ export class BrowserToolExecutor implements BrowserExecutionPort {
               )) ?? undefined;
             verificationUnavailable = verification === undefined;
           }
+          if (call.operation === 'scroll' && verification !== undefined) {
+            const segmented = await this.#continueScrollSegments(
+              call,
+              targetTabId,
+              action,
+              verification,
+              signal,
+              context?.sessionOwnerId,
+            );
+            action = segmented.action;
+            actionData = segmented.data;
+            observations = segmented.observations;
+            verificationUnavailable ||= segmented.verificationUnavailable;
+          }
           output = {
             ok: true,
             tabId: action.tabId,
             url: action.url,
             data: {
-              ...action.data,
-              ...(verification === undefined ? {} : { verification }),
+              ...actionData,
+              ...(observations.length > 1
+                ? { observations }
+                : verification === undefined
+                  ? {}
+                  : Object.hasOwn(actionData, 'verification')
+                    ? { pageVerification: verification }
+                    : { verification }),
               ...(verificationUnavailable ? { verificationUnavailable: true } : {}),
             },
             observation: action.observation,
@@ -1171,6 +1291,106 @@ export class BrowserToolExecutor implements BrowserExecutionPort {
     }
   }
 
+  async #continueScrollSegments(
+    call: ParsedBrowserToolCall,
+    tabId_: number,
+    initialAction: BrowserActionResult,
+    initialVerification: Readonly<Record<string, unknown>>,
+    signal: AbortSignal,
+    runnerId: string | undefined,
+  ): Promise<ScrollSegmentAggregate> {
+    const actions = this.#dependencies.actions;
+    if (!actions) throw new Error('Browser actions are unavailable.');
+    const requested = call.arguments as { readonly deltaX: number; readonly deltaY: number };
+    const observations: Readonly<Record<string, unknown>>[] = [initialVerification];
+    let action = initialAction;
+    let segmentData = initialAction.data;
+    let actualDeltaX = finiteNumber(segmentData.actualDeltaX) ?? 0;
+    let actualDeltaY = finiteNumber(segmentData.actualDeltaY) ?? 0;
+    let segments = Math.max(1, Math.trunc(finiteNumber(segmentData.segments) ?? 1));
+    let moved = segmentData.moved === true;
+    let contentChanged = segmentData.contentChanged === true;
+    let extentChanged = segmentData.extentChanged === true;
+    let loadedMore = segmentData.loadedMore === true;
+    let continuationLimited: string | undefined;
+    let continuationFailure: BrowserToolFailure | undefined;
+
+    while (scrollCanContinue(segmentData)) {
+      throwIfAborted(signal);
+      if (segments >= MAX_SCROLL_SEGMENTS_PER_CALL) {
+        continuationLimited = 'segment_limit';
+        break;
+      }
+      if (
+        JSON.stringify(observations).length >
+        MAX_SCROLL_OBSERVATION_CHARACTERS - RESERVED_SCROLL_OBSERVATION_CHARACTERS
+      ) {
+        continuationLimited = 'evidence_budget';
+        break;
+      }
+      const deltaX = continuationDelta(segmentData.remainingDeltaX);
+      const deltaY = continuationDelta(segmentData.remainingDeltaY);
+      if (deltaX === null || deltaY === null || (deltaX === 0 && deltaY === 0)) break;
+
+      let nextAction: BrowserActionResult;
+      try {
+        nextAction = await actions.execute(bindScrollDelta(call, tabId_, deltaX, deltaY), signal);
+      } catch (error) {
+        if (signal.aborted || (error instanceof Error && error.name === 'AbortError')) throw error;
+        continuationLimited = 'action_failure';
+        continuationFailure = failureFor(error);
+        break;
+      }
+      if (nextAction.failure !== undefined) {
+        continuationLimited = 'action_failure';
+        continuationFailure = failureFor(nextAction.failure);
+        break;
+      }
+
+      action = nextAction;
+      segmentData = nextAction.data;
+      actualDeltaX += finiteNumber(segmentData.actualDeltaX) ?? 0;
+      actualDeltaY += finiteNumber(segmentData.actualDeltaY) ?? 0;
+      segments += Math.max(1, Math.trunc(finiteNumber(segmentData.segments) ?? 1));
+      moved ||= segmentData.moved === true;
+      contentChanged ||= segmentData.contentChanged === true;
+      extentChanged ||= segmentData.extentChanged === true;
+      loadedMore ||= segmentData.loadedMore === true;
+
+      const baseSnapshot = this.#interactiveSnapshotByTab.get(tabId_);
+      if (baseSnapshot === undefined) {
+        continuationLimited = 'observation_unavailable';
+        break;
+      }
+      const observed = await this.#observeAfterAction(tabId_, baseSnapshot, signal, runnerId);
+      if (observed === null) {
+        continuationLimited = 'observation_unavailable';
+        break;
+      }
+      observations.push(observed);
+    }
+
+    return {
+      action,
+      observations,
+      verificationUnavailable: continuationLimited === 'observation_unavailable',
+      data: {
+        ...segmentData,
+        deltaX: requested.deltaX,
+        deltaY: requested.deltaY,
+        actualDeltaX,
+        actualDeltaY,
+        segments,
+        moved,
+        contentChanged,
+        extentChanged,
+        loadedMore,
+        ...(continuationLimited === undefined ? {} : { continuationLimited }),
+        ...(continuationFailure === undefined ? {} : { continuationFailure }),
+      },
+    };
+  }
+
   async #observeAfterAction(
     tabId_: number,
     baseSnapshot: string,
@@ -1194,7 +1414,8 @@ export class BrowserToolExecutor implements BrowserExecutionPort {
       );
       if (hasSelectableRef(observed.data)) this.#stateMismatchFallbackByTab.delete(tabId_);
       return observed.data;
-    } catch {
+    } catch (error) {
+      if (signal.aborted || (error instanceof Error && error.name === 'AbortError')) throw error;
       // The mutation already completed. Surface observation loss without replaying it.
       return null;
     }

@@ -33,6 +33,11 @@ export type ContinuationItem =
       readonly output: string;
       readonly resultRef: string;
       readonly attachmentIds?: readonly string[];
+    }
+  | {
+      readonly type: 'compaction';
+      readonly itemId: string;
+      readonly encryptedContent: string;
     };
 
 export interface PendingToolCall {

@@ -165,6 +165,15 @@ const taskCancelSchema = z
   })
   .strict();
 
+const taskClearContextSchema = z
+  .object({
+    version: z.literal(PROTOCOL_VERSION),
+    requestId: requestIdSchema,
+    type: z.literal('task.clearContext'),
+    payload: z.object({ taskId: identifierSchema }).strict(),
+  })
+  .strict();
+
 const screenshotCaptureSchema = z
   .object({
     version: z.literal(PROTOCOL_VERSION),
@@ -202,32 +211,6 @@ const pageFeaturesEnsureSchema = z
   })
   .strict();
 
-const selectionTextPayloadSchema = z
-  .object({
-    text: z.string().trim().min(1).max(8_000),
-    pageUrl: z.string().max(4_096),
-    pageTitle: z.string().max(500),
-  })
-  .strict();
-
-const selectionTranslateSchema = z
-  .object({
-    version: z.literal(PROTOCOL_VERSION),
-    requestId: requestIdSchema,
-    type: z.literal('selection.translate'),
-    payload: selectionTextPayloadSchema,
-  })
-  .strict();
-
-const selectionAskSchema = z
-  .object({
-    version: z.literal(PROTOCOL_VERSION),
-    requestId: requestIdSchema,
-    type: z.literal('selection.ask'),
-    payload: selectionTextPayloadSchema.extend({ question: z.string().max(4_000) }).strict(),
-  })
-  .strict();
-
 export const extensionMessageSchema: z.ZodType<ExtensionMessage> = z.discriminatedUnion('type', [
   systemPingSchema,
   panelGetSnapshotSchema,
@@ -243,11 +226,10 @@ export const extensionMessageSchema: z.ZodType<ExtensionMessage> = z.discriminat
   taskResumeSchema,
   taskRetrySchema,
   taskCancelSchema,
+  taskClearContextSchema,
   screenshotCaptureSchema,
   imagePreviewOpenSchema,
   pageFeaturesEnsureSchema,
-  selectionTranslateSchema,
-  selectionAskSchema,
 ]);
 
 const pagePingSchema = z

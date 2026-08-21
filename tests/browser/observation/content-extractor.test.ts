@@ -13,7 +13,7 @@ describe('extractReadableContent', () => {
       <p>First\n paragraph</p>
       <a href="/help"> Help center </a>
       <div hidden>hidden secret</div>
-      <div data-chatbrowserx-overlay="selection">extension overlay</div>
+      <div data-chatbrowserx-overlay="virtual-pointer">extension overlay</div>
       <iframe></iframe>
     `;
     const shadowHost = document.createElement('section');

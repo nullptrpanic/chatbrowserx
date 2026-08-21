@@ -103,6 +103,7 @@ describe('parseExtensionMessage', () => {
     ['task.pause', { taskId: 'task_1' }],
     ['task.resume', { taskId: 'task_1' }],
     ['task.cancel', { taskId: 'task_1' }],
+    ['task.clearContext', { taskId: 'task_1' }],
     ['image.preview.open', { tabId: 7, attachmentId: 'attachment_1' }],
   ])('accepts the supported %s command', (type, payload) => {
     expect(
@@ -157,6 +158,35 @@ describe('parseExtensionMessage', () => {
     },
   ])('rejects malformed command %#', (value) => {
     expect(() => parseExtensionMessage(value)).toThrow(/invalid extension message/i);
+  });
+
+  it.each([
+    [
+      'selection.translate',
+      {
+        text: 'Selected text',
+        pageUrl: 'https://example.com',
+        pageTitle: 'Example',
+      },
+    ],
+    [
+      'selection.ask',
+      {
+        text: 'Selected text',
+        question: 'Why?',
+        pageUrl: 'https://example.com',
+        pageTitle: 'Example',
+      },
+    ],
+  ])('rejects the removed selected-text command %s', (type, payload) => {
+    expect(() =>
+      parseExtensionMessage({
+        version: 1,
+        requestId: 'req_removed_selection_action',
+        type,
+        payload,
+      }),
+    ).toThrow(/invalid extension message/i);
   });
 });
 

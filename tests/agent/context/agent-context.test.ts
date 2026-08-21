@@ -438,9 +438,7 @@ describe('buildAgentContext', () => {
       {
         type: 'message',
         role: 'assistant',
-        content: [
-          { type: 'output_text', text: 'I found the target and will inspect it.' },
-        ],
+        content: [{ type: 'output_text', text: 'I found the target and will inspect it.' }],
       },
       {
         type: 'function_call',
@@ -1122,5 +1120,67 @@ describe('buildAgentContext', () => {
       },
     ]);
     expect(JSON.stringify(context.input)).not.toContain('MUST NOT ENTER HISTORY');
+  });
+
+  it('separates completed history from active opaque compacted WorkSession input', async () => {
+    const messages = [
+      message({
+        id: 'history_user',
+        taskId: 'task_history',
+        role: 'user',
+        text: 'Earlier request',
+      }),
+      message({
+        id: 'history_assistant',
+        taskId: 'task_history',
+        role: 'assistant',
+        text: 'Earlier answer',
+      }),
+      message({ id: 'active_user', taskId: TASK.id, role: 'user', text: 'Continue current work' }),
+    ];
+    const historyTask: TaskRun = {
+      ...TASK,
+      id: 'task_history',
+      workSessionId: 'workSession_history',
+      status: 'completed',
+    };
+    const context = await buildAgentContext(
+      {
+        task: TASK,
+        checkpoint: {
+          ...CHECKPOINT,
+          completedToolResults: [],
+          continuationItems: [
+            { type: 'message_ref', messageId: 'active_user' },
+            {
+              type: 'compaction',
+              itemId: 'cmp_1',
+              encryptedContent: 'opaque-compacted-context',
+            },
+          ],
+        },
+        customSystemPrompt: 'Stay bounded.',
+        historyMessageLimit: 50,
+      },
+      contextDependencies(
+        messages,
+        { get: vi.fn(async () => undefined) },
+        { listByConversation: vi.fn(async () => [historyTask, TASK]) },
+      ),
+    );
+
+    expect(context.input).toHaveLength(4);
+    expect(context.activeInput).toEqual([
+      {
+        type: 'message',
+        role: 'user',
+        content: [{ type: 'input_text', text: 'Continue current work' }],
+      },
+      {
+        type: 'compaction',
+        itemId: 'cmp_1',
+        encryptedContent: 'opaque-compacted-context',
+      },
+    ]);
   });
 });

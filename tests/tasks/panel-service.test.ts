@@ -309,6 +309,64 @@ describe('PanelService', () => {
     expect(fixture.dependencies.scheduleTask).toHaveBeenCalledWith(continuedTask.id);
   });
 
+  it('creates a fresh WorkSession after the cancelled task context was cleared', async () => {
+    const fixture = buildFixture();
+    const cancelledTask = { ...fixture.task, status: 'cancelled' as const };
+    const freshTask = {
+      ...fixture.task,
+      id: 'task_fresh',
+      workSessionId: 'workSession_fresh',
+      status: 'queued' as const,
+      tabId: 9,
+    };
+    fixture.dependencies.tasks.listByConversation.mockResolvedValue([cancelledTask]);
+    fixture.dependencies.tasks.listEvents.mockResolvedValue([
+      {
+        id: 'event_clear',
+        taskId: cancelledTask.id,
+        sequence: 1,
+        type: 'task.context-cleared',
+        reason: 'user_clear_task_context',
+        at: 1_500,
+        error: null,
+      },
+    ]);
+    fixture.dependencies.commands.create.mockResolvedValue({
+      task: freshTask,
+      checkpoint: {
+        id: 'checkpoint_fresh',
+        taskId: freshTask.id,
+        sequence: 0,
+        taskStatus: 'queued',
+        completedToolResults: [],
+        continuationItems: [{ type: 'message_ref', messageId: 'message_new' }],
+        pendingToolCall: null,
+        createdAt: 2_000,
+      },
+      events: [],
+    });
+    const service = new PanelService(fixture.dependencies);
+
+    await expect(service.getSnapshot(9, fixture.conversation.id)).resolves.toMatchObject({
+      task: { id: cancelledTask.id, contextCleared: true },
+    });
+
+    await service.submit({
+      tabId: 9,
+      conversationId: fixture.conversation.id,
+      text: 'Start from a clean task context',
+      attachmentIds: [],
+    });
+
+    expect(fixture.dependencies.commands.continueCancelled).not.toHaveBeenCalled();
+    expect(fixture.dependencies.commands.create).toHaveBeenCalledWith({
+      conversationId: fixture.conversation.id,
+      tabId: 9,
+      goal: 'Start from a clean task context',
+      userMessageId: 'message_new',
+    });
+  });
+
   it('falls back to the latest global conversation after another panel deletes the selection', async () => {
     const fixture = buildFixture();
     const service = new PanelService(fixture.dependencies);

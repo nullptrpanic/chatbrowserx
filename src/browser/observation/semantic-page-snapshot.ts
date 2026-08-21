@@ -13,6 +13,8 @@ export const SEMANTIC_SNAPSHOT_STYLES = [
 export type SemanticAction = 'click' | 'set_checked' | 'type' | 'select' | 'scroll';
 
 export interface SemanticPageEntry {
+  /** Snapshot-local native identity used only for safe deltas; never serialized to the model. */
+  readonly identity: string;
   readonly depth: number;
   readonly role: string;
   readonly name: string;
@@ -22,6 +24,18 @@ export interface SemanticPageEntry {
   readonly frame?: string;
   /** Internal selection evidence only; compact model entries never serialize geometry. */
   readonly inViewport?: boolean;
+}
+
+type SerializableSemanticPageEntry = Omit<SemanticPageEntry, 'identity'>;
+
+function semanticPageEntry(
+  identity: string,
+  entry: SerializableSemanticPageEntry,
+): SemanticPageEntry {
+  return Object.defineProperty(entry, 'identity', {
+    value: identity,
+    enumerable: false,
+  }) as SemanticPageEntry;
 }
 
 export interface SemanticPageTarget {
@@ -108,7 +122,40 @@ const EXPLICIT_OPTION_CLASS_PATTERN = /(?:^|[-_])(choice|option)(?:$|[-_])/i;
 const AMBIGUOUS_OPTION_CLASS_PATTERN = /(?:^|[-_])answer(?:$|[-_])/i;
 const DIRECT_VISUAL_SURFACE_NODE_NAMES = new Set(['CANVAS', 'VIDEO']);
 const LARGE_VISUAL_SURFACE_NODE_NAMES = new Set(['IMG', 'SVG']);
+const MIN_CONTENT_IMAGE_WIDTH = 120;
+const MIN_CONTENT_IMAGE_HEIGHT = 80;
+const MIN_CONTENT_IMAGE_AREA = 24_000;
 const MAX_SEMANTIC_LOCATOR_CHARACTERS = 2_048;
+const SYNTHETIC_ACTION_WORDS = new Set([
+  'add',
+  'cancel',
+  'close',
+  'compose',
+  'create',
+  'delete',
+  'download',
+  'edit',
+  'more',
+  'next',
+  'open',
+  'previous',
+  'refresh',
+  'remove',
+  'save',
+  'search',
+  'send',
+  'settings',
+  'submit',
+  'upload',
+]);
+const SYNTHETIC_TECHNICAL_WORDS = new Set([
+  'btn',
+  'button',
+  'control',
+  'icon',
+  'trigger',
+  'wrapper',
+]);
 
 function normalizedText(value: unknown, maximum = 500): string {
   return typeof value === 'string' ? value.replace(/\s+/g, ' ').trim().slice(0, maximum) : '';
@@ -202,7 +249,7 @@ function compactTargetEntries(
     }
     const existing = compactedEntries[existingIndex];
     if (!existing) continue;
-    compactedEntries[existingIndex] = {
+    compactedEntries[existingIndex] = semanticPageEntry(existing.identity, {
       depth: Math.min(existing.depth, entry.depth),
       role: preferredEntryRole(existing.role, entry.role),
       name: mergedEntryName(existing.name, entry.name),
@@ -221,7 +268,7 @@ function compactTargetEntries(
       ...(existing.inViewport === undefined && entry.inViewport === undefined
         ? {}
         : { inViewport: existing.inViewport === true || entry.inViewport === true }),
-    };
+    });
   }
 
   const compactedTargets = targets.map((target, targetIndex) => {
@@ -260,6 +307,23 @@ function isVisualSurface(node: SnapshotDomNode): boolean {
   const [, , width, height] = node.bounds;
   if (DIRECT_VISUAL_SURFACE_NODE_NAMES.has(node.nodeName)) return width >= 8 && height >= 8;
   return LARGE_VISUAL_SURFACE_NODE_NAMES.has(node.nodeName) && width >= 240 && height >= 160;
+}
+
+function isContentImage(node: SnapshotDomNode): boolean {
+  if (
+    node.nodeName !== 'IMG' ||
+    !node.visible ||
+    node.bounds === undefined ||
+    !syntheticNameText(node.attributes.get('src'), 1)
+  ) {
+    return false;
+  }
+  const [, , width, height] = node.bounds;
+  return (
+    width >= MIN_CONTENT_IMAGE_WIDTH &&
+    height >= MIN_CONTENT_IMAGE_HEIGHT &&
+    width * height >= MIN_CONTENT_IMAGE_AREA
+  );
 }
 
 function rareBooleanIndexes(value: Protocol.DOMSnapshot.RareBooleanData | undefined): Set<number> {
@@ -636,19 +700,17 @@ function actionsFor(
 
 function safePointerTarget(start: SnapshotDomNode): SnapshotDomNode | undefined {
   if (!start.visible || UNSAFE_CLICK_NODE_NAMES.has(start.nodeName)) return undefined;
-  let target: SnapshotDomNode | undefined;
+  let pointerTarget: SnapshotDomNode | undefined;
   let current: SnapshotDomNode | null = start;
-  while (
-    current &&
-    current.visible &&
-    current.cursor === 'pointer' &&
-    !UNSAFE_CLICK_NODE_NAMES.has(current.nodeName)
-  ) {
-    target = current;
+  for (let depth = 0; current && depth < 8; depth += 1) {
+    if (!current.visible || UNSAFE_CLICK_NODE_NAMES.has(current.nodeName)) break;
+    const declaredRole = normalizedText(current.attributes.get('role'), 100).toLowerCase();
+    const explicitAction = CLICK_ROLES.has(declaredRole) || current.cursor === 'pointer';
+    if (current.clickable && (current === start || explicitAction)) return current;
+    if (explicitAction) pointerTarget = current;
     current = current.parent;
   }
-  if (target) return target;
-  return start.clickable ? start : undefined;
+  return pointerTarget;
 }
 
 function depthOf(
@@ -747,6 +809,73 @@ function syntheticNameText(value: unknown, maximum = 200): string {
   );
 }
 
+function identifierWords(value: string): readonly string[] {
+  return value
+    .replace(/__[A-Za-z0-9_-]+$/, '')
+    .replace(/([a-z0-9])([A-Z])/g, '$1 $2')
+    .toLowerCase()
+    .split(/[^a-z0-9]+/)
+    .filter(Boolean);
+}
+
+function syntheticActionHint(
+  node: SnapshotDomNode,
+): { readonly name: string; readonly role: string } | undefined {
+  for (const attribute of ['data-testid', 'data-test-id', 'id', 'class']) {
+    const values =
+      attribute === 'class'
+        ? (node.attributes.get(attribute) ?? '').split(/\s+/)
+        : [node.attributes.get(attribute) ?? ''];
+    for (const value of values) {
+      const words = identifierWords(value);
+      if (
+        words.length === 0 ||
+        (!words.some((word) => SYNTHETIC_ACTION_WORDS.has(word)) &&
+          !words.some((word) => word === 'btn' || word === 'button'))
+      ) {
+        continue;
+      }
+      const nameWords = words.filter((word) => !SYNTHETIC_TECHNICAL_WORDS.has(word));
+      if (nameWords.length === 0) continue;
+      const phrase = nameWords.join(' ').slice(0, 200);
+      const role = words.includes('checkbox')
+        ? 'checkbox'
+        : words.includes('radio')
+          ? 'radio'
+          : words.includes('switch')
+            ? 'switch'
+            : words.includes('option')
+              ? 'option'
+              : words.includes('link')
+                ? 'link'
+                : words.includes('tab')
+                  ? 'tab'
+                  : 'button';
+      return { name: (phrase[0]?.toUpperCase() ?? '') + phrase.slice(1), role };
+    }
+  }
+  return undefined;
+}
+
+function syntheticClickableName(
+  node: SnapshotDomNode,
+): { readonly name: string; readonly role: string } | undefined {
+  const hint = syntheticActionHint(node);
+  const name = syntheticTargetName(node, hint?.name ?? '');
+  if (!name) return undefined;
+  const declaredRole = normalizedText(node.attributes.get('role'), 100).toLowerCase();
+  const role =
+    selectableRole(node) ??
+    (declaredRole && !OMITTED_ROLES.has(declaredRole)
+      ? declaredRole
+      : node.nodeName === 'BUTTON'
+        ? 'button'
+        : node.nodeName === 'A' && node.attributes.has('href')
+          ? 'link'
+          : (hint?.role ?? 'generic'));
+  return { name, role };
+}
+
 function syntheticTargetName(node: SnapshotDomNode, fallback: string): string {
   for (const attribute of ['aria-label', 'placeholder', 'data-placeholder', 'title', 'name']) {
     const value = syntheticNameText(node.attributes.get(attribute));
@@ -764,6 +893,14 @@ function syntheticTargetName(node: SnapshotDomNode, fallback: string): string {
     }
   }
   return fallback;
+}
+
+function syntheticImageName(node: SnapshotDomNode): string {
+  for (const attribute of ['alt', 'aria-label', 'title']) {
+    const value = syntheticNameText(node.attributes.get(attribute));
+    if (value) return value;
+  }
+  return 'Content image';
 }
 
 function domEditableRole(node: SnapshotDomNode): 'searchbox' | 'textbox' | undefined {
@@ -867,6 +1004,7 @@ export function buildSemanticPageSnapshot(
   const targets: SemanticPageTarget[] = [];
   const targetIndexes = new Map<number, number>();
   const seenEntries = new Set<string>();
+  const representedDomBackendIds = new Set<number>();
 
   for (const node of orderedAxNodes(input.axNodes)) {
     if (node.ignored) continue;
@@ -917,7 +1055,11 @@ export function buildSemanticPageSnapshot(
       ]);
       if (state.includes('disabled')) actions = [];
       else if (state.includes('readonly')) actions = actions.filter((action) => action !== 'type');
-      if (actions.includes('click') && hasObservableSelectionState(state)) {
+      if (
+        actions.includes('click') &&
+        hasObservableSelectionState(state) &&
+        (selectable !== undefined || SELECTABLE_ROLES.has(effectiveRole))
+      ) {
         actions = [...actions, 'set_checked'];
       }
     }
@@ -950,39 +1092,76 @@ export function buildSemanticPageSnapshot(
     if (seenEntries.has(dedupeKey)) continue;
     seenEntries.add(dedupeKey);
     const inViewport = viewportMembership(targetDomNode ?? domNode, input.viewport);
-    entries.push({
-      depth: depthOf(node, axById),
-      role: effectiveRole,
-      name,
-      ...(targetIndex === undefined ? {} : { targetIndex }),
-      ...(state.length === 0 ? {} : { state }),
-      ...(actions.length === 0 ? {} : { actions }),
-      ...(input.frame === 'main' ? {} : { frame: input.frame }),
-      ...(inViewport === undefined ? {} : { inViewport }),
-    });
+    entries.push(
+      semanticPageEntry(
+        `${input.frame}:ax:${backendNodeId === undefined ? node.nodeId : String(backendNodeId)}`,
+        {
+          depth: depthOf(node, axById),
+          role: effectiveRole,
+          name,
+          ...(targetIndex === undefined ? {} : { targetIndex }),
+          ...(state.length === 0 ? {} : { state }),
+          ...(actions.length === 0 ? {} : { actions }),
+          ...(input.frame === 'main' ? {} : { frame: input.frame }),
+          ...(inViewport === undefined ? {} : { inViewport }),
+        },
+      ),
+    );
+    if (domNode) representedDomBackendIds.add(domNode.backendNodeId);
   }
 
   for (const domNode of domByBackendId.values()) {
     if (!domNode.visible || targetIndexes.has(domNode.backendNodeId)) continue;
     const editableRole = domEditableRole(domNode);
     const scrollable = domNode.scrollableX || domNode.scrollableY;
-    if (!editableRole && !scrollable) continue;
+    const pointerTarget = safePointerTarget(domNode);
+    const clickable =
+      pointerTarget?.backendNodeId === domNode.backendNodeId && domNode.clickable
+        ? syntheticClickableName(domNode)
+        : undefined;
+    if (!editableRole && !scrollable && !clickable) {
+      if (!representedDomBackendIds.has(domNode.backendNodeId) && isContentImage(domNode)) {
+        const inViewport = viewportMembership(domNode, input.viewport);
+        entries.push(
+          semanticPageEntry(`${input.frame}:dom:${String(domNode.backendNodeId)}`, {
+            depth: domDepth(domNode),
+            role: 'image',
+            name: syntheticImageName(domNode),
+            ...(input.frame === 'main' ? {} : { frame: input.frame }),
+            ...(inViewport === undefined ? {} : { inViewport }),
+          }),
+        );
+        representedDomBackendIds.add(domNode.backendNodeId);
+      }
+      continue;
+    }
     const declaredRole = normalizedText(domNode.attributes.get('role'), 100).toLowerCase();
     const role =
-      editableRole ?? (declaredRole && !OMITTED_ROLES.has(declaredRole) ? declaredRole : 'region');
+      editableRole ??
+      clickable?.role ??
+      (declaredRole && !OMITTED_ROLES.has(declaredRole) ? declaredRole : 'region');
     const state = domState(domNode, role);
     if (state.includes('disabled')) continue;
     const actions: SemanticAction[] = [];
-    if (editableRole) {
+    if (editableRole || clickable) {
       actions.push('click');
+    }
+    if (editableRole) {
       if (!state.includes('readonly')) actions.push('type');
     }
     if (scrollable) actions.push('scroll');
+    if (
+      actions.includes('click') &&
+      hasObservableSelectionState(state) &&
+      SELECTABLE_ROLES.has(role)
+    ) {
+      actions.push('set_checked');
+    }
     const fallback = editableRole
       ? role === 'searchbox'
         ? 'Search'
         : 'Editable field'
-      : 'Scrollable area';
+      : (clickable?.name ?? 'Scrollable area');
     const name = syntheticTargetName(domNode, fallback);
     const inViewport = viewportMembership(domNode, input.viewport);
     const targetIndex = targets.length;
@@ -996,16 +1175,18 @@ export function buildSemanticPageSnapshot(
       state,
       actions,
     });
-    entries.push({
-      depth: domDepth(domNode),
-      role,
-      name,
-      targetIndex,
-      ...(state.length === 0 ? {} : { state }),
-      actions,
-      ...(input.frame === 'main' ? {} : { frame: input.frame }),
-      ...(inViewport === undefined ? {} : { inViewport }),
-    });
+    entries.push(
+      semanticPageEntry(`${input.frame}:dom:${String(domNode.backendNodeId)}`, {
+        depth: domDepth(domNode),
+        role,
+        name,
+        targetIndex,
+        ...(state.length === 0 ? {} : { state }),
+        actions,
+        ...(input.frame === 'main' ? {} : { frame: input.frame }),
+        ...(inViewport === undefined ? {} : { inViewport }),
+      }),
+    );
   }
 
   return {

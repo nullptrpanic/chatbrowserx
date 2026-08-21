@@ -256,6 +256,7 @@ describe('TaskExecutor', () => {
         },
       ],
     });
+    expect(interrupted.checkpoint.lastModelInputTokens).toBe(120);
     expect(interrupted.events.at(-1)?.modelTurn).toEqual({
       inputItemCount: 1,
       elapsedMs: 25,
@@ -727,34 +728,56 @@ describe('TaskExecutor', () => {
   });
 
   it('blocks a repeated immobile scroll at the same position before redispatch', async () => {
-    const calls = [1, 2].map((index) =>
-      browserCall(`call_immobile_scroll_${String(index)}`, 'browser_scroll', {
+    const calls = [
+      browserCall('call_immobile_scroll_1', 'browser_scroll', {
         target: 'viewport',
         deltaX: 0,
         deltaY: 600,
       }),
-    );
-    const execute = vi.fn<BrowserExecutionPort['execute']>(async () => ({
+      browserCall('call_inspect_after_immobile_scroll', 'browser_inspect', {
+        mode: 'interactive',
+        since: 'snapshot_before_scroll',
+      }),
+      browserCall('call_immobile_scroll_2', 'browser_scroll', {
+        target: 'viewport',
+        deltaX: 0,
+        deltaY: 600,
+      }),
+    ];
+    const execute = vi.fn<BrowserExecutionPort['execute']>(async (call) => ({
       output: JSON.stringify({
         ok: true,
         tabId: 7,
         url: 'https://example.test/form',
-        data: {
-          action: 'scroll',
-          dispatched: true,
-          moved: false,
-          actualDeltaX: 0,
-          actualDeltaY: 0,
-          position: { x: 0, y: 1200, maxX: 0, maxY: 1200 },
-        },
-        observation: { targetPresent: null },
+        data:
+          call.name === 'browser_inspect'
+            ? {
+                mode: 'interactive',
+                snapshot: 'snapshot_after_scroll',
+                base: 'snapshot_before_scroll',
+                unchanged: true,
+                elements: [],
+              }
+            : {
+                action: 'scroll',
+                dispatched: true,
+                moved: false,
+                actualDeltaX: 0,
+                actualDeltaY: 0,
+                position: { x: 0, y: 1200, maxX: 0, maxY: 1200 },
+              },
+        observation: call.name === 'browser_inspect' ? null : { targetPresent: null },
       }),
       attachmentIds: [],
     }));
 
     const result = await runBrowserProgressScenario('immobile-scroll', calls, execute);
 
-    expect(execute).toHaveBeenCalledOnce();
+    expect(execute).toHaveBeenCalledTimes(2);
+    expect(execute.mock.calls.map(([call]) => call.name)).toEqual([
+      'browser_scroll',
+      'browser_inspect',
+    ]);
     expect(JSON.parse(result.checkpoint.completedToolResults.at(-1)?.output ?? '')).toMatchObject({
       ok: false,
       code: 'NO_PROGRESS',
@@ -765,6 +788,132 @@ describe('TaskExecutor', () => {
         position: { x: 0, y: 1200, maxX: 0, maxY: 1200 },
       },
     });
+  });
+
+  it('rejects a premature final answer until an unfinished virtualized scroll is inspected and resumed', async () => {
+    const calls: readonly AgentEvent[] = [
+      browserCall('call_scroll_initial', 'browser_scroll', {
+        tabId: 0,
+        target: 'ref_history',
+        deltaX: 0,
+        deltaY: -10_000,
+      }),
+      {
+        type: 'task.completed',
+        reason: 'model_response_completed',
+        messageId: 'message_premature',
+      },
+      browserCall('call_inspect_loaded_batch', 'browser_inspect', {
+        tabId: 0,
+        mode: 'interactive',
+        since: 'snapshot_before_scroll',
+      }),
+      browserCall('call_scroll_remaining', 'browser_scroll', {
+        tabId: 0,
+        target: 'ref_history',
+        deltaX: 0,
+        deltaY: -9_035,
+      }),
+      browserCall('call_inspect_completed_scroll', 'browser_inspect', {
+        tabId: 0,
+        mode: 'interactive',
+        since: 'snapshot_loaded_batch',
+      }),
+    ];
+    const execute = vi.fn<BrowserExecutionPort['execute']>(async (call) => {
+      if (call.callId === 'call_scroll_initial') {
+        return {
+          output: JSON.stringify({
+            ok: true,
+            tabId: 7,
+            data: {
+              action: 'scroll',
+              requestedDeltaApplied: false,
+              remainingDeltaX: 0,
+              remainingDeltaY: -9_035,
+              loadedMore: true,
+              boundaryVerified: false,
+            },
+          }),
+          attachmentIds: [],
+        };
+      }
+      if (call.callId === 'call_inspect_loaded_batch') {
+        return {
+          output: JSON.stringify({
+            ok: true,
+            tabId: 7,
+            data: {
+              mode: 'interactive',
+              snapshot: 'snapshot_loaded_batch',
+              elements: [{ ref: 'message_1', r: 'statictext', n: 'Older message' }],
+            },
+          }),
+          attachmentIds: [],
+        };
+      }
+      if (call.callId === 'call_inspect_completed_scroll') {
+        return {
+          output: JSON.stringify({
+            ok: true,
+            tabId: 7,
+            data: {
+              mode: 'interactive',
+              snapshot: 'snapshot_completed_scroll',
+              elements: [{ ref: 'message_2', r: 'statictext', n: 'Oldest message' }],
+            },
+          }),
+          attachmentIds: [],
+        };
+      }
+      return {
+        output: JSON.stringify({
+          ok: true,
+          tabId: 7,
+          data: {
+            action: 'scroll',
+            requestedDeltaApplied: true,
+            remainingDeltaX: 0,
+            remainingDeltaY: 0,
+            loadedMore: false,
+            boundaryVerified: false,
+          },
+        }),
+        attachmentIds: [],
+      };
+    });
+
+    const result = await runBrowserProgressScenario(
+      'unfinished-virtual-scroll-blocks-final',
+      calls,
+      execute,
+      ({ taskId, appendMessage, now }) => {
+        const at = now();
+        void appendMessage({
+          id: 'message_premature',
+          kind: 'conversation',
+          conversationId: 'conversation_1',
+          taskId,
+          role: 'assistant',
+          status: 'complete',
+          text: 'The history is complete.',
+          attachmentIds: [],
+          createdAt: at,
+          updatedAt: at,
+        });
+      },
+    );
+
+    expect(result.task.status).toBe('completed');
+    expect(execute).toHaveBeenCalledTimes(4);
+    expect(result.events.filter(({ type }) => type === 'task.completed')).toHaveLength(1);
+    expect(result.checkpoint.continuationItems).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ type: 'function_call', callId: 'call_inspect_loaded_batch' }),
+        expect.objectContaining({ type: 'function_call', callId: 'call_scroll_remaining' }),
+        expect.objectContaining({ type: 'function_call', callId: 'call_inspect_completed_scroll' }),
+      ]),
+    );
   });
 
   it('replays an already verified selection on the same ref and page epoch', async () => {
@@ -2027,7 +2176,7 @@ describe('TaskExecutor', () => {
     expect(
       result.checkpoint.continuationItems.some(
         (item) =>
-          item.type !== 'message_ref' &&
+          (item.type === 'function_call' || item.type === 'function_call_output') &&
           (item.callId === 'call_search' || item.callId === 'call_bad_commit'),
       ),
     ).toBe(false);
@@ -3056,6 +3205,74 @@ describe('TaskExecutor', () => {
       task: { status: 'planning' },
       checkpoint: { completedToolResults: [] },
     });
+    database.close();
+  });
+
+  it('persists native compaction as a hidden planning boundary and continues the loop', async () => {
+    const database = await openChatBrowserDatabase(
+      createTestDatabaseName('native-context-compaction-boundary'),
+    );
+    const repository = new IndexedDbTaskRepository(database);
+    const dependencies = sources();
+    const commands = new TaskCommandService(
+      repository,
+      dependencies.clock,
+      dependencies.ids,
+      dependencies.conversations,
+    );
+    const created = await commands.create({
+      conversationId: 'conversation_1',
+      tabId: 7,
+      goal: 'Continue after compacting local process context',
+    });
+    let turn = 0;
+    const browser = browserPort();
+    const executor = new TaskExecutor({
+      repository,
+      conversations: dependencies.conversations,
+      planner: {
+        plan: () =>
+          (async function* () {
+            turn += 1;
+            if (turn === 1) {
+              yield {
+                type: 'context.compacted',
+                continuationItems: [
+                  {
+                    type: 'compaction',
+                    itemId: 'cmp_native',
+                    encryptedContent: 'opaque-native-context',
+                  },
+                ],
+              } as const;
+              return;
+            }
+            yield {
+              type: 'task.completed',
+              reason: 'model_response_completed',
+              messageId: 'message_answer',
+            } as const;
+          })(),
+      },
+      tavily: tavilyPort(),
+      browser,
+      clock: dependencies.clock,
+      ids: dependencies.ids,
+    });
+
+    const result = await executor.run(created.task.id, new AbortController().signal);
+
+    expect(result.task.status).toBe('completed');
+    expect(result.events.map(({ type }) => type)).toContain('task.context-compacted');
+    expect(result.checkpoint.continuationItems).toEqual([
+      {
+        type: 'compaction',
+        itemId: 'cmp_native',
+        encryptedContent: 'opaque-native-context',
+      },
+      { type: 'message_ref', messageId: 'message_answer' },
+    ]);
+    expect(browser.resetObservationBaselines).toHaveBeenCalledOnce();
     database.close();
   });
 });

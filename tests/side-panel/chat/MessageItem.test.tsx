@@ -432,4 +432,61 @@ describe('MessageItem', () => {
     expect(screen.getByRole('article')).toHaveClass('message-assistant');
     expect(screen.getByRole('status')).toHaveTextContent('正在生成');
   });
+
+  it('confirms cancelled-task context clearing and shows the shared cleared state', async () => {
+    const user = userEvent.setup();
+    const onClearTaskContext = vi.fn(async () => undefined);
+    const message = {
+      id: 'assistant_cancelled',
+      taskId: 'task_cancelled',
+      role: 'assistant' as const,
+      status: 'interrupted' as const,
+      text: '已保留的部分回复',
+      attachmentIds: [],
+      createdAt: 1_000,
+      updatedAt: 1_000,
+    };
+    const task = {
+      id: 'task_cancelled',
+      status: 'cancelled' as const,
+      goal: 'Cancelled task',
+      tabId: 7,
+      createdAt: 1_000,
+      updatedAt: 1_100,
+      sequence: 2,
+      lastError: null,
+      events: [],
+      completedToolResults: [],
+      supplements: [],
+    };
+    const { rerender } = render(
+      <MessageItem
+        message={message}
+        task={task}
+        taskInteractive
+        attachments={attachments}
+        t={t}
+        onClearTaskContext={onClearTaskContext}
+      />,
+    );
+
+    await user.click(screen.getByRole('button', { name: '清除任务上下文' }));
+    expect(
+      screen.getByText('只清除用于继续执行的上下文，聊天记录和执行详情会保留。'),
+    ).toBeVisible();
+    await user.click(screen.getByRole('button', { name: '确认清除' }));
+    expect(onClearTaskContext).toHaveBeenCalledOnce();
+
+    rerender(
+      <MessageItem
+        message={message}
+        task={{ ...task, contextCleared: true }}
+        taskInteractive
+        attachments={attachments}
+        t={t}
+        onClearTaskContext={onClearTaskContext}
+      />,
+    );
+    expect(screen.getByRole('button', { name: '上下文已清除' })).toBeDisabled();
+  });
 });

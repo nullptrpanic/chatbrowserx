@@ -12,9 +12,16 @@ import {
   type SemanticPageEntry,
 } from './semantic-page-snapshot';
 
-const INTERACTIVE_BUDGET = { elements: 240, targets: 120, characters: 32_000 } as const;
-const DEEP_INTERACTIVE_BUDGET = { elements: 500, targets: 200, characters: 60_000 } as const;
-const MAX_KEYED_DELTA_CHANGE_RATIO = 0.35;
+const INTERACTIVE_BUDGET = {
+  elements: 240,
+  targets: 120,
+  characters: 32_000,
+} as const;
+const DEEP_INTERACTIVE_BUDGET = {
+  elements: 500,
+  targets: 200,
+  characters: 60_000,
+} as const;
 const MAX_INTERACTIVE_SNAPSHOT_TABS = 50;
 const INTERACTIVE_ENTRY_KEYS =
   'd=depth,r=role(default generic),n=name,s=state,a=extra actions(ref defaults click),f=frame';
@@ -87,24 +94,18 @@ function createInteractiveSnapshotId(): string {
   return `s${crypto.randomUUID().replaceAll('-', '').slice(0, 20)}`;
 }
 
-function passiveEntryIdentity(entry: CompactSemanticPageEntry): string {
-  return JSON.stringify([entry.f ?? 'main', entry.d, entry.r ?? 'generic', entry.n]);
-}
-
 function compactEntryIdentities(
   elements: readonly CompactSemanticPageEntry[],
+  nativeIdentities: readonly string[],
 ): readonly string[] | null {
-  const passiveCounts = new Map<string, number>();
-  for (const entry of elements) {
-    if (entry.ref) continue;
-    const identity = passiveEntryIdentity(entry);
-    passiveCounts.set(identity, (passiveCounts.get(identity) ?? 0) + 1);
-  }
-  if ([...passiveCounts.values()].some((count) => count > 1)) return null;
-  const identities = elements.map((entry) =>
-    entry.ref ? `ref:${entry.ref}` : `entry:${passiveEntryIdentity(entry)}:0`,
+  if (elements.length !== nativeIdentities.length) return null;
+  const identities = elements.map((entry, index) =>
+    entry.ref ? `ref:${entry.ref}` : `node:${nativeIdentities[index] ?? ''}`,
   );
-  return new Set(identities).size === identities.length ? identities : null;
+  return identities.every((identity) => !identity.endsWith(':')) &&
+    new Set(identities).size === identities.length
+    ? identities
+    : null;
 }
 
 interface KeyedInteractiveDelta {
@@ -143,8 +144,6 @@ function keyedInteractiveDelta(
   const remove = previous.identities.filter((identity) => !currentByIdentity.has(identity));
   const changedIdentityCount = upsert.length + remove.length;
   if (changedIdentityCount === 0) return { unchanged: true };
-  const population = Math.max(previous.elements.length, current.elements.length, 1);
-  if (changedIdentityCount / population > MAX_KEYED_DELTA_CHANGE_RATIO) return null;
   return {
     ...(upsert.length === 0 ? {} : { upsert }),
     ...(remove.length === 0 ? {} : { remove }),
@@ -158,6 +157,7 @@ function interactiveCandidateIndexes(
 ): readonly number[] {
   if (!deep) {
     const priority = (entry: SemanticPageEntry): number => {
+      if (entry.actions?.includes('scroll')) return -1;
       if (entry.inViewport && entry.targetIndex !== undefined) return 0;
       if (entry.inViewport) return 1;
       if (
@@ -533,29 +533,44 @@ export class PageObserver {
       id: snapshotId,
       documentEpoch: JSON.stringify(documentEpochParts),
       elements,
-      identities: compactEntryIdentities(elements),
+      identities: compactEntryIdentities(
+        elements,
+        boundedEntries.map((entry) => entry.identity),
+      ),
     };
-    const visualFallbackAllowed = selectedTargets.length === 0 || hasVisualSurface;
+    const visualFallbackAllowed = deep || selectedTargets.length === 0 || hasVisualSurface;
     this.#rememberInteractiveSnapshot(tabId, current);
     const canReturnDelta =
       options.since !== undefined && options.since.length > 0 && previous?.id === options.since;
     if (canReturnDelta) {
       const delta = keyedInteractiveDelta(previous, current);
       if (delta !== null) {
-        return {
-          tabId,
-          url: metadata.url,
-          data: {
-            mode: 'interactive',
-            snapshot: snapshotId,
-            base: previous.id,
-            ...delta,
-          },
-          observation: null,
-          attachmentIds: [],
-          debuggerSession: 'ephemeral',
-          visualFallbackAllowed,
+        const deltaData = {
+          mode: 'interactive',
+          snapshot: snapshotId,
+          base: previous.id,
+          ...delta,
         };
+        const fullData = {
+          mode: 'interactive',
+          snapshot: snapshotId,
+          keys: INTERACTIVE_ENTRY_KEYS,
+          elements,
+          ...(truncated ? { truncated: true } : {}),
+        };
+        if (
+          delta.unchanged === true ||
+          JSON.stringify(deltaData).length < JSON.stringify(fullData).length
+        )
+          return {
+            tabId,
+            url: metadata.url,
+            data: deltaData,
+            observation: null,
+            attachmentIds: [],
+            debuggerSession: 'ephemeral',
+            visualFallbackAllowed,
+          };
       }
     }
     return {

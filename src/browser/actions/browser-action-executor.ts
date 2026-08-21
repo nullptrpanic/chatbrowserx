@@ -28,6 +28,10 @@ const INPUT_SETTLE_TIMEOUT_MS = 1_500;
 const INPUT_POLL_INTERVAL_MS = 75;
 const SELECTION_SETTLE_TIMEOUT_MS = 1_500;
 const SELECTION_POLL_INTERVAL_MS = 75;
+const SCROLL_SETTLE_TIMEOUT_MS = 1_500;
+const SCROLL_POLL_INTERVAL_MS = 75;
+const IMAGE_PASTE_SETTLE_TIMEOUT_MS = 5_000;
+const IMAGE_PASTE_POLL_INTERVAL_MS = 100;
 
 const SELECT_FUNCTION = `function(value) {
   if (!(this instanceof HTMLSelectElement)) return { ok: false };
@@ -51,21 +55,75 @@ const SCROLL_ELEMENT_FUNCTION = `function(deltaX, deltaY) {
       (overflow(style.overflowY) && candidate.scrollHeight > candidate.clientHeight + 1)
     );
   };
+  const state = (candidate) => {
+    const text = candidate.textContent || '';
+    const sample = text.length <= 4096 ? text : text.slice(0, 2048) + text.slice(-2048);
+    let hash = 0x811c9dc5;
+    for (let index = 0; index < sample.length; index += 1) {
+      hash ^= sample.charCodeAt(index);
+      hash = Math.imul(hash, 0x01000193);
+    }
+    return {
+      x: candidate.scrollLeft,
+      y: candidate.scrollTop,
+      maxX: Math.max(0, candidate.scrollWidth - candidate.clientWidth),
+      maxY: Math.max(0, candidate.scrollHeight - candidate.clientHeight),
+      contentKey: [candidate.childElementCount, candidate.scrollWidth, candidate.scrollHeight, hash >>> 0].join(':'),
+    };
+  };
   let target = element;
   while (target && !scrollable(target)) target = target.parentElement;
   if (!target) return { found: false };
-  const beforeX = target.scrollLeft;
-  const beforeY = target.scrollTop;
-  target.scrollLeft = beforeX + deltaX;
-  target.scrollTop = beforeY + deltaY;
+  const before = state(target);
+  target.scrollLeft = before.x + deltaX;
+  target.scrollTop = before.y + deltaY;
+  const after = state(target);
   return {
     found: true,
-    beforeX,
-    beforeY,
-    afterX: target.scrollLeft,
-    afterY: target.scrollTop,
+    beforeX: before.x,
+    beforeY: before.y,
+    beforeMaxX: before.maxX,
+    beforeMaxY: before.maxY,
+    afterX: after.x,
+    afterY: after.y,
+    maxX: after.maxX,
+    maxY: after.maxY,
+    beforeContentKey: before.contentKey,
+    afterContentKey: after.contentKey,
+  };
+}`;
+
+const READ_SCROLL_STATE_FUNCTION = `function() {
+  const __chatbrowserxScrollState = true;
+  void __chatbrowserxScrollState;
+  const element = this;
+  const window_ = element?.ownerDocument?.defaultView;
+  if (!window_?.Element || !(element instanceof window_.Element)) return { found: false };
+  const scrollable = (candidate) => {
+    const style = window_.getComputedStyle(candidate);
+    const overflow = (value) => value === 'auto' || value === 'scroll' || value === 'overlay';
+    return (
+      (overflow(style.overflowX) && candidate.scrollWidth > candidate.clientWidth + 1) ||
+      (overflow(style.overflowY) && candidate.scrollHeight > candidate.clientHeight + 1)
+    );
+  };
+  let target = element;
+  while (target && !scrollable(target)) target = target.parentElement;
+  if (!target) return { found: false };
+  const text = target.textContent || '';
+  const sample = text.length <= 4096 ? text : text.slice(0, 2048) + text.slice(-2048);
+  let hash = 0x811c9dc5;
+  for (let index = 0; index < sample.length; index += 1) {
+    hash ^= sample.charCodeAt(index);
+    hash = Math.imul(hash, 0x01000193);
+  }
+  return {
+    found: true,
+    x: target.scrollLeft,
+    y: target.scrollTop,
     maxX: Math.max(0, target.scrollWidth - target.clientWidth),
     maxY: Math.max(0, target.scrollHeight - target.clientHeight),
+    contentKey: [target.childElementCount, target.scrollWidth, target.scrollHeight, hash >>> 0].join(':'),
   };
 }`;
 
@@ -307,7 +365,7 @@ export async function pasteImageIntoEditor(
   base64: string,
   mimeType: string,
   fileName: string,
-  settleMs = 1_200,
+  settleMs = 3_000,
 ): Promise<Readonly<Record<string, unknown>>> {
   const __chatbrowserxPasteImage = true;
   void __chatbrowserxPasteImage;
@@ -368,41 +426,63 @@ export async function pasteImageIntoEditor(
   } catch {
     return { dispatched: false, reason: 'invalid_image_data' };
   }
-  const file = new window_.File([bytes], fileName, { type: mimeType, lastModified: Date.now() });
+  const file = new window_.File([bytes], fileName, {
+    type: mimeType,
+    lastModified: Date.now(),
+  });
   const clipboardData = new window_.DataTransfer();
   clipboardData.items.add(file);
-  if (target instanceof window_.HTMLElement) target.focus({ preventScroll: true });
-  if (
-    window_.HTMLInputElement &&
-    target instanceof window_.HTMLInputElement &&
-    target.type.toLowerCase() === 'file'
-  ) {
-    try {
-      target.files = clipboardData.files;
-    } catch {
-      return { dispatched: false, reason: 'file_input_rejected' };
-    }
-    target.dispatchEvent(new window_.Event('input', { bubbles: true, composed: true }));
-    target.dispatchEvent(new window_.Event('change', { bubbles: true, composed: true }));
-    const fileCount = target.files?.length || 0;
-    return {
-      dispatched: true,
-      strategy: 'file_input',
-      fileCount,
-      handled: fileCount === 1,
-      verified: fileCount === 1,
-      mutations: 0,
-    };
-  }
   let observationRoot = target;
   for (let depth = 0; depth < 6; depth += 1) {
     const parent = composedParent(observationRoot);
     if (!parent) break;
     observationRoot = parent;
   }
+  const directFileInput =
+    window_.HTMLInputElement &&
+    target instanceof window_.HTMLInputElement &&
+    target.type.toLowerCase() === 'file'
+      ? target
+      : null;
+  const fileInput = directFileInput;
   const mediaSelector = 'img, canvas, video, object, embed, [role="img"]';
+  const previewHintPattern =
+    /(?:^|[-_\s:])(?:attachment|upload|image|photo|picture|preview|file)(?:$|[-_\s:])/i;
+  const isVisualElement = (candidate: Element): boolean => {
+    if (candidate.matches(mediaSelector)) return true;
+    const backgroundImage = window_.getComputedStyle(candidate).backgroundImage;
+    return backgroundImage !== 'none' && /url\s*\(/i.test(backgroundImage);
+  };
+  const hasPreviewHint = (candidate: Element): boolean => {
+    const attributes = candidate
+      .getAttributeNames()
+      .flatMap((name) => [name, candidate.getAttribute(name) || '']);
+    return previewHintPattern.test([candidate.tagName, ...attributes].join(' '));
+  };
+  const previewSignature = (candidate: Element): string => {
+    const source =
+      'currentSrc' in candidate && typeof candidate.currentSrc === 'string'
+        ? candidate.currentSrc
+        : candidate.getAttribute('src') || '';
+    return [
+      source,
+      candidate.getAttribute('class') || '',
+      candidate.getAttribute('aria-label') || '',
+      candidate.getAttribute('data-state') || '',
+      candidate.getAttribute('data-type') || '',
+      candidate.getAttribute('style') || '',
+      window_.getComputedStyle(candidate).backgroundImage,
+    ].join('\u001f');
+  };
   const beforeLocalElements = new Set(observationRoot.querySelectorAll('*'));
   const beforeMedia = new Set(document_.querySelectorAll(mediaSelector));
+  const beforePreviewStates = new Map(
+    Array.from(observationRoot.querySelectorAll('*'))
+      .filter((candidate) => isVisualElement(candidate) || hasPreviewHint(candidate))
+      .map((candidate) => [candidate, previewSignature(candidate)]),
+  );
+  const beforeTargetMarkup = target instanceof window_.HTMLElement ? target.innerHTML : null;
+  const beforeTargetText = target.textContent || '';
   const targetRect = target.getBoundingClientRect();
   const countElements = () => observationRoot.querySelectorAll('*').length;
   const beforeElements = countElements();
@@ -422,27 +502,48 @@ export async function pasteImageIntoEditor(
     childList: true,
     subtree: true,
     attributes: true,
-    attributeFilter: ['src', 'class', 'aria-label', 'data-state'],
+    attributeFilter: ['src', 'class', 'style', 'aria-label', 'data-state', 'data-type'],
   });
-  let event: Event;
-  try {
-    event = new window_.ClipboardEvent('paste', {
-      bubbles: true,
-      cancelable: true,
-      composed: true,
-      clipboardData,
-    });
-  } catch {
-    event = new window_.Event('paste', { bubbles: true, cancelable: true, composed: true });
-    Object.defineProperty(event, 'clipboardData', { value: clipboardData });
+  let strategy: 'file_input' | 'clipboard_event';
+  let handled: boolean;
+  if (fileInput) {
+    try {
+      fileInput.files = clipboardData.files;
+    } catch {
+      observer?.disconnect();
+      return { dispatched: false, reason: 'file_input_rejected' };
+    }
+    fileInput.dispatchEvent(new window_.Event('input', { bubbles: true, composed: true }));
+    fileInput.dispatchEvent(new window_.Event('change', { bubbles: true, composed: true }));
+    strategy = 'file_input';
+    handled = true;
+  } else {
+    if (target instanceof window_.HTMLElement) target.focus({ preventScroll: true });
+    let event: Event;
+    try {
+      event = new window_.ClipboardEvent('paste', {
+        bubbles: true,
+        cancelable: true,
+        composed: true,
+        clipboardData,
+      });
+    } catch {
+      event = new window_.Event('paste', {
+        bubbles: true,
+        cancelable: true,
+        composed: true,
+      });
+      Object.defineProperty(event, 'clipboardData', { value: clipboardData });
+    }
+    const propagated = target.dispatchEvent(event);
+    strategy = 'clipboard_event';
+    handled = event.defaultPrevented || propagated === false;
   }
-  const propagated = target.dispatchEvent(event);
   const boundedSettleMs = Number.isFinite(settleMs)
     ? Math.max(0, Math.min(5_000, settleMs))
     : 1_200;
   await new Promise((resolve) => window_.setTimeout(resolve, boundedSettleMs));
   observer?.disconnect();
-  const handled = event.defaultPrevented || propagated === false;
   const isNearTarget = (candidate: Element): boolean => {
     const rect = candidate.getBoundingClientRect();
     if (rect.width <= 0 || rect.height <= 0) return false;
@@ -454,33 +555,227 @@ export async function pasteImageIntoEditor(
     );
     return horizontalOverlap && verticalDistance <= 480;
   };
-  const isVisualElement = (candidate: Element): boolean => {
-    if (candidate.matches(mediaSelector)) return true;
-    const backgroundImage = window_.getComputedStyle(candidate).backgroundImage;
-    return backgroundImage !== 'none' && /url\s*\(/i.test(backgroundImage);
-  };
-  const localPreviews = Array.from(observationRoot.querySelectorAll('*')).filter(
-    (candidate) => !beforeLocalElements.has(candidate) && isVisualElement(candidate),
-  );
+  const currentLocalElements = Array.from(observationRoot.querySelectorAll('*'));
+  const localPreviews = currentLocalElements.filter((candidate) => {
+    const candidatePreview = isVisualElement(candidate) || hasPreviewHint(candidate);
+    if (!candidatePreview) return false;
+    if (!beforeLocalElements.has(candidate)) return true;
+    const before = beforePreviewStates.get(candidate);
+    return before !== undefined && before !== previewSignature(candidate);
+  });
   const nearbyMediaPreviews = Array.from(document_.querySelectorAll(mediaSelector)).filter(
     (candidate) => !beforeMedia.has(candidate) && isNearTarget(candidate),
   );
   const previews = new Set([...localPreviews, ...nearbyMediaPreviews]);
-  const verified = previews.size > 0;
+  const targetStructureChanged =
+    handled &&
+    beforeTargetMarkup !== null &&
+    target instanceof window_.HTMLElement &&
+    target.innerHTML !== beforeTargetMarkup &&
+    (target.textContent || '') === beforeTargetText;
+  const localPendingImage = targetStructureChanged;
+  const previewCount = previews.size + (previews.size === 0 && localPendingImage ? 1 : 0);
+  const verified = previewCount > 0;
   return {
     dispatched: true,
-    strategy: 'clipboard_event',
+    strategy,
     fileCount: clipboardData.files.length,
     handled,
     verified,
     mutations,
     addedElements,
     localChanged: countElements() !== beforeElements,
-    previewCount: previews.size,
+    targetStructureChanged,
+    previewCount,
   };
 }
 
 const PASTE_IMAGE_FUNCTION = pasteImageIntoEditor.toString();
+
+interface ImagePasteState {
+  readonly connected: boolean;
+  readonly pendingUpload: boolean;
+  readonly elementCount: number;
+  readonly mediaCount: number;
+  readonly previewCount: number;
+  readonly targetMarkupHash: string;
+  readonly targetTextHash: string;
+  readonly previewHash: string;
+}
+
+/** Returns bounded structural evidence without exposing editor content or image payloads. */
+export function readImagePasteState(this: unknown): ImagePasteState {
+  const __chatbrowserxImagePasteState = true;
+  void __chatbrowserxImagePasteState;
+  const source = this as (Node & { readonly document?: Document }) | null;
+  const document_ = source?.ownerDocument ?? source?.document;
+  const window_ = document_?.defaultView;
+  if (!document_ || !window_?.Element) {
+    return {
+      connected: false,
+      pendingUpload: false,
+      elementCount: 0,
+      mediaCount: 0,
+      previewCount: 0,
+      targetMarkupHash: '',
+      targetTextHash: '',
+      previewHash: '',
+    };
+  }
+  let target: Element | null = window_.Element && source instanceof window_.Element ? source : null;
+  if (!target && source instanceof window_.Node) {
+    const root = source.getRootNode?.();
+    target =
+      source.parentElement ||
+      (window_.ShadowRoot && root instanceof window_.ShadowRoot ? root.host : null);
+  }
+  for (let depth = 0; target && depth < 10; depth += 1) {
+    const acceptsPaste = Boolean(
+      (window_.HTMLInputElement && target instanceof window_.HTMLInputElement) ||
+      (window_.HTMLTextAreaElement && target instanceof window_.HTMLTextAreaElement) ||
+      (window_.HTMLElement &&
+        target instanceof window_.HTMLElement &&
+        (target.isContentEditable ||
+          ['', 'true', 'plaintext-only'].includes(
+            (target.getAttribute('contenteditable') ?? 'false').trim().toLowerCase(),
+          ) ||
+          target.getAttribute('role') === 'textbox')),
+    );
+    if (acceptsPaste) break;
+    const root = target.getRootNode?.();
+    target =
+      target.parentElement ||
+      (window_.ShadowRoot && root instanceof window_.ShadowRoot ? root.host : null);
+  }
+  if (!target?.isConnected) {
+    return {
+      connected: false,
+      pendingUpload: false,
+      elementCount: 0,
+      mediaCount: 0,
+      previewCount: 0,
+      targetMarkupHash: '',
+      targetTextHash: '',
+      previewHash: '',
+    };
+  }
+  let observationRoot = target;
+  for (let depth = 0; depth < 6; depth += 1) {
+    const root = observationRoot.getRootNode?.();
+    const parent =
+      observationRoot.parentElement ||
+      (window_.ShadowRoot && root instanceof window_.ShadowRoot ? root.host : null);
+    if (!parent) break;
+    observationRoot = parent;
+  }
+  const mediaSelector = 'img, canvas, video, object, embed, [role="img"]';
+  const previewHintPattern =
+    /(?:^|[-_\s:])(?:attachment|upload|image|photo|picture|preview|file)(?:$|[-_\s:])/i;
+  const elements = Array.from(observationRoot.querySelectorAll('*'));
+  const previews: Element[] = [];
+  const previewParts: string[] = [];
+  let pendingUpload = false;
+  for (const candidate of elements) {
+    const attributes: string[] = [];
+    for (const name of candidate.getAttributeNames()) {
+      attributes.push(name, candidate.getAttribute(name) || '');
+    }
+    const backgroundImage = window_.getComputedStyle(candidate).backgroundImage;
+    const preview =
+      candidate.matches(mediaSelector) ||
+      previewHintPattern.test([candidate.tagName, ...attributes].join(' ')) ||
+      (backgroundImage !== 'none' && /url\s*\(/i.test(backgroundImage));
+    if (preview) {
+      previews.push(candidate);
+      if (
+        /(?:^|[-_\s:])(?:loading|pending|progress|uploading)(?:$|[-_\s:])/i.test(
+          [
+            candidate.getAttribute('class') || '',
+            candidate.getAttribute('data-state') || '',
+            candidate.getAttribute('aria-busy') || '',
+          ].join(' '),
+        )
+      ) {
+        pendingUpload = true;
+      }
+      previewParts.push(
+        [
+          candidate.tagName,
+          candidate.getAttribute('class') || '',
+          candidate.getAttribute('aria-label') || '',
+          candidate.getAttribute('data-state') || '',
+          candidate.getAttribute('data-type') || '',
+          candidate.getAttribute('src') || '',
+          candidate.getAttribute('style') || '',
+        ].join('\u001f'),
+      );
+    }
+  }
+  const values = [
+    target instanceof window_.HTMLElement ? target.innerHTML : '',
+    target.textContent || '',
+    previewParts.join('\u001e'),
+  ];
+  const hashes: string[] = [];
+  for (const value of values) {
+    let result = 0x811c9dc5;
+    for (let index = 0; index < value.length; index += 1) {
+      result ^= value.charCodeAt(index);
+      result = Math.imul(result, 0x01000193);
+    }
+    hashes.push((result >>> 0).toString(16).padStart(8, '0'));
+  }
+  return {
+    connected: true,
+    pendingUpload,
+    elementCount: elements.length,
+    mediaCount: observationRoot.querySelectorAll(mediaSelector).length,
+    previewCount: previews.length,
+    targetMarkupHash: hashes[0] ?? '',
+    targetTextHash: hashes[1] ?? '',
+    previewHash: hashes[2] ?? '',
+  };
+}
+
+const IMAGE_PASTE_STATE_FUNCTION = readImagePasteState.toString();
+
+/** Stages one bounded task-owned image for a subsequent trusted browser paste command. */
+export async function stageImageOnSystemClipboard(
+  this: unknown,
+  base64: string,
+  mimeType: string,
+): Promise<Readonly<Record<string, unknown>>> {
+  const __chatbrowserxSystemClipboardImage = true;
+  void __chatbrowserxSystemClipboardImage;
+  const source = this as (Node & { readonly document?: Document }) | null;
+  const document_ = source?.ownerDocument ?? source?.document;
+  const window_ = document_?.defaultView;
+  const ClipboardItemConstructor = window_?.ClipboardItem;
+  if (
+    !document_ ||
+    !window_ ||
+    !ClipboardItemConstructor ||
+    typeof window_.navigator.clipboard?.write !== 'function' ||
+    typeof window_.atob !== 'function'
+  ) {
+    return { staged: false, reason: 'system_clipboard_unavailable' };
+  }
+  try {
+    const binary = window_.atob(base64);
+    const bytes = new Uint8Array(binary.length);
+    for (let index = 0; index < binary.length; index += 1) bytes[index] = binary.charCodeAt(index);
+    const blob = new window_.Blob([bytes], { type: mimeType });
+    await window_.navigator.clipboard.write([new ClipboardItemConstructor({ [mimeType]: blob })]);
+    if (window_.HTMLElement && source instanceof window_.HTMLElement) {
+      source.focus({ preventScroll: true });
+    }
+    return { staged: true };
+  } catch {
+    return { staged: false, reason: 'system_clipboard_rejected' };
+  }
+}
+
+const STAGE_SYSTEM_CLIPBOARD_IMAGE_FUNCTION = stageImageOnSystemClipboard.toString();
 
 /** Self-contained DOM probe serialized into the target realm by Runtime.callFunctionOn. */
 export function inspectEditorTarget(this: unknown): {
@@ -593,7 +888,12 @@ export function inspectEditorTarget(this: unknown): {
       if (typeof modelValue === 'string') value = modelValue;
     }
   }
-  return { editor, custom, connected: valueElement?.isConnected === true, value };
+  return {
+    editor,
+    custom,
+    connected: valueElement?.isConnected === true,
+    value,
+  };
 }
 
 const EDITOR_TARGET_INFO_FUNCTION = inspectEditorTarget.toString();
@@ -631,6 +931,7 @@ export interface BrowserActionResult {
 
 export interface BrowserActionPort {
   execute(call: ParsedBrowserToolCall, signal: AbortSignal): Promise<BrowserActionResult>;
+  settle?(tabId: number, signal: AbortSignal, timeoutMs: number): Promise<void>;
 }
 
 type PageActionInput = Extract<PageCommand, { readonly type: 'page.action.perform' }>['payload'];
@@ -750,6 +1051,22 @@ interface RuntimeSelectionState {
   readonly selected?: boolean;
 }
 
+interface ElementScrollState {
+  readonly x: number;
+  readonly y: number;
+  readonly maxX: number;
+  readonly maxY: number;
+  readonly contentKey?: string;
+}
+
+interface ElementScrollResult extends ElementScrollState {
+  readonly beforeX: number;
+  readonly beforeY: number;
+  readonly beforeMaxX?: number;
+  readonly beforeMaxY?: number;
+  readonly beforeContentKey?: string;
+}
+
 interface SetCheckedExecutionResult {
   readonly ref: string;
   readonly requested: boolean;
@@ -758,7 +1075,10 @@ interface SetCheckedExecutionResult {
   readonly strategy: string;
   readonly state: readonly string[];
   readonly target: ObservedElementRefState;
-  readonly changes: readonly Readonly<{ ref: string; state: readonly string[] }>[];
+  readonly changes: readonly Readonly<{
+    ref: string;
+    state: readonly string[];
+  }>[];
 }
 
 function input<T>(call: ParsedBrowserToolCall): T {
@@ -954,6 +1274,34 @@ function selectionState(
   ];
 }
 
+function parsedImagePasteState(value: unknown): ImagePasteState | undefined {
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) return undefined;
+  const state = value as Partial<ImagePasteState>;
+  return state.connected === true &&
+    typeof state.pendingUpload === 'boolean' &&
+    typeof state.elementCount === 'number' &&
+    Number.isSafeInteger(state.elementCount) &&
+    typeof state.mediaCount === 'number' &&
+    Number.isSafeInteger(state.mediaCount) &&
+    typeof state.previewCount === 'number' &&
+    Number.isSafeInteger(state.previewCount) &&
+    typeof state.targetMarkupHash === 'string' &&
+    typeof state.targetTextHash === 'string' &&
+    typeof state.previewHash === 'string'
+    ? (state as ImagePasteState)
+    : undefined;
+}
+
+function hasImagePasteEvidence(before: ImagePasteState, after: ImagePasteState): boolean {
+  return (
+    after.mediaCount > before.mediaCount ||
+    after.previewCount > before.previewCount ||
+    after.previewHash !== before.previewHash ||
+    (after.targetMarkupHash !== before.targetMarkupHash &&
+      after.targetTextHash === before.targetTextHash)
+  );
+}
+
 /** Executes already-checkpointed browser actions through semantic refs or validated viewport points. */
 export class BrowserActionExecutor implements BrowserActionPort {
   readonly #dependencies: BrowserActionExecutorDependencies;
@@ -961,6 +1309,12 @@ export class BrowserActionExecutor implements BrowserActionPort {
 
   constructor(dependencies: BrowserActionExecutorDependencies) {
     this.#dependencies = dependencies;
+  }
+
+  async settle(tabId: number, signal: AbortSignal, timeoutMs: number): Promise<void> {
+    throwIfAborted(signal);
+    const snapshot = await this.#dependencies.sessions.ensure(tabId, signal);
+    await this.#wait(snapshot, 'dom_stable', timeoutMs, signal);
   }
 
   async execute(call: ParsedBrowserToolCall, signal: AbortSignal): Promise<BrowserActionResult> {
@@ -1108,28 +1462,39 @@ export class BrowserActionExecutor implements BrowserActionPort {
               'The target did not accept the pasted image.',
             );
           }
-          if (pasted.verified !== true) {
-            throw new BrowserActionError(
-              'ATTACHMENT_VERIFICATION_FAILED',
-              'The editor handled the image paste, but no attachment preview change was measured.',
+          if (pasted.verified === true) {
+            data = {
+              action: 'paste_image',
+              dispatched: true,
+              strategy: pasted.strategy,
+              fileCount: 1,
+              handled: pasted.handled === true,
+              verified: true,
+              mutations:
+                typeof pasted.mutations === 'number' && Number.isSafeInteger(pasted.mutations)
+                  ? pasted.mutations
+                  : 0,
+              previewCount:
+                typeof pasted.previewCount === 'number' && Number.isSafeInteger(pasted.previewCount)
+                  ? pasted.previewCount
+                  : 0,
+            };
+          } else {
+            const nativePaste = await this.#pasteImageFromSystemClipboard(
+              target,
+              objectId,
+              base64,
+              mimeType,
+              signal,
             );
+            if (!nativePaste) {
+              throw new BrowserActionError(
+                'ATTACHMENT_VERIFICATION_FAILED',
+                'The editor handled the image paste, but no attachment preview change was measured.',
+              );
+            }
+            data = { action: 'paste_image', ...nativePaste };
           }
-          data = {
-            action: 'paste_image',
-            dispatched: true,
-            strategy: pasted.strategy,
-            fileCount: 1,
-            handled: pasted.handled === true,
-            verified: true,
-            mutations:
-              typeof pasted.mutations === 'number' && Number.isSafeInteger(pasted.mutations)
-                ? pasted.mutations
-                : 0,
-            previewCount:
-              typeof pasted.previewCount === 'number' && Number.isSafeInteger(pasted.previewCount)
-                ? pasted.previewCount
-                : 0,
-          };
         } finally {
           await this.#dependencies.transport
             .send(target.session, 'Runtime.releaseObject', { objectId })
@@ -1288,7 +1653,10 @@ export class BrowserActionExecutor implements BrowserActionPort {
             break;
           }
         }
-        stateChanges = [...changesByRef].map(([ref, state]) => ({ ref, state }));
+        stateChanges = [...changesByRef].map(([ref, state]) => ({
+          ref,
+          state,
+        }));
         data = {
           action: 'set_checked_many',
           complete: actionFailure === undefined,
@@ -1435,22 +1803,93 @@ export class BrowserActionExecutor implements BrowserActionPort {
           await this.#showPointer(tabId, point, point, 'move');
           const elementScroll = await this.#scrollElement(prepared, value.deltaX, value.deltaY);
           if (elementScroll) {
-            const actualDeltaX = elementScroll.afterX - elementScroll.beforeX;
-            const actualDeltaY = elementScroll.afterY - elementScroll.beforeY;
+            let current: ElementScrollState = elementScroll;
+            let strategy = 'element';
+            const initialDeltaX = current.x - elementScroll.beforeX;
+            const initialDeltaY = current.y - elementScroll.beforeY;
+            let remainingDeltaX = this.#consumeRequestedScrollDelta(value.deltaX, initialDeltaX);
+            let remainingDeltaY = this.#consumeRequestedScrollDelta(value.deltaY, initialDeltaY);
+            const initialContentChanged =
+              elementScroll.beforeContentKey !== undefined &&
+              current.contentKey !== undefined &&
+              elementScroll.beforeContentKey !== current.contentKey;
+            const atRequestedBoundary = this.#atRequestedScrollBoundary(
+              current,
+              value.deltaX,
+              value.deltaY,
+            );
+            const initialProgress =
+              initialDeltaX !== 0 || initialDeltaY !== 0 || initialContentChanged;
+            if (atRequestedBoundary || !initialProgress) {
+              strategy =
+                atRequestedBoundary && initialProgress
+                  ? 'element_boundary_wheel'
+                  : 'element_wheel_fallback';
+              await this.#dependencies.transport.send(
+                prepared.session,
+                'Input.dispatchMouseEvent',
+                {
+                  type: 'mouseWheel',
+                  x: point.x,
+                  y: point.y,
+                  deltaX: remainingDeltaX === 0 ? value.deltaX : remainingDeltaX,
+                  deltaY: remainingDeltaY === 0 ? value.deltaY : remainingDeltaY,
+                },
+              );
+              const immediate = current;
+              current =
+                (await this.#waitForElementScrollChange(prepared, immediate, signal)) ?? current;
+              remainingDeltaX = this.#consumeRequestedScrollDelta(
+                remainingDeltaX,
+                current.x - immediate.x,
+              );
+              remainingDeltaY = this.#consumeRequestedScrollDelta(
+                remainingDeltaY,
+                current.y - immediate.y,
+              );
+            }
+            const contentChanged =
+              elementScroll.beforeContentKey !== undefined &&
+              current.contentKey !== undefined &&
+              elementScroll.beforeContentKey !== current.contentKey;
+            const beforeMaxX = elementScroll.beforeMaxX ?? elementScroll.maxX;
+            const beforeMaxY = elementScroll.beforeMaxY ?? elementScroll.maxY;
+            const extentChanged = current.maxX !== beforeMaxX || current.maxY !== beforeMaxY;
+            const stillAtBoundary = this.#atRequestedScrollBoundary(
+              current,
+              value.deltaX,
+              value.deltaY,
+            );
+            const loadedMore =
+              atRequestedBoundary && (contentChanged || extentChanged || !stillAtBoundary);
+            const boundaryVerified = atRequestedBoundary && !initialProgress && !loadedMore;
+            const needsBoundaryProbe = atRequestedBoundary && initialProgress && !loadedMore;
+            const actualDeltaX = value.deltaX - remainingDeltaX;
+            const actualDeltaY = value.deltaY - remainingDeltaY;
+            const requestedDeltaApplied = remainingDeltaX === 0 && remainingDeltaY === 0;
             data = {
               action: 'scroll',
               dispatched: true,
-              strategy: 'element',
+              strategy,
               deltaX: value.deltaX,
               deltaY: value.deltaY,
-              moved: actualDeltaX !== 0 || actualDeltaY !== 0,
+              moved: actualDeltaX !== 0 || actualDeltaY !== 0 || contentChanged || extentChanged,
               actualDeltaX,
               actualDeltaY,
+              remainingDeltaX,
+              remainingDeltaY,
+              requestedDeltaApplied,
+              segments: 1,
+              contentChanged,
+              extentChanged,
+              loadedMore,
+              boundaryVerified,
+              needsBoundaryProbe,
               position: {
-                x: elementScroll.afterX,
-                y: elementScroll.afterY,
-                maxX: elementScroll.maxX,
-                maxY: elementScroll.maxY,
+                x: current.x,
+                y: current.y,
+                maxX: current.maxX,
+                maxY: current.maxY,
               },
             };
             targetPresent = true;
@@ -1634,6 +2073,100 @@ export class BrowserActionExecutor implements BrowserActionPort {
       },
       ...(actionFailure === undefined ? {} : { failure: actionFailure }),
     };
+  }
+
+  async #readImagePasteState(
+    session: DebuggerSession,
+    objectId: string,
+  ): Promise<ImagePasteState | undefined> {
+    const response =
+      await this.#dependencies.transport.send<Protocol.Runtime.CallFunctionOnResponse>(
+        session,
+        'Runtime.callFunctionOn',
+        {
+          objectId,
+          functionDeclaration: IMAGE_PASTE_STATE_FUNCTION,
+          awaitPromise: false,
+          returnByValue: true,
+          silent: true,
+        },
+      );
+    return response.exceptionDetails === undefined
+      ? parsedImagePasteState(response.result.value)
+      : undefined;
+  }
+
+  async #pasteImageFromSystemClipboard(
+    target: PreparedElementTarget,
+    objectId: string,
+    base64: string,
+    mimeType: string,
+    signal: AbortSignal,
+  ): Promise<Readonly<Record<string, unknown>> | undefined> {
+    const before = await this.#readImagePasteState(target.session, objectId);
+    if (!before) return undefined;
+    const staged = await this.#dependencies.transport.send<Protocol.Runtime.CallFunctionOnResponse>(
+      target.session,
+      'Runtime.callFunctionOn',
+      {
+        objectId,
+        functionDeclaration: STAGE_SYSTEM_CLIPBOARD_IMAGE_FUNCTION,
+        arguments: [{ value: base64 }, { value: mimeType }],
+        awaitPromise: true,
+        returnByValue: true,
+        silent: true,
+        userGesture: true,
+      },
+    );
+    const stageResult = staged.result.value as { readonly staged?: unknown } | undefined;
+    if (staged.exceptionDetails !== undefined || stageResult?.staged !== true) return undefined;
+    throwIfAborted(signal);
+    await this.#dependencies.transport.send(target.session, 'DOM.focus', {
+      backendNodeId: target.reference.backendNodeId,
+    });
+    const modifiers = await this.#getPrimaryModifier();
+    await this.#dependencies.transport.send(target.session, 'Input.dispatchKeyEvent', {
+      type: 'rawKeyDown',
+      key: 'v',
+      code: 'KeyV',
+      modifiers,
+      windowsVirtualKeyCode: 86,
+      nativeVirtualKeyCode: 86,
+      commands: ['Paste'],
+    });
+    await this.#dependencies.transport.send(target.session, 'Input.dispatchKeyEvent', {
+      type: 'keyUp',
+      key: 'v',
+      code: 'KeyV',
+      modifiers,
+      windowsVirtualKeyCode: 86,
+      nativeVirtualKeyCode: 86,
+    });
+
+    const deadline = Date.now() + IMAGE_PASTE_SETTLE_TIMEOUT_MS;
+    do {
+      throwIfAborted(signal);
+      const after = await this.#readImagePasteState(target.session, objectId);
+      if (after && !after.pendingUpload && hasImagePasteEvidence(before, after)) {
+        return {
+          dispatched: true,
+          strategy: 'system_clipboard',
+          fileCount: 1,
+          handled: true,
+          verified: true,
+          clipboardChanged: true,
+          mutations: Math.max(0, after.elementCount - before.elementCount),
+          previewCount: Math.max(
+            1,
+            after.previewCount - before.previewCount,
+            after.mediaCount - before.mediaCount,
+          ),
+        };
+      }
+      if (Date.now() >= deadline) break;
+      await this.#delay(Math.min(IMAGE_PASTE_POLL_INTERVAL_MS, deadline - Date.now()), signal);
+    } while (Date.now() < deadline);
+    return undefined;
   }
 
   async #setChecked(
@@ -1941,6 +2474,22 @@ export class BrowserActionExecutor implements BrowserActionPort {
       { x: target.rect.x + target.rect.width * 0.75, y: target.point.y },
       { x: target.point.x, y: target.rect.y + target.rect.height * 0.25 },
       { x: target.point.x, y: target.rect.y + target.rect.height * 0.75 },
+      {
+        x: target.rect.x + target.rect.width * 0.15,
+        y: target.rect.y + target.rect.height * 0.15,
+      },
+      {
+        x: target.rect.x + target.rect.width * 0.85,
+        y: target.rect.y + target.rect.height * 0.15,
+      },
+      {
+        x: target.rect.x + target.rect.width * 0.15,
+        y: target.rect.y + target.rect.height * 0.85,
+      },
+      {
+        x: target.rect.x + target.rect.width * 0.85,
+        y: target.rect.y + target.rect.height * 0.85,
+      },
     ];
     let objectId: string | undefined;
     try {
@@ -2174,17 +2723,7 @@ export class BrowserActionExecutor implements BrowserActionPort {
     target: PreparedElementTarget,
     deltaX: number,
     deltaY: number,
-  ): Promise<
-    | {
-        readonly beforeX: number;
-        readonly beforeY: number;
-        readonly afterX: number;
-        readonly afterY: number;
-        readonly maxX: number;
-        readonly maxY: number;
-      }
-    | undefined
-  > {
+  ): Promise<ElementScrollResult | undefined> {
     let objectId: string | undefined;
     try {
       const resolved = await this.#dependencies.transport.send<Protocol.DOM.ResolveNodeResponse>(
@@ -2212,10 +2751,14 @@ export class BrowserActionExecutor implements BrowserActionPort {
             readonly found?: unknown;
             readonly beforeX?: unknown;
             readonly beforeY?: unknown;
+            readonly beforeMaxX?: unknown;
+            readonly beforeMaxY?: unknown;
             readonly afterX?: unknown;
             readonly afterY?: unknown;
             readonly maxX?: unknown;
             readonly maxY?: unknown;
+            readonly beforeContentKey?: unknown;
+            readonly afterContentKey?: unknown;
           }
         | undefined;
       if (response.exceptionDetails !== undefined || result?.found !== true) return undefined;
@@ -2233,10 +2776,22 @@ export class BrowserActionExecutor implements BrowserActionPort {
       return {
         beforeX: result.beforeX as number,
         beforeY: result.beforeY as number,
-        afterX: result.afterX as number,
-        afterY: result.afterY as number,
+        ...(typeof result.beforeMaxX === 'number' && Number.isFinite(result.beforeMaxX)
+          ? { beforeMaxX: result.beforeMaxX }
+          : {}),
+        ...(typeof result.beforeMaxY === 'number' && Number.isFinite(result.beforeMaxY)
+          ? { beforeMaxY: result.beforeMaxY }
+          : {}),
+        x: result.afterX as number,
+        y: result.afterY as number,
         maxX: result.maxX as number,
         maxY: result.maxY as number,
+        ...(typeof result.beforeContentKey === 'string'
+          ? { beforeContentKey: result.beforeContentKey }
+          : {}),
+        ...(typeof result.afterContentKey === 'string'
+          ? { contentKey: result.afterContentKey }
+          : {}),
       };
     } catch {
       return undefined;
@@ -2247,6 +2802,102 @@ export class BrowserActionExecutor implements BrowserActionPort {
           .catch(() => undefined);
       }
     }
+  }
+
+  async #readElementScrollState(
+    target: PreparedElementTarget,
+  ): Promise<ElementScrollState | undefined> {
+    let objectId: string | undefined;
+    try {
+      const resolved = await this.#dependencies.transport.send<Protocol.DOM.ResolveNodeResponse>(
+        target.session,
+        'DOM.resolveNode',
+        { backendNodeId: target.reference.backendNodeId },
+      );
+      objectId = resolved.object.objectId;
+      if (!objectId) return undefined;
+      const response =
+        await this.#dependencies.transport.send<Protocol.Runtime.CallFunctionOnResponse>(
+          target.session,
+          'Runtime.callFunctionOn',
+          {
+            objectId,
+            functionDeclaration: READ_SCROLL_STATE_FUNCTION,
+            awaitPromise: false,
+            returnByValue: true,
+            silent: true,
+          },
+        );
+      const result = response.result.value as
+        | {
+            readonly found?: unknown;
+            readonly x?: unknown;
+            readonly y?: unknown;
+            readonly maxX?: unknown;
+            readonly maxY?: unknown;
+            readonly contentKey?: unknown;
+          }
+        | undefined;
+      if (response.exceptionDetails !== undefined || result?.found !== true) return undefined;
+      const values = [result.x, result.y, result.maxX, result.maxY];
+      if (values.some((value) => typeof value !== 'number' || !Number.isFinite(value))) {
+        return undefined;
+      }
+      return {
+        x: result.x as number,
+        y: result.y as number,
+        maxX: result.maxX as number,
+        maxY: result.maxY as number,
+        ...(typeof result.contentKey === 'string' ? { contentKey: result.contentKey } : {}),
+      };
+    } catch {
+      return undefined;
+    } finally {
+      if (objectId) {
+        await this.#dependencies.transport
+          .send(target.session, 'Runtime.releaseObject', { objectId })
+          .catch(() => undefined);
+      }
+    }
+  }
+
+  async #waitForElementScrollChange(
+    target: PreparedElementTarget,
+    before: ElementScrollState,
+    signal: AbortSignal,
+  ): Promise<ElementScrollState | undefined> {
+    const changed = (current: ElementScrollState): boolean =>
+      current.x !== before.x ||
+      current.y !== before.y ||
+      current.maxX !== before.maxX ||
+      current.maxY !== before.maxY ||
+      (before.contentKey !== undefined &&
+        current.contentKey !== undefined &&
+        current.contentKey !== before.contentKey);
+    let current = await this.#readElementScrollState(target);
+    const deadline = Date.now() + SCROLL_SETTLE_TIMEOUT_MS;
+    while (current !== undefined && !changed(current) && Date.now() < deadline) {
+      await this.#delay(Math.min(SCROLL_POLL_INTERVAL_MS, deadline - Date.now()), signal);
+      current = await this.#readElementScrollState(target);
+    }
+    return current;
+  }
+
+  #atRequestedScrollBoundary(state: ElementScrollState, deltaX: number, deltaY: number): boolean {
+    return (
+      (deltaX < 0 && state.x <= 0) ||
+      (deltaX > 0 && state.x >= state.maxX) ||
+      (deltaY < 0 && state.y <= 0) ||
+      (deltaY > 0 && state.y >= state.maxY)
+    );
+  }
+
+  #consumeRequestedScrollDelta(remaining: number, observed: number): number {
+    if (remaining === 0 || observed === 0 || Math.sign(remaining) !== Math.sign(observed)) {
+      return remaining;
+    }
+    const consumed = Math.min(Math.abs(remaining), Math.abs(observed));
+    return remaining - Math.sign(remaining) * consumed;
   }
 
   async #performPageAction(
@@ -2430,59 +3081,56 @@ export class BrowserActionExecutor implements BrowserActionPort {
     target: PreparedElementTarget | null,
   ): Promise<string> {
     await this.#selectAll(session);
+    await this.#dispatchKey(session, {
+      kind: 'key',
+      key: 'ArrowRight',
+      code: 'ArrowRight',
+      modifiers: 0,
+    });
     const expected = normalizeInputValue(text);
     let verified = false;
     let verifiedValue: string | null = null;
     const settleDeadline = Date.now() + INPUT_SETTLE_TIMEOUT_MS;
-    try {
-      do {
-        if (target) {
-          const exact = await this.#editorTargetInfo(target);
-          const candidate = normalizeInputValue(exact.value);
-          verified = verifiesInput(candidate, expected, replace, before);
-          if (verified) verifiedValue = candidate;
-        }
-        try {
-          if (!verified) {
-            const response =
-              await this.#dependencies.transport.send<Protocol.Runtime.EvaluateResponse>(
-                session,
-                'Runtime.evaluate',
-                {
-                  expression: FOCUSED_EDITABLE_VALUE_EXPRESSION,
-                  returnByValue: true,
-                },
-              );
-            const candidate = evaluatedEditableValue(response);
-            verified = verifiesInput(candidate, expected, replace, before);
-            if (verified) verifiedValue = candidate ?? before;
-          }
-        } catch {
-          // Some targets do not expose a usable main execution context; AX remains the fallback.
-        }
+    do {
+      if (target) {
+        const exact = await this.#editorTargetInfo(target);
+        const candidate = normalizeInputValue(exact.value);
+        verified = verifiesInput(candidate, expected, replace, before);
+        if (verified) verifiedValue = candidate;
+      }
+      try {
         if (!verified) {
-          const tree =
-            await this.#dependencies.transport.send<Protocol.Accessibility.GetFullAXTreeResponse>(
+          const response =
+            await this.#dependencies.transport.send<Protocol.Runtime.EvaluateResponse>(
               session,
-              'Accessibility.getFullAXTree',
+              'Runtime.evaluate',
+              {
+                expression: FOCUSED_EDITABLE_VALUE_EXPRESSION,
+                returnByValue: true,
+              },
             );
-          const candidate = focusedEditableValue(tree.nodes);
+          const candidate = evaluatedEditableValue(response);
           verified = verifiesInput(candidate, expected, replace, before);
           if (verified) verifiedValue = candidate ?? before;
         }
-        if (verified || Date.now() >= settleDeadline) break;
-        await this.#delay(Math.min(INPUT_POLL_INTERVAL_MS, settleDeadline - Date.now()), signal);
-      } while (!verified);
-      if (!verified) {
-        throwIfAborted(signal);
+      } catch {
+        // Some targets do not expose a usable main execution context; AX remains the fallback.
       }
-    } finally {
-      await this.#dispatchKey(session, {
-        kind: 'key',
-        key: 'ArrowRight',
-        code: 'ArrowRight',
-        modifiers: 0,
-      });
+      if (!verified) {
+        const tree =
+          await this.#dependencies.transport.send<Protocol.Accessibility.GetFullAXTreeResponse>(
+            session,
+            'Accessibility.getFullAXTree',
+          );
+        const candidate = focusedEditableValue(tree.nodes);
+        verified = verifiesInput(candidate, expected, replace, before);
+        if (verified) verifiedValue = candidate ?? before;
+      }
+      if (verified || Date.now() >= settleDeadline) break;
+      await this.#delay(Math.min(INPUT_POLL_INTERVAL_MS, settleDeadline - Date.now()), signal);
+    } while (!verified);
+    if (!verified) {
+      throwIfAborted(signal);
     }
     if (!verified) {
       throw new BrowserActionError(

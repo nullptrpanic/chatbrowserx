@@ -24,6 +24,7 @@ export interface ConversationViewProps {
   readonly onResume: () => void;
   readonly onRetry: () => void;
   readonly onCancel: () => void;
+  readonly onClearTaskContext?: ((taskId: string) => Promise<void>) | undefined;
 }
 
 /** Renders conversation messages, embedded durable task state, and stable near-bottom following. */
@@ -41,6 +42,7 @@ export function ConversationView({
   onResume,
   onRetry,
   onCancel,
+  onClearTaskContext,
 }: ConversationViewProps) {
   const scroller = useRef<HTMLDivElement>(null);
   const [following, setFollowing] = useState(true);
@@ -118,6 +120,7 @@ export function ConversationView({
                 onResume={onResume}
                 onRetry={onRetry}
                 onCancel={onCancel}
+                onClearTaskContext={onClearTaskContext}
               />
             );
           })}

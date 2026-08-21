@@ -92,6 +92,8 @@ export interface PanelTask {
   readonly completedToolCallCount?: number | undefined;
   /** Total tool results and user supplements shown by the execution-detail timeline. */
   readonly detailItemCount?: number | undefined;
+  /** True after the cancelled WorkSession continuation was explicitly discarded. */
+  readonly contextCleared?: boolean | undefined;
   readonly lastError: {
     readonly code: string;
     readonly retryable: boolean;

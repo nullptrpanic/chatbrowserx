@@ -36,7 +36,6 @@ import { TaskCommandService } from '../tasks/task-command-service';
 import { TaskCoordinator } from '../tasks/task-coordinator';
 import { PanelService } from '../tasks/panel-service';
 import { ScreenshotController } from '../tasks/screenshot-controller';
-import { SelectionController } from '../tasks/selection-controller';
 
 interface BackgroundServices {
   readonly router: MessageRouter;
@@ -189,12 +188,6 @@ async function createBackgroundServices(
     clock: systemClock,
     startTask: scheduleTask,
   });
-  const selection = new SelectionController({
-    provider: codex,
-    settings,
-    panel,
-    sidePanel: chrome.sidePanel,
-  });
   const router = createMessageRouter({
     commands: {
       create: (input) => commands.create(input),
@@ -204,6 +197,7 @@ async function createBackgroundServices(
       resume: (taskId) => coordinator.resume(taskId),
       retry: (taskId) => coordinator.retry(taskId),
       cancel: (taskId) => coordinator.cancel(taskId),
+      clearContext: (taskId) => commands.clearContext(taskId),
     },
     panel,
     screenshots,
@@ -216,7 +210,6 @@ async function createBackgroundServices(
         return installer.ensureInstalled(tabId, tab.url ?? '');
       },
     },
-    selection,
   });
   return { router, recovery };
 }

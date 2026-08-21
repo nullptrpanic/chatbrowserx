@@ -347,7 +347,10 @@ function taskToolDefinition(
   description: string,
   properties: Readonly<Record<string, FlatProperty>>,
 ): ModelToolDefinition {
-  return toolDefinition(name, description, { tabId: TASK_TAB_ID_PROPERTY, ...properties });
+  return toolDefinition(name, description, {
+    tabId: TASK_TAB_ID_PROPERTY,
+    ...properties,
+  });
 }
 
 export const BROWSER_TOOL_DEFINITIONS: readonly ModelToolDefinition[] = [
@@ -381,7 +384,7 @@ export const BROWSER_TOOL_DEFINITIONS: readonly ModelToolDefinition[] = [
   taskToolDefinition('browser_reload', 'Reload one task page and wait for stability.', {}),
   taskToolDefinition(
     'browser_inspect',
-    'Inspect readable content, a compact native accessibility tree with actionable refs across frames, or a viewport screenshot. Use interactive for a viewport-prioritized bounded tree. Use interactive_deep only when the needed offscreen target or context was truncated. Always inspect interactive before requesting a screenshot. Continue with refs and interactive deltas whenever the accessibility tree contains the needed content or controls. Do not use screenshots to verify semantic form state. Screenshot fallback is accepted only when interactive inspection lacks actionable targets or detects a visual surface such as canvas. Set since to an empty string for a full result. Reuse only the latest interactive snapshot ID when its base elements remain in context. A keyed delta applies to that base: upsert items contain identity k and replacement element e; remove contains deleted identities.',
+    'Inspect readable content, a compact native accessibility tree with actionable refs across frames, or a viewport screenshot. Use interactive for a viewport-prioritized bounded tree. Use interactive_deep only when the needed offscreen target or context was truncated or remains unavailable after interactive inspection. Always inspect interactive before requesting a screenshot. Continue with refs and interactive deltas whenever the accessibility tree contains the needed content or controls. When reading more items from a list or timeline, use the scrollable ref that advertises scroll; passive text refs are content, not pagination controls. Do not use screenshots to verify semantic form state. Screenshot fallback is accepted when interactive inspection lacks actionable targets, detects a visual surface such as canvas, or interactive_deep still does not expose the required control. After a successful screenshot inspection, browser_click_point becomes available on the next model turn; its absence before the screenshot is expected. Set since to an empty string for a full result. Reuse only the latest interactive snapshot ID when its base elements remain in context. A keyed delta applies to that base: upsert items contain identity k and replacement element e; remove contains deleted identities.',
     {
       mode: {
         type: 'string',
@@ -400,7 +403,7 @@ export const BROWSER_TOOL_DEFINITIONS: readonly ModelToolDefinition[] = [
   ),
   taskToolDefinition(
     'browser_paste_image',
-    'Paste a task-owned screenshot into a recent semantic editable message or file-input ref without using the system clipboard. Continue only when the result reports verified=true; that means the editor consumed the image and a local attachment-preview change was measured. After sending, inspect again to verify remote delivery. Never paste the same asset twice after an ambiguous result.',
+    'Paste a task-owned screenshot into a recent semantic editable message or file-input ref. It first uses bounded page-local delivery and may fall back to staging the image on the system clipboard plus a native browser paste; clipboardChanged=true reports that fallback. This tool is available before capture so the complete workflow can be planned, but call it only after browser_capture_screenshot returns an assetId. Captured assets remain valid across context compaction within the current WorkSession; after capture, currently available IDs are listed in the assetId enum. Continue only when the result reports verified=true; that means a real editor or attachment-preview change was measured, not merely a retained hidden file input. After sending, inspect again to verify remote delivery. Never paste the same asset twice after an ambiguous result.',
     {
       ref: REF_PROPERTY,
       assetId: {
@@ -455,14 +458,14 @@ export const BROWSER_TOOL_DEFINITIONS: readonly ModelToolDefinition[] = [
   }),
   taskToolDefinition(
     'browser_keypress',
-    'Send a normalized key or chord, including BROWSER_BACK and BROWSER_FORWARD.',
+    'Send a normalized key or chord. Named keys include ENTER, TAB, ESC/ESCAPE, arrows, navigation, editing keys, and F1-F12; browser history uses BROWSER_BACK or BROWSER_FORWARD.',
     {
       keys: { type: 'string', minLength: 1, maxLength: 100 },
     },
   ),
   taskToolDefinition(
     'browser_scroll',
-    'Scroll the viewport or a recent semantic element ref by exact CSS-pixel deltas.',
+    'Scroll the viewport or a recent semantic element ref by exact CSS-pixel deltas. For a list or timeline, target the scroll ref whose name contains the relevant visible items. Do not click passive content to reveal more items. Negative deltaY reads earlier or upper content; positive deltaY reads later or lower content. One call may consume the distance in multiple virtualized segments; verification is one resulting AX observation and observations is the chronological sequence when multiple batches were exposed. Read that evidence directly instead of immediately inspecting it again. When collecting a requested time or item interval, continue until the returned evidence observes content outside the requested interval or an actual list boundary; seeing the first in-range item does not prove complete coverage. If requestedDeltaApplied=false, continue with remainingDeltaX and remainingDeltaY. continuationLimited only explains why internal batching stopped; inspect first only when verificationUnavailable=true or continuationFailure is present. Do not infer an element boundary from position 0 alone: loadedMore=true means virtualized content changed or its extent grew, while needsBoundaryProbe=true means the call only just reached the edge and needs another same-direction probe. Stop only when boundaryVerified=true. moved=true can include content or extent changes without a final position change.',
     {
       target: REF_PROPERTY,
       deltaX: {
@@ -484,10 +487,14 @@ export const BROWSER_TOOL_DEFINITIONS: readonly ModelToolDefinition[] = [
       ref: REF_PROPERTY,
     },
   ),
-  taskToolDefinition('browser_select', 'Choose an option value in a recent semantic select ref.', {
-    ref: REF_PROPERTY,
-    value: { type: 'string', maxLength: 2_000 },
-  }),
+  taskToolDefinition(
+    'browser_select',
+    'Choose a value only on a ref that advertises select. For a custom dropdown, click its trigger and then click the desired option ref.',
+    {
+      ref: REF_PROPERTY,
+      value: { type: 'string', maxLength: 2_000 },
+    },
+  ),
   taskToolDefinition('browser_drag', 'Drag from one recent semantic ref to another.', {
     fromRef: REF_PROPERTY,
     toRef: REF_PROPERTY,

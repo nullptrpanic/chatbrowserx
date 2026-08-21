@@ -208,6 +208,7 @@ const BROWSER_TOOL_NAMES = [
   'browser_reload',
   'browser_inspect',
   'browser_capture_screenshot',
+  'browser_paste_image',
   'browser_click',
   'browser_set_checked',
   'browser_type',
@@ -398,108 +399,13 @@ describe('CodexAgentPlanner', () => {
     expect(model.requests[0]).not.toHaveProperty('continuation');
   });
 
-  it('offers context commit only after a new completed non-commit tool result', async () => {
-    let turn = 0;
+  it('never exposes the legacy context commit tool in new model requests', async () => {
     const model = provider(async function* () {
-      turn += 1;
-      const responseId = `resp_commit_availability_${turn}`;
-      yield { type: 'response.started', responseId };
-      yield { type: 'text.delta', delta: `Answer ${turn}.` };
-      yield { type: 'response.completed', responseId, usage: null };
-    });
-    const storage = repositories();
-    let id = 0;
-    const planner = new CodexAgentPlanner({
-      provider: model.instance,
-      tavilyAvailability: { isConfigured: vi.fn(async () => false) },
-      settings: settings(),
-      conversations: storage.conversations,
-      tasks: storage.tasks,
-      attachments: storage.attachments,
-      ids: { create: (prefix) => `${prefix}_${++id}` },
-      clock: { now: () => 500 + id },
-    });
-    const messageRef = {
-      type: 'message_ref' as const,
-      messageId: USER_MESSAGE.id,
-    };
-    const resultPair = [
-      {
-        type: 'function_call' as const,
-        callId: 'call_short',
-        name: 'browser_get_current_tab',
-        argumentsJson: '{}',
-      },
-      {
-        type: 'function_call_output' as const,
-        callId: 'call_short',
-        output: '{}',
-        resultRef: 'result_short',
-        attachmentIds: [],
-      },
-    ];
-    const commitPair = [
-      {
-        type: 'function_call' as const,
-        callId: 'call_old_commit',
-        name: 'commit_context',
-        argumentsJson: JSON.stringify({
-          state: 'Goal: continue.',
-          throughCallId: 'call_prior',
-        }),
-      },
-      {
-        type: 'function_call_output' as const,
-        callId: 'call_old_commit',
-        output: '{"ok":true}',
-        resultRef: 'result_old_commit',
-        attachmentIds: [],
-      },
-    ];
-
-    for (const continuationItems of [
-      [messageRef],
-      [messageRef, ...resultPair],
-      [messageRef, ...commitPair],
-      [messageRef, ...commitPair, ...resultPair],
-    ]) {
-      await collect(planner, new AbortController().signal, {
-        ...PLAN_INPUT,
-        checkpoint: { ...CHECKPOINT, continuationItems },
-      });
-    }
-
-    expect(
-      model.requests.map((request) => request.tools.some(({ name }) => name === 'commit_context')),
-    ).toEqual([false, true, false, true]);
-    expect(model.requests[1]?.toolChoice).toBeUndefined();
-  });
-
-  it('forces a context commit after twenty-four raw tool results while retaining the checkpoint-safe catalog', async () => {
-    const eligibleCallIds = Array.from(
-      { length: 24 },
-      (_, index) => `call_browser_${String(index + 1)}`,
-    );
-    const throughCallId = eligibleCallIds.at(-1) ?? '';
-    const model = provider(async function* () {
-      yield { type: 'response.started', responseId: 'resp_forced_commit' };
-      yield {
-        type: 'tool.started',
-        callId: 'call_commit',
-        name: 'commit_context',
-      };
-      yield {
-        type: 'tool.completed',
-        callId: 'call_commit',
-        name: 'commit_context',
-        argumentsJson: JSON.stringify({
-          state: 'Older browser observations are summarized. Continue with the next page action.',
-          throughCallId,
-        }),
-      };
+      yield { type: 'response.started', responseId: 'resp_without_legacy_commit' };
+      yield { type: 'text.delta', delta: 'Continue without the legacy tool.' };
       yield {
         type: 'response.completed',
-        responseId: 'resp_forced_commit',
+        responseId: 'resp_without_legacy_commit',
         usage: null,
       };
     });
@@ -511,12 +417,12 @@ describe('CodexAgentPlanner', () => {
       conversations: storage.conversations,
       tasks: storage.tasks,
       attachments: storage.attachments,
-      ids: { create: (prefix) => `${prefix}_forced_commit` },
+      ids: { create: (prefix) => `${prefix}_without_legacy_commit` },
       clock: { now: () => 600 },
     });
     const continuationItems = [
       { type: 'message_ref' as const, messageId: USER_MESSAGE.id },
-      ...Array.from({ length: 24 }, (_, index) => {
+      ...Array.from({ length: 48 }, (_, index) => {
         const callId = `call_browser_${String(index + 1)}`;
         return [
           {
@@ -528,7 +434,7 @@ describe('CodexAgentPlanner', () => {
           {
             type: 'function_call_output' as const,
             callId,
-            output: '{"ok":true}',
+            output: 'x'.repeat(2_048),
             resultRef: `result_${String(index + 1)}`,
             attachmentIds: [],
           },
@@ -541,400 +447,8 @@ describe('CodexAgentPlanner', () => {
       checkpoint: { ...CHECKPOINT, continuationItems },
     });
 
-    expect(model.requests[0]?.toolChoice).toEqual({
-      type: 'function',
-      name: 'commit_context',
-    });
-    expect(model.requests[0]?.tools.map(({ name }) => name)).toEqual([
-      ...BROWSER_TOOL_NAMES,
-      'commit_context',
-    ]);
-    expect(
-      (
-        model.requests[0]?.tools.find(({ name }) => name === 'commit_context')?.parameters as {
-          readonly properties?: {
-            readonly throughCallId?: { readonly enum?: readonly string[] };
-          };
-        }
-      )?.properties?.throughCallId?.enum,
-    ).toEqual(eligibleCallIds);
-  });
-
-  it('forces a context commit before a projected Provider request crosses the size budget', async () => {
-    const model = provider(async function* () {
-      yield { type: 'response.started', responseId: 'resp_projected_commit' };
-      yield {
-        type: 'tool.started',
-        callId: 'call_projected_commit',
-        name: 'commit_context',
-      };
-      yield {
-        type: 'tool.completed',
-        callId: 'call_projected_commit',
-        name: 'commit_context',
-        argumentsJson: JSON.stringify({
-          state: 'The current browser state is preserved for the next action.',
-          throughCallId: 'call_short',
-        }),
-      };
-      yield {
-        type: 'response.completed',
-        responseId: 'resp_projected_commit',
-        usage: null,
-      };
-    });
-    const storage = repositories();
-    const planner = new CodexAgentPlanner({
-      provider: model.instance,
-      tavilyAvailability: { isConfigured: vi.fn(async () => false) },
-      settings: {
-        get: vi.fn(async () => ({
-          model: 'ignored-model-setting',
-          reasoningEffort: 'medium' as const,
-          systemPrompt: 'x'.repeat(80_000),
-          language: 'system' as const,
-          historyMessageLimit: 50,
-        })),
-      },
-      conversations: storage.conversations,
-      tasks: storage.tasks,
-      attachments: storage.attachments,
-      ids: { create: (prefix) => `${prefix}_projected_commit` },
-      clock: { now: () => 625 },
-    });
-    const continuationItems = [
-      { type: 'message_ref' as const, messageId: USER_MESSAGE.id },
-      {
-        type: 'function_call' as const,
-        callId: 'call_short',
-        name: 'browser_get_current_tab',
-        argumentsJson: '{"tabId":0}',
-      },
-      {
-        type: 'function_call_output' as const,
-        callId: 'call_short',
-        output: '{"ok":true}',
-        resultRef: 'result_short',
-        attachmentIds: [],
-      },
-    ];
-
-    await collect(planner, new AbortController().signal, {
-      ...PLAN_INPUT,
-      checkpoint: { ...CHECKPOINT, continuationItems },
-    });
-
-    expect(model.requests[0]?.toolChoice).toEqual({
-      type: 'function',
-      name: 'commit_context',
-    });
-  });
-
-  it('sends an oversized request intact when no completed tool result can be committed', async () => {
-    const model = provider(async function* () {
-      yield {
-        type: 'response.started',
-        responseId: 'resp_no_commit_candidate',
-      };
-      yield { type: 'text.delta', delta: 'Still complete.' };
-      yield {
-        type: 'response.completed',
-        responseId: 'resp_no_commit_candidate',
-        usage: null,
-      };
-    });
-    const storage = repositories();
-    const planner = new CodexAgentPlanner({
-      provider: model.instance,
-      tavilyAvailability: { isConfigured: vi.fn(async () => false) },
-      settings: {
-        get: vi.fn(async () => ({
-          model: 'ignored-model-setting',
-          reasoningEffort: 'medium' as const,
-          systemPrompt: 'x'.repeat(80_000),
-          language: 'system' as const,
-          historyMessageLimit: 50,
-        })),
-      },
-      conversations: storage.conversations,
-      tasks: storage.tasks,
-      attachments: storage.attachments,
-      ids: { create: (prefix) => `${prefix}_no_commit_candidate` },
-      clock: { now: () => 640 },
-    });
-
-    await collect(planner, new AbortController().signal, PLAN_INPUT);
-
     expect(model.requests[0]?.toolChoice).toBeUndefined();
     expect(model.requests[0]?.tools.some(({ name }) => name === 'commit_context')).toBe(false);
-    expect(model.requests[0]?.systemPrompt).toContain('x'.repeat(80_000));
-  });
-
-  it('keeps a forced commit available after an invalid cursor result', async () => {
-    const model = provider(async function* () {
-      yield { type: 'response.started', responseId: 'resp_retry_commit' };
-      yield { type: 'text.delta', delta: 'Unexpected provider fallback.' };
-      yield {
-        type: 'response.completed',
-        responseId: 'resp_retry_commit',
-        usage: null,
-      };
-    });
-    const storage = repositories();
-    const planner = new CodexAgentPlanner({
-      provider: model.instance,
-      tavilyAvailability: { isConfigured: vi.fn(async () => false) },
-      settings: settings(),
-      conversations: storage.conversations,
-      tasks: storage.tasks,
-      attachments: storage.attachments,
-      ids: { create: (prefix) => `${prefix}_retry_commit` },
-      clock: { now: () => 650 },
-    });
-    const eligibleCallIds = Array.from(
-      { length: 24 },
-      (_, index) => `call_browser_${String(index + 1)}`,
-    );
-    const rawPairs = eligibleCallIds.flatMap((callId) => [
-      {
-        type: 'function_call' as const,
-        callId,
-        name: 'browser_click',
-        argumentsJson: '{}',
-      },
-      {
-        type: 'function_call_output' as const,
-        callId,
-        output: '{"ok":true}',
-        resultRef: `result_${callId}`,
-        attachmentIds: [],
-      },
-    ]);
-    const rejectedCommitArguments = JSON.stringify({
-      state: 'The requested cursor did not exist. Preserve the raw browser state.',
-      throughCallId: 'call_hallucinated',
-    });
-
-    await collect(planner, new AbortController().signal, {
-      ...PLAN_INPUT,
-      checkpoint: {
-        ...CHECKPOINT,
-        continuationItems: [
-          { type: 'message_ref', messageId: USER_MESSAGE.id },
-          ...rawPairs,
-          {
-            type: 'function_call',
-            callId: 'call_rejected_commit',
-            name: 'commit_context',
-            argumentsJson: rejectedCommitArguments,
-          },
-          {
-            type: 'function_call_output',
-            callId: 'call_rejected_commit',
-            output: JSON.stringify({
-              ok: false,
-              code: 'INVALID_CONTEXT_COMMIT_CURSOR',
-              validThroughCallIds: eligibleCallIds,
-            }),
-            resultRef: 'result_rejected_commit',
-            attachmentIds: [],
-          },
-        ],
-      },
-    });
-
-    expect(model.requests[0]?.toolChoice).toEqual({
-      type: 'function',
-      name: 'commit_context',
-    });
-    expect(
-      (
-        model.requests[0]?.tools.find(({ name }) => name === 'commit_context')?.parameters as {
-          readonly properties?: {
-            readonly throughCallId?: { readonly enum?: readonly string[] };
-          };
-        }
-      )?.properties?.throughCallId?.enum,
-    ).toEqual(eligibleCallIds);
-  });
-
-  it('forces commit only after an image-backed result has been consumed by a later action', async () => {
-    let turn = 0;
-    const model = provider(async function* () {
-      turn += 1;
-      const responseId = `resp_image_pressure_${String(turn)}`;
-      yield { type: 'response.started', responseId };
-      yield { type: 'text.delta', delta: `Answer ${String(turn)}.` };
-      yield { type: 'response.completed', responseId, usage: null };
-    });
-    const storage = repositories();
-    const image = new Blob(['image'], { type: 'image/png' });
-    vi.mocked(storage.attachments.get).mockImplementation(async (id) =>
-      id === 'image_1'
-        ? {
-            id,
-            blob: image,
-            mimeType: image.type,
-            byteSize: image.size,
-            width: 1,
-            height: 1,
-            source: 'visual_fallback',
-            createdAt: 1,
-          }
-        : undefined,
-    );
-    const planner = new CodexAgentPlanner({
-      provider: model.instance,
-      tavilyAvailability: { isConfigured: vi.fn(async () => false) },
-      settings: settings(),
-      conversations: storage.conversations,
-      tasks: storage.tasks,
-      attachments: storage.attachments,
-      ids: { create: (prefix) => `${prefix}_${String(turn)}` },
-      clock: { now: () => 700 + turn },
-    });
-    const screenshotPair = [
-      {
-        type: 'function_call' as const,
-        callId: 'call_screenshot',
-        name: 'browser_inspect',
-        argumentsJson: '{"mode":"screenshot"}',
-      },
-      {
-        type: 'function_call_output' as const,
-        callId: 'call_screenshot',
-        output: '{"ok":true}',
-        resultRef: 'result_screenshot',
-        attachmentIds: ['image_1'],
-      },
-    ];
-    const actionPair = [
-      {
-        type: 'function_call' as const,
-        callId: 'call_click',
-        name: 'browser_click_point',
-        argumentsJson: '{"x":10,"y":20}',
-      },
-      {
-        type: 'function_call_output' as const,
-        callId: 'call_click',
-        output: '{"ok":true}',
-        resultRef: 'result_click',
-        attachmentIds: [],
-      },
-    ];
-
-    for (const continuationItems of [
-      [{ type: 'message_ref' as const, messageId: USER_MESSAGE.id }, ...screenshotPair],
-      [
-        { type: 'message_ref' as const, messageId: USER_MESSAGE.id },
-        ...screenshotPair,
-        ...actionPair,
-      ],
-    ]) {
-      await collect(planner, new AbortController().signal, {
-        ...PLAN_INPUT,
-        checkpoint: { ...CHECKPOINT, continuationItems },
-      });
-    }
-
-    expect(model.requests.map(({ toolChoice }) => toolChoice)).toEqual([
-      undefined,
-      { type: 'function', name: 'commit_context' },
-    ]);
-  });
-
-  it('emits a validated context commit and rejects it when the tool was not offered', async () => {
-    const state = 'Goal: continue from the saved state.';
-    const throughCallId = 'call_previous';
-    const argumentsJson = JSON.stringify({ state, throughCallId });
-    const commitEvents = async function* (): AsyncGenerator<ModelStreamEvent> {
-      yield { type: 'response.started', responseId: 'resp_commit' };
-      yield {
-        type: 'tool.started',
-        callId: 'call_commit',
-        name: 'commit_context',
-      };
-      yield {
-        type: 'tool.completed',
-        callId: 'call_commit',
-        name: 'commit_context',
-        argumentsJson,
-      };
-      yield {
-        type: 'response.completed',
-        responseId: 'resp_commit',
-        usage: null,
-      };
-    };
-    const eligibleContinuation = [
-      { type: 'message_ref' as const, messageId: USER_MESSAGE.id },
-      {
-        type: 'function_call' as const,
-        callId: 'call_previous',
-        name: 'browser_get_current_tab',
-        argumentsJson: '{}',
-      },
-      {
-        type: 'function_call_output' as const,
-        callId: 'call_previous',
-        output: '{}',
-        resultRef: 'result_previous',
-        attachmentIds: [],
-      },
-    ];
-    const makePlanner = (model: ModelProvider, storage: ReturnType<typeof repositories>) =>
-      new CodexAgentPlanner({
-        provider: model,
-        tavilyAvailability: { isConfigured: vi.fn(async () => false) },
-        settings: settings(),
-        conversations: storage.conversations,
-        tasks: storage.tasks,
-        attachments: storage.attachments,
-        ids: { create: (prefix) => `${prefix}_1` },
-        clock: { now: () => 500 },
-      });
-
-    const eligibleStorage = repositories();
-    await expect(
-      collect(
-        makePlanner(provider(commitEvents).instance, eligibleStorage),
-        new AbortController().signal,
-        {
-          ...PLAN_INPUT,
-          checkpoint: {
-            ...CHECKPOINT,
-            continuationItems: eligibleContinuation,
-          },
-        },
-      ),
-    ).resolves.toMatchObject([
-      {
-        type: 'context.commit',
-        call: {
-          callId: 'call_commit',
-          name: 'commit_context',
-          argumentsJson,
-          arguments: { state, throughCallId },
-        },
-      },
-    ]);
-    expect(eligibleStorage.appendMessage).not.toHaveBeenCalled();
-
-    const unavailableStorage = repositories();
-    await expect(
-      collect(
-        makePlanner(provider(commitEvents).instance, unavailableStorage),
-        new AbortController().signal,
-        {
-          ...PLAN_INPUT,
-          checkpoint: {
-            ...CHECKPOINT,
-            continuationItems: [{ type: 'message_ref' as const, messageId: USER_MESSAGE.id }],
-          },
-        },
-      ),
-    ).rejects.toMatchObject({ code: 'INVALID_RESPONSE' });
   });
 
   it('emits one validated browser call in the common Agent loop', async () => {
@@ -1800,5 +1314,182 @@ describe('CodexAgentPlanner', () => {
         text: 'Partial answer',
       }),
     );
+  });
+
+  it('uses native compaction before another model stream at the token high-water mark', async () => {
+    const compact = vi.fn<NonNullable<ModelProvider['compact']>>(async () => ({
+      itemId: 'cmp_native',
+      encryptedContent: 'opaque-native-context',
+    }));
+    const stream = vi.fn<ModelProvider['stream']>(() => {
+      throw new Error('stream must not run before compaction is persisted');
+    });
+    const storage = repositories();
+    const planner = new CodexAgentPlanner({
+      provider: { compact, stream },
+      tavilyAvailability: CONFIGURED_TAVILY,
+      settings: settings(),
+      conversations: storage.conversations,
+      tasks: storage.tasks,
+      attachments: storage.attachments,
+      ids: { create: (prefix) => `${prefix}_compact` },
+      clock: { now: () => 500 },
+    });
+    const input: AgentPlanInput = {
+      task: TASK,
+      checkpoint: {
+        ...CHECKPOINT,
+        lastModelInputTokens: 220_000,
+        completedToolResults: [
+          {
+            callId: 'call_inspect',
+            toolName: 'browser_inspect',
+            argumentsJson: '{"tabId":7,"mode":"interactive"}',
+            output: '{"ok":true}',
+            resultRef: 'result_inspect',
+          },
+        ],
+        continuationItems: [
+          { type: 'message_ref', messageId: USER_MESSAGE.id },
+          {
+            type: 'function_call',
+            callId: 'call_inspect',
+            name: 'browser_inspect',
+            argumentsJson: '{"tabId":7,"mode":"interactive"}',
+          },
+          {
+            type: 'function_call_output',
+            callId: 'call_inspect',
+            output: '{"ok":true}',
+            resultRef: 'result_inspect',
+          },
+        ],
+      },
+    };
+
+    await expect(collect(planner, new AbortController().signal, input)).resolves.toEqual([
+      {
+        type: 'context.compacted',
+        continuationItems: [
+          { type: 'message_ref', messageId: USER_MESSAGE.id },
+          {
+            type: 'compaction',
+            itemId: 'cmp_native',
+            encryptedContent: 'opaque-native-context',
+          },
+        ],
+      },
+    ]);
+    expect(stream).not.toHaveBeenCalled();
+    expect(compact).toHaveBeenCalledOnce();
+    expect(compact.mock.calls[0]?.[0].input).toEqual([
+      {
+        type: 'message',
+        role: 'user',
+        content: [{ type: 'input_text', text: 'Continue checkout' }],
+      },
+      expect.objectContaining({ type: 'function_call', callId: 'call_inspect' }),
+      expect.objectContaining({ type: 'function_call_output', callId: 'call_inspect' }),
+    ]);
+  });
+
+  it('forces inspection before compaction or final text while a virtualized scroll is incomplete', async () => {
+    const model = provider(async function* () {
+      yield { type: 'response.started', responseId: 'resp_forced_inspect' };
+      yield {
+        type: 'tool.started',
+        callId: 'call_forced_inspect',
+        name: 'browser_inspect',
+      };
+      yield {
+        type: 'tool.completed',
+        callId: 'call_forced_inspect',
+        name: 'browser_inspect',
+        argumentsJson: JSON.stringify({
+          tabId: 0,
+          mode: 'interactive',
+          since: 'snapshot_before_scroll',
+        }),
+      };
+      yield {
+        type: 'response.completed',
+        responseId: 'resp_forced_inspect',
+        usage: null,
+      };
+    });
+    const compact = vi.fn<NonNullable<ModelProvider['compact']>>(async () => ({
+      itemId: 'cmp_unfinished_scroll',
+      encryptedContent: 'opaque-unfinished-scroll',
+    }));
+    const storage = repositories();
+    const planner = new CodexAgentPlanner({
+      provider: { ...model.instance, compact },
+      tavilyAvailability: CONFIGURED_TAVILY,
+      settings: settings(),
+      conversations: storage.conversations,
+      tasks: storage.tasks,
+      attachments: storage.attachments,
+      ids: { create: (prefix) => `${prefix}_forced_inspect` },
+      clock: { now: () => 500 },
+    });
+    const input: AgentPlanInput = {
+      task: TASK,
+      checkpoint: {
+        ...CHECKPOINT,
+        lastModelInputTokens: 220_000,
+        continuationItems: [
+          { type: 'message_ref', messageId: USER_MESSAGE.id },
+          {
+            type: 'function_call',
+            callId: 'call_incomplete_scroll',
+            name: 'browser_scroll',
+            argumentsJson: JSON.stringify({
+              tabId: 0,
+              target: 'ref_history',
+              deltaX: 0,
+              deltaY: -10_000,
+            }),
+          },
+          {
+            type: 'function_call_output',
+            callId: 'call_incomplete_scroll',
+            output: JSON.stringify({
+              ok: true,
+              tabId: 7,
+              data: {
+                action: 'scroll',
+                requestedDeltaApplied: false,
+                remainingDeltaX: 0,
+                remainingDeltaY: -9_035,
+                loadedMore: true,
+                boundaryVerified: false,
+              },
+            }),
+            resultRef: 'result_incomplete_scroll',
+          },
+        ],
+      },
+    };
+
+    await expect(collect(planner, new AbortController().signal, input)).resolves.toMatchObject([
+      {
+        type: 'browser.call',
+        call: { name: 'browser_inspect', operation: 'inspect' },
+      },
+    ]);
+
+    expect(compact).not.toHaveBeenCalled();
+    expect(model.requests).toHaveLength(1);
+    expect(model.requests[0]?.toolChoice).toEqual({
+      type: 'function',
+      name: 'browser_inspect',
+    });
+    expect(model.requests[0]?.tools.map(({ name }) => name)).toEqual(['browser_inspect']);
+    expect(model.requests[0]?.tools[0]?.parameters).toMatchObject({
+      properties: {
+        tabId: { enum: [0] },
+        mode: { enum: ['interactive'] },
+      },
+    });
   });
 });

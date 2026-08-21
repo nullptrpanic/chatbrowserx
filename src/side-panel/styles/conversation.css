@@ -389,6 +389,8 @@
 
 .message-actions {
   display: flex;
+  flex-wrap: wrap;
+  gap: 2px;
   margin-top: 5px;
 }
 
@@ -407,6 +409,38 @@
 .message-actions button:hover {
   color: var(--cbx-text);
   background: var(--cbx-hover);
+}
+
+.message-actions button:disabled {
+  cursor: default;
+  opacity: 0.65;
+}
+
+.task-context-clear-confirmation {
+  margin-top: 5px;
+  padding: 7px 8px;
+  border: 1px solid var(--cbx-divider);
+  border-radius: 7px;
+  color: var(--cbx-muted);
+  background: var(--cbx-subtle);
+  font-size: 10px;
+}
+
+.task-context-clear-confirmation p {
+  margin: 0 0 6px;
+}
+
+.task-context-clear-confirmation > div {
+  display: flex;
+  gap: 6px;
+}
+
+.task-context-clear-confirmation button {
+  padding: 3px 7px;
+  border-radius: 5px;
+  color: var(--cbx-text);
+  background: var(--cbx-hover);
+  font-size: 10px;
 }
 
 .streaming-label,

@@ -145,7 +145,9 @@ describe('BROWSER_TOOL_DEFINITIONS', () => {
           readonly properties: Readonly<Record<string, unknown>>;
         }
       | undefined;
-    const mode = parameters?.properties.mode as { readonly enum?: readonly string[] };
+    const mode = parameters?.properties.mode as {
+      readonly enum?: readonly string[];
+    };
 
     expect(mode.enum).toEqual(['content', 'interactive', 'interactive_deep', 'screenshot']);
   });
@@ -159,7 +161,36 @@ describe('BROWSER_TOOL_DEFINITIONS', () => {
     expect(definitions.get('browser_inspect')?.description).toContain(
       'Do not use screenshots to verify semantic form state',
     );
+    expect(definitions.get('browser_inspect')?.description).toContain(
+      'browser_click_point becomes available on the next model turn',
+    );
     expect(definitions.get('browser_click')?.description).toContain('advertises set_checked');
+    expect(definitions.get('browser_inspect')?.description).toContain(
+      'scrollable ref that advertises scroll',
+    );
+    expect(definitions.get('browser_scroll')?.description).toContain(
+      'Do not click passive content to reveal more items',
+    );
+    expect(definitions.get('browser_scroll')?.description).toContain(
+      'One call may consume the distance in multiple virtualized segments',
+    );
+    expect(definitions.get('browser_scroll')?.description).toContain(
+      'observations is the chronological sequence',
+    );
+    expect(definitions.get('browser_scroll')?.description).toContain(
+      'instead of immediately inspecting it again',
+    );
+    expect(definitions.get('browser_scroll')?.description).toContain('virtualized content changed');
+    expect(definitions.get('browser_scroll')?.description).toContain('loadedMore=true');
+    expect(definitions.get('browser_scroll')?.description).toContain('needsBoundaryProbe=true');
+    expect(definitions.get('browser_scroll')?.description).toContain('boundaryVerified=true');
+    expect(definitions.get('browser_scroll')?.description).toContain('requestedDeltaApplied=false');
+    expect(definitions.get('browser_scroll')?.description).toContain('remainingDelta');
+    expect(definitions.get('browser_scroll')?.description).toContain(
+      'outside the requested interval',
+    );
+    expect(definitions.get('browser_select')?.description).toContain('advertises select');
+    expect(definitions.get('browser_select')?.description).toContain('custom dropdown');
   });
 
   it('requires an explicit string base snapshot on model-generated inspections', () => {

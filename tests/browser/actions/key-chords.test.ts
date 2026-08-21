@@ -15,6 +15,12 @@ describe('parseKeyChord', () => {
       code: 'Enter',
       modifiers: 0,
     });
+    expect(parseKeyChord('ESC')).toEqual({
+      kind: 'key',
+      key: 'Escape',
+      code: 'Escape',
+      modifiers: 0,
+    });
   });
 
   it('uses explicit logical history tokens instead of platform shortcuts', () => {

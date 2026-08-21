@@ -1,12 +1,12 @@
 import { handlePageCommand } from '../page/browser-command-handler';
-import { mountSelectionFeature } from '../page/selection/mount-selection-feature';
 
 interface PageContentGlobal {
   __chatBrowserXPageCommandsV1__?:
     | boolean
     | {
         readonly listener: Parameters<typeof chrome.runtime.onMessage.addListener>[0];
-        readonly disposeSelection: () => void;
+        /** Removes listeners installed by builds that included selected-text actions. */
+        readonly disposeSelection?: (() => void) | undefined;
       };
 }
 
@@ -20,15 +20,15 @@ if (typeof previous === 'object') {
     // A listener from the previous extension context may already be detached.
   }
   try {
-    previous.disposeSelection();
+    previous.disposeSelection?.();
   } catch {
     // Reinstallation must continue even if the previous context can no longer clean itself up.
   }
-} else if (previous === true) {
-  // Migrate pages that still contain the boolean guard used by older builds.
-  for (const overlay of document.querySelectorAll('[data-chatbrowserx-overlay="selection"]')) {
-    overlay.remove();
-  }
+}
+
+// Remove a host left by an older injected build, including the legacy boolean-guard build.
+for (const overlay of document.querySelectorAll('[data-chatbrowserx-overlay="selection"]')) {
+  overlay.remove();
 }
 
 const listener: Parameters<typeof chrome.runtime.onMessage.addListener>[0] = (
@@ -42,5 +42,4 @@ const listener: Parameters<typeof chrome.runtime.onMessage.addListener>[0] = (
 chrome.runtime.onMessage.addListener(listener);
 pageGlobal.__chatBrowserXPageCommandsV1__ = {
   listener,
-  disposeSelection: mountSelectionFeature(),
 };

@@ -71,6 +71,35 @@ afterEach(() => {
 });
 
 describe('PanelClient', () => {
+  it('sends the explicit cancelled-task context clear command and refreshes shared state', async () => {
+    const current = snapshot();
+    const send = vi.fn<RuntimePort['send']>(async (message) => ({
+      version: 1,
+      requestId: message.requestId,
+      ok: true,
+      data: message.type === 'panel.getSnapshot' ? current : {},
+    }));
+    const client = new PanelClient(
+      { send },
+      { getActiveTab: vi.fn(async () => ({ id: 7 })) },
+      { pollIntervalMs: 60_000 },
+    );
+    await client.connect();
+
+    await client.clearTaskContext('task_1');
+
+    expect(send).toHaveBeenCalledWith(
+      expect.objectContaining({
+        type: 'task.clearContext',
+        payload: { taskId: 'task_1' },
+      }),
+    );
+    expect(
+      send.mock.calls.filter(([message]) => message.type === 'panel.getSnapshot'),
+    ).toHaveLength(2);
+    client.dispose();
+  });
+
   it('opens the saved source URL without reusing a previously recorded tab', async () => {
     const get = vi.fn(async () => ({ id: 17, windowId: 4 }));
     const update = vi.fn(async () => ({ id: 17 }));

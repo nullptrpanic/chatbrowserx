@@ -134,6 +134,7 @@ export function App({ runtimePort, environment, panelClient, attachmentClient }:
               onResume={() => void client.resumeTask()}
               onRetry={() => void client.retryTask()}
               onCancel={() => void client.cancelTask()}
+              onClearTaskContext={(taskId) => client.clearTaskContext(taskId)}
             />
           </div>
           <ChatComposer

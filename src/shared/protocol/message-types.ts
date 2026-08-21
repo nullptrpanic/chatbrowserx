@@ -40,14 +40,10 @@ export type ExtensionMessage =
   | Message<'task.resume', { taskId: string }>
   | Message<'task.retry', { taskId: string }>
   | Message<'task.cancel', { taskId: string }>
+  | Message<'task.clearContext', { taskId: string }>
   | Message<'screenshot.capture', { tabId: number; mode: 'viewport' | 'region' }>
   | Message<'image.preview.open', { tabId: number; attachmentId: string }>
-  | Message<'page.features.ensure', { tabId: number }>
-  | Message<'selection.translate', { text: string; pageUrl: string; pageTitle: string }>
-  | Message<
-      'selection.ask',
-      { text: string; question: string; pageUrl: string; pageTitle: string }
-    >;
+  | Message<'page.features.ensure', { tabId: number }>;
 
 export type PageCommand =
   | Message<'page.ping', Record<string, never>>

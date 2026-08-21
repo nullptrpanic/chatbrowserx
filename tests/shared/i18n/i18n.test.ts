@@ -3,7 +3,6 @@ import { createTranslator, resolveLanguage } from '../../../src/shared/i18n/i18n
 import { en } from '../../../src/shared/i18n/messages.en';
 import { ja } from '../../../src/shared/i18n/messages.ja';
 import { zhCN } from '../../../src/shared/i18n/messages.zh-CN';
-import { resolveSelectionLabels } from '../../../src/page/selection/selection-i18n';
 
 describe('interface translations', () => {
   it('keeps every catalog key aligned and every visible value nonblank', () => {
@@ -20,11 +19,5 @@ describe('interface translations', () => {
     expect(resolveLanguage('system', 'ja-JP')).toBe('ja');
     expect(resolveLanguage('system', 'fr-FR')).toBe('en');
     expect(createTranslator('en')('taskPlanning')).toBe('Generating a response');
-  });
-
-  it('localizes page selection controls from the browser locale only', () => {
-    expect(resolveSelectionLabels('zh-CN').translate).toBe('翻译');
-    expect(resolveSelectionLabels('ja-JP').translate).toBe('翻訳');
-    expect(resolveSelectionLabels('de-DE').translate).toBe('Translate');
   });
 });

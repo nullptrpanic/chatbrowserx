@@ -388,6 +388,114 @@ describe('buildSemanticPageSnapshot', () => {
     );
   });
 
+  it('synthesizes one named button for a DOM-only clickable action control', () => {
+    const result = buildSemanticPageSnapshot({
+      axNodes: [axNode('root', 1, 'RootWebArea', 'Calendar')],
+      domSnapshot: domSnapshot([
+        { backendNodeId: 1, nodeName: '#document', parentIndex: -1 },
+        {
+          backendNodeId: 10,
+          nodeName: 'DIV',
+          parentIndex: 0,
+          attributes: { class: 'calendar-shell' },
+          bounds: [0, 0, 1_440, 900],
+        },
+        {
+          backendNodeId: 20,
+          nodeName: 'DIV',
+          parentIndex: 1,
+          attributes: { class: 'add-new-event-btn' },
+          cursor: 'pointer',
+          clickable: true,
+          bounds: [1_370, 830, 45, 45],
+        },
+        {
+          backendNodeId: 21,
+          nodeName: 'SPAN',
+          parentIndex: 2,
+          attributes: { class: 'add-new-event-icon-wrapper' },
+          cursor: 'pointer',
+          bounds: [1_370, 830, 45, 45],
+        },
+      ]),
+      frame: 'main',
+      viewport: { x: 0, y: 0, width: 1_440, height: 900 },
+    });
+
+    expect(result.entries).toEqual([
+      {
+        depth: 2,
+        role: 'button',
+        name: 'Add new event',
+        targetIndex: 0,
+        actions: ['click'],
+        inViewport: true,
+      },
+    ]);
+    expect(result.targets).toEqual([
+      expect.objectContaining({
+        backendNodeId: 20,
+        role: 'button',
+        name: 'Add new event',
+        state: [],
+        actions: ['click'],
+      }),
+    ]);
+  });
+
+  it('promotes passive option text to its nearest actionable tree ancestor', () => {
+    const result = buildSemanticPageSnapshot({
+      axNodes: [
+        axNode('root', 1, 'RootWebArea', 'Policy editor', { childIds: ['domain-text'] }),
+        axNode('domain-text', 21, 'StaticText', '域名', { parentId: 'root' }),
+      ],
+      domSnapshot: domSnapshot([
+        { backendNodeId: 1, nodeName: '#document', parentIndex: -1 },
+        {
+          backendNodeId: 10,
+          nodeName: 'DIV',
+          parentIndex: 0,
+          attributes: { role: 'tree' },
+          bounds: [200, 200, 300, 240],
+        },
+        {
+          backendNodeId: 20,
+          nodeName: 'DIV',
+          parentIndex: 1,
+          attributes: { role: 'treeitem', 'aria-selected': 'false' },
+          cursor: 'pointer',
+          clickable: true,
+          bounds: [220, 280, 240, 40],
+        },
+        {
+          backendNodeId: 21,
+          nodeName: 'SPAN',
+          parentIndex: 2,
+          cursor: 'auto',
+          bounds: [250, 288, 80, 24],
+        },
+      ]),
+      frame: 'main',
+      viewport: { x: 0, y: 0, width: 1_000, height: 800 },
+    });
+
+    expect(result.entries).toContainEqual(
+      expect.objectContaining({
+        role: 'statictext',
+        name: '域名',
+        actions: ['click'],
+        inViewport: true,
+      }),
+    );
+    expect(result.targets).toContainEqual(
+      expect.objectContaining({
+        backendNodeId: 20,
+        name: '域名',
+        actions: ['click'],
+      }),
+    );
+  });
+
   it('follows AX child order and preserves repeated labels in different groups', () => {
     const result = buildSemanticPageSnapshot({
       axNodes: [
@@ -1126,6 +1234,57 @@ describe('buildSemanticPageSnapshot', () => {
     });
 
     expect(result.hasVisualSurface).toBe(true);
+  });
+
+  it('synthesizes a passive image entry for a large visible content image omitted from AX', () => {
+    const result = buildSemanticPageSnapshot({
+      axNodes: [axNode('root', 1, 'RootWebArea', 'Sent mail')],
+      domSnapshot: domSnapshot([
+        { backendNodeId: 1, nodeName: '#document', parentIndex: -1 },
+        {
+          backendNodeId: 2,
+          nodeName: 'DIV',
+          parentIndex: 0,
+          bounds: [100, 100, 720, 480],
+        },
+        {
+          backendNodeId: 3,
+          nodeName: 'IMG',
+          parentIndex: 1,
+          attributes: { src: 'blob:https://mail.test/captured-screenshot' },
+          bounds: [120, 140, 640, 360],
+        },
+      ]),
+      frame: 'main',
+      viewport: { x: 0, y: 0, width: 1_000, height: 800 },
+    });
+
+    expect(result.entries).toContainEqual({
+      depth: 2,
+      role: 'image',
+      name: 'Content image',
+      inViewport: true,
+    });
+    expect(result.targets).toEqual([]);
+  });
+
+  it('does not synthesize passive image entries for small decorative icons', () => {
+    const result = buildSemanticPageSnapshot({
+      axNodes: [axNode('root', 1, 'RootWebArea', 'Toolbar')],
+      domSnapshot: domSnapshot([
+        { backendNodeId: 1, nodeName: '#document', parentIndex: -1 },
+        {
+          backendNodeId: 2,
+          nodeName: 'IMG',
+          parentIndex: 0,
+          attributes: { src: '/icon.png' },
+          bounds: [20, 20, 24, 24],
+        },
+      ]),
+      frame: 'main',
+    });
+
+    expect(result.entries).toEqual([]);
   });
 
   it('keeps native checked state and prunes duplicate inline text', () => {

@@ -472,7 +472,10 @@ export class PanelService {
       await this.#dependencies.conversations.appendMessage(message);
       const goal = taskGoal(text);
       const snapshot =
-        latestTask?.status === 'cancelled'
+        latestTask?.status === 'cancelled' &&
+        !(await this.#dependencies.tasks
+          .listEvents(latestTask.id)
+          .then((events) => events.some((event) => event.type === 'task.context-cleared')))
           ? await this.#dependencies.commands.continueCancelled({
               sourceTaskId: latestTask.id,
               tabId: input.tabId,
@@ -720,6 +723,7 @@ export class PanelService {
       sequence: checkpoint?.sequence ?? currentTaskEvents.at(-1)?.sequence ?? 0,
       completedToolCallCount: completedResults.length,
       detailItemCount: detailIndexes.itemCount,
+      contextCleared: currentTaskEvents.some((event) => event.type === 'task.context-cleared'),
       lastError:
         task.lastError === null
           ? null

@@ -11,7 +11,7 @@ export const ja = {
   unavailable: 'バックグラウンドに接続できません',
   retryConnection: '再接続',
   pageUnsupported:
-    'このページではスクリーンショットと選択機能を使えませんが、チャットは利用できます',
+    'このページではスクリーンショットとブラウザー操作を使えませんが、チャットは利用できます',
   pageAccessReady: 'ページアクセス許可済み',
   pageAccessNeeded: 'すべてのサイトへのアクセスが無効です',
   emptyTitle: '今日は何について話しますか？',
@@ -115,6 +115,12 @@ export const ja = {
   contextCommitSummary: '呼び出し {calls} 件を圧縮 · {chars} 文字 / 画像 {images} 枚を解放',
   browserToolResultRecorded: '{tool} 完了',
   contextCommitResultRecorded: '作業状態を保存しました',
+  clearTaskContext: 'タスクの文脈を消去',
+  clearTaskContextDescription:
+    '続行用の文脈だけを消去します。チャット履歴と実行詳細は保持されます。',
+  confirmClearTaskContext: '消去する',
+  cancelClearTaskContext: 'キャンセル',
+  taskContextCleared: '文脈を消去しました',
   collapseToolOutput: '{tool} の結果を閉じる',
   expandToolOutput: '{tool} の結果を表示',
   collapseTerminalOutput: 'ターミナル出力を閉じる',

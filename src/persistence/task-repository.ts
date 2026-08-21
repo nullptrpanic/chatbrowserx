@@ -89,6 +89,7 @@ const MAX_MODEL_OUTPUT_ITEMS_PER_CALL = 8;
 const MAX_ENCRYPTED_REASONING_CHARACTERS = 8 * 1024 * 1024;
 const MAX_REASONING_SUMMARIES_PER_ITEM = 8;
 const MAX_REASONING_SUMMARY_CHARACTERS = 20_000;
+const MAX_COMPACTION_ENCRYPTED_CHARACTERS = 8 * 1024 * 1024;
 
 function normalizeAttachmentIds(value: unknown): readonly string[] {
   if (value === undefined) return [];
@@ -100,9 +101,7 @@ function normalizeAttachmentIds(value: unknown): readonly string[] {
 }
 
 /** Preserves only bounded opaque Provider output required for stateless continuation. */
-function normalizeModelOutputItems(
-  value: unknown,
-): readonly ModelOutputContinuationItem[] | null {
+function normalizeModelOutputItems(value: unknown): readonly ModelOutputContinuationItem[] | null {
   if (value === undefined) return [];
   if (!Array.isArray(value) || value.length > MAX_MODEL_OUTPUT_ITEMS_PER_CALL) return null;
   const normalized: ModelOutputContinuationItem[] = [];
@@ -225,6 +224,7 @@ function normalizeStoredContinuation(
 
   const items: ContinuationItem[] = [];
   const usedCallIds = new Set<string>();
+  let seenCompaction = false;
   let unresolvedCall: Extract<ContinuationItem, { type: 'function_call' }> | null = null;
   for (const value of rawItems) {
     if (typeof value !== 'object' || value === null) return null;
@@ -265,6 +265,27 @@ function normalizeStoredContinuation(
       };
       usedCallIds.add(item.callId);
       items.push(unresolvedCall);
+      continue;
+    }
+    if (item.type === 'compaction') {
+      if (
+        unresolvedCall !== null ||
+        seenCompaction ||
+        typeof item.itemId !== 'string' ||
+        item.itemId.length === 0 ||
+        item.itemId.length > 256 ||
+        typeof item.encryptedContent !== 'string' ||
+        item.encryptedContent.length === 0 ||
+        item.encryptedContent.length > MAX_COMPACTION_ENCRYPTED_CHARACTERS
+      ) {
+        return null;
+      }
+      seenCompaction = true;
+      items.push({
+        type: 'compaction',
+        itemId: item.itemId,
+        encryptedContent: item.encryptedContent,
+      });
       continue;
     }
     if (item.type === 'function_call_output') {
@@ -324,6 +345,7 @@ function normalizeCheckpoint(checkpoint: Checkpoint): Checkpoint {
     readonly pendingToolCall?: unknown;
     readonly browserToolCallsInAttempt?: unknown;
     readonly browserTargetTabId?: unknown;
+    readonly lastModelInputTokens?: unknown;
   };
   const completedToolResults = Array.isArray(checkpoint.completedToolResults)
     ? checkpoint.completedToolResults
@@ -358,6 +380,11 @@ function normalizeCheckpoint(checkpoint: Checkpoint): Checkpoint {
     completedToolResults,
     continuationItems,
     pendingToolCall: storedContinuation?.pendingToolCall ?? null,
+    ...(typeof raw.lastModelInputTokens === 'number' &&
+    Number.isSafeInteger(raw.lastModelInputTokens) &&
+    raw.lastModelInputTokens >= 0
+      ? { lastModelInputTokens: raw.lastModelInputTokens }
+      : {}),
     browserToolCallsInAttempt,
     ...(browserTargetTabId === undefined ? {} : { browserTargetTabId }),
     createdAt: checkpoint.createdAt,

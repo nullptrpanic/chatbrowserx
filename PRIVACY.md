@@ -59,17 +59,14 @@ credential-bearing, and non-HTTP(S) targets.
 
 ## Page access and captures
 
-All-site access supports user-triggered screenshots, page-selection features, and reviewed browser
-agent operations on user-opened HTTP(S) tabs. Browser control may attach Chrome DevTools Protocol to
+All-site access supports user-triggered screenshots and reviewed browser agent operations on
+user-opened HTTP(S) tabs. Browser control may attach Chrome DevTools Protocol to
 the selected tab, which makes Chrome show its normal debugger notice. Browser-internal pages,
 extension pages, DevTools, local files, credential-bearing URLs, and unsupported schemes are rejected.
 
 - Viewport or region screenshots enter a model request only after the user captures and keeps them in the draft, then sends that draft.
 - An agent screenshot enters a model request only after Codex explicitly calls the screenshot inspect
   tool for the selected tab. Extension overlays are hidden during capture and restored afterward.
-- Translation sends the selected text plus bounded page URL and title.
-- Ask AI turns the selected text and question into an explicit chat message.
-- Password and editable surfaces do not trigger the selection feature.
 
 ## Network analysis
 

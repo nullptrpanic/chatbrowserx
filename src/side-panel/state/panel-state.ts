@@ -89,6 +89,7 @@ const panelTaskSchema = z
     sequence: z.number().int().nonnegative(),
     completedToolCallCount: z.number().int().nonnegative().optional(),
     detailItemCount: z.number().int().nonnegative().optional(),
+    contextCleared: z.boolean().optional(),
     lastError: z
       .object({
         code: z.string().max(128),

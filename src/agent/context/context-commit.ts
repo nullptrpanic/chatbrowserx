@@ -27,10 +27,13 @@ export class ContextCommitCursorError extends Error {
   }
 }
 
-const MAX_RAW_TOOL_PAIRS_BEFORE_COMMIT = 24;
-const MAX_RAW_TOOL_CHARACTERS_BEFORE_COMMIT = 64 * 1024;
+const MAX_RAW_TOOL_PAIRS_BEFORE_COMMIT = 48;
+const MAX_RAW_TOOL_CHARACTERS_BEFORE_COMMIT = 192 * 1024;
+const MIN_RAW_TOOL_PAIRS_BEFORE_OPTIONAL_COMMIT = 12;
+const MIN_RAW_TOOL_CHARACTERS_BEFORE_OPTIONAL_COMMIT = 64 * 1024;
+const MAX_DYNAMIC_RAW_TOOL_CHARACTERS_BEFORE_OPTIONAL_COMMIT = 128 * 1024;
 const MAX_COMMITTED_STATE_CHARACTERS = 8_192;
-export const MAX_PROJECTED_PROVIDER_INPUT_CHARACTERS = 80_000;
+export const MAX_PROJECTED_PROVIDER_INPUT_CHARACTERS = 160_000;
 const ELEMENT_REF_PATTERN =
   /\b(?:ref_[a-z0-9_-]{1,64}|e(?=[a-z0-9]{8,32}\b)(?=[a-z0-9]*\d)[a-z0-9]{8,32})\b/gi;
 const SNAPSHOT_ID_PATTERN = /\bs(?=[a-f0-9]{16,32}\b)(?=[a-f0-9]*\d)[a-f0-9]{16,32}\b/gi;
@@ -112,6 +115,11 @@ export function contextCommitCandidateCallIds(
       if (pendingCall) invalidContinuation();
       continue;
     }
+    if (item.type === 'compaction') {
+      if (pendingCall) invalidContinuation();
+      callIds = [];
+      continue;
+    }
     if (item.type === 'function_call') {
       if (pendingCall) invalidContinuation();
       pendingCall = item;
@@ -137,22 +145,55 @@ export function hasContextCommitCandidate(items: readonly ContinuationItem[]): b
   return contextCommitCandidateCallIds(items).length > 0;
 }
 
-/**
- * Returns whether raw working context has reached a point where the next model turn must
- * replace a chosen completed range with a durable checkpoint.
- */
-export function shouldForceContextCommit(
-  checkpoint: Pick<Checkpoint, 'continuationItems' | 'completedToolResults'>,
-): boolean {
+interface RawContextPressure {
+  readonly pairCount: number;
+  readonly characters: number;
+  readonly hasConsumedImage: boolean;
+  readonly previousReleasedCharacters?: number;
+}
+
+function releasedCharactersFromCommit(output: string): number | undefined {
+  try {
+    const value: unknown = JSON.parse(output);
+    if (
+      typeof value !== 'object' ||
+      value === null ||
+      !('ok' in value) ||
+      value.ok !== true ||
+      !('releasedTextChars' in value) ||
+      typeof value.releasedTextChars !== 'number' ||
+      !Number.isSafeInteger(value.releasedTextChars) ||
+      value.releasedTextChars < 0
+    ) {
+      return undefined;
+    }
+    return value.releasedTextChars;
+  } catch {
+    return undefined;
+  }
+}
+
+/** Measures only the raw continuation suffix that a new commit can actually replace. */
+function rawContextPressure(items: readonly ContinuationItem[]): RawContextPressure {
   let pendingCall: Extract<ContinuationItem, { readonly type: 'function_call' }> | undefined;
-  let rawPairCount = 0;
-  let rawCharacters = 0;
+  let pairCount = 0;
+  let characters = 0;
   let hasUnconsumedImage = false;
   let hasConsumedImage = false;
+  let previousReleasedCharacters: number | undefined;
 
-  for (const item of checkpoint.continuationItems) {
+  for (const item of items) {
     if (item.type === 'message_ref') {
       if (pendingCall) invalidContinuation();
+      continue;
+    }
+    if (item.type === 'compaction') {
+      if (pendingCall) invalidContinuation();
+      pairCount = 0;
+      characters = 0;
+      hasUnconsumedImage = false;
+      hasConsumedImage = false;
+      previousReleasedCharacters = undefined;
       continue;
     }
     if (item.type === 'function_call') {
@@ -166,15 +207,16 @@ export function shouldForceContextCommit(
 
     if (pendingCall.name === CONTEXT_COMMIT_TOOL_NAME) {
       if (!isRejectedContextCommitOutput(item.output)) {
-        rawPairCount = 0;
-        rawCharacters = 0;
+        pairCount = 0;
+        characters = 0;
         hasUnconsumedImage = false;
         hasConsumedImage = false;
+        previousReleasedCharacters = releasedCharactersFromCommit(item.output);
       }
     } else {
       if (hasUnconsumedImage) hasConsumedImage = true;
-      rawPairCount += 1;
-      rawCharacters +=
+      pairCount += 1;
+      characters +=
         pendingCall.argumentsJson.length + item.output.length + modelOutputCharacters(pendingCall);
       if ((item.attachmentIds?.length ?? 0) > 0) hasUnconsumedImage = true;
     }
@@ -182,10 +224,47 @@ export function shouldForceContextCommit(
   }
   if (pendingCall) invalidContinuation();
 
+  return {
+    pairCount,
+    characters,
+    hasConsumedImage,
+    ...(previousReleasedCharacters === undefined ? {} : { previousReleasedCharacters }),
+  };
+}
+
+function optionalCommitCharacterThreshold(pressure: RawContextPressure): number {
+  const priorRelease = pressure.previousReleasedCharacters ?? 0;
+  return Math.min(
+    MAX_DYNAMIC_RAW_TOOL_CHARACTERS_BEFORE_OPTIONAL_COMMIT,
+    Math.max(MIN_RAW_TOOL_CHARACTERS_BEFORE_OPTIONAL_COMMIT, priorRelease * 2),
+  );
+}
+
+/** Offers model-directed compaction only after a useful raw working window has accumulated. */
+export function shouldOfferContextCommit(
+  checkpoint: Pick<Checkpoint, 'continuationItems' | 'completedToolResults'>,
+): boolean {
+  const pressure = rawContextPressure(checkpoint.continuationItems);
   return (
-    rawPairCount >= MAX_RAW_TOOL_PAIRS_BEFORE_COMMIT ||
-    rawCharacters >= MAX_RAW_TOOL_CHARACTERS_BEFORE_COMMIT ||
-    hasConsumedImage
+    pressure.pairCount >= MIN_RAW_TOOL_PAIRS_BEFORE_OPTIONAL_COMMIT ||
+    pressure.characters >= optionalCommitCharacterThreshold(pressure) ||
+    pressure.hasConsumedImage
+  );
+}
+
+/**
+ * Returns whether raw working context has reached a point where the next model turn must
+ * replace a chosen completed range with a durable checkpoint.
+ */
+export function shouldForceContextCommit(
+  checkpoint: Pick<Checkpoint, 'continuationItems' | 'completedToolResults'>,
+): boolean {
+  const pressure = rawContextPressure(checkpoint.continuationItems);
+
+  return (
+    pressure.pairCount >= MAX_RAW_TOOL_PAIRS_BEFORE_COMMIT ||
+    pressure.characters >= MAX_RAW_TOOL_CHARACTERS_BEFORE_COMMIT ||
+    pressure.hasConsumedImage
   );
 }
 
@@ -272,10 +351,12 @@ export function shouldForceContextCommitForRequest(
   checkpoint: Pick<Checkpoint, 'continuationItems' | 'completedToolResults'>,
   requestShape: ProjectedProviderRequestShape,
 ): boolean {
+  const pressure = rawContextPressure(checkpoint.continuationItems);
   return (
     shouldForceContextCommit(checkpoint) ||
-    (projectedSerializedCharacters(requestShape, new WeakSet()) ?? 0) >=
-      MAX_PROJECTED_PROVIDER_INPUT_CHARACTERS
+    (pressure.characters >= optionalCommitCharacterThreshold(pressure) &&
+      (projectedSerializedCharacters(requestShape, new WeakSet()) ?? 0) >=
+        MAX_PROJECTED_PROVIDER_INPUT_CHARACTERS)
   );
 }
 
@@ -317,7 +398,7 @@ export function compactContextAtCommit(
   const units: ContinuationUnit[] = [];
   let openCall: FunctionCallItem | undefined;
   for (const item of items.slice(0, -1)) {
-    if (item.type === 'message_ref') {
+    if (item.type === 'message_ref' || item.type === 'compaction') {
       if (openCall) {
         invalidContinuation();
       }

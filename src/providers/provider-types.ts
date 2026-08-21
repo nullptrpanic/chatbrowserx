@@ -39,6 +39,11 @@ export type ModelInputItem =
       readonly type: 'function_call_output';
       readonly callId: string;
       readonly output: ModelFunctionOutput;
+    }
+  | {
+      readonly type: 'compaction';
+      readonly itemId: string;
+      readonly encryptedContent: string;
     };
 
 export interface ModelToolDefinition {
@@ -62,4 +67,10 @@ export interface ModelRequest {
 
 export interface ModelProvider {
   stream(request: ModelRequest, signal: AbortSignal): AsyncIterable<ModelStreamEvent>;
+  compact?(request: ModelRequest, signal: AbortSignal): Promise<ModelCompactionResult>;
+}
+
+export interface ModelCompactionResult {
+  readonly itemId: string;
+  readonly encryptedContent: string;
 }

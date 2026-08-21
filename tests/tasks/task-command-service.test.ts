@@ -26,6 +26,52 @@ function createCommandSources() {
 }
 
 describe('TaskCommandService', () => {
+  it('clears only cancelled-task continuation state and prevents later WorkSession reuse', async () => {
+    const database = await openChatBrowserDatabase(
+      createTestDatabaseName('command-clear-cancelled-context'),
+    );
+    const repository = new IndexedDbTaskRepository(database);
+    const conversations = new IndexedDbConversationRepository(database);
+    const sources = createCommandSources();
+    await conversations.create({
+      id: 'conv_clear',
+      tabId: 7,
+      title: 'Clear context',
+      createdAt: 1_000,
+      updatedAt: 1_000,
+    });
+    const commands = new TaskCommandService(repository, sources.clock, sources.ids, conversations);
+    const created = await commands.create({
+      conversationId: 'conv_clear',
+      tabId: 7,
+      goal: 'Keep visible history but discard continuation',
+      userMessageId: 'message_user',
+    });
+    sources.advance(1_100);
+    const cancelled = await commands.cancel(created.task.id);
+    sources.advance(1_200);
+
+    const cleared = await commands.clearContext(cancelled.task.id);
+
+    expect(cleared.task.status).toBe('cancelled');
+    expect(cleared.checkpoint.continuationItems).toEqual([]);
+    expect(cleared.checkpoint.pendingToolCall).toBeNull();
+    expect(cleared.events.at(-1)).toMatchObject({
+      type: 'task.context-cleared',
+      reason: 'user_clear_task_context',
+    });
+    await expect(commands.clearContext(cancelled.task.id)).resolves.toEqual(cleared);
+    await expect(
+      commands.continueCancelled({
+        sourceTaskId: cancelled.task.id,
+        tabId: 8,
+        goal: 'Do not reuse cleared state',
+        userMessageId: 'message_new',
+      }),
+    ).rejects.toMatchObject({ code: 'TASK_STATE_INVALID' });
+    database.close();
+  });
+
   it('atomically creates a queued task with a sequence-zero checkpoint', async () => {
     const database = await openChatBrowserDatabase(createTestDatabaseName('command-create'));
     const repository = new IndexedDbTaskRepository(database);

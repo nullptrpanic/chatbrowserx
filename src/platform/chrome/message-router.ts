@@ -6,10 +6,6 @@ import {
 import { parseExtensionMessage } from '../../shared/protocol/parse-message';
 import { TaskCommandError, type TaskCommandPort } from '../../tasks/task-command-service';
 import type { PanelService } from '../../tasks/panel-service';
-import {
-  SelectionControllerError,
-  type SelectionController,
-} from '../../tasks/selection-controller';
 
 export interface RuntimeMessageContext {
   readonly senderTabId: number | null;
@@ -42,7 +38,6 @@ export interface MessageRouterDependencies {
   readonly pageFeatures?: {
     ensure(tabId: number): Promise<unknown>;
   };
-  readonly selection?: Pick<SelectionController, 'translate' | 'ask'>;
 }
 
 /**
@@ -162,6 +157,11 @@ async function routeMessage(
         message.requestId,
         await dependencies.commands.cancel(message.payload.taskId),
       );
+    case 'task.clearContext':
+      return successResponse(
+        message.requestId,
+        await dependencies.commands.clearContext(message.payload.taskId),
+      );
     case 'screenshot.capture':
       return successResponse(
         message.requestId,
@@ -186,20 +186,6 @@ async function routeMessage(
         message.requestId,
         await dependencies.pageFeatures.ensure(message.payload.tabId),
       );
-    case 'selection.translate':
-      if (context.senderTabId === null || dependencies.selection === undefined) {
-        return errorResponse(message.requestId, 'INVALID_CONTEXT', 'Page context is invalid.');
-      }
-      return successResponse(
-        message.requestId,
-        await dependencies.selection.translate(message.payload),
-      );
-    case 'selection.ask':
-      if (context.senderTabId === null || dependencies.selection === undefined) {
-        return errorResponse(message.requestId, 'INVALID_CONTEXT', 'Page context is invalid.');
-      }
-      await dependencies.selection.ask({ ...message.payload, tabId: context.senderTabId });
-      return successResponse(message.requestId, { submitted: true });
   }
 }
 
@@ -224,9 +210,6 @@ export function createMessageRouter(dependencies: MessageRouterDependencies): Me
       return await routeMessage(message, dependencies, context);
     } catch (error) {
       if (error instanceof TaskCommandError) {
-        return errorResponse(message.requestId, error.code, error.message);
-      }
-      if (error instanceof SelectionControllerError) {
         return errorResponse(message.requestId, error.code, error.message);
       }
       return errorResponse(

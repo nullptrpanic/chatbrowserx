@@ -1,6 +1,6 @@
 import type { ModelInputItem, ModelMessageContent, ModelRequest } from '../provider-types';
 import { providerErrorFromCode } from '../provider-errors';
-import { CODEX_MODEL, CODEX_RESPONSES_URL } from './codex-constants';
+import { CODEX_COMPACT_URL, CODEX_MODEL, CODEX_RESPONSES_URL } from './codex-constants';
 import { toCodexToolName } from './codex-tool-name';
 
 export interface BuildCodexRequestInput {
@@ -10,7 +10,7 @@ export interface BuildCodexRequestInput {
 }
 
 export interface CodexHttpRequest {
-  readonly url: typeof CODEX_RESPONSES_URL;
+  readonly url: typeof CODEX_RESPONSES_URL | typeof CODEX_COMPACT_URL;
   readonly headers: Readonly<Record<string, string>>;
   readonly body: Readonly<Record<string, unknown>>;
 }
@@ -59,7 +59,20 @@ function mapInputItem(item: ModelInputItem): Readonly<Record<string, unknown>> {
         call_id: item.callId,
         output: typeof item.output === 'string' ? item.output : item.output.map(mapContentPart),
       };
+    case 'compaction':
+      return {
+        type: 'compaction',
+        id: item.itemId,
+        encrypted_content: item.encryptedContent,
+      };
   }
+}
+
+function mappedTools(request: ModelRequest): readonly Readonly<Record<string, unknown>>[] {
+  return request.tools.map((tool) => ({
+    ...tool,
+    name: toCodexToolName(tool.name),
+  }));
 }
 
 /** Builds the only supported Codex URL, headers, and request body. */
@@ -73,10 +86,7 @@ export function buildCodexRequest(input: BuildCodexRequestInput): CodexHttpReque
     input.request.tools.length === 0
       ? {}
       : {
-          tools: input.request.tools.map((tool) => ({
-            ...tool,
-            name: toCodexToolName(tool.name),
-          })),
+          tools: mappedTools(input.request),
           tool_choice:
             requestedToolChoice === 'auto'
               ? requestedToolChoice
@@ -108,6 +118,33 @@ export function buildCodexRequest(input: BuildCodexRequestInput): CodexHttpReque
       store: false,
       stream: true,
       include: ['reasoning.encrypted_content'],
+      reasoning: { effort: input.request.reasoningEffort, summary: 'auto' },
+    },
+  };
+}
+
+/** Builds the fixed unary native-compaction request without response-stream state fields. */
+export function buildCodexCompactRequest(input: BuildCodexRequestInput): CodexHttpRequest {
+  const toolContract =
+    input.request.tools.length === 0
+      ? {}
+      : {
+          tools: mappedTools(input.request),
+          parallel_tool_calls: false,
+        };
+  return {
+    url: CODEX_COMPACT_URL,
+    headers: {
+      Authorization: `Bearer ${input.accessToken}`,
+      'ChatGPT-Account-ID': input.accountId,
+      'Content-Type': 'application/json',
+      Accept: 'application/json',
+    },
+    body: {
+      model: CODEX_MODEL,
+      instructions: input.request.systemPrompt,
+      input: input.request.input.map(mapInputItem),
+      ...toolContract,
       reasoning: { effort: input.request.reasoningEffort, summary: 'auto' },
     },
   };

@@ -1,4 +1,4 @@
-import { Check, Copy, ExternalLink, Globe2 } from 'lucide-react';
+import { Check, Copy, Eraser, ExternalLink, Globe2 } from 'lucide-react';
 import { useState } from 'react';
 import type { Translator } from '../../shared/i18n/i18n';
 import type {
@@ -25,6 +25,7 @@ export interface MessageItemProps {
   readonly onResume?: () => void;
   readonly onRetry?: () => void;
   readonly onCancel?: () => void;
+  readonly onClearTaskContext?: ((taskId: string) => Promise<void>) | undefined;
 }
 
 /** Renders one user, assistant, or system message with safe content and image references. */
@@ -41,9 +42,12 @@ export function MessageItem({
   onResume = noop,
   onRetry = noop,
   onCancel = noop,
+  onClearTaskContext,
 }: MessageItemProps) {
   const [copied, setCopied] = useState(false);
   const [faviconFailed, setFaviconFailed] = useState(false);
+  const [confirmingContextClear, setConfirmingContextClear] = useState(false);
+  const [clearingContext, setClearingContext] = useState(false);
   const sourcePage = message.role === 'user' ? message.sourcePage : undefined;
   const displayedText =
     message.text.length > 0
@@ -55,6 +59,8 @@ export function MessageItem({
             task?.status === 'cancelled'
           ? t('cancelledResponse')
           : '';
+  const canClearTaskContext =
+    message.role === 'assistant' && taskInteractive && task?.status === 'cancelled';
   if (
     message.role === 'assistant' &&
     message.status === 'interrupted' &&
@@ -116,7 +122,7 @@ export function MessageItem({
         {message.status === 'interrupted' && task?.status !== 'cancelled' ? (
           <p className="interrupted-label">{t('interrupted')}</p>
         ) : null}
-        {displayedText.length > 0 || message.attachmentIds.length > 0 ? (
+        {displayedText.length > 0 || message.attachmentIds.length > 0 || canClearTaskContext ? (
           <div className="message-actions">
             <button
               type="button"
@@ -136,6 +142,43 @@ export function MessageItem({
               {copied ? <Check size={13} /> : <Copy size={13} />}
               {copied ? t('copied') : t('copy')}
             </button>
+            {canClearTaskContext ? (
+              <button
+                type="button"
+                disabled={task.contextCleared === true || clearingContext}
+                onClick={() => setConfirmingContextClear(true)}
+              >
+                <Eraser size={13} />
+                {task.contextCleared === true ? t('taskContextCleared') : t('clearTaskContext')}
+              </button>
+            ) : null}
+          </div>
+        ) : null}
+        {canClearTaskContext && task.contextCleared !== true && confirmingContextClear ? (
+          <div className="task-context-clear-confirmation" role="group">
+            <p>{t('clearTaskContextDescription')}</p>
+            <div>
+              <button
+                type="button"
+                disabled={clearingContext}
+                onClick={() => {
+                  setClearingContext(true);
+                  void onClearTaskContext?.(task.id)
+                    .then(() => setConfirmingContextClear(false))
+                    .catch(noop)
+                    .finally(() => setClearingContext(false));
+                }}
+              >
+                {t('confirmClearTaskContext')}
+              </button>
+              <button
+                type="button"
+                disabled={clearingContext}
+                onClick={() => setConfirmingContextClear(false)}
+              >
+                {t('cancelClearTaskContext')}
+              </button>
+            </div>
           </div>
         ) : null}
         {task === null ? null : (

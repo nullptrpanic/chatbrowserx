@@ -51,6 +51,7 @@ function buildCommands(snapshot: TaskSnapshot): TaskCommandPort {
     resume: vi.fn(async () => snapshot),
     retry: vi.fn(async () => snapshot),
     cancel: vi.fn(async () => snapshot),
+    clearContext: vi.fn(async () => snapshot),
   };
 }
 
@@ -178,11 +179,7 @@ describe('createMessageRouter', () => {
     expect(requestRecoveryScan).toHaveBeenCalledTimes(1);
   });
 
-  it('binds selected-text commands to the trusted sender tab and redacts invalid contexts', async () => {
-    const selection = {
-      translate: vi.fn(async () => ({ text: '译文' })),
-      ask: vi.fn(async () => undefined),
-    };
+  it('installs page features through the trusted background service', async () => {
     const pageFeatures = { ensure: vi.fn(async () => ({ status: 'installed' })) };
     const router = createMessageRouter({
       commands: buildCommands(buildSnapshot()),
@@ -190,44 +187,8 @@ describe('createMessageRouter', () => {
       screenshots: buildScreenshots(),
       requestRecoveryScan: vi.fn(async () => undefined),
       scheduleTask: vi.fn(async () => undefined),
-      selection,
       pageFeatures,
     });
-    const selectionPayload = {
-      text: 'Selected text',
-      pageUrl: 'https://example.com',
-      pageTitle: 'Example',
-    };
-
-    await expect(
-      router({
-        version: PROTOCOL_VERSION,
-        requestId: 'req_invalid_context',
-        type: 'selection.translate',
-        payload: selectionPayload,
-      }),
-    ).resolves.toMatchObject({ ok: false, error: { code: 'INVALID_CONTEXT' } });
-
-    await expect(
-      router(
-        {
-          version: PROTOCOL_VERSION,
-          requestId: 'req_translate',
-          type: 'selection.translate',
-          payload: selectionPayload,
-        },
-        { senderTabId: 7 },
-      ),
-    ).resolves.toMatchObject({ ok: true, data: { text: '译文' } });
-    await router(
-      {
-        version: PROTOCOL_VERSION,
-        requestId: 'req_ask',
-        type: 'selection.ask',
-        payload: { ...selectionPayload, question: 'Why?' },
-      },
-      { senderTabId: 9 },
-    );
     await router({
       version: PROTOCOL_VERSION,
       requestId: 'req_features',
@@ -235,8 +196,6 @@ describe('createMessageRouter', () => {
       payload: { tabId: 9 },
     });
 
-    expect(selection.translate).toHaveBeenCalledWith(selectionPayload);
-    expect(selection.ask).toHaveBeenCalledWith({ ...selectionPayload, question: 'Why?', tabId: 9 });
     expect(pageFeatures.ensure).toHaveBeenCalledWith(9);
   });
 
@@ -308,6 +267,12 @@ describe('createMessageRouter', () => {
     });
     await router({
       version: PROTOCOL_VERSION,
+      requestId: 'req_clear_context',
+      type: 'task.clearContext',
+      payload: { taskId: snapshot.task.id },
+    });
+    await router({
+      version: PROTOCOL_VERSION,
       requestId: 'req_snapshot',
       type: 'task.getSnapshot',
       payload: { taskId: snapshot.task.id },
@@ -341,6 +306,7 @@ describe('createMessageRouter', () => {
     expect(commands.resume).toHaveBeenCalledWith(snapshot.task.id);
     expect(commands.retry).toHaveBeenCalledWith(snapshot.task.id);
     expect(commands.cancel).toHaveBeenCalledWith(snapshot.task.id);
+    expect(commands.clearContext).toHaveBeenCalledWith(snapshot.task.id);
     expect(scheduleTask).toHaveBeenNthCalledWith(1, snapshot.task.id);
     expect(scheduleTask).toHaveBeenNthCalledWith(2, snapshot.task.id);
     expect(scheduleTask).toHaveBeenNthCalledWith(3, snapshot.task.id);

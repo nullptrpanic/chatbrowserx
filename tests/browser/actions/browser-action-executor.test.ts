@@ -422,9 +422,301 @@ describe('pasteImageIntoEditor', () => {
       document.body.innerHTML = '';
     }
   });
+
+  it('verifies a persistent non-media attachment preview created by the editor', async () => {
+    const originalDataTransfer = window.DataTransfer;
+    const originalClipboardEvent = window.ClipboardEvent;
+    class TestDataTransfer {
+      readonly files: File[] = [];
+      readonly items = {
+        add: (file: File) => {
+          this.files.push(file);
+        },
+      };
+    }
+    class TestClipboardEvent extends Event {
+      readonly clipboardData: TestDataTransfer;
+
+      constructor(type: string, init: EventInit & { clipboardData: TestDataTransfer }) {
+        super(type, init);
+        this.clipboardData = init.clipboardData;
+      }
+    }
+    Object.defineProperty(window, 'DataTransfer', {
+      configurable: true,
+      value: TestDataTransfer,
+    });
+    Object.defineProperty(window, 'ClipboardEvent', {
+      configurable: true,
+      value: TestClipboardEvent,
+    });
+
+    try {
+      document.body.innerHTML = `
+        <main>
+          <section id="composer"><div id="editor" contenteditable="true">message</div></section>
+        </main>
+      `;
+      const editor = document.querySelector<HTMLElement>('#editor');
+      const composer = document.querySelector<HTMLElement>('#composer');
+      if (!editor || !composer) throw new Error('Test composer was not created.');
+      editor.addEventListener('paste', (event) => {
+        event.preventDefault();
+        const preview = document.createElement('div');
+        preview.className = 'attachment-preview';
+        preview.dataset.state = 'uploading';
+        composer.append(preview);
+      });
+
+      await expect(
+        pasteImageIntoEditor.call(editor, 'aW1hZ2U=', 'image/png', 'capture.png', 0),
+      ).resolves.toMatchObject({
+        dispatched: true,
+        handled: true,
+        verified: true,
+        previewCount: 1,
+      });
+    } finally {
+      Object.defineProperty(window, 'DataTransfer', {
+        configurable: true,
+        value: originalDataTransfer,
+      });
+      Object.defineProperty(window, 'ClipboardEvent', {
+        configurable: true,
+        value: originalClipboardEvent,
+      });
+      document.body.innerHTML = '';
+    }
+  });
+
+  it('verifies a reused visual preview whose image state changes after paste', async () => {
+    const originalDataTransfer = window.DataTransfer;
+    const originalClipboardEvent = window.ClipboardEvent;
+    class TestDataTransfer {
+      readonly files: File[] = [];
+      readonly items = {
+        add: (file: File) => {
+          this.files.push(file);
+        },
+      };
+    }
+    class TestClipboardEvent extends Event {
+      readonly clipboardData: TestDataTransfer;
+
+      constructor(type: string, init: EventInit & { clipboardData: TestDataTransfer }) {
+        super(type, init);
+        this.clipboardData = init.clipboardData;
+      }
+    }
+    Object.defineProperty(window, 'DataTransfer', {
+      configurable: true,
+      value: TestDataTransfer,
+    });
+    Object.defineProperty(window, 'ClipboardEvent', {
+      configurable: true,
+      value: TestClipboardEvent,
+    });
+
+    try {
+      document.body.innerHTML = `
+        <main>
+          <section id="composer">
+            <div id="editor" contenteditable="true"></div>
+            <div id="preview" role="img"></div>
+          </section>
+        </main>
+      `;
+      const editor = document.querySelector<HTMLElement>('#editor');
+      const preview = document.querySelector<HTMLElement>('#preview');
+      if (!editor || !preview) throw new Error('Test preview was not created.');
+      editor.addEventListener('paste', (event) => {
+        event.preventDefault();
+        preview.style.backgroundImage = 'url("data:image/png;base64,aW1hZ2U=")';
+      });
+
+      await expect(
+        pasteImageIntoEditor.call(editor, 'aW1hZ2U=', 'image/png', 'capture.png', 0),
+      ).resolves.toMatchObject({
+        dispatched: true,
+        handled: true,
+        verified: true,
+        previewCount: 1,
+      });
+    } finally {
+      Object.defineProperty(window, 'DataTransfer', {
+        configurable: true,
+        value: originalDataTransfer,
+      });
+      Object.defineProperty(window, 'ClipboardEvent', {
+        configurable: true,
+        value: originalClipboardEvent,
+      });
+      document.body.innerHTML = '';
+    }
+  });
+
+  it('does not divert an editor paste through a nearby hidden file input', async () => {
+    const originalDataTransfer = window.DataTransfer;
+    const originalClipboardEvent = window.ClipboardEvent;
+    class TestDataTransfer {
+      readonly files: File[] = [];
+      readonly items = {
+        add: (file: File) => {
+          this.files.push(file);
+        },
+      };
+    }
+    class TestClipboardEvent extends Event {
+      readonly clipboardData: TestDataTransfer;
+
+      constructor(type: string, init: EventInit & { clipboardData: TestDataTransfer }) {
+        super(type, init);
+        this.clipboardData = init.clipboardData;
+      }
+    }
+    Object.defineProperty(window, 'DataTransfer', {
+      configurable: true,
+      value: TestDataTransfer,
+    });
+    Object.defineProperty(window, 'ClipboardEvent', {
+      configurable: true,
+      value: TestClipboardEvent,
+    });
+
+    try {
+      document.body.innerHTML = `
+        <main>
+          <section id="composer">
+            <div id="editor" contenteditable="true">message</div>
+            <input id="image-input" type="file" accept="image/*">
+          </section>
+        </main>
+      `;
+      const editor = document.querySelector<HTMLElement>('#editor');
+      const fileInput = document.querySelector<HTMLInputElement>('#image-input');
+      const composer = document.querySelector<HTMLElement>('#composer');
+      if (!editor || !fileInput || !composer) throw new Error('Test composer was not created.');
+      Object.defineProperty(fileInput, 'files', {
+        configurable: true,
+        writable: true,
+        value: [],
+      });
+      let fileInputChanges = 0;
+      fileInput.addEventListener('change', () => {
+        fileInputChanges += 1;
+      });
+      editor.addEventListener('paste', (event) => {
+        event.preventDefault();
+        const preview = document.createElement('img');
+        preview.alt = 'pending image';
+        composer.append(preview);
+      });
+
+      await expect(
+        pasteImageIntoEditor.call(editor, 'aW1hZ2U=', 'image/png', 'capture.png', 0),
+      ).resolves.toMatchObject({
+        dispatched: true,
+        strategy: 'clipboard_event',
+        fileCount: 1,
+        handled: true,
+        verified: true,
+        previewCount: 1,
+      });
+      expect(fileInputChanges).toBe(0);
+    } finally {
+      Object.defineProperty(window, 'DataTransfer', {
+        configurable: true,
+        value: originalDataTransfer,
+      });
+      Object.defineProperty(window, 'ClipboardEvent', {
+        configurable: true,
+        value: originalClipboardEvent,
+      });
+      document.body.innerHTML = '';
+    }
+  });
+
+  it('does not treat a retained file-input selection as attachment preview evidence', async () => {
+    const originalDataTransfer = window.DataTransfer;
+    const originalClipboardEvent = window.ClipboardEvent;
+    class TestDataTransfer {
+      readonly files: File[] = [];
+      readonly items = {
+        add: (file: File) => {
+          this.files.push(file);
+        },
+      };
+    }
+    class TestClipboardEvent extends Event {
+      readonly clipboardData: TestDataTransfer;
+
+      constructor(type: string, init: EventInit & { clipboardData: TestDataTransfer }) {
+        super(type, init);
+        this.clipboardData = init.clipboardData;
+      }
+    }
+    Object.defineProperty(window, 'DataTransfer', {
+      configurable: true,
+      value: TestDataTransfer,
+    });
+    Object.defineProperty(window, 'ClipboardEvent', {
+      configurable: true,
+      value: TestClipboardEvent,
+    });
+
+    try {
+      document.body.innerHTML = `
+        <main>
+          <section id="composer">
+            <div id="editor" contenteditable="true">message</div>
+            <input id="image-input" type="file" accept="image/*">
+          </section>
+        </main>
+      `;
+      const fileInput = document.querySelector<HTMLInputElement>('#image-input');
+      if (!fileInput) throw new Error('Test file input was not created.');
+      Object.defineProperty(fileInput, 'files', {
+        configurable: true,
+        writable: true,
+        value: [],
+      });
+
+      await expect(
+        pasteImageIntoEditor.call(fileInput, 'aW1hZ2U=', 'image/png', 'capture.png', 0),
+      ).resolves.toMatchObject({
+        dispatched: true,
+        strategy: 'file_input',
+        fileCount: 1,
+        handled: true,
+        verified: false,
+        previewCount: 0,
+      });
+    } finally {
+      Object.defineProperty(window, 'DataTransfer', {
+        configurable: true,
+        value: originalDataTransfer,
+      });
+      Object.defineProperty(window, 'ClipboardEvent', {
+        configurable: true,
+        value: originalClipboardEvent,
+      });
+      document.body.innerHTML = '';
+    }
+  });
 });
 
 describe('BrowserActionExecutor', () => {
+  it('waits for a bounded DOM quiet period before post-action observation', async () => {
+    vi.useFakeTimers();
+    const { executor, sessions } = harness();
+
+    const settled = executor.settle(7, new AbortController().signal, 1_000);
+    await vi.advanceTimersByTimeAsync(500);
+
+    await expect(settled).resolves.toBeUndefined();
+    expect(sessions.ensure).toHaveBeenCalledWith(7, expect.any(AbortSignal));
+  });
+
   it('pastes a task-owned image into a semantic editor ref without the system clipboard', async () => {
     const get = vi.fn(async () => ({
       id: 'attachment_capture',
@@ -569,6 +861,127 @@ describe('BrowserActionExecutor', () => {
         new AbortController().signal,
       ),
     ).rejects.toMatchObject({ code: 'ATTACHMENT_VERIFICATION_FAILED' });
+  });
+
+  it('falls back to a native system-clipboard paste and verifies a real editor change', async () => {
+    let evidenceReads = 0;
+    const { executor, send } = harness({
+      os: 'mac',
+      attachments: {
+        get: vi.fn(async () => ({
+          id: 'attachment_capture',
+          blob: new Blob(['image-bytes'], { type: 'image/png' }),
+          mimeType: 'image/png',
+          byteSize: 11,
+          width: 640,
+          height: 480,
+          source: 'viewport_capture' as const,
+          createdAt: 1,
+          fileName: 'capture.png',
+        })),
+      },
+      targets: [
+        {
+          frameTargetId: null,
+          documentFrameId: 'frame-main',
+          loaderId: 'loader-1',
+          backendNodeId: 42,
+          role: 'textbox',
+          name: 'Message',
+          state: ['editable'],
+          actions: ['type'],
+          frame: 'main',
+        },
+      ],
+      responder: (_session, method, params) => {
+        if (
+          method !== 'Runtime.callFunctionOn' ||
+          typeof params?.functionDeclaration !== 'string'
+        ) {
+          return undefined;
+        }
+        if (params.functionDeclaration.includes('__chatbrowserxPasteImage')) {
+          return {
+            result: {
+              type: 'object',
+              value: {
+                dispatched: true,
+                strategy: 'clipboard_event',
+                fileCount: 1,
+                handled: true,
+                verified: false,
+                previewCount: 0,
+              },
+            },
+          };
+        }
+        if (params.functionDeclaration.includes('__chatbrowserxImagePasteState')) {
+          evidenceReads += 1;
+          return {
+            result: {
+              type: 'object',
+              value:
+                evidenceReads === 1
+                  ? {
+                      connected: true,
+                      pendingUpload: false,
+                      elementCount: 3,
+                      mediaCount: 0,
+                      previewCount: 0,
+                      targetMarkupHash: 'before-markup',
+                      targetTextHash: 'same-text',
+                      previewHash: 'before-preview',
+                    }
+                  : {
+                      connected: true,
+                      pendingUpload: false,
+                      elementCount: 4,
+                      mediaCount: 1,
+                      previewCount: 1,
+                      targetMarkupHash: 'after-markup',
+                      targetTextHash: 'same-text',
+                      previewHash: 'after-preview',
+                    },
+            },
+          };
+        }
+        if (params.functionDeclaration.includes('__chatbrowserxSystemClipboardImage')) {
+          return { result: { type: 'object', value: { staged: true } } };
+        }
+        return undefined;
+      },
+    });
+
+    await expect(
+      executor.execute(
+        call('browser_paste_image', {
+          tabId: 7,
+          ref: 'ref_1',
+          assetId: 'attachment_capture',
+        }),
+        new AbortController().signal,
+      ),
+    ).resolves.toMatchObject({
+      data: {
+        action: 'paste_image',
+        strategy: 'system_clipboard',
+        fileCount: 1,
+        handled: true,
+        verified: true,
+        previewCount: 1,
+      },
+    });
+    expect(send).toHaveBeenCalledWith(
+      SNAPSHOT.root,
+      'Input.dispatchKeyEvent',
+      expect.objectContaining({
+        type: 'rawKeyDown',
+        key: 'v',
+        code: 'KeyV',
+        modifiers: 4,
+        commands: ['Paste'],
+      }),
+    );
   });
 
   it('uses the page bridge for a DOM ref without attaching a debugger session', async () => {
@@ -2018,7 +2431,10 @@ describe('BrowserActionExecutor', () => {
                 properties: [
                   {
                     name: 'checked',
-                    value: { type: 'boolean', value: target.state.includes('checked') },
+                    value: {
+                      type: 'boolean',
+                      value: target.state.includes('checked'),
+                    },
                   },
                 ],
               },
@@ -2961,6 +3377,50 @@ describe('BrowserActionExecutor', () => {
     );
   });
 
+  it('uses an uncovered inset corner when the center cross is occluded', async () => {
+    const { executor, send, pointer } = harness({
+      responder: (_session, method, params) => {
+        if (
+          method === 'Runtime.callFunctionOn' &&
+          typeof params?.functionDeclaration === 'string' &&
+          params.functionDeclaration.includes('__chatbrowserxActionablePoint')
+        ) {
+          const points = (
+            params.arguments as readonly {
+              readonly value?: readonly unknown[];
+            }[]
+          )?.at(0)?.value;
+          expect(points).toHaveLength(9);
+          return { result: { type: 'number', value: 5 } };
+        }
+        return undefined;
+      },
+    });
+
+    await executor.execute(
+      call('browser_click', {
+        tabId: 7,
+        ref: 'ref_1',
+        button: 'left',
+        count: 1,
+      }),
+      new AbortController().signal,
+    );
+
+    expect(pointer.show).toHaveBeenCalledWith(7, {
+      x: 25,
+      y: 24.5,
+      fromX: 25,
+      fromY: 24.5,
+      effect: 'click',
+    });
+    expect(send).toHaveBeenCalledWith(
+      { tabId: 7 },
+      'Input.dispatchMouseEvent',
+      expect.objectContaining({ type: 'mousePressed', x: 25, y: 24.5 }),
+    );
+  });
+
   it('does not dispatch a click when every point inside the target is occluded', async () => {
     const { executor, send, pointer } = harness({
       responder: (_session, method, params) => {
@@ -3159,7 +3619,10 @@ describe('BrowserActionExecutor', () => {
     });
 
     editor.className = 'ace_editor';
-    expect(inspectEditorTarget.call(text)).toMatchObject({ editor: true, custom: true });
+    expect(inspectEditorTarget.call(text)).toMatchObject({
+      editor: true,
+      custom: true,
+    });
   });
 
   it('reads the full Monaco model matched to the target instead of its partial textarea buffer', () => {
@@ -3253,6 +3716,88 @@ describe('BrowserActionExecutor', () => {
       stage: 'readback',
     });
     expect(editorInfoReads).toBeGreaterThanOrEqual(2);
+  });
+
+  it('commits a controlled input before verifying its retained value', async () => {
+    vi.useFakeTimers();
+    const before = '13:00';
+    const expected = '16:30';
+    let committed = false;
+    const currentValue = () => (committed ? expected : before);
+    const { executor } = harness({
+      targets: [
+        {
+          frameTargetId: null,
+          documentFrameId: 'frame-main',
+          loaderId: 'loader-1',
+          backendNodeId: 42,
+          role: 'textbox',
+          name: 'Editable field',
+          state: [],
+          actions: ['type'],
+          frame: 'main',
+        },
+      ],
+      responder: (_session, method, params) => {
+        if (
+          method === 'Input.dispatchKeyEvent' &&
+          params?.type === 'keyDown' &&
+          params.key === 'ArrowRight'
+        ) {
+          committed = true;
+        }
+        if (
+          method === 'Runtime.callFunctionOn' &&
+          typeof params?.functionDeclaration === 'string' &&
+          params.functionDeclaration.includes('__chatbrowserxEditorTargetInfo')
+        ) {
+          return {
+            result: {
+              type: 'object',
+              value: {
+                editor: true,
+                custom: false,
+                connected: true,
+                value: currentValue(),
+              },
+            },
+          };
+        }
+        if (method === 'Runtime.evaluate' && params?.returnByValue === true) {
+          return { result: { type: 'string', value: currentValue() } };
+        }
+        if (method === 'Accessibility.getFullAXTree') {
+          return {
+            nodes: [
+              {
+                nodeId: 'controlled-input',
+                ignored: false,
+                role: { type: 'role', value: 'textbox' },
+                value: { type: 'string', value: currentValue() },
+                properties: [{ name: 'focused', value: { type: 'boolean', value: true } }],
+              },
+            ],
+          };
+        }
+        return undefined;
+      },
+    });
+
+    const operation = executor.execute(
+      call('browser_type', {
+        tabId: 7,
+        ref: 'ref_1',
+        text: expected,
+        replace: true,
+        submit: false,
+      }),
+      new AbortController().signal,
+    );
+    const completion = expect(operation).resolves.toMatchObject({
+      data: { action: 'type', verified: true },
+    });
+    await vi.advanceTimersByTimeAsync(2_000);
+    await completion;
   });
 
   it('keeps editor-aware atomic replacement for new CDP semantic refs', async () => {
@@ -3558,6 +4103,422 @@ describe('BrowserActionExecutor', () => {
           method === 'Input.dispatchMouseEvent' && params?.type === 'mouseWheel',
       ),
     ).toBe(false);
+  });
+
+  it('uses a trusted wheel fallback when a virtualized list loads content at its boundary', async () => {
+    let wheelDispatched = false;
+    const { executor, send } = harness({
+      targets: [
+        {
+          frameTargetId: null,
+          documentFrameId: 'frame-main',
+          loaderId: 'loader-1',
+          backendNodeId: 42,
+          role: 'region',
+          name: 'Message history',
+          state: [],
+          actions: ['scroll'],
+          frame: 'main',
+        },
+      ],
+      responder: (_session, method, params) => {
+        if (method === 'Input.dispatchMouseEvent' && params?.type === 'mouseWheel') {
+          wheelDispatched = true;
+          return {};
+        }
+        if (
+          method === 'Runtime.callFunctionOn' &&
+          typeof params?.functionDeclaration === 'string' &&
+          params.functionDeclaration.includes('__chatbrowserxScrollTarget')
+        ) {
+          return {
+            result: {
+              type: 'object',
+              value: {
+                found: true,
+                beforeX: 0,
+                beforeY: 0,
+                afterX: 0,
+                afterY: 0,
+                maxX: 0,
+                maxY: 800,
+                beforeContentKey: 'older-boundary',
+                afterContentKey: 'older-boundary',
+              },
+            },
+          };
+        }
+        if (
+          method === 'Runtime.callFunctionOn' &&
+          typeof params?.functionDeclaration === 'string' &&
+          params.functionDeclaration.includes('__chatbrowserxScrollState')
+        ) {
+          return {
+            result: {
+              type: 'object',
+              value: {
+                found: true,
+                x: 0,
+                y: 0,
+                maxX: 0,
+                maxY: 800,
+                contentKey: wheelDispatched ? 'newly-loaded-history' : 'older-boundary',
+              },
+            },
+          };
+        }
+        return undefined;
+      },
+    });
+
+    const result = await executor.execute(
+      call('browser_scroll', {
+        tabId: 7,
+        target: 'ref_1',
+        deltaX: 0,
+        deltaY: -600,
+      }),
+      new AbortController().signal,
+    );
+
+    expect(result.data).toMatchObject({
+      action: 'scroll',
+      strategy: 'element_wheel_fallback',
+      moved: true,
+      contentChanged: true,
+      actualDeltaX: 0,
+      actualDeltaY: 0,
+    });
+    expect(send).toHaveBeenCalledWith(
+      { tabId: 7 },
+      'Input.dispatchMouseEvent',
+      expect.objectContaining({ type: 'mouseWheel', deltaY: -600 }),
+    );
+  });
+
+  it('waits for one virtualized content batch after a direct scroll reaches the boundary', async () => {
+    let wheelDispatched = false;
+    let scrollSegment = 0;
+    const { executor, send } = harness({
+      targets: [
+        {
+          frameTargetId: null,
+          documentFrameId: 'frame-main',
+          loaderId: 'loader-1',
+          backendNodeId: 42,
+          role: 'region',
+          name: 'Message history',
+          state: [],
+          actions: ['scroll'],
+          frame: 'main',
+        },
+      ],
+      responder: (_session, method, params) => {
+        if (method === 'Input.dispatchMouseEvent' && params?.type === 'mouseWheel') {
+          wheelDispatched = true;
+          return {};
+        }
+        if (
+          method === 'Runtime.callFunctionOn' &&
+          typeof params?.functionDeclaration === 'string' &&
+          params.functionDeclaration.includes('__chatbrowserxScrollTarget')
+        ) {
+          scrollSegment += 1;
+          return {
+            result: {
+              type: 'object',
+              value:
+                scrollSegment === 1
+                  ? {
+                      found: true,
+                      beforeX: 0,
+                      beforeY: 600,
+                      afterX: 0,
+                      afterY: 0,
+                      beforeMaxX: 0,
+                      beforeMaxY: 1_000,
+                      maxX: 0,
+                      maxY: 1_000,
+                      beforeContentKey: 'visible-history',
+                      afterContentKey: 'visible-history',
+                    }
+                  : {
+                      found: true,
+                      beforeX: 0,
+                      beforeY: 500,
+                      afterX: 0,
+                      afterY: 100,
+                      beforeMaxX: 0,
+                      beforeMaxY: 1_500,
+                      maxX: 0,
+                      maxY: 1_500,
+                      beforeContentKey: 'older-history-loaded',
+                      afterContentKey: 'older-history-loaded',
+                    },
+            },
+          };
+        }
+        if (
+          method === 'Runtime.callFunctionOn' &&
+          typeof params?.functionDeclaration === 'string' &&
+          params.functionDeclaration.includes('__chatbrowserxScrollState')
+        ) {
+          return {
+            result: {
+              type: 'object',
+              value: {
+                found: true,
+                x: 0,
+                y: wheelDispatched ? 500 : 0,
+                maxX: 0,
+                maxY: wheelDispatched ? 1_500 : 1_000,
+                contentKey: wheelDispatched ? 'older-history-loaded' : 'visible-history',
+              },
+            },
+          };
+        }
+        return undefined;
+      },
+    });
+
+    const result = await executor.execute(
+      call('browser_scroll', {
+        tabId: 7,
+        target: 'ref_1',
+        deltaX: 0,
+        deltaY: -1_000,
+      }),
+      new AbortController().signal,
+    );
+
+    expect(result.data).toMatchObject({
+      action: 'scroll',
+      strategy: 'element_boundary_wheel',
+      moved: true,
+      loadedMore: true,
+      boundaryVerified: false,
+      contentChanged: true,
+      extentChanged: true,
+      actualDeltaX: 0,
+      actualDeltaY: -600,
+      remainingDeltaX: 0,
+      remainingDeltaY: -400,
+      requestedDeltaApplied: false,
+      segments: 1,
+      position: { x: 0, y: 500, maxX: 0, maxY: 1_500 },
+    });
+    expect(send).toHaveBeenCalledWith(
+      { tabId: 7 },
+      'Input.dispatchMouseEvent',
+      expect.objectContaining({ type: 'mouseWheel', deltaY: -400 }),
+    );
+  });
+
+  it('reports the unconsumed delta after loading one virtualized content batch', async () => {
+    let scrollSegment = 0;
+    const { executor, send } = harness({
+      targets: [
+        {
+          frameTargetId: null,
+          documentFrameId: 'frame-main',
+          loaderId: 'loader-1',
+          backendNodeId: 42,
+          role: 'region',
+          name: 'Message history',
+          state: [],
+          actions: ['scroll'],
+          frame: 'main',
+        },
+      ],
+      responder: (_session, method, params) => {
+        if (
+          method === 'Runtime.callFunctionOn' &&
+          typeof params?.functionDeclaration === 'string' &&
+          params.functionDeclaration.includes('__chatbrowserxScrollTarget')
+        ) {
+          scrollSegment += 1;
+          return {
+            result: {
+              type: 'object',
+              value:
+                scrollSegment === 1
+                  ? {
+                      found: true,
+                      beforeX: 0,
+                      beforeY: 1_000,
+                      afterX: 0,
+                      afterY: 0,
+                      beforeMaxX: 0,
+                      beforeMaxY: 1_000,
+                      maxX: 0,
+                      maxY: 1_000,
+                      beforeContentKey: 'recent-history',
+                      afterContentKey: 'recent-history',
+                    }
+                  : {
+                      found: true,
+                      beforeX: 0,
+                      beforeY: 9_000,
+                      afterX: 0,
+                      afterY: 1_000,
+                      beforeMaxX: 0,
+                      beforeMaxY: 10_000,
+                      maxX: 0,
+                      maxY: 10_000,
+                      beforeContentKey: 'middle-history',
+                      afterContentKey: 'middle-history',
+                    },
+            },
+          };
+        }
+        if (
+          method === 'Runtime.callFunctionOn' &&
+          typeof params?.functionDeclaration === 'string' &&
+          params.functionDeclaration.includes('__chatbrowserxScrollState')
+        ) {
+          return {
+            result: {
+              type: 'object',
+              value:
+                scrollSegment === 1
+                  ? {
+                      found: true,
+                      x: 0,
+                      y: 9_000,
+                      maxX: 0,
+                      maxY: 10_000,
+                      contentKey: 'middle-history',
+                    }
+                  : {
+                      found: true,
+                      x: 0,
+                      y: 1_000,
+                      maxX: 0,
+                      maxY: 10_000,
+                      contentKey: 'middle-history',
+                    },
+            },
+          };
+        }
+        return undefined;
+      },
+    });
+
+    const result = await executor.execute(
+      call('browser_scroll', {
+        tabId: 7,
+        target: 'ref_1',
+        deltaX: 0,
+        deltaY: -9_000,
+      }),
+      new AbortController().signal,
+    );
+
+    expect(result.data).toMatchObject({
+      action: 'scroll',
+      strategy: 'element_boundary_wheel',
+      moved: true,
+      loadedMore: true,
+      actualDeltaX: 0,
+      actualDeltaY: -1_000,
+      remainingDeltaX: 0,
+      remainingDeltaY: -8_000,
+      requestedDeltaApplied: false,
+      segments: 1,
+      position: { x: 0, y: 9_000, maxX: 0, maxY: 10_000 },
+    });
+    expect(
+      send.mock.calls.filter(
+        ([, method, params]) =>
+          method === 'Input.dispatchMouseEvent' && params?.type === 'mouseWheel',
+      ),
+    ).toHaveLength(1);
+  });
+
+  it('requires a second stationary boundary probe before declaring history exhausted', async () => {
+    vi.useFakeTimers();
+    const { executor } = harness({
+      targets: [
+        {
+          frameTargetId: null,
+          documentFrameId: 'frame-main',
+          loaderId: 'loader-1',
+          backendNodeId: 42,
+          role: 'region',
+          name: 'Message history',
+          state: [],
+          actions: ['scroll'],
+          frame: 'main',
+        },
+      ],
+      responder: (_session, method, params) => {
+        if (
+          method === 'Runtime.callFunctionOn' &&
+          typeof params?.functionDeclaration === 'string' &&
+          params.functionDeclaration.includes('__chatbrowserxScrollTarget')
+        ) {
+          return {
+            result: {
+              type: 'object',
+              value: {
+                found: true,
+                beforeX: 0,
+                beforeY: 600,
+                afterX: 0,
+                afterY: 0,
+                beforeMaxX: 0,
+                beforeMaxY: 1_000,
+                maxX: 0,
+                maxY: 1_000,
+                beforeContentKey: 'visible-history',
+                afterContentKey: 'visible-history',
+              },
+            },
+          };
+        }
+        if (
+          method === 'Runtime.callFunctionOn' &&
+          typeof params?.functionDeclaration === 'string' &&
+          params.functionDeclaration.includes('__chatbrowserxScrollState')
+        ) {
+          return {
+            result: {
+              type: 'object',
+              value: {
+                found: true,
+                x: 0,
+                y: 0,
+                maxX: 0,
+                maxY: 1_000,
+                contentKey: 'visible-history',
+              },
+            },
+          };
+        }
+        return undefined;
+      },
+    });
+
+    const execution = executor.execute(
+      call('browser_scroll', {
+        tabId: 7,
+        target: 'ref_1',
+        deltaX: 0,
+        deltaY: -1_000,
+      }),
+      new AbortController().signal,
+    );
+    await vi.advanceTimersByTimeAsync(2_000);
+    const result = await execution;
+
+    expect(result.data).toMatchObject({
+      strategy: 'element_boundary_wheel',
+      moved: true,
+      loadedMore: false,
+      boundaryVerified: false,
+      needsBoundaryProbe: true,
+      position: { y: 0, maxY: 1_000 },
+    });
   });
 
   it('navigates logical browser history without synthesizing shortcuts', async () => {

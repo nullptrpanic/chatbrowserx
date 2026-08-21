@@ -9,6 +9,7 @@ import type { ParsedBrowserToolCall } from './tools/browser-tool-schema';
 import type { ParsedContextCommitToolCall } from './tools/context-commit-tool-schema';
 import type { ModelUsage } from '../providers/stream-events';
 import type { ModelOutputContinuationItem } from '../tasks/continuation-types';
+import type { ContinuationItem } from '../tasks/continuation-types';
 
 export interface AgentPlanInput {
   readonly task: TaskRun;
@@ -31,6 +32,10 @@ interface AgentOutcomeMetadata {
 
 export type AgentEvent =
   | { readonly type: 'reasoning.summary'; readonly text: string }
+  | {
+      readonly type: 'context.compacted';
+      readonly continuationItems: readonly ContinuationItem[];
+    }
   | (AgentOutcomeMetadata & {
       readonly type: 'browser.call';
       readonly call: ParsedBrowserToolCall;

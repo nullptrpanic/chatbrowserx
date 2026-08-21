@@ -3,6 +3,7 @@ import {
   MAX_PROJECTED_PROVIDER_INPUT_CHARACTERS,
   compactContextAtCommit,
   hasContextCommitCandidate,
+  shouldOfferContextCommit,
   shouldForceContextCommit,
   shouldForceContextCommitForRequest,
 } from '../../../src/agent/context/context-commit';
@@ -87,6 +88,78 @@ describe('hasContextCommitCandidate', () => {
   });
 });
 
+describe('shouldOfferContextCommit', () => {
+  const pair = (callId: string, output = '{}'): ContinuationItem[] => [
+    {
+      type: 'function_call',
+      callId,
+      name: 'browser_inspect',
+      argumentsJson: '{}',
+    },
+    {
+      type: 'function_call_output',
+      callId,
+      output,
+      resultRef: `result_${callId}`,
+      attachmentIds: [],
+    },
+  ];
+
+  it('does not re-offer compaction for two small calls immediately after a successful commit', () => {
+    expect(
+      shouldOfferContextCommit({
+        continuationItems: [
+          userMessage,
+          commitCall,
+          commitOutput,
+          ...pair('call_after_commit_1', 'x'.repeat(7_258)),
+          ...pair('call_after_commit_2', 'x'.repeat(18_825)),
+        ],
+        completedToolResults: [],
+      }),
+    ).toBe(false);
+  });
+
+  it('offers model-directed compaction after a meaningful raw working window accumulates', () => {
+    const checkpointWith = (count: number) => ({
+      continuationItems: [
+        userMessage,
+        commitCall,
+        commitOutput,
+        ...Array.from({ length: count }, (_, index) => pair(`call_window_${String(index)}`)).flat(),
+      ],
+      completedToolResults: [],
+    });
+
+    expect(shouldOfferContextCommit(checkpointWith(11))).toBe(false);
+    expect(shouldOfferContextCommit(checkpointWith(12))).toBe(true);
+  });
+
+  it('raises the next raw-character window after a high-yield commit', () => {
+    const priorCommitOutput: ContinuationItem = {
+      ...commitOutput,
+      output: JSON.stringify({
+        ok: true,
+        compactedCalls: 6,
+        releasedTextChars: 60_140,
+        releasedImages: 0,
+      }),
+    };
+    const checkpointWith = (characters: number) => ({
+      continuationItems: [
+        userMessage,
+        commitCall,
+        priorCommitOutput,
+        ...pair('call_after_high_yield_commit', 'x'.repeat(characters)),
+      ],
+      completedToolResults: [],
+    });
+
+    expect(shouldOfferContextCommit(checkpointWith(100_000))).toBe(false);
+    expect(shouldOfferContextCommit(checkpointWith(121_000))).toBe(true);
+  });
+});
+
 describe('shouldForceContextCommit', () => {
   const toolPairs = (count: number): ContinuationItem[] =>
     Array.from({ length: count }, (_, index) => {
@@ -108,28 +181,38 @@ describe('shouldForceContextCommit', () => {
       ];
     }).flat();
 
-  it('forces at twenty-four raw tool pairs but not before the boundary', () => {
+  it('forces at forty-eight raw tool pairs but not before the boundary', () => {
     expect(
       shouldForceContextCommit({
-        continuationItems: [userMessage, ...toolPairs(23)],
+        continuationItems: [userMessage, ...toolPairs(47)],
         completedToolResults: [],
       }),
     ).toBe(false);
     expect(
       shouldForceContextCommit({
-        continuationItems: [userMessage, ...toolPairs(24)],
+        continuationItems: [userMessage, ...toolPairs(48)],
         completedToolResults: [],
       }),
     ).toBe(true);
   });
 
-  it('forces when raw tool text reaches 64 KiB', () => {
+  it('forces when raw tool text reaches 192 KiB', () => {
     expect(
       shouldForceContextCommit({
         continuationItems: [
           userMessage,
           shortCall,
-          { ...shortOutput, output: 'x'.repeat(64 * 1024) },
+          { ...shortOutput, output: 'x'.repeat(192 * 1024 - 5) },
+        ],
+        completedToolResults: [],
+      }),
+    ).toBe(false);
+    expect(
+      shouldForceContextCommit({
+        continuationItems: [
+          userMessage,
+          shortCall,
+          { ...shortOutput, output: 'x'.repeat(192 * 1024) },
         ],
         completedToolResults: [],
       }),
@@ -147,7 +230,7 @@ describe('shouldForceContextCommit', () => {
               {
                 type: 'reasoning',
                 itemId: 'reasoning_large',
-                encryptedContent: 'x'.repeat(64 * 1024),
+                encryptedContent: 'x'.repeat(192 * 1024),
                 summary: [],
               },
             ],
@@ -212,6 +295,16 @@ describe('shouldForceContextCommitForRequest', () => {
     continuationItems: [userMessage, shortCall, shortOutput],
     completedToolResults: [],
   };
+  const reclaimableCheckpoint = {
+    continuationItems: [
+      userMessage,
+      commitCall,
+      commitOutput,
+      shortCall,
+      { ...shortOutput, output: 'r'.repeat(64 * 1024) },
+    ],
+    completedToolResults: [],
+  };
   const shape = (systemPrompt: string) => ({
     systemPrompt,
     input: [],
@@ -219,19 +312,48 @@ describe('shouldForceContextCommitForRequest', () => {
   });
   const emptyShapeCharacters = JSON.stringify(shape('')).length;
 
-  it('uses an inclusive 80,000-character projected request boundary', () => {
+  it('uses an inclusive 160,000-character projected request boundary', () => {
+    expect(MAX_PROJECTED_PROVIDER_INPUT_CHARACTERS).toBe(160_000);
     expect(
       shouldForceContextCommitForRequest(
-        checkpoint,
+        reclaimableCheckpoint,
         shape('x'.repeat(MAX_PROJECTED_PROVIDER_INPUT_CHARACTERS - emptyShapeCharacters - 1)),
       ),
     ).toBe(false);
     expect(
       shouldForceContextCommitForRequest(
-        checkpoint,
+        reclaimableCheckpoint,
         shape('x'.repeat(MAX_PROJECTED_PROVIDER_INPUT_CHARACTERS - emptyShapeCharacters)),
       ),
     ).toBe(true);
+  });
+
+  it('does not repeatedly force a commit when only a small raw tail is reclaimable', () => {
+    const continuationItems: ContinuationItem[] = [
+      userMessage,
+      commitCall,
+      commitOutput,
+      {
+        type: 'function_call',
+        callId: 'call_small_tail',
+        name: 'browser_inspect',
+        argumentsJson: '{}',
+      },
+      {
+        type: 'function_call_output',
+        callId: 'call_small_tail',
+        output: 'x'.repeat(18_825),
+        resultRef: 'result_small_tail',
+        attachmentIds: [],
+      },
+    ];
+
+    expect(
+      shouldForceContextCommitForRequest(
+        { continuationItems, completedToolResults: [] },
+        shape('x'.repeat(MAX_PROJECTED_PROVIDER_INPUT_CHARACTERS)),
+      ),
+    ).toBe(false);
   });
 
   it.each([
@@ -266,35 +388,6 @@ describe('shouldForceContextCommitForRequest', () => {
       },
     },
     {
-      name: 'encrypted reasoning',
-      request: {
-        systemPrompt: '',
-        input: [
-          {
-            type: 'reasoning',
-            itemId: 'reasoning_large',
-            encryptedContent: 'r'.repeat(80_000),
-            summary: [],
-          },
-        ],
-        tools: [],
-      },
-    },
-    {
-      name: 'compact tool receipts',
-      request: {
-        systemPrompt: '',
-        input: [
-          {
-            type: 'function_call_output',
-            callId: 'call_large',
-            output: 'o'.repeat(80_000),
-          },
-        ],
-        tools: [],
-      },
-    },
-    {
       name: 'image URLs',
       request: {
         systemPrompt: '',
@@ -314,14 +407,14 @@ describe('shouldForceContextCommitForRequest', () => {
         tools: [],
       },
     },
-  ])('counts large $name without inspecting or logging its content', ({ request }) => {
-    expect(shouldForceContextCommitForRequest(checkpoint, request)).toBe(true);
+  ])('does not force for large $name that context commit cannot reclaim', ({ request }) => {
+    expect(shouldForceContextCommitForRequest(checkpoint, request)).toBe(false);
   });
 
-  it('keeps the existing raw-pair trigger even for a tiny projected request', () => {
+  it('keeps the hard raw-pair trigger even for a tiny projected request', () => {
     const continuationItems = [
       userMessage,
-      ...Array.from({ length: 24 }, (_, index) => {
+      ...Array.from({ length: 48 }, (_, index) => {
         const callId = `call_force_${String(index)}`;
         return [
           {
@@ -359,7 +452,7 @@ describe('shouldForceContextCommitForRequest', () => {
       tools: [],
     };
     request.input.push(request);
-    expect(() => shouldForceContextCommitForRequest(checkpoint, request)).toThrow(
+    expect(() => shouldForceContextCommitForRequest(reclaimableCheckpoint, request)).toThrow(
       'Projected Provider request contains a cycle.',
     );
   });

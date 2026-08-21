@@ -954,82 +954,318 @@ describe('BrowserToolExecutor', () => {
   it.each([
     ['browser_click', { ref: 'ref_action', button: 'left', count: 1 }],
     ['browser_scroll', { target: 'ref_action', deltaX: 0, deltaY: 600 }],
-  ])(
-    'leaves the current semantic snapshot available for an explicit inspection after %s',
-    async (name, input) => {
-      const observer = {
-        inspect: vi.fn(
-          async (
-            _tabId: number,
-            _mode: string,
-            _signal: AbortSignal,
-            options?: { readonly since?: string },
-          ) => ({
+  ])('returns a fresh semantic observation in the same result after %s', async (name, input) => {
+    const observer = {
+      inspect: vi.fn(
+        async (
+          _tabId: number,
+          _mode: string,
+          _signal: AbortSignal,
+          options?: { readonly since?: string },
+        ) => ({
+          tabId: 7,
+          url: 'https://example.com/form',
+          data:
+            options?.since === 'snapshot_before'
+              ? {
+                  mode: 'interactive',
+                  snapshot: 'snapshot_after',
+                  base: 'snapshot_before',
+                  upsert: [
+                    {
+                      k: 'ref:ref_action',
+                      e: { d: 1, r: 'button', n: 'Continue', ref: 'ref_action' },
+                    },
+                  ],
+                }
+              : {
+                  mode: 'interactive',
+                  snapshot: 'snapshot_before',
+                  elements: [{ d: 1, r: 'button', n: 'Continue', ref: 'ref_action' }],
+                },
+          observation: null,
+          attachmentIds: [],
+          debuggerSession: 'ephemeral' as const,
+          visualFallbackAllowed: false,
+        }),
+      ),
+    };
+    const actions = {
+      execute: vi.fn(async () => ({
+        tabId: 7,
+        url: 'https://example.com/form',
+        data: { action: name.replace('browser_', ''), completed: true },
+        observation: null,
+      })),
+    };
+    const executor = new BrowserToolExecutor({ tabs: tabPort(), observer, actions });
+    const signal = new AbortController().signal;
+    const context = { currentTabId: 7 };
+
+    await executor.execute(call('browser_inspect', { mode: 'interactive' }), signal, context);
+    const acted = await executor.execute(call(name, input), signal, context);
+
+    expect(JSON.parse(acted.output)).toMatchObject({
+      ok: true,
+      data: {
+        completed: true,
+        verification: {
+          snapshot: 'snapshot_after',
+          base: 'snapshot_before',
+        },
+      },
+    });
+    expect(observer.inspect).toHaveBeenCalledTimes(2);
+    expect(observer.inspect).toHaveBeenLastCalledWith(7, 'interactive', signal, {
+      since: 'snapshot_before',
+    });
+  });
+
+  it('consumes virtualized scroll remainder in ordered observed segments within one tool call', async () => {
+    const order: string[] = [];
+    const observer = {
+      inspect: vi.fn(
+        async (
+          _tabId: number,
+          _mode: string,
+          _signal: AbortSignal,
+          options?: { readonly since?: string },
+        ) => {
+          order.push(`inspect:${options?.since ?? 'initial'}`);
+          const sequence = observer.inspect.mock.calls.length;
+          return {
             tabId: 7,
-            url: 'https://example.com/form',
+            url: 'https://example.com/history',
             data:
-              options?.since === 'snapshot_before'
+              sequence === 1
                 ? {
                     mode: 'interactive',
-                    snapshot: 'snapshot_after',
-                    base: 'snapshot_before',
-                    upsert: [
-                      {
-                        k: 'ref:ref_action',
-                        e: { d: 1, r: 'button', n: 'Continue', ref: 'ref_action' },
-                      },
-                    ],
+                    snapshot: 'snapshot_0',
+                    elements: [{ d: 1, r: 'region', n: 'History', ref: 'ref_history' }],
                   }
                 : {
                     mode: 'interactive',
-                    snapshot: 'snapshot_before',
-                    elements: [{ d: 1, r: 'button', n: 'Continue', ref: 'ref_action' }],
+                    snapshot: `snapshot_${sequence - 1}`,
+                    base: options?.since,
+                    upsert: [
+                      {
+                        k: `node:message_${sequence - 1}`,
+                        e: { d: 2, r: 'statictext', n: `Batch ${sequence - 1}` },
+                      },
+                    ],
                   },
             observation: null,
             attachmentIds: [],
             debuggerSession: 'ephemeral' as const,
             visualFallbackAllowed: false,
-          }),
-        ),
-      };
-      const actions = {
-        execute: vi.fn(async () => ({
+          };
+        },
+      ),
+    };
+    const segmentResults = [
+      { actualDeltaY: -1_000, remainingDeltaY: -2_000, requestedDeltaApplied: false },
+      { actualDeltaY: -1_000, remainingDeltaY: -1_000, requestedDeltaApplied: false },
+      { actualDeltaY: -1_000, remainingDeltaY: 0, requestedDeltaApplied: true },
+    ];
+    const actions = {
+      execute: vi.fn(async (actionCall: ReturnType<typeof call>) => {
+        const index = actions.execute.mock.calls.length - 1;
+        order.push(`scroll:${String((actionCall.arguments as { deltaY: number }).deltaY)}`);
+        const segment = segmentResults[index] ?? segmentResults.at(-1);
+        if (!segment) throw new Error('Missing scroll segment fixture.');
+        return {
+          tabId: 7,
+          url: 'https://example.com/history',
+          data: {
+            action: 'scroll',
+            dispatched: true,
+            deltaX: 0,
+            deltaY: (actionCall.arguments as { deltaY: number }).deltaY,
+            actualDeltaX: 0,
+            remainingDeltaX: 0,
+            moved: true,
+            contentChanged: true,
+            extentChanged: true,
+            loadedMore: true,
+            boundaryVerified: false,
+            needsBoundaryProbe: false,
+            segments: 1,
+            ...segment,
+          },
+          observation: { targetPresent: true },
+        };
+      }),
+    };
+    const executor = new BrowserToolExecutor({ tabs: tabPort(), observer, actions });
+    const signal = new AbortController().signal;
+    const context = { currentTabId: 7 };
+
+    await executor.execute(call('browser_inspect', { mode: 'interactive' }), signal, context);
+    const result = await executor.execute(
+      call('browser_scroll', { target: 'ref_history', deltaX: 0, deltaY: -3_000 }),
+      signal,
+      context,
+    );
+
+    expect(order).toEqual([
+      'inspect:initial',
+      'scroll:-3000',
+      'inspect:snapshot_0',
+      'scroll:-2000',
+      'inspect:snapshot_1',
+      'scroll:-1000',
+      'inspect:snapshot_2',
+    ]);
+    expect(actions.execute).toHaveBeenCalledTimes(3);
+    expect(JSON.parse(result.output)).toMatchObject({
+      ok: true,
+      data: {
+        action: 'scroll',
+        deltaX: 0,
+        deltaY: -3_000,
+        actualDeltaX: 0,
+        actualDeltaY: -3_000,
+        remainingDeltaX: 0,
+        remainingDeltaY: 0,
+        requestedDeltaApplied: true,
+        segments: 3,
+        observations: [
+          { snapshot: 'snapshot_1', base: 'snapshot_0' },
+          { snapshot: 'snapshot_2', base: 'snapshot_1' },
+          { snapshot: 'snapshot_3', base: 'snapshot_2' },
+        ],
+      },
+    });
+  });
+
+  it('stops segmented scrolling before the next action when retained page evidence reaches its budget', async () => {
+    const observer = {
+      inspect: vi
+        .fn()
+        .mockResolvedValueOnce({
+          tabId: 7,
+          url: 'https://example.com/history',
+          data: {
+            mode: 'interactive',
+            snapshot: 'snapshot_0',
+            elements: [{ d: 1, r: 'region', n: 'History', ref: 'ref_history' }],
+          },
+          observation: null,
+          attachmentIds: [],
+          debuggerSession: 'ephemeral' as const,
+          visualFallbackAllowed: false,
+        })
+        .mockResolvedValueOnce({
+          tabId: 7,
+          url: 'https://example.com/history',
+          data: {
+            mode: 'interactive',
+            snapshot: 'snapshot_1',
+            base: 'snapshot_0',
+            upsert: [{ k: 'node:large_batch', e: { d: 2, n: 'x'.repeat(35_000) } }],
+          },
+          observation: null,
+          attachmentIds: [],
+          debuggerSession: 'ephemeral' as const,
+          visualFallbackAllowed: false,
+        }),
+    };
+    const actions = {
+      execute: vi.fn(async () => ({
+        tabId: 7,
+        url: 'https://example.com/history',
+        data: {
+          action: 'scroll',
+          dispatched: true,
+          deltaX: 0,
+          deltaY: -3_000,
+          actualDeltaX: 0,
+          actualDeltaY: -1_000,
+          remainingDeltaX: 0,
+          remainingDeltaY: -2_000,
+          requestedDeltaApplied: false,
+          moved: true,
+          contentChanged: true,
+          extentChanged: true,
+          loadedMore: true,
+          boundaryVerified: false,
+          needsBoundaryProbe: false,
+          segments: 1,
+        },
+        observation: { targetPresent: true },
+      })),
+    };
+    const executor = new BrowserToolExecutor({ tabs: tabPort(), observer, actions });
+    const signal = new AbortController().signal;
+    const context = { currentTabId: 7 };
+
+    await executor.execute(call('browser_inspect', { mode: 'interactive' }), signal, context);
+    const result = await executor.execute(
+      call('browser_scroll', { target: 'ref_history', deltaX: 0, deltaY: -3_000 }),
+      signal,
+      context,
+    );
+
+    expect(actions.execute).toHaveBeenCalledOnce();
+    expect(JSON.parse(result.output)).toMatchObject({
+      ok: true,
+      data: {
+        remainingDeltaY: -2_000,
+        requestedDeltaApplied: false,
+        continuationLimited: 'evidence_budget',
+        verification: { snapshot: 'snapshot_1', base: 'snapshot_0' },
+      },
+    });
+  });
+
+  it('preserves a dispatched semantic action when its embedded observation is unavailable', async () => {
+    const observer = {
+      inspect: vi
+        .fn()
+        .mockResolvedValueOnce({
           tabId: 7,
           url: 'https://example.com/form',
-          data: { action: name.replace('browser_', ''), completed: true },
+          data: {
+            mode: 'interactive',
+            snapshot: 'snapshot_before',
+            elements: [{ d: 1, r: 'button', n: 'Continue', ref: 'ref_action' }],
+          },
           observation: null,
-        })),
-      };
-      const executor = new BrowserToolExecutor({ tabs: tabPort(), observer, actions });
-      const signal = new AbortController().signal;
-      const context = { currentTabId: 7 };
+          attachmentIds: [],
+          debuggerSession: 'ephemeral' as const,
+          visualFallbackAllowed: false,
+        })
+        .mockRejectedValueOnce(new Error('observation unavailable')),
+    };
+    const actions = {
+      execute: vi.fn(async () => ({
+        tabId: 7,
+        url: 'https://example.com/form',
+        data: { action: 'click', dispatched: true },
+        observation: { targetPresent: true },
+      })),
+    };
+    const executor = new BrowserToolExecutor({ tabs: tabPort(), observer, actions });
+    const signal = new AbortController().signal;
+    const context = { currentTabId: 7 };
 
-      await executor.execute(call('browser_inspect', { mode: 'interactive' }), signal, context);
-      const acted = await executor.execute(call(name, input), signal, context);
-      const inspected = await executor.execute(
-        call('browser_inspect', { mode: 'interactive', since: 'snapshot_before' }),
-        signal,
-        context,
-      );
+    await executor.execute(call('browser_inspect', { mode: 'interactive' }), signal, context);
+    const acted = await executor.execute(
+      call('browser_click', { ref: 'ref_action', button: 'left', count: 1 }),
+      signal,
+      context,
+    );
 
-      expect(JSON.parse(acted.output)).toMatchObject({
-        ok: true,
-        data: { completed: true },
-      });
-      expect(JSON.parse(acted.output).data).not.toHaveProperty('verification');
-      expect(JSON.parse(inspected.output)).toMatchObject({
-        ok: true,
-        data: {
-          snapshot: 'snapshot_after',
-          base: 'snapshot_before',
-        },
-      });
-      expect(observer.inspect).toHaveBeenCalledTimes(2);
-      expect(observer.inspect).toHaveBeenLastCalledWith(7, 'interactive', signal, {
-        since: 'snapshot_before',
-      });
-    },
-  );
+    expect(JSON.parse(acted.output)).toMatchObject({
+      ok: true,
+      data: {
+        action: 'click',
+        dispatched: true,
+        verificationUnavailable: true,
+      },
+    });
+    expect(actions.execute).toHaveBeenCalledOnce();
+  });
 
   it('returns a failed batch receipt without losing its verified selection prefix', async () => {
     const actions = {

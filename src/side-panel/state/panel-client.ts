@@ -296,7 +296,7 @@ export class PanelClient {
     await this.#environment.openSourcePage(source);
   }
 
-  /** Ensures screenshot and selected-text listeners are installed on one already-authorized tab. */
+  /** Ensures page commands are installed on one already-authorized tab. */
   async #ensurePageFeatures(tabId: number): Promise<void> {
     await this.#send({
       version: PROTOCOL_VERSION,
@@ -367,6 +367,17 @@ export class PanelClient {
   /** Cancels the active task without deleting its conversation history. */
   cancelTask(): Promise<void> {
     return this.#runTaskCommand('task.cancel');
+  }
+
+  /** Discards one cancelled task's continuation while retaining visible history and audit data. */
+  async clearTaskContext(taskId: string): Promise<void> {
+    await this.#send({
+      version: PROTOCOL_VERSION,
+      requestId: requestId(),
+      type: 'task.clearContext',
+      payload: { taskId },
+    });
+    await this.refresh();
   }
 
   /** Stops polling and invalidates every in-flight response. */

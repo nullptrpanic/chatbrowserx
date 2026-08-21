@@ -23,6 +23,7 @@ import {
   INVALID_CONTEXT_COMMIT_CURSOR,
 } from './context/context-commit';
 import { parseBrowserToolCall } from './tools/browser-tool-schema';
+import { browserScrollContinuationForCheckpoint } from './tools/browser-tool-availability';
 import { CONTEXT_COMMIT_TOOL_NAME } from './tools/context-commit-tool-schema';
 import { parseTavilyToolCall } from './tools/tavily-tool-schema';
 
@@ -69,6 +70,7 @@ interface BoundaryInput {
   readonly browserToolCallsInAttempt?: number;
   readonly browserTargetTabId?: number | null;
   readonly supplementIds?: readonly string[];
+  readonly lastModelInputTokens?: number | null;
 }
 
 type AgentOutcome = Exclude<AgentEvent, { readonly type: 'reasoning.summary' }>;
@@ -435,10 +437,23 @@ function outputSnapshot(record: Readonly<Record<string, unknown>>): string | nul
   const data = childRecord(record, 'data');
   if (!data) return null;
   if (typeof data.snapshot === 'string' && data.snapshot.length > 0) return data.snapshot;
-  const verification = childRecord(data, 'verification');
-  return typeof verification?.snapshot === 'string' && verification.snapshot.length > 0
-    ? verification.snapshot
-    : null;
+  const direct = childRecord(data, 'pageVerification') ?? childRecord(data, 'verification');
+  if (typeof direct?.snapshot === 'string' && direct.snapshot.length > 0) return direct.snapshot;
+  if (!Array.isArray(data.observations)) return null;
+  for (let index = data.observations.length - 1; index >= 0; index -= 1) {
+    const observation = data.observations[index];
+    if (
+      typeof observation === 'object' &&
+      observation !== null &&
+      !Array.isArray(observation) &&
+      'snapshot' in observation &&
+      typeof observation.snapshot === 'string' &&
+      observation.snapshot.length > 0
+    ) {
+      return observation.snapshot;
+    }
+  }
+  return null;
 }
 
 function outputSelection(
@@ -483,9 +498,13 @@ function recentBrowserProgress(items: readonly ContinuationItem[]): BrowserProgr
   let verifiedSelection: VerifiedSelectionProgress | undefined;
   let immobileScroll: ImmobileScrollProgress | undefined;
   for (const item of items) {
-    if (item.type === 'message_ref') {
+    if (item.type === 'message_ref' || item.type === 'compaction') {
       calls.clear();
       completed.length = 0;
+      pageEpoch = null;
+      mutationVersion = 0;
+      verifiedSelection = undefined;
+      immobileScroll = undefined;
       continue;
     }
     if (item.type === 'function_call') {
@@ -526,9 +545,14 @@ function recentBrowserProgress(items: readonly ContinuationItem[]): BrowserProgr
     const nextEpoch = outputSnapshot(output);
     if (call.name === 'browser_inspect') {
       if (nextEpoch !== null && nextEpoch !== pageEpoch) {
+        const previousImmobileScroll =
+          childRecord(output, 'data')?.unchanged === true ? immobileScroll : undefined;
         pageEpoch = nextEpoch;
         verifiedSelection = undefined;
-        immobileScroll = undefined;
+        immobileScroll =
+          previousImmobileScroll === undefined
+            ? undefined
+            : { ...previousImmobileScroll, pageEpoch: nextEpoch };
       }
       continue;
     }
@@ -811,6 +835,10 @@ export class TaskExecutor {
         transientModelRetryCount = 0;
 
         if (result.type === 'task.completed') {
+          if (browserScrollContinuationForCheckpoint(snapshot.checkpoint) !== null) {
+            await this.#interruptReply(snapshot.task, result.messageId);
+            continue;
+          }
           const continuationItems = snapshot.checkpoint.continuationItems.some(
             (item) => item.type === 'message_ref' && item.messageId === result.messageId,
           )
@@ -834,6 +862,18 @@ export class TaskExecutor {
             await this.#interruptReply(snapshot.task, result.messageId);
             continue;
           }
+        }
+
+        if (result.type === 'context.compacted') {
+          this.#dependencies.browser.resetObservationBaselines();
+          snapshot = await this.#saveBoundary(snapshot, ownerId, signal, {
+            type: 'task.context-compacted',
+            reason: 'native_context_compacted',
+            continuationItems: result.continuationItems,
+            pendingToolCall: null,
+            lastModelInputTokens: null,
+          });
+          continue;
         }
 
         const call =
@@ -1375,8 +1415,16 @@ export class TaskExecutor {
       ...(input.modelTurn === undefined ? {} : { modelTurn: input.modelTurn }),
       ...(input.supplementIds === undefined ? {} : { supplementIds: [...input.supplementIds] }),
     };
+    const { lastModelInputTokens: previousLastModelInputTokens, ...previousCheckpoint } =
+      snapshot.checkpoint;
+    const lastModelInputTokens =
+      input.lastModelInputTokens === null
+        ? undefined
+        : (input.lastModelInputTokens ??
+          input.modelTurn?.inputTokens ??
+          previousLastModelInputTokens);
     const checkpoint: Checkpoint = {
-      ...snapshot.checkpoint,
+      ...previousCheckpoint,
       id: checkpointId,
       sequence,
       taskStatus: task.status,
@@ -1386,6 +1434,7 @@ export class TaskExecutor {
         input.pendingToolCall === undefined
           ? snapshot.checkpoint.pendingToolCall
           : input.pendingToolCall,
+      ...(lastModelInputTokens === undefined ? {} : { lastModelInputTokens }),
       browserToolCallsInAttempt:
         input.browserToolCallsInAttempt ?? snapshot.checkpoint.browserToolCallsInAttempt ?? 0,
       ...(input.browserTargetTabId === undefined
