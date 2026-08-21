@@ -20,6 +20,8 @@ export interface LiveScenario {
   readonly requiredTypedTextIncludes?: readonly string[];
   readonly requiredToolOutputIncludes?: readonly string[];
   readonly finalTextIncludes: readonly string[];
+  /** Any occurrence indicates the model reported an unresolved blocker instead of success. */
+  readonly finalTextExcludes?: readonly string[];
   readonly minFinalTextLength: number;
   readonly minimumMarkdownTableRows?: number;
   readonly allowRemoteMutation: boolean;

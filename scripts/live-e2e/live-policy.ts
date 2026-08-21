@@ -192,6 +192,10 @@ export function evaluateLiveRun(scenario: LiveScenario, input: LiveRunInput): Li
   const missingFinalText = scenario.finalTextIncludes.filter(
     (value) => !input.finalText.includes(value),
   );
+  const normalizedFinalText = input.finalText.toLocaleLowerCase();
+  const presentExcludedFinalText = (scenario.finalTextExcludes ?? []).filter((value) =>
+    normalizedFinalText.includes(value.toLocaleLowerCase()),
+  );
   const tableMetrics = markdownTableMetrics(input.finalText);
   const minimumTableRows = scenario.minimumMarkdownTableRows;
   const providerTrace = input.providerTrace;
@@ -323,6 +327,13 @@ export function evaluateLiveRun(scenario: LiveScenario, input: LiveRunInput): Li
       missingFinalText.length === 0
         ? 'Final text includes every required phrase.'
         : `Missing: ${missingFinalText.join(', ')}.`,
+    ),
+    check(
+      'final-text-exclusions',
+      presentExcludedFinalText.length === 0,
+      presentExcludedFinalText.length === 0
+        ? 'Final text does not declare an unresolved scenario blocker.'
+        : `Excluded blocker text present: ${presentExcludedFinalText.join(', ')}.`,
     ),
     check(
       'final-text-length',

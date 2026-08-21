@@ -131,7 +131,8 @@ export function summarizeResponsesRequestBody(
     const type = stringValue(item.type);
     const callId = stringValue(item.call_id);
     if (callId === null) continue;
-    const target = type === 'function_call' ? callCounts : type === 'function_call_output' ? outputCounts : null;
+    const target =
+      type === 'function_call' ? callCounts : type === 'function_call_output' ? outputCounts : null;
     if (target !== null) target.set(callId, (target.get(callId) ?? 0) + 1);
   }
   const functionCallCount = [...callCounts.values()].reduce((total, count) => total + count, 0);
@@ -157,7 +158,8 @@ export function summarizeResponsesRequestBody(
   return {
     bodyValid: true,
     model: stringValue(request.model),
-    instructionCharacters: typeof request.instructions === 'string' ? request.instructions.length : 0,
+    instructionCharacters:
+      typeof request.instructions === 'string' ? request.instructions.length : 0,
     store: booleanValue(request.store),
     stream: booleanValue(request.stream),
     parallelToolCalls: booleanValue(request.parallel_tool_calls),
@@ -208,7 +210,9 @@ function emptyResponseSummary(): LiveProviderResponseSummary {
   };
 }
 
-function summarizeSseResponse(body: Buffer): Omit<LiveProviderResponseSummary, 'status' | 'contentType'> {
+function summarizeSseResponse(
+  body: Buffer,
+): Omit<LiveProviderResponseSummary, 'status' | 'contentType'> {
   if (body.byteLength > MAX_RESPONSE_BODY_BYTES) {
     return {
       bodyBytes: body.byteLength,

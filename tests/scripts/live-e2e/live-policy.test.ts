@@ -201,6 +201,24 @@ describe('live E2E acceptance policy', () => {
     );
   });
 
+  it('rejects a nominally completed answer that declares an unresolved scenario blocker', () => {
+    const guardedScenario: LiveScenario = {
+      ...scenario,
+      finalTextExcludes: ['唯一阻塞点', '无法确认', 'could not verify'],
+    };
+    const result = evaluateLiveRun(guardedScenario, {
+      ...completedInput(),
+      finalText: 'Example chat was read, but the image remains the 唯一阻塞点，无法确认。',
+    });
+
+    expect(result.passed).toBe(false);
+    expect(result.checks).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ name: 'final-text-exclusions', passed: false }),
+      ]),
+    );
+  });
+
   it('verifies one declared submitted message from its call and structural readback', () => {
     const marker = 'ChatBrowserX live self-check live_123';
     const mutationScenario: LiveScenario = {

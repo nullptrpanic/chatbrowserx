@@ -241,6 +241,11 @@ function expandScenario(scenario: LiveScenario, runId: string): LiveScenario {
     ...scenario,
     taskText: expandRunMarker(scenario.taskText, runId),
     finalTextIncludes: scenario.finalTextIncludes.map((value) => expandRunMarker(value, runId)),
+    ...(scenario.finalTextExcludes === undefined
+      ? {}
+      : {
+          finalTextExcludes: expandAll(scenario.finalTextExcludes),
+        }),
     ...(scenario.requiredTypedTextIncludes === undefined
       ? {}
       : {
