@@ -146,7 +146,10 @@ describe('live E2E acceptance policy', () => {
     });
     expect(duplicatePaste.checks).toEqual(
       expect.arrayContaining([
-        expect.objectContaining({ name: 'expected-tool-counts', passed: false }),
+        expect.objectContaining({
+          name: 'expected-tool-counts',
+          passed: false,
+        }),
       ]),
     );
   });
@@ -164,7 +167,13 @@ describe('live E2E acceptance policy', () => {
       toolResults: [
         tool(
           'browser_type',
-          { tabId: 0, ref: 'editor', text: 'replacement', replace: true, submit: false },
+          {
+            tabId: 0,
+            ref: 'editor',
+            text: 'replacement',
+            replace: true,
+            submit: false,
+          },
           {
             output: JSON.stringify({
               ok: false,
@@ -179,7 +188,10 @@ describe('live E2E acceptance policy', () => {
     expect(result.passed).toBe(false);
     expect(result.checks).toEqual(
       expect.arrayContaining([
-        expect.objectContaining({ name: 'required-tool-verification', passed: false }),
+        expect.objectContaining({
+          name: 'required-tool-verification',
+          passed: false,
+        }),
       ]),
     );
   });
@@ -212,6 +224,44 @@ describe('live E2E acceptance policy', () => {
     });
 
     expect(result.passed).toBe(false);
+    expect(result.checks).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          name: 'final-text-exclusions',
+          passed: false,
+        }),
+      ]),
+    );
+  });
+
+  it('does not treat a blocker word embedded in a code identifier as an unresolved blocker', () => {
+    const guardedScenario: LiveScenario = {
+      ...scenario,
+      finalTextExcludes: ['blocked'],
+    };
+    const result = evaluateLiveRun(guardedScenario, {
+      ...completedInput(),
+      finalText:
+        'Example chat was read and verified. The documented identifier IsShareBlockedByCAC is enabled.',
+    });
+
+    expect(result.checks).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ name: 'final-text-exclusions', passed: true }),
+      ]),
+    );
+  });
+
+  it('still rejects a standalone Latin blocker word', () => {
+    const guardedScenario: LiveScenario = {
+      ...scenario,
+      finalTextExcludes: ['blocked'],
+    };
+    const result = evaluateLiveRun(guardedScenario, {
+      ...completedInput(),
+      finalText: 'Example chat was read, but verification is blocked by authentication.',
+    });
+
     expect(result.checks).toEqual(
       expect.arrayContaining([
         expect.objectContaining({ name: 'final-text-exclusions', passed: false }),
@@ -326,7 +376,10 @@ describe('live E2E acceptance policy', () => {
     expect(editorMirror.passed).toBe(false);
     expect(editorMirror.checks).toEqual(
       expect.arrayContaining([
-        expect.objectContaining({ name: 'submitted-state-readback', passed: false }),
+        expect.objectContaining({
+          name: 'submitted-state-readback',
+          passed: false,
+        }),
       ]),
     );
   });
@@ -420,6 +473,7 @@ describe('live E2E acceptance policy', () => {
       parallelToolCalls: false,
       includesEncryptedReasoning: true,
       toolNames: ['browser_inspect'],
+      toolDefinitionCharacters: 256,
       toolChoice: 'auto',
       inputItems: [],
       activeUserRequestOccurrences: 1,
@@ -479,8 +533,14 @@ describe('live E2E acceptance policy', () => {
     expect(broken.passed).toBe(false);
     expect(broken.checks).toEqual(
       expect.arrayContaining([
-        expect.objectContaining({ name: 'provider-request-contract', passed: false }),
-        expect.objectContaining({ name: 'encrypted-reasoning-continuation', passed: false }),
+        expect.objectContaining({
+          name: 'provider-request-contract',
+          passed: false,
+        }),
+        expect.objectContaining({
+          name: 'encrypted-reasoning-continuation',
+          passed: false,
+        }),
       ]),
     );
   });
@@ -511,5 +571,39 @@ describe('live E2E report payload sanitization', () => {
 
     expect(sanitized).not.toContain('abc.def.ghi');
     expect(sanitized.length).toBeLessThanOrEqual(48);
+  });
+
+  it('keeps bounded JSON parseable when only pretty printing would exceed the report limit', () => {
+    const value = JSON.stringify({
+      ok: true,
+      observations: Array.from({ length: 40 }, (_, index) => ({
+        index,
+        text: `message-${String(index)}`,
+      })),
+    });
+    const limit = value.length + 1;
+
+    const sanitized = sanitizeToolPayload(value, limit);
+
+    expect(sanitized.length).toBeLessThanOrEqual(limit);
+    expect(JSON.parse(sanitized)).toMatchObject({ ok: true });
+  });
+
+  it('structurally truncates oversized JSON and records that evidence was omitted', () => {
+    const value = JSON.stringify({
+      ok: true,
+      authorization: 'Bearer secret-value',
+      observations: Array.from({ length: 80 }, (_, index) => ({
+        index,
+        text: `message-${String(index)}-${'x'.repeat(80)}`,
+      })),
+    });
+
+    const sanitized = sanitizeToolPayload(value, 320);
+    const parsed = JSON.parse(sanitized) as Readonly<Record<string, unknown>>;
+
+    expect(sanitized.length).toBeLessThanOrEqual(320);
+    expect(parsed).toMatchObject({ ok: true, __truncated__: true });
+    expect(sanitized).not.toContain('secret-value');
   });
 });

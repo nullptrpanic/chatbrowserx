@@ -4,6 +4,30 @@ import { summarizeResponsesRequestBody } from '../../../scripts/live-e2e/provide
 describe('live Responses API trace sanitization', () => {
   it('retains only structural request evidence and validates function-call pairing', () => {
     const activeUserText = 'Read the exact private conversation.';
+    const tools = [
+      {
+        type: 'function',
+        name: 'browser_inspect',
+        description: 'private schema description',
+        parameters: {
+          type: 'object',
+          properties: { mode: { type: 'string', enum: ['interactive'] } },
+          required: ['mode'],
+          additionalProperties: false,
+        },
+      },
+      {
+        type: 'function',
+        name: 'browser_click',
+        description: 'another private schema description',
+        parameters: {
+          type: 'object',
+          properties: { target: { type: 'string' } },
+          required: ['target'],
+          additionalProperties: false,
+        },
+      },
+    ];
     const summary = summarizeResponsesRequestBody(
       {
         model: 'gpt-5.6-terra',
@@ -12,7 +36,13 @@ describe('live Responses API trace sanitization', () => {
           {
             type: 'message',
             role: 'user',
-            content: [{ type: 'input_text', text: activeUserText }],
+            content: [
+              { type: 'input_text', text: activeUserText },
+              {
+                type: 'input_text',
+                text: 'Task page metadata (untrusted): {"tabId":0}',
+              },
+            ],
           },
           {
             type: 'function_call',
@@ -32,7 +62,7 @@ describe('live Responses API trace sanitization', () => {
             summary: [],
           },
         ],
-        tools: [{ type: 'function', name: 'browser_inspect' }],
+        tools,
         tool_choice: 'auto',
         parallel_tool_calls: false,
         store: false,
@@ -56,14 +86,19 @@ describe('live Responses API trace sanitization', () => {
       unpairedFunctionCallCount: 0,
       duplicateFunctionCallIds: false,
       encryptedReasoningInputCount: 1,
+      toolDefinitionCharacters: tools.reduce(
+        (total, tool) => total + JSON.stringify(tool).length,
+        0,
+      ),
     });
     expect(summary.inputItems).toEqual([
       {
         position: 0,
         type: 'message',
         role: 'user',
-        contentTypes: ['input_text'],
-        textCharacters: activeUserText.length,
+        contentTypes: ['input_text', 'input_text'],
+        textCharacters:
+          activeUserText.length + 'Task page metadata (untrusted): {"tabId":0}'.length,
         matchesActiveUserRequest: true,
       },
       {
@@ -81,6 +116,27 @@ describe('live Responses API trace sanitization', () => {
     ]);
     expect(JSON.stringify(summary)).not.toContain('private');
     expect(JSON.stringify(summary)).not.toContain(activeUserText);
+  });
+
+  it('counts duplicate active request items even when they share one message', () => {
+    const activeUserText = 'Do not send this twice.';
+    const summary = summarizeResponsesRequestBody(
+      {
+        input: [
+          {
+            type: 'message',
+            role: 'user',
+            content: [
+              { type: 'input_text', text: activeUserText },
+              { type: 'input_text', text: activeUserText },
+            ],
+          },
+        ],
+      },
+      activeUserText,
+    );
+
+    expect(summary.activeUserRequestOccurrences).toBe(2);
   });
 
   it('reports duplicated calls and orphaned outputs without retaining call IDs', () => {

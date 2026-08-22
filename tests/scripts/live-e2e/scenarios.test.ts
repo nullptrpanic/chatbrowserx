@@ -38,16 +38,17 @@ describe('live E2E scenario registry', () => {
 
     expect(scenario.allowRemoteMutation).toBe(false);
     expect(scenario.requiredTools).toEqual(
-      expect.arrayContaining(['browser_inspect', 'browser_scroll']),
+      expect.arrayContaining(['browser_inspect', 'browser_scroll_until']),
     );
     expect(scenario.forbidScreenshotInspect).toBe(true);
     expect(scenario.forbidSubmittedType).toBe(true);
     expect(scenario.forbiddenTools).toEqual(
-      expect.arrayContaining(['browser_click_point', 'browser_drag_point']),
+      expect.arrayContaining(['browser_click_point', 'browser_drag_point', 'browser_scroll']),
     );
     expect(scenario.taskText).toContain('豆包*飞书C360管');
     expect(scenario.taskText).toContain('2026 年 8 月');
     expect(scenario.taskText).toContain('boundaryVerified=true');
+    expect(scenario.taskText).toContain('browser_scroll_until');
     expect(scenario.finalTextIncludes).toEqual(
       expect.arrayContaining(['豆包*飞书C360管', '8 月', '覆盖边界']),
     );

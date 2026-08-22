@@ -83,6 +83,7 @@ export interface LiveProviderRequestBodySummary {
   readonly parallelToolCalls: boolean | null;
   readonly includesEncryptedReasoning: boolean;
   readonly toolNames: readonly string[];
+  readonly toolDefinitionCharacters: number;
   readonly toolChoice: string | null;
   readonly inputItems: readonly LiveProviderInputItemSummary[];
   readonly activeUserRequestOccurrences: number;

@@ -53,8 +53,7 @@ function messageItemSummary(
     ...(typeof item.role === 'string' ? { role: item.role } : {}),
     contentTypes: contentRecords.map((content) => stringValue(content.type) ?? 'unknown'),
     textCharacters: texts.reduce((total, text) => total + text.length, 0),
-    matchesActiveUserRequest:
-      item.role === 'user' && texts.length === 1 && texts[0] === activeUserText,
+    matchesActiveUserRequest: item.role === 'user' && texts.includes(activeUserText),
   };
 }
 
@@ -74,7 +73,11 @@ function inputItemSummary(
     };
   }
   if (type === 'function_call_output') {
-    return { position, type, outputCharacters: serializedCharacters(item.output) };
+    return {
+      position,
+      type,
+      outputCharacters: serializedCharacters(item.output),
+    };
   }
   if (type === 'reasoning') {
     return {
@@ -97,6 +100,7 @@ function invalidRequestSummary(): LiveProviderRequestBodySummary {
     parallelToolCalls: null,
     includesEncryptedReasoning: false,
     toolNames: [],
+    toolDefinitionCharacters: 0,
     toolChoice: null,
     inputItems: [],
     activeUserRequestOccurrences: 0,
@@ -147,12 +151,11 @@ export function summarizeResponsesRequestBody(
       return typeof content?.text === 'string' ? [content.text] : [];
     });
   });
-  const tools = Array.isArray(request.tools)
-    ? request.tools.flatMap((candidate) => {
-        const tool = record(candidate);
-        return typeof tool?.name === 'string' ? [tool.name] : [];
-      })
-    : [];
+  const toolDefinitions = Array.isArray(request.tools) ? request.tools : [];
+  const tools = toolDefinitions.flatMap((candidate) => {
+    const tool = record(candidate);
+    return typeof tool?.name === 'string' ? [tool.name] : [];
+  });
   const choice = record(request.tool_choice);
 
   return {
@@ -166,6 +169,10 @@ export function summarizeResponsesRequestBody(
     includesEncryptedReasoning:
       Array.isArray(request.include) && request.include.includes('reasoning.encrypted_content'),
     toolNames: tools.slice(0, 64),
+    toolDefinitionCharacters: toolDefinitions.reduce(
+      (total, definition) => total + serializedCharacters(definition),
+      0,
+    ),
     toolChoice:
       typeof request.tool_choice === 'string'
         ? request.tool_choice
@@ -173,9 +180,7 @@ export function summarizeResponsesRequestBody(
           ? choice.name
           : null,
     inputItems,
-    activeUserRequestOccurrences: inputItems.filter(
-      (item) => item.matchesActiveUserRequest === true,
-    ).length,
+    activeUserRequestOccurrences: messageTexts.filter((text) => text === activeUserText).length,
     runtimeSupplementOccurrences: messageTexts.filter((text) =>
       text.startsWith(RUNTIME_SUPPLEMENT_PREFIX),
     ).length,
@@ -297,7 +302,10 @@ export class ResponsesTraceCollector {
     await Promise.all([...this.#responseTasks]);
     return {
       requestCount: this.#entries.length,
-      requests: this.#entries.map((entry) => ({ ...entry, response: { ...entry.response } })),
+      requests: this.#entries.map((entry) => ({
+        ...entry,
+        response: { ...entry.response },
+      })),
     };
   }
 
@@ -343,7 +351,10 @@ export class ResponsesTraceCollector {
         };
       })
       .catch(() => {
-        entry.response = { ...entry.response, captureError: 'response_body_unavailable' };
+        entry.response = {
+          ...entry.response,
+          captureError: 'response_body_unavailable',
+        };
       })
       .finally(() => {
         this.#responseTasks.delete(task);

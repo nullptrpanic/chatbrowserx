@@ -7,6 +7,7 @@ import type {
 
 const SECRET_KEY = /authorization|cookie|password|secret|access[\s_-]?token|api[\s_-]?key/i;
 const BEARER_TOKEN = /Bearer\s+[A-Za-z0-9._~+/=-]+/gi;
+const TRUNCATION_KEY = '__truncated__';
 
 function redactValue(value: unknown): unknown {
   if (Array.isArray(value)) return value.map(redactValue);
@@ -97,16 +98,84 @@ function markdownTableMetrics(text: string): {
   return best;
 }
 
+function boundedString(value: string, maxCharacters: number): string | undefined {
+  if (maxCharacters < 2) return undefined;
+  if (JSON.stringify(value).length <= maxCharacters) return value;
+  const suffix = '…';
+  if (JSON.stringify(suffix).length > maxCharacters) return '';
+  let low = 0;
+  let high = value.length;
+  while (low < high) {
+    const middle = Math.ceil((low + high) / 2);
+    if (JSON.stringify(`${value.slice(0, middle)}${suffix}`).length <= maxCharacters) low = middle;
+    else high = middle - 1;
+  }
+  return `${value.slice(0, low)}${suffix}`;
+}
+
+function boundedJsonValue(value: unknown, maxCharacters: number): unknown | undefined {
+  const serialized = JSON.stringify(value);
+  if (serialized !== undefined && serialized.length <= maxCharacters) return value;
+  if (typeof value === 'string') return boundedString(value, maxCharacters);
+  if (value === null || typeof value !== 'object') return maxCharacters >= 1 ? 0 : undefined;
+
+  const marker = { [TRUNCATION_KEY]: true };
+  if (Array.isArray(value)) {
+    if (JSON.stringify([marker]).length > maxCharacters) return undefined;
+    let compact: unknown[] = [marker];
+    for (const child of value) {
+      const available = Math.max(0, maxCharacters - JSON.stringify(compact).length - 1);
+      const bounded = boundedJsonValue(child, available);
+      if (bounded === undefined) break;
+      const candidate = [...compact.slice(0, -1), bounded, marker];
+      if (JSON.stringify(candidate).length > maxCharacters) break;
+      compact = candidate;
+    }
+    return compact;
+  }
+
+  if (JSON.stringify(marker).length > maxCharacters) return undefined;
+  let compact: Record<string, unknown> = { ...marker };
+  for (const [key, child] of Object.entries(value)) {
+    if (key === TRUNCATION_KEY) continue;
+    const keyCost = JSON.stringify(key).length + 2;
+    const available = Math.max(0, maxCharacters - JSON.stringify(compact).length - keyCost);
+    const bounded = boundedJsonValue(child, available);
+    if (bounded === undefined) continue;
+    const candidate = { ...compact, [key]: bounded };
+    if (JSON.stringify(candidate).length > maxCharacters) continue;
+    compact = candidate;
+  }
+  return compact;
+}
+
+function boundedJson(value: unknown, maxCharacters: number): string {
+  const serialized = JSON.stringify(value);
+  if (serialized.length <= maxCharacters) return serialized;
+  const bounded = boundedJsonValue(value, maxCharacters);
+  const result = bounded === undefined ? '' : JSON.stringify(bounded);
+  if (result.length > 0 && result.length <= maxCharacters) return result;
+  if (maxCharacters >= 4) return 'null';
+  return maxCharacters >= 1 ? '0' : '';
+}
+
+function containsExcludedFinalText(normalizedText: string, exclusion: string): boolean {
+  const normalizedExclusion = exclusion.toLocaleLowerCase();
+  if (!/^[a-z0-9_]+$/i.test(normalizedExclusion)) {
+    return normalizedText.includes(normalizedExclusion);
+  }
+  const pattern = new RegExp(`(?<![\\p{L}\\p{N}_])${normalizedExclusion}(?![\\p{L}\\p{N}_])`, 'u');
+  return pattern.test(normalizedText);
+}
+
 /** Redacts credential-shaped fields and keeps persisted live-run evidence strictly bounded. */
 export function sanitizeToolPayload(value: string, maxCharacters: number): string {
   if (!Number.isInteger(maxCharacters) || maxCharacters <= 0) return '';
-  let sanitized: string;
   try {
-    sanitized = JSON.stringify(redactValue(JSON.parse(value)), null, 2);
+    return boundedJson(redactValue(JSON.parse(value)), maxCharacters);
   } catch {
-    sanitized = value.replace(BEARER_TOKEN, 'Bearer [REDACTED]');
+    return value.replace(BEARER_TOKEN, 'Bearer [REDACTED]').slice(0, maxCharacters);
   }
-  return sanitized.slice(0, maxCharacters);
 }
 
 /** Evaluates one live run without consulting mutable page state or provider payloads. */
@@ -194,7 +263,7 @@ export function evaluateLiveRun(scenario: LiveScenario, input: LiveRunInput): Li
   );
   const normalizedFinalText = input.finalText.toLocaleLowerCase();
   const presentExcludedFinalText = (scenario.finalTextExcludes ?? []).filter((value) =>
-    normalizedFinalText.includes(value.toLocaleLowerCase()),
+    containsExcludedFinalText(normalizedFinalText, value),
   );
   const tableMetrics = markdownTableMetrics(input.finalText);
   const minimumTableRows = scenario.minimumMarkdownTableRows;

@@ -37,14 +37,15 @@ const LARK_MESSENGER_AUGUST_HISTORY = Object.freeze<LiveScenario>({
   startUrl: 'https://bytedance.larkoffice.com/next/messenger',
   expectedOrigin: 'https://bytedance.larkoffice.com',
   taskText:
-    '只使用结构化浏览器工具，不要请求或使用截图、坐标操作、图片附件或任何网络抓包。搜索并打开名称匹配“豆包*飞书C360管”的真实群聊，先从会话标题或群聊信息确认目标。读取当前账号可见的 2026 年 8 月完整聊天内容并做忠实总结。必须滚动群聊的消息历史容器，不得滚动整页或侧边会话列表；每次滚动后先按顺序读取工具结果中的 verification 或 observations，它们就是新暴露的页面状态，只有 verificationUnavailable=true 或 continuationFailure 存在时才额外调用 browser_inspect；去重保留消息和日期证据。只有满足以下任一覆盖条件才允许结束：返回的观察证据已经出现 2026 年 8 月 1 日之前的消息；或者同方向边界探测明确返回 boundaryVerified=true，且同次返回的观察证据确认没有加载出更早内容。仅看到 8 月 1 日当天、滚动位置为 0、内容 unchanged 或模型主观认为到顶，都不能单独证明覆盖完整。如果真实边界晚于 8 月 1 日，必须如实写明当前账号可见的最早时间和边界证据，不得虚构缺失内容。不要发送消息、不要修改任何远端数据。最终回复必须包含群名、实际读取到的 8 月时间范围、内容总结，并用“覆盖边界：”明确写出看到的 8 月前日期或 boundaryVerified=true 的工具证据。任何一步无法验证时立即说明唯一阻塞点，不要声称已完成。',
+    '只使用结构化浏览器工具，不要请求或使用截图、坐标操作、图片附件或任何网络抓包。搜索并打开名称匹配“豆包*飞书C360管”的真实群聊，先从会话标题或群聊信息确认目标。读取当前账号可见的 2026 年 8 月完整聊天内容并做忠实总结。必须滚动群聊的消息历史容器，不得滚动整页或侧边会话列表；从最新 interactive 检查中找到明确 advertises scroll 的消息历史 ref 后，必须使用 browser_scroll_until 沿负 deltaY 分段读取，stopText 只作为发现 8 月以前日期文本的候选停止标记，不得使用逐次 browser_scroll 代替。每次 browser_scroll_until 返回后，先按顺序读取 observations，它们就是每个已执行分段新暴露的页面状态；stopReason=text_seen 只表示看到了候选文本，必须从 observations 确认它确实是 8 月前日期；continuationRequired=true 时根据 stopReason 和最新证据继续结构化检查或再次调用 browser_scroll_until，不能直接结束。去重保留消息和日期证据。只有满足以下任一覆盖条件才允许结束：返回的观察证据已经出现 2026 年 8 月 1 日之前的消息；或者同方向边界探测明确返回 boundaryVerified=true，且同次返回的观察证据确认没有加载出更早内容。仅看到 8 月 1 日当天、滚动位置为 0、内容 unchanged、stopReason=text_seen 或模型主观认为到顶，都不能单独证明覆盖完整。如果真实边界晚于 8 月 1 日，必须如实写明当前账号可见的最早时间和边界证据，不得虚构缺失内容。不要发送消息、不要修改任何远端数据。最终回复必须包含群名、实际读取到的 8 月时间范围、内容总结，并用“覆盖边界：”明确写出看到的 8 月前日期或 boundaryVerified=true 的工具证据。任何一步无法验证时立即说明唯一阻塞点，不要声称已完成。',
   readinessTimeoutMs: 30_000,
   taskTimeoutMs: 480_000,
   maxToolCalls: 120,
-  requiredTools: Object.freeze(['browser_inspect', 'browser_scroll']),
+  requiredTools: Object.freeze(['browser_inspect', 'browser_scroll_until']),
   forbiddenTools: Object.freeze([
     'browser_click_point',
     'browser_drag_point',
+    'browser_scroll',
     'browser_network_start',
     'browser_network_list',
     'browser_network_get',
