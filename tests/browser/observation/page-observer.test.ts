@@ -97,6 +97,184 @@ function buttonDomSnapshot(
   };
 }
 
+function virtualDocumentDomSnapshot() {
+  const strings = [
+    'https://top.test/',
+    'Virtual document',
+    '',
+    'frame-main',
+    '#document',
+    'DIV',
+    'aria-label',
+    'Document pages',
+    'auto',
+    'block',
+    'visible',
+    'hidden',
+  ];
+  return {
+    strings,
+    documents: [
+      {
+        documentURL: 0,
+        title: 1,
+        baseURL: 0,
+        contentLanguage: 2,
+        encodingName: 2,
+        publicId: 2,
+        systemId: 2,
+        frameId: 3,
+        nodes: {
+          parentIndex: [-1, 0],
+          nodeType: [9, 1],
+          nodeName: [4, 5],
+          nodeValue: [2, 2],
+          backendNodeId: [1, 11],
+          attributes: [[], [6, 7]],
+          isClickable: { index: [] },
+        },
+        layout: {
+          nodeIndex: [1],
+          styles: [[8, 9, 10, 8, 10, 11]],
+          bounds: [[100, 80, 800, 600]],
+          text: [2],
+          stackingContexts: { index: [] },
+          scrollRects: [[100, 80, 800, 6_000]],
+          clientRects: [[100, 80, 800, 600]],
+        },
+        textBoxes: { layoutIndex: [], bounds: [], start: [], length: [] },
+      },
+    ],
+  };
+}
+
+function multipleScrollContainersDomSnapshot(
+  containers: readonly {
+    readonly label: string;
+    readonly bounds: readonly [number, number, number, number];
+    readonly scrollHeight: number;
+  }[],
+) {
+  const strings = [
+    'https://top.test/',
+    'Scrollable workspace',
+    '',
+    'frame-main',
+    '#document',
+    'DIV',
+    'aria-label',
+    'auto',
+    'block',
+    'visible',
+    'hidden',
+    ...containers.map(({ label }) => label),
+  ];
+  const labelOffset = 11;
+  return {
+    strings,
+    documents: [
+      {
+        documentURL: 0,
+        title: 1,
+        baseURL: 0,
+        contentLanguage: 2,
+        encodingName: 2,
+        publicId: 2,
+        systemId: 2,
+        frameId: 3,
+        nodes: {
+          parentIndex: [-1, ...containers.map(() => 0)],
+          nodeType: [9, ...containers.map(() => 1)],
+          nodeName: [4, ...containers.map(() => 5)],
+          nodeValue: [2, ...containers.map(() => 2)],
+          backendNodeId: [1, ...containers.map((_container, index) => index + 10)],
+          attributes: [[], ...containers.map((_container, index) => [6, labelOffset + index])],
+          isClickable: { index: [] },
+        },
+        layout: {
+          nodeIndex: containers.map((_container, index) => index + 1),
+          styles: containers.map(() => [7, 8, 9, 7, 9, 10]),
+          bounds: containers.map(({ bounds }) => [...bounds]),
+          text: containers.map(() => 2),
+          stackingContexts: { index: [] },
+          scrollRects: containers.map(({ bounds, scrollHeight }) => [
+            bounds[0],
+            bounds[1],
+            bounds[2],
+            scrollHeight,
+          ]),
+          clientRects: containers.map(({ bounds }) => [...bounds]),
+        },
+        textBoxes: { layoutIndex: [], bounds: [], start: [], length: [] },
+      },
+    ],
+  };
+}
+
+function nestedScrollContainersDomSnapshot() {
+  const strings = [
+    'https://top.test/',
+    'Nested workspace',
+    '',
+    'frame-main',
+    '#document',
+    'DIV',
+    'aria-label',
+    'auto',
+    'block',
+    'visible',
+    'hidden',
+    'Conversation history and messages',
+    'Conversation history',
+  ];
+  return {
+    strings,
+    documents: [
+      {
+        documentURL: 0,
+        title: 1,
+        baseURL: 0,
+        contentLanguage: 2,
+        encodingName: 2,
+        publicId: 2,
+        systemId: 2,
+        frameId: 3,
+        nodes: {
+          parentIndex: [-1, 0, 1],
+          nodeType: [9, 1, 1],
+          nodeName: [4, 5, 5],
+          nodeValue: [2, 2, 2],
+          backendNodeId: [1, 10, 11],
+          attributes: [[], [6, 11], [6, 12]],
+          isClickable: { index: [] },
+        },
+        layout: {
+          nodeIndex: [1, 2],
+          styles: [
+            [7, 8, 9, 7, 9, 10],
+            [7, 8, 9, 7, 9, 10],
+          ],
+          bounds: [
+            [100, 80, 900, 650],
+            [104, 84, 892, 642],
+          ],
+          text: [2, 2],
+          stackingContexts: { index: [] },
+          scrollRects: [
+            [100, 80, 900, 10_000],
+            [104, 84, 892, 9_900],
+          ],
+          clientRects: [
+            [100, 80, 900, 650],
+            [104, 84, 892, 642],
+          ],
+        },
+        textBoxes: { layoutIndex: [], bounds: [], start: [], length: [] },
+      },
+    ],
+  };
+}
+
 function mainFrameTree(
   loaderId = 'loader-main',
   frameId = 'frame-main',
@@ -189,6 +367,7 @@ describe('PageObserver', () => {
         'overflow-y',
       ],
       includeDOMRects: true,
+      includePaintOrder: true,
     });
     expect(result).toMatchObject({
       url: 'https://top.test/',
@@ -217,6 +396,283 @@ describe('PageObserver', () => {
       loaderId: 'loader-main',
       backendNodeId: 11,
     });
+  });
+
+  it('reports incomplete document coverage and recommends viewport traversal', async () => {
+    const snapshot: BrowserSessionSnapshot = {
+      tabId: 7,
+      generation: 1,
+      root: { tabId: 7 },
+      children: new Map(),
+    };
+    const transport = debuggerTransport((_session, method) => {
+      if (method === 'Accessibility.getFullAXTree') {
+        return {
+          nodes: [
+            {
+              nodeId: 'visible-text',
+              ignored: false,
+              role: { value: 'StaticText' },
+              name: { value: 'Visible document text' },
+            },
+          ],
+        };
+      }
+      if (method === 'DOMSnapshot.captureSnapshot') return buttonDomSnapshot();
+      if (method === 'Page.getFrameTree') return mainFrameTree();
+      if (method === 'Page.getLayoutMetrics') {
+        return {
+          visualViewport: {
+            pageX: 0,
+            pageY: 0,
+            clientWidth: 800,
+            clientHeight: 600,
+          },
+          contentSize: { x: 0, y: 0, width: 800, height: 2_400 },
+        };
+      }
+      if (method === 'Page.getNavigationHistory') return { currentIndex: 0, entries: [] };
+      return {};
+    });
+    const observer = new PageObserver({
+      sessions: sessions(snapshot),
+      transport,
+      content: CONTENT,
+      refs: new ElementRefStore({ create: () => 'unused' }),
+    });
+
+    const result = await observer.inspect(7, 'interactive', new AbortController().signal);
+
+    expect(result.data).toMatchObject({
+      mode: 'interactive',
+      coverage: {
+        scope: 'viewport',
+        complete: false,
+        moreBefore: false,
+        moreAfter: true,
+        targets: ['viewport'],
+        primaryTarget: 'viewport',
+        recommendedAction: 'browser_scroll_until',
+        contentKey: expect.stringMatching(/^[0-9a-f]{8}$/),
+      },
+    });
+  });
+
+  it('reports a virtualized element ref as an incomplete traversal target', async () => {
+    const snapshot: BrowserSessionSnapshot = {
+      tabId: 7,
+      generation: 1,
+      root: { tabId: 7 },
+      children: new Map(),
+    };
+    const transport = debuggerTransport((_session, method) => {
+      if (method === 'Accessibility.getFullAXTree') {
+        return {
+          nodes: [
+            {
+              nodeId: 'root',
+              backendDOMNodeId: 1,
+              ignored: false,
+              role: { value: 'RootWebArea' },
+              name: { value: 'Virtual document' },
+            },
+          ],
+        };
+      }
+      if (method === 'DOMSnapshot.captureSnapshot') return virtualDocumentDomSnapshot();
+      if (method === 'Page.getFrameTree') return mainFrameTree();
+      if (method === 'Page.getLayoutMetrics') {
+        return {
+          visualViewport: {
+            pageX: 0,
+            pageY: 0,
+            clientWidth: 1_000,
+            clientHeight: 800,
+          },
+          contentSize: { x: 0, y: 0, width: 1_000, height: 800 },
+        };
+      }
+      if (method === 'Page.getNavigationHistory') return { currentIndex: 0, entries: [] };
+      return {};
+    });
+    const observer = new PageObserver({
+      sessions: sessions(snapshot),
+      transport,
+      content: CONTENT,
+      refs: new ElementRefStore({ create: () => 'ref_pages' }),
+    });
+
+    const result = await observer.inspect(7, 'interactive', new AbortController().signal);
+
+    expect(result.data).toMatchObject({
+      elements: [
+        expect.objectContaining({
+          n: 'Document pages',
+          a: ['scroll'],
+          ref: 'ref_pages',
+        }),
+      ],
+      coverage: {
+        complete: false,
+        moreBefore: 'unknown',
+        moreAfter: 'unknown',
+        targets: ['ref_pages'],
+        primaryTarget: 'ref_pages',
+        recommendedAction: 'browser_scroll_until',
+      },
+    });
+  });
+
+  it('ranks one strongly dominant scroll surface first and marks it as primary', async () => {
+    const snapshot: BrowserSessionSnapshot = {
+      tabId: 7,
+      generation: 1,
+      root: { tabId: 7 },
+      children: new Map(),
+    };
+    const transport = debuggerTransport((_session, method) => {
+      if (method === 'Accessibility.getFullAXTree') {
+        return {
+          nodes: [
+            {
+              nodeId: 'root',
+              backendDOMNodeId: 1,
+              ignored: false,
+              role: { value: 'RootWebArea' },
+              name: { value: 'Scrollable workspace' },
+            },
+          ],
+        };
+      }
+      if (method === 'DOMSnapshot.captureSnapshot') {
+        return multipleScrollContainersDomSnapshot([
+          { label: 'Short sidebar', bounds: [0, 0, 240, 600], scrollHeight: 680 },
+          { label: 'Main document', bounds: [250, 0, 900, 650], scrollHeight: 21_000 },
+          { label: 'Short auxiliary panel', bounds: [250, 660, 900, 100], scrollHeight: 220 },
+        ]);
+      }
+      if (method === 'Page.getFrameTree') return mainFrameTree();
+      if (method === 'Page.getLayoutMetrics') {
+        return {
+          visualViewport: { pageX: 0, pageY: 0, clientWidth: 1_200, clientHeight: 800 },
+          contentSize: { x: 0, y: 0, width: 1_200, height: 800 },
+        };
+      }
+      if (method === 'Page.getNavigationHistory') return { currentIndex: 0, entries: [] };
+      return {};
+    });
+    const refs = ['ref_sidebar', 'ref_document', 'ref_auxiliary'];
+    const observer = new PageObserver({
+      sessions: sessions(snapshot),
+      transport,
+      content: CONTENT,
+      refs: new ElementRefStore({ create: () => refs.shift() ?? 'unexpected_ref' }),
+    });
+
+    const result = await observer.inspect(7, 'interactive', new AbortController().signal);
+    const coverage = result.data.coverage as Readonly<Record<string, unknown>>;
+
+    expect(coverage.targets).toEqual(['ref_document', 'ref_auxiliary', 'ref_sidebar']);
+    expect(coverage.primaryTarget).toBe('ref_document');
+  });
+
+  it('does not guess a primary scroll target for similarly sized split panes', async () => {
+    const snapshot: BrowserSessionSnapshot = {
+      tabId: 7,
+      generation: 1,
+      root: { tabId: 7 },
+      children: new Map(),
+    };
+    const transport = debuggerTransport((_session, method) => {
+      if (method === 'Accessibility.getFullAXTree') {
+        return {
+          nodes: [
+            {
+              nodeId: 'root',
+              backendDOMNodeId: 1,
+              ignored: false,
+              role: { value: 'RootWebArea' },
+              name: { value: 'Split workspace' },
+            },
+          ],
+        };
+      }
+      if (method === 'DOMSnapshot.captureSnapshot') {
+        return multipleScrollContainersDomSnapshot([
+          { label: 'Left pane', bounds: [0, 0, 580, 700], scrollHeight: 6_000 },
+          { label: 'Right pane', bounds: [600, 0, 580, 700], scrollHeight: 5_500 },
+        ]);
+      }
+      if (method === 'Page.getFrameTree') return mainFrameTree();
+      if (method === 'Page.getLayoutMetrics') {
+        return {
+          visualViewport: { pageX: 0, pageY: 0, clientWidth: 1_200, clientHeight: 800 },
+          contentSize: { x: 0, y: 0, width: 1_200, height: 800 },
+        };
+      }
+      if (method === 'Page.getNavigationHistory') return { currentIndex: 0, entries: [] };
+      return {};
+    });
+    const refs = ['ref_left', 'ref_right'];
+    const observer = new PageObserver({
+      sessions: sessions(snapshot),
+      transport,
+      content: CONTENT,
+      refs: new ElementRefStore({ create: () => refs.shift() ?? 'unexpected_ref' }),
+    });
+
+    const result = await observer.inspect(7, 'interactive', new AbortController().signal);
+    const coverage = result.data.coverage as Readonly<Record<string, unknown>>;
+
+    expect(coverage.targets).toEqual(['ref_left', 'ref_right']);
+    expect(coverage).not.toHaveProperty('primaryTarget');
+  });
+
+  it('canonicalizes near-identical nested scroll surfaces to the deeper semantic target', async () => {
+    const snapshot: BrowserSessionSnapshot = {
+      tabId: 7,
+      generation: 1,
+      root: { tabId: 7 },
+      children: new Map(),
+    };
+    const transport = debuggerTransport((_session, method) => {
+      if (method === 'Accessibility.getFullAXTree') {
+        return {
+          nodes: [
+            {
+              nodeId: 'root',
+              backendDOMNodeId: 1,
+              ignored: false,
+              role: { value: 'RootWebArea' },
+              name: { value: 'Nested workspace' },
+            },
+          ],
+        };
+      }
+      if (method === 'DOMSnapshot.captureSnapshot') return nestedScrollContainersDomSnapshot();
+      if (method === 'Page.getFrameTree') return mainFrameTree();
+      if (method === 'Page.getLayoutMetrics') {
+        return {
+          visualViewport: { pageX: 0, pageY: 0, clientWidth: 1_200, clientHeight: 800 },
+          contentSize: { x: 0, y: 0, width: 1_200, height: 800 },
+        };
+      }
+      if (method === 'Page.getNavigationHistory') return { currentIndex: 0, entries: [] };
+      return {};
+    });
+    const refs = ['ref_outer', 'ref_history'];
+    const observer = new PageObserver({
+      sessions: sessions(snapshot),
+      transport,
+      content: CONTENT,
+      refs: new ElementRefStore({ create: () => refs.shift() ?? 'unexpected_ref' }),
+    });
+
+    const result = await observer.inspect(7, 'interactive', new AbortController().signal);
+    const coverage = result.data.coverage as Readonly<Record<string, unknown>>;
+
+    expect(coverage.targets).toEqual(['ref_history']);
+    expect(coverage.primaryTarget).toBe('ref_history');
   });
 
   it('allows visual fallback after deep native inspection exhausts semantic discovery', async () => {

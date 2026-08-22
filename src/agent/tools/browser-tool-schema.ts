@@ -121,6 +121,17 @@ export const browserScrollSchema = z
   })
   .strict()
   .refine(({ deltaX, deltaY }) => deltaX !== 0 || deltaY !== 0);
+export const browserScrollUntilSchema = z
+  .object({
+    tabId: tabIdSchema.optional(),
+    target: refSchema,
+    deltaX: z.number().int().min(-MAX_SCROLL_DELTA).max(MAX_SCROLL_DELTA),
+    deltaY: z.number().int().min(-MAX_SCROLL_DELTA).max(MAX_SCROLL_DELTA),
+    maxSegments: z.number().int().min(1).max(24),
+    stopText: z.string().max(500),
+  })
+  .strict()
+  .refine(({ deltaX, deltaY }) => deltaX !== 0 || deltaY !== 0);
 export const browserHoverSchema = z
   .object({ tabId: tabIdSchema.optional(), ref: refSchema })
   .strict();
@@ -201,6 +212,7 @@ const BROWSER_SCHEMAS = {
   browser_type: browserTypeSchema,
   browser_keypress: browserKeypressSchema,
   browser_scroll: browserScrollSchema,
+  browser_scroll_until: browserScrollUntilSchema,
   browser_hover: browserHoverSchema,
   browser_select: browserSelectSchema,
   browser_drag: browserDragSchema,
@@ -231,6 +243,7 @@ export type BrowserOperation =
   | 'type'
   | 'keypress'
   | 'scroll'
+  | 'scroll_until'
   | 'hover'
   | 'select'
   | 'drag'
@@ -277,6 +290,7 @@ const OPERATIONS: Readonly<Record<BrowserToolName, BrowserOperation>> = {
   browser_type: 'type',
   browser_keypress: 'keypress',
   browser_scroll: 'scroll',
+  browser_scroll_until: 'scroll_until',
   browser_hover: 'hover',
   browser_select: 'select',
   browser_drag: 'drag',
@@ -384,7 +398,7 @@ export const BROWSER_TOOL_DEFINITIONS: readonly ModelToolDefinition[] = [
   taskToolDefinition('browser_reload', 'Reload one task page and wait for stability.', {}),
   taskToolDefinition(
     'browser_inspect',
-    'Inspect readable content, a compact native accessibility tree with actionable refs across frames, or a viewport screenshot. Use interactive for a viewport-prioritized bounded tree. Use interactive_deep only when the needed offscreen target or context was truncated or remains unavailable after interactive inspection. Always inspect interactive before requesting a screenshot. Continue with refs and interactive deltas whenever the accessibility tree contains the needed content or controls. When reading more items from a list or timeline, use the scrollable ref that advertises scroll; passive text refs are content, not pagination controls. Do not use screenshots to verify semantic form state. Screenshot fallback is accepted when interactive inspection lacks actionable targets, detects a visual surface such as canvas, or interactive_deep still does not expose the required control. After a successful screenshot inspection, browser_click_point becomes available on the next model turn; its absence before the screenshot is expected. Set since to an empty string for a full result. Reuse only the latest interactive snapshot ID when its base elements remain in context. A keyed delta applies to that base: upsert items contain identity k and replacement element e; remove contains deleted identities.',
+    'Inspect readable content, a compact native accessibility tree with actionable refs across frames, or a viewport screenshot. Content mode reads only the currently mounted DOM and never proves complete offscreen or virtualized coverage; use interactive before answering a whole-document, all-items, date-range, or page-summary request. Use interactive for a viewport-prioritized bounded tree. When interactive coverage.complete=false, the returned tree is not complete page evidence and the relevant coverage target must be traversed before answering. For a finite document or virtual list, first establish one directional boundary and then traverse toward the opposite boundary; for an endless feed, collect a bounded representative sample and disclose its observed range. Use interactive_deep only when the needed offscreen target or context was truncated or remains unavailable after interactive inspection. Always inspect interactive before requesting a screenshot. Continue with refs and interactive deltas whenever the accessibility tree contains the needed content or controls. When reading more items from a list or timeline, use the scrollable ref that advertises scroll; passive text refs are content, not pagination controls. Do not use screenshots to verify semantic form state. Screenshot fallback is accepted when interactive inspection lacks actionable targets, detects a visual surface such as canvas, or interactive_deep still does not expose the required control. After a successful screenshot inspection, browser_click_point becomes available on the next model turn; its absence before the screenshot is expected. Set since to an empty string for a full result. Reuse only the latest interactive snapshot ID when its base elements remain in context. A keyed delta applies to that base: upsert items contain identity k and replacement element e; remove contains deleted identities.',
     {
       mode: {
         type: 'string',
@@ -403,7 +417,7 @@ export const BROWSER_TOOL_DEFINITIONS: readonly ModelToolDefinition[] = [
   ),
   taskToolDefinition(
     'browser_paste_image',
-    'Paste a task-owned screenshot into a recent semantic editable message or file-input ref. It first uses bounded page-local delivery and may fall back to staging the image on the system clipboard plus a native browser paste; clipboardChanged=true reports that fallback. This tool is available before capture so the complete workflow can be planned, but call it only after browser_capture_screenshot returns an assetId. Captured assets remain valid across context compaction within the current WorkSession; after capture, currently available IDs are listed in the assetId enum. Continue only when the result reports verified=true; that means a real editor or attachment-preview change was measured, not merely a retained hidden file input. After sending, inspect again to verify remote delivery. Never paste the same asset twice after an ambiguous result.',
+    'Paste a task-owned screenshot into a recent semantic editable message or file-input ref. This tool becomes available after capture returns an assetId. It first uses bounded page-local delivery and may fall back to staging the image on the system clipboard plus a native browser paste; clipboardChanged=true reports that fallback. Captured assets remain valid across context compaction within the current WorkSession, and currently available IDs are listed in the assetId enum. Continue only when the result reports verified=true; that means a real editor or attachment-preview change was measured, not merely a retained hidden file input. After sending, inspect again to verify remote delivery. Never paste the same asset twice after an ambiguous result.',
     {
       ref: REF_PROPERTY,
       assetId: {
@@ -478,6 +492,25 @@ export const BROWSER_TOOL_DEFINITIONS: readonly ModelToolDefinition[] = [
         minimum: -MAX_SCROLL_DELTA,
         maximum: MAX_SCROLL_DELTA,
       },
+    },
+  ),
+  taskToolDefinition(
+    'browser_scroll_until',
+    'Traverse a long document, virtual list, timeline, or feed by repeatedly scrolling one current coverage target and returning every newly exposed interactive AX batch in order. Use the target named by coverage when it is unambiguous; otherwise choose the scroll ref whose semantic name matches the requested content. It performs no clicks, typing, date interpretation, or page-specific logic. Negative deltaY reads earlier or upper content and positive deltaY reads later or lower content. For complete finite coverage, reach one boundary and then traverse in the opposite direction until coverage.directionComplete=true; reaching only the first boundary is not full-document proof. stopText is a normalized substring marker; a text match proves only that the marker was seen, not that an entire requested range is complete. Empty stopText permits boundary, cycle, or bounded open-feed detection. coverage.mode=open_ended or cyclic with sampleComplete=true is a bounded sample, not a physical end: summarize only the observed range and say so. Read observations directly instead of immediately inspecting again. Continue when continuationRequired=true; a complete finite objective may deliberately continue beyond a bounded sample.',
+    {
+      target: REF_PROPERTY,
+      deltaX: {
+        type: 'integer',
+        minimum: -MAX_SCROLL_DELTA,
+        maximum: MAX_SCROLL_DELTA,
+      },
+      deltaY: {
+        type: 'integer',
+        minimum: -MAX_SCROLL_DELTA,
+        maximum: MAX_SCROLL_DELTA,
+      },
+      maxSegments: { type: 'integer', minimum: 1, maximum: 24 },
+      stopText: { type: 'string', maxLength: 500 },
     },
   ),
   taskToolDefinition(

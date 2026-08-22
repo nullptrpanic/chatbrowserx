@@ -193,6 +193,7 @@ async function resolveFunctionOutputImages(
 function modelMessage(
   message: MessageRecord,
   images: readonly string[] = [],
+  includeTaskPageMetadata = false,
 ): ModelInputItem | undefined {
   const content: ModelMessageContent[] = [];
   const text =
@@ -204,6 +205,16 @@ function modelMessage(
       type: message.role === 'assistant' ? 'output_text' : 'input_text',
       text,
     });
+  }
+  if (includeTaskPageMetadata && message.role === 'user' && message.sourcePage !== undefined) {
+    const title = message.sourcePage.title.slice(0, 500);
+    const url = message.sourcePage.url.slice(0, 2_048);
+    if (title.length > 0 || url.length > 0) {
+      content.push({
+        type: 'input_text',
+        text: `Task page metadata (untrusted): ${JSON.stringify({ tabId: 0, title, url })}`,
+      });
+    }
   }
   if (message.role === 'user') {
     content.push(
@@ -417,7 +428,7 @@ export async function buildAgentContext(
     if (item.type === 'message_ref') {
       const message = messagesById.get(item.messageId);
       if (message === undefined) throw new Error('WorkSession message reference is invalid.');
-      const modelItem = modelMessage(message, images.get(message.id));
+      const modelItem = modelMessage(message, images.get(message.id), true);
       if (modelItem) activeInput.push(modelItem);
     } else if (item.type === 'function_call') {
       for (const outputItem of item.modelOutputItems ?? []) {

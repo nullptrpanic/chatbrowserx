@@ -101,6 +101,7 @@ export const ja = {
   browserToolType: 'テキストを入力',
   browserToolKeypress: 'キーを送信',
   browserToolScroll: 'ページをスクロール',
+  browserToolScrollUntil: '条件までスクロール',
   browserToolHover: '要素にホバー',
   browserToolSelect: '項目を選択',
   browserToolDrag: '要素をドラッグ',

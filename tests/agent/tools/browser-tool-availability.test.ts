@@ -4,6 +4,7 @@ import {
   browserToolContractForCheckpoint,
   browserToolDefinitionsForCheckpoint,
 } from '../../../src/agent/tools/browser-tool-availability';
+import { compactBrowserModelOutput } from '../../../src/browser/browser-model-output';
 import type { Checkpoint, CompletedToolResult } from '../../../src/tasks/checkpoint-types';
 import type { ContinuationItem } from '../../../src/tasks/continuation-types';
 
@@ -51,20 +52,21 @@ function names(value: Checkpoint): readonly string[] {
 }
 
 describe('browserToolDefinitionsForCheckpoint', () => {
-  it('starts with core semantic tools and no unsupported advanced capability', () => {
+  it('starts with core semantic tools while keeping state-dependent capabilities unbound', () => {
     const available = names(checkpoint());
 
     expect(available).toEqual(
       expect.arrayContaining([
-        'browser_get_current_tab',
         'browser_inspect',
         'browser_click',
         'browser_set_checked',
+        'browser_scroll_until',
         'browser_network_start',
       ]),
     );
     expect(available).not.toEqual(
       expect.arrayContaining([
+        'browser_get_current_tab',
         'browser_click_point',
         'browser_drag_point',
         'browser_network_list',
@@ -73,8 +75,239 @@ describe('browserToolDefinitionsForCheckpoint', () => {
         'browser_set_checked_many',
       ]),
     );
-    expect(available).toContain('browser_paste_image');
+    expect(available).not.toContain('browser_get_current_tab');
+    const scrollUntil = browserToolDefinitionsForCheckpoint(checkpoint()).find(
+      ({ name }) => name === 'browser_scroll_until',
+    );
+    expect(scrollUntil?.parameters).toMatchObject({
+      properties: { target: { type: 'string' } },
+    });
+    expect(
+      (
+        scrollUntil?.parameters.properties as Readonly<
+          Record<string, Readonly<Record<string, unknown>>>
+        >
+      ).target,
+    ).not.toHaveProperty('enum');
+    expect(available).not.toContain('browser_paste_image');
     expect(new Set(available).size).toBe(available.length);
+  });
+
+  it('keeps a legacy current-tab call available only while replaying that work session', () => {
+    const currentTab = pair(
+      'current_tab',
+      'browser_get_current_tab',
+      {},
+      {
+        ok: true,
+        tabId: 7,
+        url: 'https://example.com/',
+        data: { title: 'Example', taskBound: true },
+      },
+    );
+
+    expect(names(checkpoint(currentTab))).toContain('browser_get_current_tab');
+  });
+
+  it('binds bounded scroll-until to current interactive scroll refs when available', () => {
+    const inspected = pair(
+      'inspect_scrollable',
+      'browser_inspect',
+      { mode: 'interactive', since: '' },
+      {
+        ok: true,
+        data: {
+          mode: 'interactive',
+          snapshot: 's_scrollable',
+          elements: [
+            { ref: 'ref_label', r: 'statictext', n: 'Messages' },
+            {
+              ref: 'ref_history',
+              r: 'list',
+              n: 'Message history',
+              a: ['scroll'],
+            },
+          ],
+        },
+      },
+    );
+
+    const definition = browserToolDefinitionsForCheckpoint(checkpoint(inspected)).find(
+      ({ name }) => name === 'browser_scroll_until',
+    );
+    expect(definition).toBeDefined();
+    expect(definition?.parameters).toMatchObject({
+      properties: { target: { enum: ['ref_history'] } },
+    });
+
+    const navigated = pair(
+      'navigate_after_scroll',
+      'browser_navigate',
+      { tabId: 0, url: 'https://example.com/other' },
+      { ok: true, tabId: 7, data: { title: 'Other page' } },
+    );
+    const afterNavigation = browserToolDefinitionsForCheckpoint(
+      checkpoint([...inspected, ...navigated]),
+    ).find(({ name }) => name === 'browser_scroll_until');
+    expect(afterNavigation).toBeDefined();
+    expect(
+      (
+        afterNavigation?.parameters.properties as Readonly<
+          Record<string, Readonly<Record<string, unknown>>>
+        >
+      ).target,
+    ).not.toHaveProperty('enum');
+  });
+
+  it('binds bounded scroll-until to a scrollable document viewport from coverage', () => {
+    const inspected = pair(
+      'inspect_viewport',
+      'browser_inspect',
+      { mode: 'interactive', since: '' },
+      {
+        ok: true,
+        data: {
+          mode: 'interactive',
+          snapshot: 's_viewport',
+          elements: [{ r: 'statictext', n: 'Visible document text' }],
+          coverage: {
+            complete: false,
+            targets: ['viewport'],
+            primaryTarget: 'viewport',
+            recommendedAction: 'browser_scroll_until',
+          },
+        },
+      },
+    );
+
+    const definition = browserToolDefinitionsForCheckpoint(checkpoint(inspected)).find(
+      ({ name }) => name === 'browser_scroll_until',
+    );
+
+    expect(definition?.parameters).toMatchObject({
+      properties: { target: { enum: ['viewport'] } },
+    });
+  });
+
+  it('enables bounded scroll-until from a keyed interactive delta', () => {
+    const full = pair(
+      'inspect_full',
+      'browser_inspect',
+      { mode: 'interactive', since: '' },
+      {
+        ok: true,
+        data: { mode: 'interactive', snapshot: 's1', elements: [] },
+      },
+    );
+    const delta = pair(
+      'inspect_delta',
+      'browser_inspect',
+      { mode: 'interactive', since: 's1' },
+      {
+        ok: true,
+        data: {
+          mode: 'interactive',
+          snapshot: 's2',
+          base: 's1',
+          upsert: [
+            {
+              k: 'ref:ref_history',
+              e: { ref: 'ref_history', r: 'list', n: 'History', a: ['scroll'] },
+            },
+          ],
+          remove: [],
+        },
+      },
+    );
+
+    expect(names(checkpoint([...full, ...delta]))).toContain('browser_scroll_until');
+  });
+
+  it('reconstructs current scroll refs from compact scroll-until evidence', () => {
+    const inspected = pair(
+      'inspect_old_scroll',
+      'browser_inspect',
+      { mode: 'interactive', since: '' },
+      {
+        ok: true,
+        data: {
+          mode: 'interactive',
+          snapshot: 's1',
+          elements: [{ ref: 'ref_old', r: 'region', n: 'Old surface', a: ['scroll'] }],
+        },
+      },
+    );
+    const fullScrollOutput = JSON.stringify({
+      ok: true,
+      tabId: 7,
+      url: 'https://example.com/document',
+      data: {
+        action: 'scroll_until',
+        stopReason: 'boundary_verified',
+        observations: [
+          {
+            mode: 'interactive',
+            snapshot: 's2',
+            base: 's1',
+            remove: ['node:old-copy', 'ref:ref_old'],
+            upsert: [
+              {
+                k: 'ref:ref_new',
+                e: { ref: 'ref_new', r: 'region', n: 'Current surface', a: ['scroll'] },
+              },
+            ],
+          },
+        ],
+      },
+      observation: null,
+    });
+    const scrolled = pair(
+      'scroll_with_compact_evidence',
+      'browser_scroll_until',
+      { tabId: 0, target: 'ref_old', deltaX: 0, deltaY: 800, maxSegments: 8, stopText: '' },
+      compactBrowserModelOutput(fullScrollOutput),
+    );
+
+    const definition = browserToolDefinitionsForCheckpoint(
+      checkpoint([...inspected, ...scrolled]),
+    ).find(({ name }) => name === 'browser_scroll_until');
+
+    expect(definition?.parameters).toMatchObject({
+      properties: { target: { enum: ['ref_new'] } },
+    });
+  });
+
+  it('uses attached fresh interactive evidence from a failed action', () => {
+    const failedWithFreshState = pair(
+      'stale_click',
+      'browser_click',
+      { tabId: 0, ref: 'ref_old', button: 'left', count: 1 },
+      {
+        ok: false,
+        code: 'STALE_REF',
+        retryable: true,
+        needsInspect: false,
+        data: {
+          verification: {
+            mode: 'interactive',
+            snapshot: 'snapshot_fresh',
+            elements: [
+              { r: 'checkbox', n: 'One', a: ['set_checked'], ref: 'ref_one' },
+              { r: 'checkbox', n: 'Two', a: ['set_checked'], ref: 'ref_two' },
+              { r: 'list', n: 'History', a: ['scroll'], ref: 'ref_history' },
+            ],
+          },
+        },
+      },
+    );
+
+    const available = browserToolDefinitionsForCheckpoint(checkpoint(failedWithFreshState));
+    expect(available.map(({ name }) => name)).toContain('browser_set_checked_many');
+    expect(available.find(({ name }) => name === 'browser_scroll_until')?.parameters).toMatchObject(
+      {
+        properties: { target: { enum: ['ref_history'] } },
+      },
+    );
   });
 
   it('enables coordinate actions only for the current successful screenshot inspection', () => {
@@ -142,7 +375,7 @@ describe('browserToolDefinitionsForCheckpoint', () => {
     );
 
     expect(definition).toBeDefined();
-    expect(definition?.description).toContain('remain valid across context compaction');
+    expect(definition?.description).toContain('available after capture');
     expect(definition?.parameters).toMatchObject({
       properties: {
         assetId: {
@@ -150,6 +383,24 @@ describe('browserToolDefinitionsForCheckpoint', () => {
         },
       },
     });
+  });
+
+  it('retains a used image-delivery definition until the replay window is compacted', () => {
+    const used = pair(
+      'paste',
+      'browser_paste_image',
+      { tabId: 0, ref: 'ref_editor', assetId: 'attachment_expired' },
+      { ok: true, data: { action: 'paste_image', verified: true } },
+    );
+
+    expect(names(checkpoint(used))).toContain('browser_paste_image');
+
+    const compacted: ContinuationItem = {
+      type: 'compaction',
+      itemId: 'cmp_paste',
+      encryptedContent: 'opaque',
+    };
+    expect(names(checkpoint([...used, compacted]))).not.toContain('browser_paste_image');
   });
 
   it('enables batch selection after two selectable refs are present in semantic state', () => {
@@ -303,6 +554,226 @@ describe('browserToolDefinitionsForCheckpoint', () => {
       remainingDeltaX: 0,
       remainingDeltaY: -8_800,
     });
+  });
+
+  it('continues a bounded traversal after its evidence budget is exhausted', () => {
+    const boundedTraversal = pair(
+      'scroll_until_evidence_budget',
+      'browser_scroll_until',
+      {
+        tabId: 0,
+        target: 'ref_history',
+        deltaX: 0,
+        deltaY: -800,
+        maxSegments: 12,
+        stopText: '2026年7月',
+      },
+      {
+        ok: true,
+        tabId: 7,
+        data: {
+          action: 'scroll_until',
+          target: 'ref_history',
+          stopReason: 'evidence_budget',
+          continuationRequired: true,
+          nextDeltaX: 0,
+          nextDeltaY: -800,
+          observations: [
+            {
+              mode: 'interactive',
+              snapshot: 'snapshot_2',
+              base: 'snapshot_1',
+              upsert: [],
+            },
+          ],
+        },
+      },
+    );
+
+    const contract = browserToolContractForCheckpoint(checkpoint(boundedTraversal));
+
+    expect(contract.toolChoice).toEqual({
+      type: 'function',
+      name: 'browser_scroll_until',
+    });
+    expect(contract.tools.map(({ name }) => name)).toEqual(['browser_scroll_until']);
+    expect(contract.tools[0]?.parameters).toMatchObject({
+      properties: {
+        tabId: { enum: [0] },
+        target: { enum: ['ref_history'] },
+        deltaX: { enum: [0] },
+        deltaY: { enum: [-800] },
+        maxSegments: { enum: [12] },
+        stopText: { enum: ['2026年7月'] },
+      },
+    });
+    expect(contract.scrollContinuation).toMatchObject({
+      next: 'scroll_until',
+      resumeOperation: 'scroll_until',
+      target: 'ref_history',
+      maxSegments: 12,
+      stopText: '2026年7月',
+    });
+  });
+
+  it('inspects and then resumes the same bounded traversal after observation loss', () => {
+    const interruptedTraversal = pair(
+      'scroll_until_observation_loss',
+      'browser_scroll_until',
+      {
+        tabId: 0,
+        target: 'ref_old',
+        deltaX: 0,
+        deltaY: 900,
+        maxSegments: 8,
+        stopText: '',
+      },
+      {
+        ok: true,
+        data: {
+          action: 'scroll_until',
+          stopReason: 'observation_unavailable',
+          continuationRequired: true,
+          verificationUnavailable: true,
+          observations: [],
+        },
+      },
+    );
+
+    const inspectContract = browserToolContractForCheckpoint(checkpoint(interruptedTraversal));
+    expect(inspectContract.toolChoice).toEqual({ type: 'function', name: 'browser_inspect' });
+    expect(inspectContract.scrollContinuation).toMatchObject({
+      next: 'inspect',
+      resumeOperation: 'scroll_until',
+    });
+
+    const refreshed = pair(
+      'inspect_traversal_replacement',
+      'browser_inspect',
+      { tabId: 0, mode: 'interactive', since: '' },
+      {
+        ok: true,
+        data: {
+          mode: 'interactive',
+          snapshot: 'snapshot_3',
+          elements: [
+            {
+              d: 40,
+              r: 'region',
+              n: 'Message history',
+              a: ['scroll'],
+              ref: 'ref_new',
+            },
+          ],
+        },
+      },
+    );
+    const resumed = browserToolContractForCheckpoint(
+      checkpoint([...interruptedTraversal, ...refreshed]),
+    );
+
+    expect(resumed.toolChoice).toEqual({ type: 'function', name: 'browser_scroll_until' });
+    expect(resumed.tools[0]?.parameters).toMatchObject({
+      properties: {
+        target: { enum: ['ref_new'] },
+        deltaX: { enum: [0] },
+        deltaY: { enum: [900] },
+        maxSegments: { enum: [8] },
+        stopText: { enum: [''] },
+      },
+    });
+  });
+
+  it('keeps a bounded traversal mandatory when refresh exposes multiple replacement targets', () => {
+    const interruptedTraversal = pair(
+      'scroll_until_multiple_replacements',
+      'browser_scroll_until',
+      {
+        tabId: 0,
+        target: 'ref_old',
+        deltaX: 0,
+        deltaY: -700,
+        maxSegments: 10,
+        stopText: 'July',
+      },
+      {
+        ok: true,
+        data: {
+          action: 'scroll_until',
+          stopReason: 'observation_unavailable',
+          continuationRequired: true,
+          verificationUnavailable: true,
+          observations: [],
+        },
+      },
+    );
+    const refreshed = pair(
+      'inspect_multiple_replacements',
+      'browser_inspect',
+      { tabId: 0, mode: 'interactive', since: '' },
+      {
+        ok: true,
+        data: {
+          mode: 'interactive',
+          snapshot: 'snapshot_replacements',
+          elements: [
+            { d: 20, r: 'region', n: 'Document', a: ['scroll'], ref: 'ref_document' },
+            { d: 24, r: 'region', n: 'Comments', a: ['scroll'], ref: 'ref_comments' },
+          ],
+        },
+      },
+    );
+
+    const contract = browserToolContractForCheckpoint(
+      checkpoint([...interruptedTraversal, ...refreshed]),
+    );
+
+    expect(contract.toolChoice).toEqual({ type: 'function', name: 'browser_scroll_until' });
+    expect(contract.tools[0]?.parameters).toMatchObject({
+      properties: {
+        target: { enum: ['ref_document', 'ref_comments'] },
+        deltaY: { enum: [-700] },
+        maxSegments: { enum: [10] },
+        stopText: { enum: ['July'] },
+      },
+    });
+  });
+
+  it('releases the bounded traversal contract after a verified terminal receipt', () => {
+    const completedTraversal = pair(
+      'scroll_until_boundary',
+      'browser_scroll_until',
+      {
+        tabId: 0,
+        target: 'ref_document',
+        deltaX: 0,
+        deltaY: 900,
+        maxSegments: 8,
+        stopText: '',
+      },
+      {
+        ok: true,
+        data: {
+          action: 'scroll_until',
+          stopReason: 'boundary_verified',
+          continuationRequired: false,
+          boundaryVerified: true,
+          observations: [
+            {
+              mode: 'interactive',
+              snapshot: 'snapshot_boundary',
+              upsert: [],
+            },
+          ],
+        },
+      },
+    );
+
+    const contract = browserToolContractForCheckpoint(checkpoint(completedTraversal));
+
+    expect(contract.toolChoice).toBeUndefined();
+    expect(contract.scrollContinuation).toBeUndefined();
+    expect(contract.tools.map(({ name }) => name)).toContain('browser_scroll_until');
   });
 
   it('does not force a redundant inspection after a completed scroll returned interactive evidence', () => {

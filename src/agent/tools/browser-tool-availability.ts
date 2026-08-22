@@ -8,7 +8,6 @@ import {
 } from './browser-tool-schema';
 
 const CORE_TOOL_NAMES = new Set<BrowserToolName>([
-  'browser_get_current_tab',
   'browser_list_tabs',
   'browser_open_tab',
   'browser_switch_tab',
@@ -17,12 +16,12 @@ const CORE_TOOL_NAMES = new Set<BrowserToolName>([
   'browser_reload',
   'browser_inspect',
   'browser_capture_screenshot',
-  'browser_paste_image',
   'browser_click',
   'browser_set_checked',
   'browser_type',
   'browser_keypress',
   'browser_scroll',
+  'browser_scroll_until',
   'browser_hover',
   'browser_select',
   'browser_drag',
@@ -43,6 +42,7 @@ const VISUAL_INVALIDATING_TOOLS = new Set<BrowserToolName>([
   'browser_type',
   'browser_keypress',
   'browser_scroll',
+  'browser_scroll_until',
   'browser_hover',
   'browser_select',
   'browser_drag',
@@ -55,17 +55,22 @@ interface CapabilityState {
   visualSnapshotCurrent: boolean;
   networkActive: boolean;
   selectableRefs: Set<string>;
+  scrollableRefs: Set<string>;
   readonly usedTools: Set<BrowserToolName>;
 }
 
 export interface BrowserScrollContinuation {
-  readonly next: 'inspect' | 'scroll';
+  readonly next: 'inspect' | 'scroll' | 'scroll_until';
+  readonly resumeOperation?: 'scroll_until';
   readonly tabId: number;
   readonly target: string;
+  readonly targetOptions?: readonly string[];
   readonly remainingDeltaX: number;
   readonly remainingDeltaY: number;
   readonly boundaryProbeDeltaX?: number;
   readonly boundaryProbeDeltaY?: number;
+  readonly maxSegments?: number;
+  readonly stopText?: string;
 }
 
 export interface BrowserToolContract {
@@ -75,6 +80,7 @@ export interface BrowserToolContract {
 }
 
 const MAX_EXPOSED_ASSET_IDS = 8;
+const MAX_BOUND_SCROLL_REFS = 32;
 
 function availableAssetIds(
   completedToolResults: Pick<Checkpoint, 'completedToolResults'>['completedToolResults'],
@@ -103,6 +109,31 @@ function bindAvailableAssets(
       properties: {
         ...properties,
         assetId: { ...assetId, enum: [...assetIds] },
+      },
+    },
+  };
+}
+
+function bindScrollableTargets(
+  definition: ModelToolDefinition,
+  refs: ReadonlySet<string>,
+): ModelToolDefinition {
+  if (
+    definition.name !== 'browser_scroll_until' ||
+    refs.size === 0 ||
+    refs.size > MAX_BOUND_SCROLL_REFS
+  ) {
+    return definition;
+  }
+  const properties = definition.parameters.properties as Readonly<Record<string, unknown>>;
+  const target = properties.target as Readonly<Record<string, unknown>>;
+  return {
+    ...definition,
+    parameters: {
+      ...definition.parameters,
+      properties: {
+        ...properties,
+        target: { ...target, enum: [...refs] },
       },
     },
   };
@@ -220,18 +251,32 @@ export function browserScrollContinuationForCheckpoint(
             : refs.length === 1
               ? refs[0]
               : undefined;
-          if (target === undefined) {
+          if (
+            target === undefined &&
+            state.continuation.resumeOperation === 'scroll_until' &&
+            refs.length > 1
+          ) {
+            state.continuation = {
+              ...state.continuation,
+              target: refs[0] as string,
+              targetOptions: refs,
+              next: 'scroll_until',
+            };
+          } else if (target === undefined) {
             state.continuation = null;
             state.continuationFailures = 0;
           } else {
             state.continuation = {
               ...state.continuation,
               target,
-              next: 'scroll',
+              next: state.continuation.resumeOperation ?? 'scroll',
             };
           }
         } else {
-          state.continuation = { ...state.continuation, next: 'scroll' };
+          state.continuation = {
+            ...state.continuation,
+            next: state.continuation.resumeOperation ?? 'scroll',
+          };
         }
       } else {
         state.continuation = null;
@@ -239,12 +284,69 @@ export function browserScrollContinuationForCheckpoint(
       }
       continue;
     }
-    if (call.name !== 'browser_scroll') continue;
+    if (call.name !== 'browser_scroll' && call.name !== 'browser_scroll_until') continue;
     if (output === null) {
       if (state.continuation !== null) {
         state.continuationFailures += 1;
         state.continuation = { ...state.continuation, next: 'inspect' };
       }
+      continue;
+    }
+    if (call.name === 'browser_scroll_until') {
+      const data = childRecord(output, 'data');
+      const arguments_ = jsonRecord(call.argumentsJson);
+      if (
+        data?.action !== 'scroll_until' ||
+        data.continuationRequired !== true ||
+        typeof arguments_?.target !== 'string' ||
+        typeof arguments_.maxSegments !== 'number' ||
+        !Number.isInteger(arguments_.maxSegments) ||
+        typeof arguments_.stopText !== 'string'
+      ) {
+        state.continuation = null;
+        state.continuationFailures = 0;
+        continue;
+      }
+      const requestedDeltaX = integerContinuationDelta(arguments_.deltaX);
+      const requestedDeltaY = integerContinuationDelta(arguments_.deltaY);
+      const nextDeltaX = integerContinuationDelta(data.nextDeltaX) ?? requestedDeltaX;
+      const nextDeltaY = integerContinuationDelta(data.nextDeltaY) ?? requestedDeltaY;
+      if (
+        requestedDeltaX === null ||
+        requestedDeltaY === null ||
+        nextDeltaX === null ||
+        nextDeltaY === null ||
+        (nextDeltaX === 0 && nextDeltaY === 0)
+      ) {
+        state.continuation = null;
+        state.continuationFailures = 0;
+        continue;
+      }
+      const hasInteractiveEvidence =
+        embeddedInteractiveObservations(data).length > 0 &&
+        data.verificationUnavailable !== true &&
+        data.continuationFailure === undefined;
+      const directContinuation =
+        hasInteractiveEvidence &&
+        (data.stopReason === 'evidence_budget' || data.stopReason === 'segment_limit');
+      state.continuationFailures = directContinuation
+        ? 0
+        : state.continuation?.resumeOperation === 'scroll_until'
+          ? state.continuationFailures + 1
+          : 1;
+      state.continuation = {
+        next: directContinuation ? 'scroll_until' : 'inspect',
+        resumeOperation: 'scroll_until',
+        tabId:
+          typeof arguments_.tabId === 'number' && Number.isInteger(arguments_.tabId)
+            ? arguments_.tabId
+            : 0,
+        target: arguments_.target,
+        remainingDeltaX: nextDeltaX,
+        remainingDeltaY: nextDeltaY,
+        maxSegments: arguments_.maxSegments,
+        stopText: arguments_.stopText,
+      };
       continue;
     }
     state.continuationFailures = 0;
@@ -332,7 +434,17 @@ function scrollableRefs(data: Readonly<Record<string, unknown>> | null): readonl
       if (ref) refs.add(ref);
     }
   }
+  for (const target of coverageScrollTargets(data)) refs.add(target);
   return [...refs];
+}
+
+function coverageScrollTargets(data: Readonly<Record<string, unknown>>): readonly string[] {
+  const coverage = childRecord(data, 'coverage');
+  if (!Array.isArray(coverage?.targets)) return [];
+  return coverage.targets.filter(
+    (target): target is string =>
+      typeof target === 'string' && target.length > 0 && target.length <= 128,
+  );
 }
 
 function browserToolName(value: string): BrowserToolName | null {
@@ -350,13 +462,17 @@ function selectableRefFromEntry(value: unknown): string | null {
   return typeof entry.ref === 'string' && actions.includes('set_checked') ? entry.ref : null;
 }
 
-function applySemanticState(data: unknown, refs: Set<string>): void {
+function applySemanticRefState(
+  data: unknown,
+  refs: Set<string>,
+  refFromEntry: (value: unknown) => string | null,
+): void {
   if (typeof data !== 'object' || data === null || Array.isArray(data)) return;
   const record = data as Readonly<Record<string, unknown>>;
   if (record.mode === 'interactive' && Array.isArray(record.elements)) {
     refs.clear();
     for (const entry of record.elements) {
-      const ref = selectableRefFromEntry(entry);
+      const ref = refFromEntry(entry);
       if (ref) refs.add(ref);
     }
   }
@@ -372,7 +488,7 @@ function applySemanticState(data: unknown, refs: Set<string>): void {
       const value = item as Readonly<Record<string, unknown>>;
       const identity = typeof value.k === 'string' ? value.k : '';
       if (identity.startsWith('ref:')) refs.delete(identity.slice(4));
-      const ref = selectableRefFromEntry(value.e);
+      const ref = refFromEntry(value.e);
       if (ref) refs.add(ref);
     }
   }
@@ -389,7 +505,15 @@ function applySuccessfulBrowserResult(
       : null;
   if (name === 'browser_inspect') {
     state.visualSnapshotCurrent = data?.mode === 'screenshot';
-    applySemanticState(data, state.selectableRefs);
+    applySemanticRefState(data, state.selectableRefs, selectableRefFromEntry);
+    applySemanticRefState(data, state.scrollableRefs, scrollableRefFromEntry);
+    if (data !== null) {
+      const coverageTargets = coverageScrollTargets(data);
+      if (coverageTargets.length > 0) {
+        state.scrollableRefs.clear();
+        for (const target of coverageTargets) state.scrollableRefs.add(target);
+      }
+    }
     return;
   }
   if (VISUAL_INVALIDATING_TOOLS.has(name)) state.visualSnapshotCurrent = false;
@@ -400,11 +524,18 @@ function applySuccessfulBrowserResult(
     name === 'browser_close_tab'
   ) {
     state.selectableRefs.clear();
+    state.scrollableRefs.clear();
   }
   if (name === 'browser_network_start') state.networkActive = true;
   else if (name === 'browser_network_stop') state.networkActive = false;
   for (const observation of embeddedInteractiveObservations(data)) {
-    applySemanticState(observation, state.selectableRefs);
+    applySemanticRefState(observation, state.selectableRefs, selectableRefFromEntry);
+    applySemanticRefState(observation, state.scrollableRefs, scrollableRefFromEntry);
+    const coverageTargets = coverageScrollTargets(observation);
+    if (coverageTargets.length > 0) {
+      state.scrollableRefs.clear();
+      for (const target of coverageTargets) state.scrollableRefs.add(target);
+    }
   }
 }
 
@@ -425,6 +556,7 @@ function availableBrowserToolDefinitions(
     visualSnapshotCurrent: false,
     networkActive: false,
     selectableRefs: new Set(),
+    scrollableRefs: new Set(),
     usedTools: new Set(),
   };
   const pendingCalls = new Map<
@@ -436,6 +568,7 @@ function availableBrowserToolDefinitions(
       state.visualSnapshotCurrent = false;
       state.networkActive = false;
       state.selectableRefs.clear();
+      state.scrollableRefs.clear();
       state.usedTools.clear();
       pendingCalls.clear();
       continue;
@@ -452,6 +585,7 @@ function availableBrowserToolDefinitions(
       state.visualSnapshotCurrent = false;
       state.networkActive = false;
       state.selectableRefs.clear();
+      state.scrollableRefs.clear();
       state.usedTools.clear();
       continue;
     }
@@ -459,7 +593,22 @@ function availableBrowserToolDefinitions(
     if (!name) continue;
     state.usedTools.add(name);
     const output = successfulRecord(item.output);
-    if (output) applySuccessfulBrowserResult(name, output, state);
+    if (output) {
+      applySuccessfulBrowserResult(name, output, state);
+      continue;
+    }
+    const failed = jsonRecord(item.output);
+    for (const observation of embeddedInteractiveObservations(
+      failed === null ? null : childRecord(failed, 'data'),
+    )) {
+      applySemanticRefState(observation, state.selectableRefs, selectableRefFromEntry);
+      applySemanticRefState(observation, state.scrollableRefs, scrollableRefFromEntry);
+      const coverageTargets = coverageScrollTargets(observation);
+      if (coverageTargets.length > 0) {
+        state.scrollableRefs.clear();
+        for (const target of coverageTargets) state.scrollableRefs.add(target);
+      }
+    }
   }
 
   const enabled = new Set<BrowserToolName>([...CORE_TOOL_NAMES, ...state.usedTools]);
@@ -475,15 +624,22 @@ function availableBrowserToolDefinitions(
   if (state.selectableRefs.size >= 2) enabled.add('browser_set_checked_many');
 
   const assetIds = availableAssetIds(checkpoint.completedToolResults);
+  if (assetIds.length > 0) enabled.add('browser_paste_image');
   return BROWSER_TOOL_DEFINITIONS.filter(({ name }) => enabled.has(name as BrowserToolName)).map(
-    (definition) => bindAvailableAssets(definition, assetIds),
+    (definition) =>
+      bindScrollableTargets(bindAvailableAssets(definition, assetIds), state.scrollableRefs),
   );
 }
 
 function constrainedContinuationDefinition(
   continuation: BrowserScrollContinuation,
 ): ModelToolDefinition {
-  const name = continuation.next === 'inspect' ? 'browser_inspect' : 'browser_scroll';
+  const name =
+    continuation.next === 'inspect'
+      ? 'browser_inspect'
+      : continuation.next === 'scroll_until'
+        ? 'browser_scroll_until'
+        : 'browser_scroll';
   const definition = BROWSER_TOOL_DEFINITION_BY_NAME[name];
   const properties = definition.parameters.properties as Readonly<Record<string, unknown>>;
   const hasRemainingDistance =
@@ -501,14 +657,20 @@ function constrainedContinuationDefinition(
     ...definition,
     description:
       continuation.next === 'inspect'
-        ? hasRemainingDistance
-          ? 'A virtualized scroll still has unconsumed distance. Inspect the newly exposed interactive batch before any further scrolling or final answer.'
-          : requiresBoundaryProbe
-            ? 'The scroll only just reached an apparent boundary. Inspect the exposed batch, then verify the boundary with one same-direction probe before any final answer.'
-            : 'The page was scrolled. Inspect the resulting interactive state before any further action or final answer.'
-        : requiresBoundaryProbe && !hasRemainingDistance
-          ? 'Verify the apparent boundary with one same-direction scroll probe. Use the schema-constrained distance and current scrollable ref; do not finish yet.'
-          : 'Continue the unfinished virtualized scroll after reading the exposed batch. Use the schema-constrained distance and the current scrollable ref; do not finish yet.',
+        ? continuation.resumeOperation === 'scroll_until'
+          ? 'A bounded traversal still requires more evidence, but its latest page state was unavailable or made no reliable progress. Inspect one fresh full interactive state, then resume the same traversal before any final answer.'
+          : hasRemainingDistance
+            ? 'A virtualized scroll still has unconsumed distance. Inspect the newly exposed interactive batch before any further scrolling or final answer.'
+            : requiresBoundaryProbe
+              ? 'The scroll only just reached an apparent boundary. Inspect the exposed batch, then verify the boundary with one same-direction probe before any final answer.'
+              : 'The page was scrolled. Inspect the resulting interactive state before any further action or final answer.'
+        : continuation.next === 'scroll_until'
+          ? continuation.targetOptions !== undefined
+            ? 'Continue the same unfinished bounded traversal. Choose the semantically matching target from the fresh schema-constrained refs, preserve its direction, stop marker, and segment bound, and do not finish while continuation is required.'
+            : 'Continue the same unfinished bounded traversal. Preserve its direction, stop marker, and segment bound; do not switch strategy or finish while continuation is required.'
+          : requiresBoundaryProbe && !hasRemainingDistance
+            ? 'Verify the apparent boundary with one same-direction scroll probe. Use the schema-constrained distance and current scrollable ref; do not finish yet.'
+            : 'Continue the unfinished virtualized scroll after reading the exposed batch. Use the schema-constrained distance and the current scrollable ref; do not finish yet.',
     parameters: {
       ...definition.parameters,
       properties: {
@@ -523,11 +685,15 @@ function constrainedContinuationDefinition(
                 ...(properties.mode as Readonly<Record<string, unknown>>),
                 enum: ['interactive'],
               },
+              since: {
+                ...(properties.since as Readonly<Record<string, unknown>>),
+                enum: [''],
+              },
             }
           : {
               target: {
                 ...(properties.target as Readonly<Record<string, unknown>>),
-                enum: [continuation.target],
+                enum: continuation.targetOptions ?? [continuation.target],
               },
               deltaX: {
                 ...(properties.deltaX as Readonly<Record<string, unknown>>),
@@ -537,6 +703,18 @@ function constrainedContinuationDefinition(
                 ...(properties.deltaY as Readonly<Record<string, unknown>>),
                 enum: [nextDeltaY],
               },
+              ...(continuation.next === 'scroll_until'
+                ? {
+                    maxSegments: {
+                      ...(properties.maxSegments as Readonly<Record<string, unknown>>),
+                      enum: [continuation.maxSegments],
+                    },
+                    stopText: {
+                      ...(properties.stopText as Readonly<Record<string, unknown>>),
+                      enum: [continuation.stopText],
+                    },
+                  }
+                : {}),
             }),
       },
     },
@@ -549,7 +727,12 @@ export function browserToolContractForCheckpoint(
 ): BrowserToolContract {
   const scrollContinuation = browserScrollContinuationForCheckpoint(checkpoint);
   if (scrollContinuation !== null) {
-    const name = scrollContinuation.next === 'inspect' ? 'browser_inspect' : 'browser_scroll';
+    const name =
+      scrollContinuation.next === 'inspect'
+        ? 'browser_inspect'
+        : scrollContinuation.next === 'scroll_until'
+          ? 'browser_scroll_until'
+          : 'browser_scroll';
     return {
       tools: [constrainedContinuationDefinition(scrollContinuation)],
       toolChoice: { type: 'function', name },

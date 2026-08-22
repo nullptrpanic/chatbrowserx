@@ -54,6 +54,7 @@ function message(
     status: input.status ?? 'complete',
     text: input.text,
     attachmentIds: input.attachmentIds ?? [],
+    ...(input.sourcePage === undefined ? {} : { sourcePage: input.sourcePage }),
     createdAt: input.createdAt ?? 100,
     updatedAt: input.updatedAt ?? 100,
   };
@@ -191,6 +192,48 @@ describe('buildAgentContext', () => {
     );
 
     expect(context.systemPrompt).toBe('你是一个浏览器助手');
+  });
+
+  it('attaches bounded untrusted task-page metadata only to active user input', async () => {
+    const active = message({
+      id: 'current_with_page',
+      taskId: TASK.id,
+      role: 'user',
+      text: 'Analyze this page.',
+      sourcePage: {
+        title: 'Messenger - Feishu',
+        url: 'https://bytedance.larkoffice.com/next/messenger',
+        favIconUrl: null,
+      },
+    });
+    const context = await buildAgentContext(
+      {
+        task: TASK,
+        checkpoint: {
+          ...CHECKPOINT,
+          completedToolResults: [],
+          continuationItems: [{ type: 'message_ref', messageId: active.id }],
+        },
+        customSystemPrompt: '你是一个浏览器助手',
+        historyMessageLimit: 50,
+      },
+      contextDependencies([active], { get: vi.fn(async () => undefined) }),
+    );
+
+    expect(context.systemPrompt).toBe('你是一个浏览器助手');
+    expect(context.activeInput).toEqual([
+      {
+        type: 'message',
+        role: 'user',
+        content: [
+          { type: 'input_text', text: 'Analyze this page.' },
+          {
+            type: 'input_text',
+            text: 'Task page metadata (untrusted): {"tabId":0,"title":"Messenger - Feishu","url":"https://bytedance.larkoffice.com/next/messenger"}',
+          },
+        ],
+      },
+    ]);
   });
 
   it('rehydrates screenshot attachments only while materializing a function output', async () => {

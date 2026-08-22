@@ -4042,6 +4042,109 @@ describe('BrowserActionExecutor', () => {
     });
   });
 
+  it('requires one same-direction viewport probe before verifying a finite boundary', async () => {
+    let pageY = 0;
+    const { executor } = harness({
+      responder: (_session, method, params) => {
+        if (method === 'Input.dispatchMouseEvent' && params?.type === 'mouseWheel') {
+          pageY = 400;
+          return {};
+        }
+        if (method === 'Page.getLayoutMetrics') {
+          return {
+            visualViewport: {
+              pageX: 0,
+              pageY,
+              clientWidth: 800,
+              clientHeight: 600,
+            },
+            contentSize: { x: 0, y: 0, width: 800, height: 1_000 },
+          };
+        }
+        return undefined;
+      },
+    });
+
+    const first = await executor.execute(
+      call('browser_scroll', {
+        tabId: 7,
+        target: 'viewport',
+        deltaX: 0,
+        deltaY: 600,
+      }),
+      new AbortController().signal,
+    );
+    const second = await executor.execute(
+      call('browser_scroll', {
+        tabId: 7,
+        target: 'viewport',
+        deltaX: 0,
+        deltaY: 600,
+      }),
+      new AbortController().signal,
+    );
+
+    expect(first.data).toMatchObject({
+      moved: true,
+      actualDeltaY: 400,
+      requestedDeltaApplied: false,
+      remainingDeltaY: 200,
+      boundaryVerified: false,
+      needsBoundaryProbe: true,
+      position: { y: 400, maxY: 400 },
+    });
+    expect(second.data).toMatchObject({
+      moved: false,
+      actualDeltaY: 0,
+      boundaryVerified: true,
+      needsBoundaryProbe: false,
+      position: { y: 400, maxY: 400 },
+    });
+  });
+
+  it('waits for delayed viewport growth before declaring the current edge a boundary', async () => {
+    let metricReads = 0;
+    const { executor } = harness({
+      responder: (_session, method) => {
+        if (method === 'Page.getLayoutMetrics') {
+          metricReads += 1;
+          const height = metricReads >= 7 ? 1_600 : 1_000;
+          return {
+            visualViewport: {
+              pageX: 0,
+              pageY: 400,
+              clientWidth: 800,
+              clientHeight: 600,
+            },
+            contentSize: { x: 0, y: 0, width: 800, height },
+          };
+        }
+        return undefined;
+      },
+    });
+
+    const result = await executor.execute(
+      call('browser_scroll', {
+        tabId: 7,
+        target: 'viewport',
+        deltaX: 0,
+        deltaY: 600,
+      }),
+      new AbortController().signal,
+    );
+
+    expect(metricReads).toBeGreaterThanOrEqual(7);
+    expect(result.data).toMatchObject({
+      moved: true,
+      actualDeltaY: 0,
+      extentChanged: true,
+      loadedMore: true,
+      boundaryVerified: false,
+      needsBoundaryProbe: false,
+      position: { y: 400, maxY: 1_000 },
+    });
+  });
+
   it('scrolls the nearest nested container directly and reports its real position', async () => {
     const { executor, send } = harness({
       targets: [

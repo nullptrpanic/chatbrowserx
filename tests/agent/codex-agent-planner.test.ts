@@ -199,7 +199,6 @@ const SEARCH_ARGUMENTS = {
 } as const;
 
 const BROWSER_TOOL_NAMES = [
-  'browser_get_current_tab',
   'browser_list_tabs',
   'browser_open_tab',
   'browser_switch_tab',
@@ -208,12 +207,12 @@ const BROWSER_TOOL_NAMES = [
   'browser_reload',
   'browser_inspect',
   'browser_capture_screenshot',
-  'browser_paste_image',
   'browser_click',
   'browser_set_checked',
   'browser_type',
   'browser_keypress',
   'browser_scroll',
+  'browser_scroll_until',
   'browser_hover',
   'browser_select',
   'browser_drag',
@@ -401,7 +400,10 @@ describe('CodexAgentPlanner', () => {
 
   it('never exposes the legacy context commit tool in new model requests', async () => {
     const model = provider(async function* () {
-      yield { type: 'response.started', responseId: 'resp_without_legacy_commit' };
+      yield {
+        type: 'response.started',
+        responseId: 'resp_without_legacy_commit',
+      };
       yield { type: 'text.delta', delta: 'Continue without the legacy tool.' };
       yield {
         type: 'response.completed',
@@ -1388,8 +1390,14 @@ describe('CodexAgentPlanner', () => {
         role: 'user',
         content: [{ type: 'input_text', text: 'Continue checkout' }],
       },
-      expect.objectContaining({ type: 'function_call', callId: 'call_inspect' }),
-      expect.objectContaining({ type: 'function_call_output', callId: 'call_inspect' }),
+      expect.objectContaining({
+        type: 'function_call',
+        callId: 'call_inspect',
+      }),
+      expect.objectContaining({
+        type: 'function_call_output',
+        callId: 'call_inspect',
+      }),
     ]);
   });
 

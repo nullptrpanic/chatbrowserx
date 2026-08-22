@@ -790,6 +790,57 @@ describe('TaskExecutor', () => {
     });
   });
 
+  it('blocks a repeated bounded scroll after it reports no progress', async () => {
+    const arguments_ = {
+      target: 'ref_history',
+      deltaX: 0,
+      deltaY: -600,
+      maxSegments: 8,
+      stopText: '',
+    };
+    const calls = [
+      browserCall('call_scroll_until_1', 'browser_scroll_until', arguments_),
+      browserCall('call_scroll_until_2', 'browser_scroll_until', arguments_),
+    ];
+    const execute = vi.fn<BrowserExecutionPort['execute']>(async () => ({
+      output: JSON.stringify({
+        ok: true,
+        tabId: 7,
+        url: 'https://example.test/history',
+        data: {
+          action: 'scroll_until',
+          moved: false,
+          stopReason: 'no_progress',
+          position: { x: 0, y: 0, maxX: 0, maxY: 1_200 },
+          observations: [
+            {
+              mode: 'interactive',
+              snapshot: 'snapshot_no_progress',
+              base: 'snapshot_before',
+              unchanged: true,
+            },
+          ],
+        },
+        observation: null,
+      }),
+      attachmentIds: [],
+    }));
+
+    const result = await runBrowserProgressScenario('bounded-scroll-no-progress', calls, execute);
+
+    expect(execute).toHaveBeenCalledOnce();
+    expect(JSON.parse(result.checkpoint.completedToolResults.at(-1)?.output ?? '')).toMatchObject({
+      ok: false,
+      code: 'NO_PROGRESS',
+      retryable: false,
+      needsInspect: false,
+      data: {
+        direction: { deltaX: 0, deltaY: -600 },
+        position: { x: 0, y: 0, maxX: 0, maxY: 1_200 },
+      },
+    });
+  });
+
   it('rejects a premature final answer until an unfinished virtualized scroll is inspected and resumed', async () => {
     const calls: readonly AgentEvent[] = [
       browserCall('call_scroll_initial', 'browser_scroll', {
@@ -909,9 +960,18 @@ describe('TaskExecutor', () => {
     expect(result.events.filter(({ type }) => type === 'task.completed')).toHaveLength(1);
     expect(result.checkpoint.continuationItems).toEqual(
       expect.arrayContaining([
-        expect.objectContaining({ type: 'function_call', callId: 'call_inspect_loaded_batch' }),
-        expect.objectContaining({ type: 'function_call', callId: 'call_scroll_remaining' }),
-        expect.objectContaining({ type: 'function_call', callId: 'call_inspect_completed_scroll' }),
+        expect.objectContaining({
+          type: 'function_call',
+          callId: 'call_inspect_loaded_batch',
+        }),
+        expect.objectContaining({
+          type: 'function_call',
+          callId: 'call_scroll_remaining',
+        }),
+        expect.objectContaining({
+          type: 'function_call',
+          callId: 'call_inspect_completed_scroll',
+        }),
       ]),
     );
   });

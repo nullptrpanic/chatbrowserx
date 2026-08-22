@@ -12,10 +12,12 @@ interface FixtureNode {
   readonly text?: string;
   readonly attributes?: Readonly<Record<string, string>>;
   readonly cursor?: string;
+  readonly pointerEvents?: string;
   readonly clickable?: boolean;
   readonly checked?: boolean;
   readonly selected?: boolean;
   readonly bounds?: readonly [number, number, number, number];
+  readonly paintOrder?: number;
   readonly overflowX?: string;
   readonly overflowY?: string;
   readonly scrollRect?: readonly [number, number, number, number];
@@ -39,6 +41,7 @@ function domSnapshot(nodes: readonly FixtureNode[]): Protocol.DOMSnapshot.Captur
   const layoutNodeIndexes: number[] = [];
   const layoutStyles: number[][] = [];
   const layoutBounds: number[][] = [];
+  const layoutPaintOrders: number[] = [];
   const layoutScrollRects: number[][] = [];
   const layoutClientRects: number[][] = [];
   nodes.forEach((node, nodeIndex) => {
@@ -57,7 +60,7 @@ function domSnapshot(nodes: readonly FixtureNode[]): Protocol.DOMSnapshot.Captur
                 : property === 'visibility'
                   ? 'visible'
                   : property === 'pointer-events'
-                    ? 'auto'
+                    ? (node.pointerEvents ?? 'auto')
                     : property === 'overflow-x'
                       ? (node.overflowX ?? 'visible')
                       : property === 'overflow-y'
@@ -67,6 +70,7 @@ function domSnapshot(nodes: readonly FixtureNode[]): Protocol.DOMSnapshot.Captur
         ),
       );
       layoutBounds.push([...node.bounds]);
+      layoutPaintOrders.push(node.paintOrder ?? 0);
       layoutScrollRects.push([...(node.scrollRect ?? node.bounds)]);
       layoutClientRects.push([...(node.clientRect ?? node.bounds)]);
     }
@@ -107,6 +111,7 @@ function domSnapshot(nodes: readonly FixtureNode[]): Protocol.DOMSnapshot.Captur
           bounds: layoutBounds,
           text: layoutNodeIndexes.map(() => stringIndex('')),
           stackingContexts: { index: [] },
+          paintOrders: layoutPaintOrders,
           scrollRects: layoutScrollRects,
           clientRects: layoutClientRects,
         },
@@ -199,6 +204,114 @@ function labeledCheckboxSnapshot(checked: boolean) {
 }
 
 describe('buildSemanticPageSnapshot', () => {
+  it('does not advertise a click target completely covered by an unrelated higher layer', () => {
+    const result = buildSemanticPageSnapshot({
+      axNodes: [
+        axNode('root', 1, 'RootWebArea', 'Messenger', {
+          childIds: ['covered-action', 'search-overlay'],
+        }),
+        axNode('covered-action', 2, 'button', 'Covered action', { parentId: 'root' }),
+        axNode('search-overlay', 3, 'generic', 'Search overlay', { parentId: 'root' }),
+      ],
+      domSnapshot: domSnapshot([
+        { backendNodeId: 1, nodeName: '#document', parentIndex: -1 },
+        {
+          backendNodeId: 2,
+          nodeName: 'BUTTON',
+          parentIndex: 0,
+          clickable: true,
+          bounds: [20, 20, 160, 40],
+          paintOrder: 1,
+        },
+        {
+          backendNodeId: 3,
+          nodeName: 'DIV',
+          parentIndex: 0,
+          bounds: [0, 0, 240, 120],
+          paintOrder: 2,
+        },
+      ]),
+      frame: 'main',
+      viewport: { x: 0, y: 0, width: 300, height: 200 },
+    });
+
+    expect(result.entries.find((entry) => entry.name === 'Covered action')).toMatchObject({
+      name: 'Covered action',
+    });
+    expect(
+      result.entries.find((entry) => entry.name === 'Covered action')?.actions,
+    ).toBeUndefined();
+    expect(result.targets.some((target) => target.name === 'Covered action')).toBe(false);
+  });
+
+  it('keeps a click target when its own painted child covers the sampled points', () => {
+    const result = buildSemanticPageSnapshot({
+      axNodes: [
+        axNode('root', 1, 'RootWebArea', 'Form', { childIds: ['button'] }),
+        axNode('button', 2, 'button', 'Continue', {
+          parentId: 'root',
+          childIds: ['button-label'],
+        }),
+        axNode('button-label', 3, 'StaticText', 'Continue', { parentId: 'button' }),
+      ],
+      domSnapshot: domSnapshot([
+        { backendNodeId: 1, nodeName: '#document', parentIndex: -1 },
+        {
+          backendNodeId: 2,
+          nodeName: 'BUTTON',
+          parentIndex: 0,
+          clickable: true,
+          bounds: [20, 20, 160, 40],
+          paintOrder: 1,
+        },
+        {
+          backendNodeId: 3,
+          nodeName: 'SPAN',
+          parentIndex: 1,
+          bounds: [20, 20, 160, 40],
+          paintOrder: 2,
+        },
+      ]),
+      frame: 'main',
+      viewport: { x: 0, y: 0, width: 300, height: 200 },
+    });
+
+    expect(result.targets.some((target) => target.name === 'Continue')).toBe(true);
+  });
+
+  it('keeps a click target beneath a pointer-events-none visual layer', () => {
+    const result = buildSemanticPageSnapshot({
+      axNodes: [
+        axNode('root', 1, 'RootWebArea', 'Form', { childIds: ['button', 'decoration'] }),
+        axNode('button', 2, 'button', 'Continue', { parentId: 'root' }),
+        axNode('decoration', 3, 'generic', 'Decoration', { parentId: 'root' }),
+      ],
+      domSnapshot: domSnapshot([
+        { backendNodeId: 1, nodeName: '#document', parentIndex: -1 },
+        {
+          backendNodeId: 2,
+          nodeName: 'BUTTON',
+          parentIndex: 0,
+          clickable: true,
+          bounds: [20, 20, 160, 40],
+          paintOrder: 1,
+        },
+        {
+          backendNodeId: 3,
+          nodeName: 'DIV',
+          parentIndex: 0,
+          pointerEvents: 'none',
+          bounds: [0, 0, 240, 120],
+          paintOrder: 2,
+        },
+      ]),
+      frame: 'main',
+      viewport: { x: 0, y: 0, width: 300, height: 200 },
+    });
+
+    expect(result.targets.some((target) => target.name === 'Continue')).toBe(true);
+  });
+
   it('binds editable AX descendants to their nearest contenteditable host', () => {
     const editable = {
       name: 'editable',
@@ -377,12 +490,47 @@ describe('buildSemanticPageSnapshot', () => {
         role: 'region',
         name: 'Message history',
         actions: ['scroll'],
+        scrollMetrics: {
+          bounds: [400, 100, 600, 500],
+          clientWidth: 600,
+          clientHeight: 500,
+          scrollWidth: 600,
+          scrollHeight: 4_000,
+        },
       }),
     );
     expect(result.entries).toContainEqual(
       expect.objectContaining({
         role: 'region',
         name: 'Message history',
+        actions: ['scroll'],
+      }),
+    );
+  });
+
+  it('treats measurable overflow hidden as a programmatically scrollable target', () => {
+    const result = buildSemanticPageSnapshot({
+      axNodes: [axNode('root', 1, 'RootWebArea', 'Virtual document')],
+      domSnapshot: domSnapshot([
+        { backendNodeId: 1, nodeName: '#document', parentIndex: -1 },
+        {
+          backendNodeId: 10,
+          nodeName: 'DIV',
+          parentIndex: 0,
+          attributes: { 'aria-label': 'Document pages' },
+          overflowY: 'hidden',
+          bounds: [100, 80, 800, 600],
+          clientRect: [100, 80, 800, 600],
+          scrollRect: [100, 80, 800, 6_000],
+        },
+      ]),
+      frame: 'main',
+    });
+
+    expect(result.targets).toContainEqual(
+      expect.objectContaining({
+        backendNodeId: 10,
+        name: 'Document pages',
         actions: ['scroll'],
       }),
     );

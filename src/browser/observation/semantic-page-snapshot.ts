@@ -47,6 +47,16 @@ export interface SemanticPageTarget {
   readonly semanticLocator: string;
   readonly state: readonly string[];
   readonly actions: readonly SemanticAction[];
+  /** Internal ranking evidence; compact model entries never serialize geometry. */
+  readonly scrollMetrics?: SemanticScrollMetrics;
+}
+
+export interface SemanticScrollMetrics {
+  readonly bounds?: readonly [number, number, number, number];
+  readonly clientWidth: number;
+  readonly clientHeight: number;
+  readonly scrollWidth: number;
+  readonly scrollHeight: number;
 }
 
 export interface SemanticPageSnapshot {
@@ -78,9 +88,12 @@ interface SnapshotDomNode {
   readonly optionSelected: boolean;
   readonly cursor: string;
   readonly visible: boolean;
+  readonly paintOrder?: number;
   readonly scrollableX: boolean;
   readonly scrollableY: boolean;
   readonly bounds?: readonly [number, number, number, number];
+  readonly scrollRect?: readonly [number, number, number, number];
+  readonly clientRect?: readonly [number, number, number, number];
   parent: SnapshotDomNode | null;
   readonly children: SnapshotDomNode[];
 }
@@ -374,6 +387,7 @@ function snapshotDomNodes(
       {
         readonly styles: readonly number[];
         readonly bounds?: readonly [number, number, number, number];
+        readonly paintOrder?: number;
         readonly text: string;
         readonly scrollRect?: readonly [number, number, number, number];
         readonly clientRect?: readonly [number, number, number, number];
@@ -381,12 +395,14 @@ function snapshotDomNodes(
     >();
     document_.layout.nodeIndex.forEach((nodeIndex, layoutIndex) => {
       const bounds = tupleBounds(document_.layout.bounds[layoutIndex]);
+      const paintOrder = document_.layout.paintOrders?.[layoutIndex];
       const scrollRect = tupleBounds(document_.layout.scrollRects?.[layoutIndex]);
       const clientRect = tupleBounds(document_.layout.clientRects?.[layoutIndex]);
       layoutByNodeIndex.set(nodeIndex, {
         styles: document_.layout.styles[layoutIndex] ?? [],
         text: stringAt(snapshot.strings, document_.layout.text[layoutIndex]),
         ...(bounds ? { bounds } : {}),
+        ...(paintOrder === undefined ? {} : { paintOrder }),
         ...(scrollRect ? { scrollRect } : {}),
         ...(clientRect ? { clientRect } : {}),
       });
@@ -408,7 +424,7 @@ function snapshotDomNodes(
       const scrollRect = layout?.scrollRect;
       const clientRect = layout?.clientRect;
       const scrollableOverflow = (value: string): boolean =>
-        value === 'auto' || value === 'scroll' || value === 'overlay';
+        value === 'auto' || value === 'scroll' || value === 'overlay' || value === 'hidden';
       const node: SnapshotDomNode = {
         backendNodeId,
         documentFrameId,
@@ -438,7 +454,10 @@ function snapshotDomNodes(
           styles.visibility !== 'hidden' &&
           styles.visibility !== 'collapse' &&
           styles['pointer-events'] !== 'none',
+        ...(layout?.paintOrder === undefined ? {} : { paintOrder: layout.paintOrder }),
         ...(bounds ? { bounds } : {}),
+        ...(scrollRect ? { scrollRect } : {}),
+        ...(clientRect ? { clientRect } : {}),
         parent: null,
         children: [],
       };
@@ -455,6 +474,89 @@ function snapshotDomNodes(
     }
   }
   return nodesByBackendId;
+}
+
+function scrollMetricsFor(node: SnapshotDomNode): SemanticScrollMetrics | undefined {
+  if (
+    (!node.scrollableX && !node.scrollableY) ||
+    node.scrollRect === undefined ||
+    node.clientRect === undefined
+  ) {
+    return undefined;
+  }
+  return {
+    ...(node.bounds === undefined ? {} : { bounds: node.bounds }),
+    clientWidth: Math.max(0, node.clientRect[2]),
+    clientHeight: Math.max(0, node.clientRect[3]),
+    scrollWidth: Math.max(0, node.scrollRect[2]),
+    scrollHeight: Math.max(0, node.scrollRect[3]),
+  };
+}
+
+function domNodesAreRelated(left: SnapshotDomNode, right: SnapshotDomNode): boolean {
+  const reaches = (start: SnapshotDomNode, expected: SnapshotDomNode): boolean => {
+    let current: SnapshotDomNode | null = start;
+    while (current) {
+      if (current === expected) return true;
+      current = current.parent;
+    }
+    return false;
+  };
+  return reaches(left, right) || reaches(right, left);
+}
+
+function fullyCoveredByHigherLayer(
+  target: SnapshotDomNode,
+  candidates: Iterable<SnapshotDomNode>,
+  viewport: BuildSemanticPageSnapshotInput['viewport'],
+): boolean {
+  const bounds = target.bounds;
+  const targetPaintOrder = target.paintOrder;
+  if (!bounds || targetPaintOrder === undefined || !viewport) return false;
+  const left = Math.max(bounds[0], viewport.x);
+  const top = Math.max(bounds[1], viewport.y);
+  const right = Math.min(bounds[0] + bounds[2], viewport.x + viewport.width);
+  const bottom = Math.min(bounds[1] + bounds[3], viewport.y + viewport.height);
+  if (right <= left || bottom <= top) return false;
+
+  const points = [
+    [0.5, 0.5],
+    [0.25, 0.5],
+    [0.75, 0.5],
+    [0.5, 0.25],
+    [0.5, 0.75],
+    [0.15, 0.15],
+    [0.85, 0.15],
+    [0.15, 0.85],
+    [0.85, 0.85],
+  ].map(([xRatio = 0, yRatio = 0]) => ({
+    x: left + (right - left) * xRatio,
+    y: top + (bottom - top) * yRatio,
+  }));
+  const coveringNodes = [...candidates].filter(
+    (candidate) =>
+      candidate !== target &&
+      candidate.visible &&
+      candidate.bounds !== undefined &&
+      candidate.paintOrder !== undefined &&
+      candidate.paintOrder > targetPaintOrder &&
+      !domNodesAreRelated(target, candidate),
+  );
+  return (
+    coveringNodes.length > 0 &&
+    points.every(({ x, y }) =>
+      coveringNodes.some((candidate) => {
+        const candidateBounds = candidate.bounds;
+        return (
+          candidateBounds !== undefined &&
+          x >= candidateBounds[0] &&
+          x <= candidateBounds[0] + candidateBounds[2] &&
+          y >= candidateBounds[1] &&
+          y <= candidateBounds[1] + candidateBounds[3]
+        );
+      }),
+    )
+  );
 }
 
 function structuralClassTokens(node: SnapshotDomNode): readonly string[] {
@@ -1005,6 +1107,7 @@ export function buildSemanticPageSnapshot(
   const targetIndexes = new Map<number, number>();
   const seenEntries = new Set<string>();
   const representedDomBackendIds = new Set<number>();
+  const domNodes = [...domByBackendId.values()];
 
   for (const node of orderedAxNodes(input.axNodes)) {
     if (node.ignored) continue;
@@ -1028,6 +1131,10 @@ export function buildSemanticPageSnapshot(
       }
     }
     if (!targetDomNode) actions = [];
+    else if (fullyCoveredByHigherLayer(targetDomNode, domNodes, input.viewport)) {
+      actions = [];
+      targetDomNode = undefined;
+    }
 
     const selectable = targetDomNode
       ? associatedSelectableControl(targetDomNode, domByBackendId)
@@ -1069,6 +1176,7 @@ export function buildSemanticPageSnapshot(
       else {
         targetIndex = targets.length;
         targetIndexes.set(targetDomNode.backendNodeId, targetIndex);
+        const scrollMetrics = scrollMetricsFor(targetDomNode);
         targets.push({
           backendNodeId: targetDomNode.backendNodeId,
           ...(selectable === undefined ||
@@ -1081,6 +1189,7 @@ export function buildSemanticPageSnapshot(
           semanticLocator: semanticLocatorFor(node, targetDomNode, effectiveRole, name, axById),
           state,
           actions,
+          ...(scrollMetrics === undefined ? {} : { scrollMetrics }),
         });
       }
     }
@@ -1110,7 +1219,7 @@ export function buildSemanticPageSnapshot(
     if (domNode) representedDomBackendIds.add(domNode.backendNodeId);
   }
 
-  for (const domNode of domByBackendId.values()) {
+  for (const domNode of domNodes) {
     if (!domNode.visible || targetIndexes.has(domNode.backendNodeId)) continue;
     const editableRole = domEditableRole(domNode);
     const scrollable = domNode.scrollableX || domNode.scrollableY;
@@ -1135,6 +1244,7 @@ export function buildSemanticPageSnapshot(
       }
       continue;
     }
+    if (fullyCoveredByHigherLayer(pointerTarget ?? domNode, domNodes, input.viewport)) continue;
     const declaredRole = normalizedText(domNode.attributes.get('role'), 100).toLowerCase();
     const role =
       editableRole ??
@@ -1165,6 +1275,7 @@ export function buildSemanticPageSnapshot(
     const name = syntheticTargetName(domNode, fallback);
     const inViewport = viewportMembership(domNode, input.viewport);
     const targetIndex = targets.length;
+    const scrollMetrics = scrollMetricsFor(domNode);
     targetIndexes.set(domNode.backendNodeId, targetIndex);
     targets.push({
       backendNodeId: domNode.backendNodeId,
@@ -1174,6 +1285,7 @@ export function buildSemanticPageSnapshot(
       semanticLocator: syntheticSemanticLocator(domNode, role, name),
       state,
       actions,
+      ...(scrollMetrics === undefined ? {} : { scrollMetrics }),
     });
     entries.push(
       semanticPageEntry(`${input.frame}:dom:${String(domNode.backendNodeId)}`, {

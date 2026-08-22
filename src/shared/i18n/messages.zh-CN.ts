@@ -96,6 +96,7 @@ export const zhCN = {
   browserToolType: '输入内容',
   browserToolKeypress: '发送按键',
   browserToolScroll: '滚动页面',
+  browserToolScrollUntil: '连续滚动页面',
   browserToolHover: '悬停元素',
   browserToolSelect: '选择选项',
   browserToolDrag: '拖拽元素',

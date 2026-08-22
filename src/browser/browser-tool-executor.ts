@@ -12,6 +12,7 @@ import type { PageInspectionOptions, PageObservationResult } from './observation
 import type { BrowserActionPort, BrowserActionResult } from './actions/browser-action-executor';
 import type { NetworkCapturePort } from './network/network-capture-registry';
 import { readSelectionState } from './selection-state';
+import { compactBrowserModelOutput } from './browser-model-output';
 
 const MAX_OUTPUT_CHARACTERS = 100 * 1_024;
 const RELOAD_RECOVERY_FAILURES = new Set<BrowserToolFailureCode>([
@@ -19,6 +20,13 @@ const RELOAD_RECOVERY_FAILURES = new Set<BrowserToolFailureCode>([
   'PAGE_UNAVAILABLE',
   'INVALID_PAGE_RESPONSE',
   'BROWSER_OPERATION_FAILED',
+]);
+const FRESH_OBSERVATION_FAILURES = new Set<BrowserToolFailureCode>([
+  'STALE_REF',
+  'TYPE_VERIFICATION_FAILED',
+  'ACTION_STATE_MISMATCH',
+  'ACTION_STATE_UNAVAILABLE',
+  'ACTION_TARGET_OBSCURED',
 ]);
 const TASK_SCOPED_OPERATIONS = new Set<ParsedBrowserToolCall['operation']>([
   'navigate',
@@ -32,6 +40,7 @@ const TASK_SCOPED_OPERATIONS = new Set<ParsedBrowserToolCall['operation']>([
   'type',
   'keypress',
   'scroll',
+  'scroll_until',
   'hover',
   'select',
   'drag',
@@ -56,6 +65,7 @@ const POST_ACTION_OBSERVATION_OPERATIONS = new Set<ParsedBrowserToolCall['operat
 ]);
 const POST_ACTION_SETTLE_OPERATIONS = new Set<ParsedBrowserToolCall['operation']>([
   'click',
+  'type',
   'keypress',
   'select',
   'drag',
@@ -63,9 +73,12 @@ const POST_ACTION_SETTLE_OPERATIONS = new Set<ParsedBrowserToolCall['operation']
   'drag_point',
 ]);
 const POST_ACTION_SETTLE_TIMEOUT_MS = 1_500;
+const POST_TYPE_FOLLOW_UP_SETTLE_TIMEOUT_MS = 1_000;
 const MAX_SCROLL_SEGMENTS_PER_CALL = 8;
 const MAX_SCROLL_OBSERVATION_CHARACTERS = 68 * 1_024;
 const RESERVED_SCROLL_OBSERVATION_CHARACTERS = 34 * 1_024;
+const MAX_SCROLL_UNTIL_OBSERVATION_CHARACTERS = 96 * 1_024;
+const RESERVED_SCROLL_UNTIL_OBSERVATION_CHARACTERS = 36 * 1_024;
 
 interface ReloadRecoveryState {
   readonly operation: ParsedBrowserToolCall['operation'];
@@ -132,6 +145,23 @@ function browserActionFailureStage(error: unknown): BrowserToolFailure['stage'] 
     return 'readback';
   }
   return undefined;
+}
+
+function failureMessageWithFreshObservation(code: BrowserToolFailureCode): string {
+  switch (code) {
+    case 'STALE_REF':
+      return 'The element reference is stale. Fresh interactive state is attached; use only its latest refs.';
+    case 'TYPE_VERIFICATION_FAILED':
+      return 'The page did not retain the requested text. Fresh interactive state is attached; use it to choose the next action.';
+    case 'ACTION_STATE_MISMATCH':
+      return 'The page did not retain the requested selection. Fresh interactive state is attached; use it to choose the next action.';
+    case 'ACTION_STATE_UNAVAILABLE':
+      return 'The browser could not measure the requested state. Fresh interactive state is attached; use it to choose the next action.';
+    case 'ACTION_TARGET_OBSCURED':
+      return 'The target is covered by another element. Fresh interactive state is attached; choose a visible target from it.';
+    default:
+      return 'Fresh interactive state is attached; use it to choose the next action.';
+  }
 }
 
 function failureFor(error: unknown): BrowserToolFailure {
@@ -317,8 +347,10 @@ function result(
 ): BrowserToolExecutionResult {
   const serialized = JSON.stringify(output);
   if (serialized.length <= MAX_OUTPUT_CHARACTERS) {
+    const compact = compactBrowserModelOutput(serialized);
     return {
       output: serialized,
+      ...(compact.length < serialized.length ? { modelOutput: compact } : {}),
       attachmentIds,
       ...(modelAttachmentIds === undefined ? {} : { modelAttachmentIds }),
     };
@@ -569,14 +601,17 @@ function bindScrollDelta(
   deltaX: number,
   deltaY: number,
 ): ParsedBrowserToolCall {
+  const target = (call.arguments as { readonly target: string }).target;
   const arguments_ = {
-    ...(call.arguments as Readonly<Record<string, unknown>>),
     tabId: targetTabId,
+    target,
     deltaX,
     deltaY,
   } as ParsedBrowserToolCall['arguments'];
   return {
     ...call,
+    name: 'browser_scroll',
+    operation: 'scroll',
     arguments: arguments_,
     argumentsJson: JSON.stringify(arguments_),
   };
@@ -619,6 +654,90 @@ interface ScrollSegmentAggregate {
   readonly data: Readonly<Record<string, unknown>>;
   readonly observations: readonly Readonly<Record<string, unknown>>[];
   readonly verificationUnavailable: boolean;
+}
+
+type ScrollUntilStopReason =
+  | 'text_seen'
+  | 'boundary_verified'
+  | 'cycle_detected'
+  | 'sample_limit'
+  | 'no_progress'
+  | 'evidence_budget'
+  | 'segment_limit'
+  | 'observation_unavailable'
+  | 'action_failure';
+
+function normalizedVisibleText(value: string): string {
+  return value.normalize('NFKC').replace(/\s+/gu, ' ').trim().toLocaleLowerCase();
+}
+
+function semanticEntryContainsText(value: unknown, marker: string): boolean {
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) return false;
+  const entry = value as Readonly<Record<string, unknown>>;
+  const candidates: string[] = [];
+  if (typeof entry.n === 'string') candidates.push(entry.n);
+  if (typeof entry.s === 'string') candidates.push(entry.s);
+  if (Array.isArray(entry.s)) {
+    for (const state of entry.s) if (typeof state === 'string') candidates.push(state);
+  }
+  return candidates.some((candidate) => normalizedVisibleText(candidate).includes(marker));
+}
+
+function interactiveObservationContainsText(
+  observation: Readonly<Record<string, unknown>>,
+  marker: string,
+): boolean {
+  if (marker.length === 0) return false;
+  if (
+    Array.isArray(observation.elements) &&
+    observation.elements.some((entry) => semanticEntryContainsText(entry, marker))
+  ) {
+    return true;
+  }
+  return (
+    Array.isArray(observation.upsert) &&
+    observation.upsert.some((item) => {
+      if (typeof item !== 'object' || item === null || Array.isArray(item)) return false;
+      return semanticEntryContainsText((item as Readonly<Record<string, unknown>>).e, marker);
+    })
+  );
+}
+
+function semanticObservationContentKey(
+  observation: Readonly<Record<string, unknown>>,
+): string | null {
+  const coverageValue = observation.coverage;
+  const coverage =
+    typeof coverageValue === 'object' && coverageValue !== null && !Array.isArray(coverageValue)
+      ? (coverageValue as Readonly<Record<string, unknown>>)
+      : null;
+  if (typeof coverage?.contentKey === 'string' && coverage.contentKey.length > 0) {
+    return coverage.contentKey;
+  }
+  const entries = Array.isArray(observation.elements)
+    ? observation.elements
+    : Array.isArray(observation.upsert)
+      ? observation.upsert.flatMap((item) => {
+          if (typeof item !== 'object' || item === null || Array.isArray(item)) return [];
+          const entry = (item as Readonly<Record<string, unknown>>).e;
+          return typeof entry === 'object' && entry !== null && !Array.isArray(entry)
+            ? [entry]
+            : [];
+        })
+      : [];
+  if (entries.length === 0) return null;
+  const value = JSON.stringify(
+    entries.map((entry) => {
+      const record = entry as Readonly<Record<string, unknown>>;
+      return [record.r ?? 'generic', record.n ?? '', record.s ?? [], record.f ?? 'main'];
+    }),
+  );
+  let hash = 0x811c9dc5;
+  for (let index = 0; index < value.length; index += 1) {
+    hash ^= value.charCodeAt(index);
+    hash = Math.imul(hash, 0x01000193);
+  }
+  return (hash >>> 0).toString(16).padStart(8, '0');
 }
 
 function requiredTaskTabId(resolution: TaskTargetResolution): number {
@@ -911,6 +1030,36 @@ export class BrowserToolExecutor implements BrowserExecutionPort {
           modelAttachmentIds = [];
           break;
         }
+        case 'scroll_until': {
+          if (!this.#dependencies.actions || !this.#dependencies.observer) {
+            output = failure(
+              'OPERATION_UNAVAILABLE',
+              'This browser operation is not connected yet.',
+              false,
+              false,
+            );
+            break;
+          }
+          const targetTabId = requiredTaskTabId(taskTarget);
+          if (this.#interactiveSnapshotByTab.get(targetTabId) === undefined) {
+            output = failure(
+              'INTERACTIVE_INSPECTION_REQUIRED',
+              'Inspect the page with mode interactive before starting bounded scrolling.',
+              true,
+              true,
+            );
+            break;
+          }
+          this.#screenshotScales.delete(targetTabId);
+          await this.#retainRunner(targetTabId, context?.sessionOwnerId);
+          output = await this.#executeScrollUntil(
+            call,
+            targetTabId,
+            signal,
+            context?.sessionOwnerId,
+          );
+          break;
+        }
         case 'click':
         case 'set_checked':
         case 'set_checked_many':
@@ -979,11 +1128,26 @@ export class BrowserToolExecutor implements BrowserExecutionPort {
             if (normalized.code === 'ACTION_STATE_MISMATCH') {
               this.#stateMismatchFallbackByTab.add(targetTabId);
             }
+            const fresh = await this.#observeFailureState(
+              normalized,
+              targetTabId,
+              signal,
+              context?.sessionOwnerId,
+            );
             output = {
-              ...normalized,
+              ...(fresh === null
+                ? normalized
+                : {
+                    ...normalized,
+                    message: failureMessageWithFreshObservation(normalized.code),
+                    needsInspect: false,
+                  }),
               tabId: action.tabId,
               url: action.url,
-              data: action.data,
+              data: {
+                ...action.data,
+                ...(fresh === null ? {} : { verification: fresh }),
+              },
               observation: action.observation,
             };
             break;
@@ -1025,6 +1189,35 @@ export class BrowserToolExecutor implements BrowserExecutionPort {
                 context?.sessionOwnerId,
               )) ?? undefined;
             verificationUnavailable = verification === undefined;
+            if (
+              call.operation === 'type' &&
+              (call.arguments as { readonly submit: boolean }).submit === false &&
+              verification !== undefined &&
+              this.#dependencies.actions.settle
+            ) {
+              try {
+                await this.#dependencies.actions.settle(
+                  targetTabId,
+                  signal,
+                  POST_TYPE_FOLLOW_UP_SETTLE_TIMEOUT_MS,
+                );
+              } catch (error) {
+                if (signal.aborted || (error instanceof Error && error.name === 'AbortError')) {
+                  throw error;
+                }
+                // The first observation remains valid even if the follow-up settle times out.
+              }
+              const followUpBase = this.#interactiveSnapshotByTab.get(targetTabId);
+              if (followUpBase !== undefined) {
+                const followUp = await this.#observeAfterAction(
+                  targetTabId,
+                  followUpBase,
+                  signal,
+                  context?.sessionOwnerId,
+                );
+                if (followUp !== null) observations = [verification, followUp];
+              }
+            }
           }
           if (call.operation === 'scroll' && verification !== undefined) {
             const segmented = await this.#continueScrollSegments(
@@ -1178,8 +1371,29 @@ export class BrowserToolExecutor implements BrowserExecutionPort {
         this.#stateMismatchFallbackByTab.add(recoveryTabId);
         this.#rememberFailedSelection(call, recoveryTabId);
       }
-      this.#recordRecoveryOutcome(call.operation, recoveryTabId, normalized);
-      return result(call.operation, normalized);
+      const fresh =
+        recoveryTabId === null
+          ? null
+          : await this.#observeFailureState(
+              normalized,
+              recoveryTabId,
+              signal,
+              context?.sessionOwnerId,
+            );
+      const recovered =
+        fresh === null
+          ? normalized
+          : {
+              ...normalized,
+              message: failureMessageWithFreshObservation(normalized.code),
+              needsInspect: false,
+              tabId: recoveryTabId,
+              url: null,
+              data: { verification: fresh },
+              observation: null,
+            };
+      this.#recordRecoveryOutcome(call.operation, recoveryTabId, recovered);
+      return result(call.operation, recovered);
     }
   }
 
@@ -1301,7 +1515,10 @@ export class BrowserToolExecutor implements BrowserExecutionPort {
   ): Promise<ScrollSegmentAggregate> {
     const actions = this.#dependencies.actions;
     if (!actions) throw new Error('Browser actions are unavailable.');
-    const requested = call.arguments as { readonly deltaX: number; readonly deltaY: number };
+    const requested = call.arguments as {
+      readonly deltaX: number;
+      readonly deltaY: number;
+    };
     const observations: Readonly<Record<string, unknown>>[] = [initialVerification];
     let action = initialAction;
     let segmentData = initialAction.data;
@@ -1391,6 +1608,228 @@ export class BrowserToolExecutor implements BrowserExecutionPort {
     };
   }
 
+  async #executeScrollUntil(
+    call: ParsedBrowserToolCall,
+    tabId_: number,
+    signal: AbortSignal,
+    runnerId: string | undefined,
+  ): Promise<unknown> {
+    const actions = this.#dependencies.actions;
+    if (!actions) throw new Error('Browser actions are unavailable.');
+    const input = call.arguments as {
+      readonly target: string;
+      readonly deltaX: number;
+      readonly deltaY: number;
+      readonly maxSegments: number;
+      readonly stopText: string;
+    };
+    const marker = normalizedVisibleText(input.stopText);
+    const observations: Readonly<Record<string, unknown>>[] = [];
+    let nextDeltaX = input.deltaX;
+    let nextDeltaY = input.deltaY;
+    let latestAction: BrowserActionResult | null = null;
+    let latestSnapshot: string | null = null;
+    let stopReason: ScrollUntilStopReason | null = null;
+    let continuationFailure: BrowserToolFailure | undefined;
+    let segments = 0;
+    let actualDeltaX = 0;
+    let actualDeltaY = 0;
+    let moved = false;
+    let contentChanged = false;
+    let extentChanged = false;
+    let loadedMore = false;
+    let boundaryVerified = false;
+    let verificationUnavailable = false;
+    let latestPosition: unknown;
+    let growthSegments = 0;
+    const contentKeys = new Set<string>();
+
+    while (segments < input.maxSegments) {
+      throwIfAborted(signal);
+      let action: BrowserActionResult;
+      try {
+        action = await actions.execute(
+          bindScrollDelta(call, tabId_, nextDeltaX, nextDeltaY),
+          signal,
+        );
+      } catch (error) {
+        if (signal.aborted || (error instanceof Error && error.name === 'AbortError')) throw error;
+        const normalized = failureFor(error);
+        if (segments === 0) return normalized;
+        stopReason = 'action_failure';
+        continuationFailure = normalized;
+        break;
+      }
+      if (action.failure !== undefined) {
+        const normalized = failureFor(action.failure);
+        if (segments === 0) {
+          return {
+            ...normalized,
+            tabId: action.tabId,
+            url: action.url,
+            data: action.data,
+            observation: action.observation,
+          };
+        }
+        stopReason = 'action_failure';
+        continuationFailure = normalized;
+        break;
+      }
+
+      latestAction = action;
+      const data = action.data;
+      segments += 1;
+      actualDeltaX += finiteNumber(data.actualDeltaX) ?? 0;
+      actualDeltaY += finiteNumber(data.actualDeltaY) ?? 0;
+      moved ||= data.moved === true;
+      contentChanged ||= data.contentChanged === true;
+      extentChanged ||= data.extentChanged === true;
+      loadedMore ||= data.loadedMore === true;
+      if (data.loadedMore === true || data.extentChanged === true) growthSegments += 1;
+      boundaryVerified = data.boundaryVerified === true;
+      if (data.position !== undefined) latestPosition = data.position;
+
+      const remainingDeltaX = continuationDelta(data.remainingDeltaX);
+      const remainingDeltaY = continuationDelta(data.remainingDeltaY);
+      if (
+        data.requestedDeltaApplied === false &&
+        remainingDeltaX !== null &&
+        remainingDeltaY !== null &&
+        (remainingDeltaX !== 0 || remainingDeltaY !== 0)
+      ) {
+        nextDeltaX = remainingDeltaX;
+        nextDeltaY = remainingDeltaY;
+      } else {
+        nextDeltaX = input.deltaX;
+        nextDeltaY = input.deltaY;
+      }
+
+      const baseSnapshot = this.#interactiveSnapshotByTab.get(tabId_);
+      if (baseSnapshot === undefined) {
+        verificationUnavailable = true;
+        stopReason = 'observation_unavailable';
+        break;
+      }
+      const observed = await this.#observeAfterAction(tabId_, baseSnapshot, signal, runnerId);
+      if (observed === null) {
+        verificationUnavailable = true;
+        stopReason = 'observation_unavailable';
+        break;
+      }
+      observations.push(observed);
+      latestSnapshot = interactiveSnapshotId(observed);
+      if (latestSnapshot === null) {
+        verificationUnavailable = true;
+        stopReason = 'observation_unavailable';
+        break;
+      }
+      if (interactiveObservationContainsText(observed, marker)) {
+        stopReason = 'text_seen';
+        break;
+      }
+      if (boundaryVerified) {
+        stopReason = 'boundary_verified';
+        break;
+      }
+      const contentKey = semanticObservationContentKey(observed);
+      if (contentKey !== null) {
+        if (contentKeys.has(contentKey) && contentKeys.size >= 2) {
+          stopReason = 'cycle_detected';
+          break;
+        }
+        contentKeys.add(contentKey);
+      }
+      const segmentProgressed =
+        data.moved === true ||
+        data.contentChanged === true ||
+        data.extentChanged === true ||
+        data.loadedMore === true ||
+        (finiteNumber(data.actualDeltaX) ?? 0) !== 0 ||
+        (finiteNumber(data.actualDeltaY) ?? 0) !== 0;
+      if (!segmentProgressed) {
+        stopReason = 'no_progress';
+        break;
+      }
+      if (
+        JSON.stringify(observations).length >
+        MAX_SCROLL_UNTIL_OBSERVATION_CHARACTERS - RESERVED_SCROLL_UNTIL_OBSERVATION_CHARACTERS
+      ) {
+        stopReason = 'evidence_budget';
+        break;
+      }
+      if (segments >= input.maxSegments) {
+        stopReason = 'segment_limit';
+        break;
+      }
+    }
+
+    stopReason ??= 'segment_limit';
+    const openEndedSample =
+      marker.length === 0 &&
+      (stopReason === 'segment_limit' || stopReason === 'evidence_budget') &&
+      segments >= 4 &&
+      growthSegments >= 3 &&
+      growthSegments * 5 >= segments * 3;
+    if (openEndedSample) stopReason = 'sample_limit';
+    const continuationRequired = ![
+      'text_seen',
+      'boundary_verified',
+      'cycle_detected',
+      'sample_limit',
+    ].includes(stopReason);
+    const coverageMode =
+      stopReason === 'boundary_verified'
+        ? 'finite'
+        : stopReason === 'cycle_detected'
+          ? 'cyclic'
+          : stopReason === 'sample_limit'
+            ? 'open_ended'
+            : 'unknown';
+    const evidenceCharacters = JSON.stringify(observations).length;
+    return {
+      ok: true,
+      tabId: latestAction?.tabId ?? tabId_,
+      url: latestAction?.url ?? null,
+      data: {
+        action: 'scroll_until',
+        target: input.target,
+        deltaX: input.deltaX,
+        deltaY: input.deltaY,
+        maxSegments: input.maxSegments,
+        stopText: input.stopText,
+        segments,
+        actualDeltaX,
+        actualDeltaY,
+        moved,
+        contentChanged,
+        extentChanged,
+        loadedMore,
+        boundaryVerified,
+        matched: stopReason === 'text_seen',
+        stopReason,
+        continuationRequired,
+        coverage: {
+          mode: coverageMode,
+          directionComplete: stopReason === 'boundary_verified',
+          sampleComplete: stopReason === 'cycle_detected' || stopReason === 'sample_limit',
+          uniqueBatches: contentKeys.size,
+          growthSegments,
+        },
+        evidenceCharacters,
+        observations,
+        ...(latestSnapshot === null ? {} : { latestSnapshot }),
+        ...(latestPosition === undefined ? {} : { position: latestPosition }),
+        ...(continuationRequired &&
+        (stopReason === 'evidence_budget' || stopReason === 'segment_limit')
+          ? { nextDeltaX, nextDeltaY }
+          : {}),
+        ...(verificationUnavailable ? { verificationUnavailable: true } : {}),
+        ...(continuationFailure === undefined ? {} : { continuationFailure }),
+      },
+      observation: latestAction?.observation ?? null,
+    };
+  }
+
   async #observeAfterAction(
     tabId_: number,
     baseSnapshot: string,
@@ -1419,6 +1858,18 @@ export class BrowserToolExecutor implements BrowserExecutionPort {
       // The mutation already completed. Surface observation loss without replaying it.
       return null;
     }
+  }
+
+  async #observeFailureState(
+    failed: BrowserToolFailure,
+    tabId_: number,
+    signal: AbortSignal,
+    runnerId: string | undefined,
+  ): Promise<Readonly<Record<string, unknown>> | null> {
+    if (!failed.needsInspect || !FRESH_OBSERVATION_FAILURES.has(failed.code)) return null;
+    const baseSnapshot = this.#interactiveSnapshotByTab.get(tabId_);
+    if (baseSnapshot === undefined) return null;
+    return this.#observeAfterAction(tabId_, baseSnapshot, signal, runnerId);
   }
 
   async #retainRunner(tabId_: number, runnerId: string | undefined): Promise<void> {

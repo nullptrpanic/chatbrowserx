@@ -21,6 +21,7 @@ const reviewedToolKeys: Readonly<Record<string, MessageKey>> = {
   browser_type: 'browserToolType',
   browser_keypress: 'browserToolKeypress',
   browser_scroll: 'browserToolScroll',
+  browser_scroll_until: 'browserToolScrollUntil',
   browser_hover: 'browserToolHover',
   browser_select: 'browserToolSelect',
   browser_drag: 'browserToolDrag',

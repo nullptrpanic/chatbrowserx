@@ -99,6 +99,7 @@ export const en = {
   browserToolType: 'Enter text',
   browserToolKeypress: 'Send keys',
   browserToolScroll: 'Scroll page',
+  browserToolScrollUntil: 'Scroll until condition',
   browserToolHover: 'Hover element',
   browserToolSelect: 'Select option',
   browserToolDrag: 'Drag element',

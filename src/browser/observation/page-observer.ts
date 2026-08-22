@@ -10,6 +10,7 @@ import {
   buildSemanticPageSnapshot,
   type SemanticAction,
   type SemanticPageEntry,
+  type SemanticScrollMetrics,
 } from './semantic-page-snapshot';
 
 const INTERACTIVE_BUDGET = {
@@ -75,6 +76,18 @@ interface InteractiveSnapshot {
   readonly documentEpoch: string;
   readonly elements: readonly CompactSemanticPageEntry[];
   readonly identities: readonly string[] | null;
+  readonly coverage?: InteractiveCoverage;
+}
+
+interface InteractiveCoverage {
+  readonly scope: 'viewport';
+  readonly complete: false;
+  readonly moreBefore: boolean | 'unknown';
+  readonly moreAfter: boolean | 'unknown';
+  readonly targets: readonly string[];
+  readonly primaryTarget?: string;
+  readonly recommendedAction: 'browser_scroll_until';
+  readonly contentKey: string;
 }
 
 function compactSemanticEntry(entry: SemanticPageEntry, ref?: string): CompactSemanticPageEntry {
@@ -219,6 +232,230 @@ interface BuildViewport {
   readonly y: number;
   readonly width: number;
   readonly height: number;
+}
+
+interface DocumentViewportCoverage {
+  readonly moreBefore: boolean;
+  readonly moreAfter: boolean;
+  readonly scrollMetrics: SemanticScrollMetrics;
+}
+
+function documentViewportCoverage(
+  metrics: Partial<Protocol.Page.GetLayoutMetricsResponse>,
+): DocumentViewportCoverage | undefined {
+  const viewport = metrics.visualViewport ?? metrics.layoutViewport;
+  const content = metrics.contentSize;
+  if (!viewport || !content) return undefined;
+  const values = [
+    viewport.pageX,
+    viewport.pageY,
+    viewport.clientWidth,
+    viewport.clientHeight,
+    content.width,
+    content.height,
+  ];
+  if (values.some((value) => typeof value !== 'number' || !Number.isFinite(value))) {
+    return undefined;
+  }
+  const maxX = Math.max(0, content.width - viewport.clientWidth);
+  const maxY = Math.max(0, content.height - viewport.clientHeight);
+  const moreBefore = viewport.pageX > 1 || viewport.pageY > 1;
+  const moreAfter = viewport.pageX < maxX - 1 || viewport.pageY < maxY - 1;
+  return moreBefore || moreAfter
+    ? {
+        moreBefore,
+        moreAfter,
+        scrollMetrics: {
+          bounds: [viewport.pageX, viewport.pageY, viewport.clientWidth, viewport.clientHeight],
+          clientWidth: Math.max(0, viewport.clientWidth),
+          clientHeight: Math.max(0, viewport.clientHeight),
+          scrollWidth: Math.max(0, content.width),
+          scrollHeight: Math.max(0, content.height),
+        },
+      }
+    : undefined;
+}
+
+interface InteractiveScrollTarget {
+  readonly ref: string;
+  readonly name: string;
+  readonly depth: number;
+  readonly metrics?: SemanticScrollMetrics;
+}
+
+interface RankedScrollTarget extends InteractiveScrollTarget {
+  readonly order: number;
+  readonly span: number;
+  readonly clientExtent: number;
+  readonly score: number;
+}
+
+function scrollSpan(metrics: SemanticScrollMetrics | undefined): number {
+  if (metrics === undefined) return 0;
+  return Math.max(
+    Math.max(0, metrics.scrollHeight - metrics.clientHeight),
+    Math.max(0, metrics.scrollWidth - metrics.clientWidth),
+  );
+}
+
+function nearIdenticalScrollGeometry(
+  left: SemanticScrollMetrics | undefined,
+  right: SemanticScrollMetrics | undefined,
+): boolean {
+  if (left?.bounds === undefined || right?.bounds === undefined) return false;
+  const [leftX, leftY, leftWidth, leftHeight] = left.bounds;
+  const [rightX, rightY, rightWidth, rightHeight] = right.bounds;
+  const leftArea = Math.max(0, leftWidth) * Math.max(0, leftHeight);
+  const rightArea = Math.max(0, rightWidth) * Math.max(0, rightHeight);
+  const sharedWidth = Math.max(
+    0,
+    Math.min(leftX + leftWidth, rightX + rightWidth) - Math.max(leftX, rightX),
+  );
+  const sharedHeight = Math.max(
+    0,
+    Math.min(leftY + leftHeight, rightY + rightHeight) - Math.max(leftY, rightY),
+  );
+  const smallerArea = Math.min(leftArea, rightArea);
+  if (smallerArea <= 0 || (sharedWidth * sharedHeight) / smallerArea < 0.92) return false;
+  const leftSpan = scrollSpan(left);
+  const rightSpan = scrollSpan(right);
+  return (
+    Math.min(leftSpan, rightSpan) >= 64 &&
+    Math.min(leftSpan, rightSpan) / Math.max(leftSpan, rightSpan) >= 0.8
+  );
+}
+
+function relatedScrollNames(left: string, right: string): boolean {
+  const normalizedLeft = left.normalize('NFKC').replace(/\s+/gu, ' ').trim().toLocaleLowerCase();
+  const normalizedRight = right.normalize('NFKC').replace(/\s+/gu, ' ').trim().toLocaleLowerCase();
+  if (normalizedLeft === normalizedRight) return normalizedLeft.length > 0;
+  const shorter =
+    normalizedLeft.length <= normalizedRight.length ? normalizedLeft : normalizedRight;
+  const longer = shorter === normalizedLeft ? normalizedRight : normalizedLeft;
+  return shorter.length >= 8 && longer.includes(shorter);
+}
+
+/** Drops only a shallower duplicate of the same nested scroll surface. */
+function canonicalScrollTargets(
+  targets: readonly InteractiveScrollTarget[],
+): readonly InteractiveScrollTarget[] {
+  return targets.filter(
+    (candidate) =>
+      !targets.some(
+        (other) =>
+          other.ref !== candidate.ref &&
+          other.depth > candidate.depth &&
+          relatedScrollNames(candidate.name, other.name) &&
+          nearIdenticalScrollGeometry(candidate.metrics, other.metrics),
+      ),
+  );
+}
+
+function rankedScrollTargets(
+  targets: readonly InteractiveScrollTarget[],
+): readonly RankedScrollTarget[] {
+  return targets
+    .map((target, order): RankedScrollTarget => {
+      const verticalSpan = Math.max(
+        0,
+        (target.metrics?.scrollHeight ?? 0) - (target.metrics?.clientHeight ?? 0),
+      );
+      const horizontalSpan = Math.max(
+        0,
+        (target.metrics?.scrollWidth ?? 0) - (target.metrics?.clientWidth ?? 0),
+      );
+      const vertical = verticalSpan >= horizontalSpan;
+      const span = vertical ? verticalSpan : horizontalSpan;
+      const clientExtent = vertical
+        ? (target.metrics?.clientHeight ?? 0)
+        : (target.metrics?.clientWidth ?? 0);
+      const crossExtent = vertical
+        ? (target.metrics?.clientWidth ?? 0)
+        : (target.metrics?.clientHeight ?? 0);
+      return {
+        ...target,
+        order,
+        span,
+        clientExtent,
+        score: span * Math.max(1, crossExtent),
+      };
+    })
+    .toSorted((left, right) => right.score - left.score || left.order - right.order);
+}
+
+function primaryScrollTarget(targets: readonly RankedScrollTarget[]): string | undefined {
+  const first = targets[0];
+  if (!first) return undefined;
+  if (targets.length === 1) return first.ref;
+  const second = targets[1];
+  if (
+    first.span < Math.max(64, first.clientExtent / 2) ||
+    first.score <= 0 ||
+    second === undefined ||
+    first.score < second.score * 2.5
+  ) {
+    return undefined;
+  }
+  return first.ref;
+}
+
+function semanticContentKey(elements: readonly CompactSemanticPageEntry[]): string {
+  const value = JSON.stringify(
+    elements.map((entry) => [entry.r ?? 'generic', entry.n, entry.s ?? [], entry.f ?? 'main']),
+  );
+  let hash = 0x811c9dc5;
+  for (let index = 0; index < value.length; index += 1) {
+    hash ^= value.charCodeAt(index);
+    hash = Math.imul(hash, 0x01000193);
+  }
+  return (hash >>> 0).toString(16).padStart(8, '0');
+}
+
+function interactiveCoverage(
+  elements: readonly CompactSemanticPageEntry[],
+  documentCoverage: DocumentViewportCoverage | undefined,
+  elementMetrics: ReadonlyMap<string, SemanticScrollMetrics>,
+): InteractiveCoverage | undefined {
+  const candidates: InteractiveScrollTarget[] = [];
+  const seen = new Set<string>();
+  const include = (
+    ref: string,
+    metrics: SemanticScrollMetrics | undefined,
+    name: string,
+    depth: number,
+  ): void => {
+    if (seen.has(ref)) return;
+    seen.add(ref);
+    candidates.push({ ref, name, depth, ...(metrics === undefined ? {} : { metrics }) });
+  };
+  if (documentCoverage !== undefined) {
+    candidates.push({
+      ref: 'viewport',
+      name: 'Document viewport',
+      depth: -1,
+      metrics: documentCoverage.scrollMetrics,
+    });
+    seen.add('viewport');
+  }
+  for (const entry of elements) {
+    if (entry.ref && entry.a?.includes('scroll')) {
+      include(entry.ref, elementMetrics.get(entry.ref), entry.n, entry.d);
+    }
+  }
+  const ranked = rankedScrollTargets(canonicalScrollTargets(candidates));
+  if (ranked.length === 0) return undefined;
+  const targets = ranked.map(({ ref }) => ref);
+  const primaryTarget = primaryScrollTarget(ranked);
+  return {
+    scope: 'viewport',
+    complete: false,
+    moreBefore: documentCoverage?.moreBefore ?? 'unknown',
+    moreAfter: documentCoverage?.moreAfter ?? 'unknown',
+    targets,
+    ...(primaryTarget === undefined ? {} : { primaryTarget }),
+    recommendedAction: 'browser_scroll_until',
+    contentKey: semanticContentKey(elements),
+  };
 }
 
 function throwIfAborted(signal: AbortSignal): void {
@@ -378,9 +615,11 @@ export class PageObserver {
   ): Promise<PageObservationResult> {
     const browserSession = await this.#dependencies.sessions.ensure(tabId, signal);
     throwIfAborted(signal);
-    const targets: ObservedElementTarget[] = [];
+    const targets: (ObservedElementTarget & { readonly scrollMetrics?: SemanticScrollMetrics })[] =
+      [];
     const entries: SemanticPageEntry[] = [];
     const documentEpochParts: string[] = [];
+    let mainDocumentCoverage: DocumentViewportCoverage | undefined;
     let hasVisualSurface = false;
     const sessionTargets: readonly {
       session: DebuggerSession;
@@ -408,6 +647,7 @@ export class PageObserver {
           {
             computedStyles: [...SEMANTIC_SNAPSHOT_STYLES],
             includeDOMRects: true,
+            includePaintOrder: true,
           },
         ),
         this.#dependencies.transport.send<Protocol.Page.GetFrameTreeResponse>(
@@ -429,6 +669,9 @@ export class PageObserver {
         ]),
       );
       const viewport = viewportFromLayoutMetrics(metrics);
+      if (sessionTarget.frame === 'main') {
+        mainDocumentCoverage = documentViewportCoverage(metrics);
+      }
       const semantic = buildSemanticPageSnapshot({
         axNodes: tree.nodes,
         domSnapshot,
@@ -455,6 +698,7 @@ export class PageObserver {
           state: target.state,
           actions: target.actions,
           frame: sessionTarget.frame,
+          ...(target.scrollMetrics === undefined ? {} : { scrollMetrics: target.scrollMetrics }),
         });
       });
       entries.push(
@@ -525,6 +769,16 @@ export class PageObserver {
         entry.targetIndex === undefined ? undefined : refByTargetIndex.get(entry.targetIndex);
       return compactSemanticEntry(entry, ref || undefined);
     });
+    const visibleElements = elements.filter(
+      (_entry, index) => boundedEntries[index]?.inViewport !== false,
+    );
+    const scrollMetricsByRef = new Map<string, SemanticScrollMetrics>();
+    selectedTargetIndexes.forEach((targetIndex, index) => {
+      const ref = refs[index];
+      const metrics = targets[targetIndex]?.scrollMetrics;
+      if (ref && metrics) scrollMetricsByRef.set(ref, metrics);
+    });
+    const coverage = interactiveCoverage(visibleElements, mainDocumentCoverage, scrollMetricsByRef);
     const metadata = await this.#pageMetadata(browserSession.root);
     const snapshotId = createInteractiveSnapshotId();
     const truncated = boundedEntries.length < originalCount;
@@ -537,6 +791,7 @@ export class PageObserver {
         elements,
         boundedEntries.map((entry) => entry.identity),
       ),
+      ...(coverage === undefined ? {} : { coverage }),
     };
     const visualFallbackAllowed = deep || selectedTargets.length === 0 || hasVisualSurface;
     this.#rememberInteractiveSnapshot(tabId, current);
@@ -550,6 +805,7 @@ export class PageObserver {
           snapshot: snapshotId,
           base: previous.id,
           ...delta,
+          ...(coverage === undefined ? {} : { coverage }),
         };
         const fullData = {
           mode: 'interactive',
@@ -557,6 +813,7 @@ export class PageObserver {
           keys: INTERACTIVE_ENTRY_KEYS,
           elements,
           ...(truncated ? { truncated: true } : {}),
+          ...(coverage === undefined ? {} : { coverage }),
         };
         if (
           delta.unchanged === true ||
@@ -582,6 +839,7 @@ export class PageObserver {
         keys: INTERACTIVE_ENTRY_KEYS,
         elements,
         ...(truncated ? { truncated: true } : {}),
+        ...(coverage === undefined ? {} : { coverage }),
       },
       observation: null,
       attachmentIds: [],

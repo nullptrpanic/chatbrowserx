@@ -360,6 +360,7 @@ const browserSemanticMutationToolNames = new Set([
   'browser_type',
   'browser_keypress',
   'browser_scroll',
+  'browser_scroll_until',
   'browser_select',
   'browser_drag',
   'browser_click_point',
@@ -485,7 +486,10 @@ function outputImmobileScroll(
 ): Readonly<{ position?: unknown }> | null {
   if (record.ok !== true) return null;
   const data = childRecord(record, 'data');
-  if (data?.action !== 'scroll' || data.moved !== false) return null;
+  const immobile =
+    (data?.action === 'scroll' && data.moved === false) ||
+    (data?.action === 'scroll_until' && data.stopReason === 'no_progress');
+  if (!immobile) return null;
   return data.position === undefined ? {} : { position: data.position };
 }
 
@@ -557,7 +561,10 @@ function recentBrowserProgress(items: readonly ContinuationItem[]): BrowserProgr
       continue;
     }
 
-    const immobile = call.name === 'browser_scroll' ? outputImmobileScroll(output) : null;
+    const immobile =
+      call.name === 'browser_scroll' || call.name === 'browser_scroll_until'
+        ? outputImmobileScroll(output)
+        : null;
     if (browserSemanticMutationToolNames.has(call.name) && immobile === null) {
       mutationVersion += 1;
       verifiedSelection = undefined;
@@ -639,7 +646,7 @@ function immobileScrollOutput(
 ): string | null {
   const evidence = progress.immobileScroll;
   if (
-    pending.name !== 'browser_scroll' ||
+    (pending.name !== 'browser_scroll' && pending.name !== 'browser_scroll_until') ||
     evidence === undefined ||
     evidence.callFingerprint !== browserCallFingerprint(pending.name, pending.argumentsJson) ||
     evidence.pageEpoch !== progress.pageEpoch ||

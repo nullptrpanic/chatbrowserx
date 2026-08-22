@@ -49,7 +49,7 @@ const SCROLL_ELEMENT_FUNCTION = `function(deltaX, deltaY) {
   if (!window_?.Element || !(element instanceof window_.Element)) return { found: false };
   const scrollable = (candidate) => {
     const style = window_.getComputedStyle(candidate);
-    const overflow = (value) => value === 'auto' || value === 'scroll' || value === 'overlay';
+    const overflow = (value) => value === 'auto' || value === 'scroll' || value === 'overlay' || value === 'hidden';
     return (
       (overflow(style.overflowX) && candidate.scrollWidth > candidate.clientWidth + 1) ||
       (overflow(style.overflowY) && candidate.scrollHeight > candidate.clientHeight + 1)
@@ -101,7 +101,7 @@ const READ_SCROLL_STATE_FUNCTION = `function() {
   if (!window_?.Element || !(element instanceof window_.Element)) return { found: false };
   const scrollable = (candidate) => {
     const style = window_.getComputedStyle(candidate);
-    const overflow = (value) => value === 'auto' || value === 'scroll' || value === 'overlay';
+    const overflow = (value) => value === 'auto' || value === 'scroll' || value === 'overlay' || value === 'hidden';
     return (
       (overflow(style.overflowX) && candidate.scrollWidth > candidate.clientWidth + 1) ||
       (overflow(style.overflowY) && candidate.scrollHeight > candidate.clientHeight + 1)
@@ -991,6 +991,16 @@ export interface BrowserActionExecutorDependencies {
 interface Point {
   readonly x: number;
   readonly y: number;
+}
+
+interface ViewportState {
+  readonly width: number;
+  readonly height: number;
+  readonly pageX: number;
+  readonly pageY: number;
+  readonly maxX: number;
+  readonly maxY: number;
+  readonly extentKnown: boolean;
 }
 
 function throwIfAborted(signal: AbortSignal): void {
@@ -1898,9 +1908,12 @@ export class BrowserActionExecutor implements BrowserActionPort {
         }
         const scrollSession = prepared?.session ?? snapshot.root;
         const before =
-          scrollSession === snapshot.root
-            ? { x: viewport.pageX, y: viewport.pageY }
-            : await this.#scrollPosition(scrollSession);
+          scrollSession === snapshot.root ? viewport : await this.#viewport(scrollSession);
+        const beforeBoundary = this.#atRequestedViewportBoundary(
+          before,
+          value.deltaX,
+          value.deltaY,
+        );
         await this.#showPointer(tabId, point, point, 'move');
         await this.#dependencies.transport.send(scrollSession, 'Input.dispatchMouseEvent', {
           type: 'mouseWheel',
@@ -1909,17 +1922,50 @@ export class BrowserActionExecutor implements BrowserActionPort {
           deltaX: value.deltaX,
           deltaY: value.deltaY,
         });
-        const after = await this.#waitForScrollPosition(scrollSession, before, signal);
-        const actualDeltaX = after.x - before.x;
-        const actualDeltaY = after.y - before.y;
+        const after = await this.#waitForViewportChange(
+          scrollSession,
+          before,
+          beforeBoundary,
+          signal,
+        );
+        const actualDeltaX = after.pageX - before.pageX;
+        const actualDeltaY = after.pageY - before.pageY;
+        const remainingDeltaX = this.#consumeRequestedScrollDelta(value.deltaX, actualDeltaX);
+        const remainingDeltaY = this.#consumeRequestedScrollDelta(value.deltaY, actualDeltaY);
+        const requestedDeltaApplied = remainingDeltaX === 0 && remainingDeltaY === 0;
+        const extentChanged =
+          before.extentKnown &&
+          after.extentKnown &&
+          (before.maxX !== after.maxX || before.maxY !== after.maxY);
+        const afterBoundary = this.#atRequestedViewportBoundary(after, value.deltaX, value.deltaY);
+        const progressed = actualDeltaX !== 0 || actualDeltaY !== 0 || extentChanged;
+        const loadedMore = beforeBoundary && (extentChanged || !afterBoundary);
+        const boundaryVerified = beforeBoundary && !progressed && !loadedMore;
+        const needsBoundaryProbe = afterBoundary && progressed && !loadedMore;
         data = {
           action: 'scroll',
           dispatched: true,
+          strategy: 'viewport_wheel',
           deltaX: value.deltaX,
           deltaY: value.deltaY,
-          moved: actualDeltaX !== 0 || actualDeltaY !== 0,
+          moved: progressed,
           actualDeltaX,
           actualDeltaY,
+          remainingDeltaX,
+          remainingDeltaY,
+          requestedDeltaApplied,
+          segments: 1,
+          contentChanged: false,
+          extentChanged,
+          loadedMore,
+          boundaryVerified,
+          needsBoundaryProbe,
+          position: {
+            x: after.pageX,
+            y: after.pageY,
+            maxX: after.maxX,
+            maxY: after.maxY,
+          },
         };
         break;
       }
@@ -3334,41 +3380,66 @@ export class BrowserActionExecutor implements BrowserActionPort {
     });
   }
 
-  async #viewport(
-    session: DebuggerSession,
-  ): Promise<{ width: number; height: number; pageX: number; pageY: number }> {
+  async #viewport(session: DebuggerSession): Promise<ViewportState> {
     const metrics = await this.#dependencies.transport.send<Protocol.Page.GetLayoutMetricsResponse>(
       session,
       'Page.getLayoutMetrics',
     );
+    const viewport = metrics.visualViewport ?? metrics.layoutViewport;
+    const content = metrics.contentSize;
+    const extentKnown =
+      content !== undefined &&
+      [content.width, content.height].every(
+        (value) => typeof value === 'number' && Number.isFinite(value),
+      );
+    const contentWidth = extentKnown ? Math.max(viewport.clientWidth, content.width) : undefined;
+    const contentHeight = extentKnown ? Math.max(viewport.clientHeight, content.height) : undefined;
     return {
-      width: metrics.visualViewport.clientWidth,
-      height: metrics.visualViewport.clientHeight,
-      pageX: metrics.visualViewport.pageX,
-      pageY: metrics.visualViewport.pageY,
+      width: viewport.clientWidth,
+      height: viewport.clientHeight,
+      pageX: viewport.pageX,
+      pageY: viewport.pageY,
+      maxX:
+        contentWidth === undefined
+          ? viewport.pageX
+          : Math.max(0, contentWidth - viewport.clientWidth),
+      maxY:
+        contentHeight === undefined
+          ? viewport.pageY
+          : Math.max(0, contentHeight - viewport.clientHeight),
+      extentKnown,
     };
   }
 
-  async #scrollPosition(session: DebuggerSession): Promise<Point> {
-    const viewport = await this.#viewport(session);
-    return { x: viewport.pageX, y: viewport.pageY };
-  }
-
-  async #waitForScrollPosition(
+  async #waitForViewportChange(
     session: DebuggerSession,
-    before: Point,
+    before: ViewportState,
+    settleAtBoundary: boolean,
     signal: AbortSignal,
-  ): Promise<Point> {
-    let current = await this.#scrollPosition(session);
-    for (
-      let attempt = 0;
-      attempt < 4 && current.x === before.x && current.y === before.y;
-      attempt += 1
+  ): Promise<ViewportState> {
+    let current = await this.#viewport(session);
+    const deadline = Date.now() + (settleAtBoundary ? SCROLL_SETTLE_TIMEOUT_MS : 100);
+    while (
+      current.pageX === before.pageX &&
+      current.pageY === before.pageY &&
+      current.maxX === before.maxX &&
+      current.maxY === before.maxY &&
+      Date.now() < deadline
     ) {
-      await this.#delay(25, signal);
-      current = await this.#scrollPosition(session);
+      await this.#delay(Math.min(SCROLL_POLL_INTERVAL_MS, deadline - Date.now()), signal);
+      current = await this.#viewport(session);
     }
     return current;
+  }
+
+  #atRequestedViewportBoundary(state: ViewportState, deltaX: number, deltaY: number): boolean {
+    return (
+      state.extentKnown &&
+      ((deltaX < 0 && state.pageX <= 0) ||
+        (deltaX > 0 && state.pageX >= state.maxX) ||
+        (deltaY < 0 && state.pageY <= 0) ||
+        (deltaY > 0 && state.pageY >= state.maxY))
+    );
   }
 
   async #validatePoint(session: DebuggerSession, point: Point): Promise<void> {
