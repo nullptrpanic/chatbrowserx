@@ -13,6 +13,15 @@ const systemPingSchema = z
   })
   .strict();
 
+const panelGetStateVersionSchema = z
+  .object({
+    version: z.literal(PROTOCOL_VERSION),
+    requestId: requestIdSchema,
+    type: z.literal('panel.getStateVersion'),
+    payload: z.object({}).strict(),
+  })
+  .strict();
+
 const panelGetSnapshotSchema = z
   .object({
     version: z.literal(PROTOCOL_VERSION),
@@ -215,6 +224,7 @@ const pageFeaturesEnsureSchema = z
 
 export const extensionMessageSchema: z.ZodType<ExtensionMessage> = z.discriminatedUnion('type', [
   systemPingSchema,
+  panelGetStateVersionSchema,
   panelGetSnapshotSchema,
   panelGetTaskDetailsSchema,
   chatSubmitSchema,

@@ -19,10 +19,8 @@ const MESSAGE: MessageRecord = {
 /** Creates a repository spy that records durable message snapshots. */
 function repository(): ConversationRepository {
   return {
-    create: vi.fn(async () => undefined),
     get: vi.fn(async () => undefined),
     listAll: vi.fn(async () => []),
-    listByTab: vi.fn(async () => []),
     listMessages: vi.fn(async () => []),
     appendMessage: vi.fn(async () => undefined),
     appendSupplement: vi.fn(async () => undefined),

@@ -39,6 +39,7 @@ import { RecoveryScanner } from '../tasks/recovery-scanner';
 import { TaskCommandService } from '../tasks/task-command-service';
 import { TaskCoordinator } from '../tasks/task-coordinator';
 import { PanelService } from '../tasks/panel-service';
+import { PanelChangeNotifier } from '../tasks/panel-change-notifier';
 import { ScreenshotController } from '../tasks/screenshot-controller';
 
 interface BackgroundServices {
@@ -66,8 +67,15 @@ async function createBackgroundServices(
   credentials: ChromeCredentialStore,
 ): Promise<BackgroundServices> {
   const database = await openChatBrowserDatabase();
-  const repository = new IndexedDbTaskRepository(database);
-  const conversations = new IndexedDbConversationRepository(database);
+  const panelChanges = new PanelChangeNotifier({
+    clock: systemClock,
+    publish: async (notification) => {
+      await chrome.runtime.sendMessage(notification).catch(() => undefined);
+    },
+  });
+  const repository = new IndexedDbTaskRepository(database, () => panelChanges.changed());
+  await repository.pruneObsoleteCheckpoints();
+  const conversations = new IndexedDbConversationRepository(database, () => panelChanges.changed());
   const attachments = new IndexedDbAttachmentRepository(database);
   const attachmentService = new AttachmentService(attachments, {
     clock: systemClock,
@@ -196,6 +204,10 @@ async function createBackgroundServices(
     clock: systemClock,
     ids: cryptoIds,
     scheduleTask,
+    stateVersion: {
+      get: () => panelChanges.getVersion(),
+      changed: () => panelChanges.changed(),
+    },
     cancelTask: (taskId) => coordinator.cancel(taskId),
   });
   const recovery = new RecoveryScanner({
@@ -206,7 +218,6 @@ async function createBackgroundServices(
   const router = createMessageRouter({
     commands: {
       create: (input) => commands.create(input),
-      continueCancelled: (input) => commands.continueCancelled(input),
       getSnapshot: (taskId) => commands.getSnapshot(taskId),
       pause: (taskId) => coordinator.pause(taskId),
       resume: (taskId) => coordinator.resume(taskId),

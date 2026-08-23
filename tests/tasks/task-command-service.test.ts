@@ -7,7 +7,7 @@ import { openChatBrowserDatabase } from '../../src/persistence/open-database';
 import { IndexedDbTaskRepository } from '../../src/persistence/task-repository';
 import { TaskCommandService } from '../../src/tasks/task-command-service';
 import type { TaskError } from '../../src/tasks/task-errors';
-import { createTestDatabaseName } from '../persistence/test-helpers';
+import { createTestDatabaseName, seedConversation } from '../persistence/test-helpers';
 
 /**
  * Creates deterministic clock and ID sources whose values can advance between commands.
@@ -25,6 +25,41 @@ function createCommandSources() {
   };
 }
 
+/** Exercises the production continuation boundary while keeping test setup concise. */
+async function continueCancelled(
+  commands: TaskCommandService,
+  conversations: IndexedDbConversationRepository,
+  input: {
+    readonly sourceTaskId: string;
+    readonly tabId: number;
+    readonly goal: string;
+    readonly userMessageId: string;
+  },
+) {
+  const source = await commands.getSnapshot(input.sourceTaskId);
+  const conversation = await conversations.get(source.task.conversationId);
+  if (conversation === undefined) throw new Error('Continuation test conversation is missing.');
+  const at = source.task.updatedAt + 1;
+  return commands.continueCancelledSubmission({
+    sourceTaskId: input.sourceTaskId,
+    tabId: input.tabId,
+    goal: input.goal,
+    conversation,
+    message: {
+      id: input.userMessageId,
+      kind: 'conversation',
+      conversationId: conversation.id,
+      taskId: null,
+      role: 'user',
+      status: 'complete',
+      text: input.goal,
+      attachmentIds: [],
+      createdAt: at,
+      updatedAt: at,
+    },
+  });
+}
+
 describe('TaskCommandService', () => {
   it('clears only cancelled-task continuation state and prevents later WorkSession reuse', async () => {
     const database = await openChatBrowserDatabase(
@@ -33,7 +68,7 @@ describe('TaskCommandService', () => {
     const repository = new IndexedDbTaskRepository(database);
     const conversations = new IndexedDbConversationRepository(database);
     const sources = createCommandSources();
-    await conversations.create({
+    await seedConversation(database, {
       id: 'conv_clear',
       tabId: 7,
       title: 'Clear context',
@@ -62,7 +97,7 @@ describe('TaskCommandService', () => {
     });
     await expect(commands.clearContext(cancelled.task.id)).resolves.toEqual(cleared);
     await expect(
-      commands.continueCancelled({
+      continueCancelled(commands, conversations, {
         sourceTaskId: cancelled.task.id,
         tabId: 8,
         goal: 'Do not reuse cleared state',
@@ -130,7 +165,7 @@ describe('TaskCommandService', () => {
       code: 'TASK_ALREADY_RUNNING',
       message: '已有任务运行中',
     });
-    await expect(repository.listUnfinished()).resolves.toHaveLength(1);
+    await expect(repository.listAll()).resolves.toHaveLength(1);
     database.close();
   });
 
@@ -139,7 +174,7 @@ describe('TaskCommandService', () => {
     const repository = new IndexedDbTaskRepository(database);
     const conversations = new IndexedDbConversationRepository(database);
     const sources = createCommandSources();
-    await conversations.create({
+    await seedConversation(database, {
       id: 'conv_1',
       tabId: 7,
       title: 'Complete the page',
@@ -189,7 +224,7 @@ describe('TaskCommandService', () => {
     const repository = new IndexedDbTaskRepository(database);
     const conversations = new IndexedDbConversationRepository(database);
     const sources = createCommandSources();
-    await conversations.create({
+    await seedConversation(database, {
       id: 'conv_1',
       tabId: 7,
       title: 'Continue the task',
@@ -207,7 +242,7 @@ describe('TaskCommandService', () => {
     sources.advance(1_100);
     const firstCancelled = await commands.cancel(created.task.id);
     sources.advance(1_200);
-    const firstContinuation = await commands.continueCancelled({
+    const firstContinuation = await continueCancelled(commands, conversations, {
       sourceTaskId: firstCancelled.task.id,
       tabId: 8,
       goal: 'Continue with more detail',
@@ -225,7 +260,7 @@ describe('TaskCommandService', () => {
     sources.advance(1_300);
     const secondCancelled = await commands.cancel(firstContinuation.task.id);
     sources.advance(1_400);
-    const secondContinuation = await commands.continueCancelled({
+    const secondContinuation = await continueCancelled(commands, conversations, {
       sourceTaskId: secondCancelled.task.id,
       tabId: 9,
       goal: 'Continue again',
@@ -249,7 +284,7 @@ describe('TaskCommandService', () => {
     const repository = new IndexedDbTaskRepository(database);
     const conversations = new IndexedDbConversationRepository(database);
     const sources = createCommandSources();
-    await conversations.create({
+    await seedConversation(database, {
       id: 'conv_1',
       tabId: 7,
       title: 'Continue committed context',
@@ -333,7 +368,7 @@ describe('TaskCommandService', () => {
     sources.advance(1_200);
     const cancelled = await commands.cancel(created.task.id);
     sources.advance(1_300);
-    const continued = await commands.continueCancelled({
+    const continued = await continueCancelled(commands, conversations, {
       sourceTaskId: cancelled.task.id,
       tabId: 8,
       goal: 'Continue after commit',
@@ -374,7 +409,7 @@ describe('TaskCommandService', () => {
     const repository = new IndexedDbTaskRepository(database);
     const conversations = new IndexedDbConversationRepository(database);
     const sources = createCommandSources();
-    await conversations.create({
+    await seedConversation(database, {
       id: 'conv_1',
       tabId: 7,
       title: 'Continue with supplement',
@@ -404,7 +439,7 @@ describe('TaskCommandService', () => {
     sources.advance(1_100);
     const cancelled = await commands.cancel(created.task.id);
     sources.advance(1_200);
-    const continued = await commands.continueCancelled({
+    const continued = await continueCancelled(commands, conversations, {
       sourceTaskId: cancelled.task.id,
       tabId: 7,
       goal: 'Continue after cancellation',
@@ -426,7 +461,7 @@ describe('TaskCommandService', () => {
     const repository = new IndexedDbTaskRepository(database);
     const conversations = new IndexedDbConversationRepository(database);
     const sources = createCommandSources();
-    await conversations.create({
+    await seedConversation(database, {
       id: 'conv_1',
       tabId: 7,
       title: 'Continue pending tool',
@@ -532,7 +567,7 @@ describe('TaskCommandService', () => {
     sources.advance(1_300);
     const cancelled = await commands.cancel(created.task.id);
     sources.advance(1_400);
-    const continued = await commands.continueCancelled({
+    const continued = await continueCancelled(commands, conversations, {
       sourceTaskId: cancelled.task.id,
       tabId: 7,
       goal: 'Continue after the pending call',
@@ -562,7 +597,7 @@ describe('TaskCommandService', () => {
     const repository = new IndexedDbTaskRepository(database);
     const conversations = new IndexedDbConversationRepository(database);
     const sources = createCommandSources();
-    await conversations.create({
+    await seedConversation(database, {
       id: 'conv_1',
       tabId: 7,
       title: 'Partial reply',
@@ -594,20 +629,28 @@ describe('TaskCommandService', () => {
     await commands.cancel(created.task.id);
 
     sources.advance(1_200);
-    const continued = await commands.continueCancelled({
+    const continued = await continueCancelled(commands, conversations, {
       sourceTaskId: cancelled.task.id,
       tabId: 7,
       goal: 'Continue after partial output',
       userMessageId: 'message_2',
     });
 
-    await expect(conversations.listMessages('conv_1')).resolves.toEqual([
+    const messages = await conversations.listMessages('conv_1');
+    expect(messages.filter(({ role }) => role === 'assistant')).toEqual([
       expect.objectContaining({
         id: 'message_partial',
         status: 'interrupted',
         text: 'Partial output',
       }),
     ]);
+    expect(messages).toContainEqual(
+      expect.objectContaining({
+        id: 'message_2',
+        role: 'user',
+        text: 'Continue after partial output',
+      }),
+    );
     expect(continued.checkpoint.continuationItems).toEqual([
       { type: 'message_ref', messageId: 'message_1' },
       { type: 'message_ref', messageId: 'message_partial' },

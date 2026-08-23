@@ -118,10 +118,14 @@ function repositories(existingMessages: readonly MessageRecord[] = []): {
   readonly attachments: AttachmentRepository;
   readonly tasks: Pick<TaskRepository, 'listByConversation'>;
   readonly messages: MessageRecord[];
+  readonly listMessages: ReturnType<typeof vi.fn>;
+  readonly listTasks: ReturnType<typeof vi.fn>;
   readonly appendMessage: ReturnType<typeof vi.fn>;
   readonly updateMessage: ReturnType<typeof vi.fn>;
 } {
   const messages = [USER_MESSAGE, ...existingMessages];
+  const listMessages = vi.fn(async () => [...messages]);
+  const listTasks = vi.fn(async () => [TASK]);
   const appendMessage = vi.fn(async (message: MessageRecord) => {
     messages.push(message);
   });
@@ -132,14 +136,14 @@ function repositories(existingMessages: readonly MessageRecord[] = []): {
   });
   return {
     messages,
+    listMessages,
+    listTasks,
     appendMessage,
     updateMessage,
     conversations: {
-      create: vi.fn(async () => undefined),
       get: vi.fn(async () => undefined),
       listAll: vi.fn(async () => []),
-      listByTab: vi.fn(async () => []),
-      listMessages: vi.fn(async () => [...messages]),
+      listMessages,
       appendMessage,
       appendSupplement: vi.fn(async () => undefined),
       updateMessage,
@@ -153,7 +157,7 @@ function repositories(existingMessages: readonly MessageRecord[] = []): {
       deleteUnreferenced: vi.fn(async () => 0),
     },
     tasks: {
-      listByConversation: vi.fn(async () => [TASK]),
+      listByConversation: listTasks,
     },
   };
 }
@@ -209,15 +213,6 @@ const BROWSER_TOOL_NAMES = [
   'browser_reload',
   'browser_inspect',
   'browser_capture_screenshot',
-  'browser_click',
-  'browser_set_checked',
-  'browser_type',
-  'browser_keypress',
-  'browser_scroll',
-  'browser_scroll_until',
-  'browser_hover',
-  'browser_select',
-  'browser_drag',
   'browser_wait',
   'browser_network_start',
 ] as const;
@@ -272,6 +267,8 @@ describe('CodexAgentPlanner', () => {
         text: 'Checkout is ready.',
       }),
     );
+    expect(storage.listMessages).toHaveBeenCalledTimes(1);
+    expect(storage.listTasks).toHaveBeenCalledTimes(1);
     expect(model.requests[0]).toMatchObject({
       model: 'gpt-5.6-terra',
       reasoningEffort: 'medium',

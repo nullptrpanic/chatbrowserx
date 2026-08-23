@@ -227,56 +227,6 @@ function sameBrowserTypeArguments(
   );
 }
 
-/** Replays an immediately preceding successful submit instead of dispatching it twice. */
-function duplicateSuccessfulBrowserSubmitOutput(
-  snapshot: TaskSnapshot,
-  call: ReturnType<typeof parseBrowserToolCall>,
-): string | null {
-  if (call.operation !== 'type') return null;
-  const currentArguments = call.arguments as BrowserTypeArguments;
-  if (!currentArguments.submit) return null;
-  const previous = snapshot.checkpoint.completedToolResults.findLast((result) =>
-    result.toolName.startsWith('browser_'),
-  );
-  if (previous?.toolName !== 'browser_type') return null;
-  try {
-    const envelope: unknown = JSON.parse(previous.output);
-    if (typeof envelope !== 'object' || envelope === null || Array.isArray(envelope)) return null;
-    const record = envelope as Readonly<Record<string, unknown>>;
-    const data = record.data;
-    if (
-      record.ok !== true ||
-      typeof data !== 'object' ||
-      data === null ||
-      Array.isArray(data) ||
-      (data as Readonly<Record<string, unknown>>).submitted !== true
-    ) {
-      return null;
-    }
-    const previousCall = parseBrowserToolCall({
-      callId: previous.callId,
-      name: previous.toolName,
-      argumentsJson: previous.argumentsJson,
-    });
-    if (
-      previousCall.operation !== 'type' ||
-      !sameBrowserTypeArguments(
-        snapshot,
-        currentArguments,
-        previousCall.arguments as BrowserTypeArguments,
-      )
-    ) {
-      return null;
-    }
-    return JSON.stringify({
-      ...record,
-      data: { ...(data as Readonly<Record<string, unknown>>), replayed: true },
-    });
-  } catch {
-    return null;
-  }
-}
-
 /** Detects an immediately repeated failed editor write before it can redispatch a mutation. */
 function duplicateFailedBrowserTypeOutput(
   snapshot: TaskSnapshot,
@@ -1155,11 +1105,6 @@ export class TaskExecutor {
           needsInspect: true,
         }),
       );
-    }
-
-    const duplicateSubmit = duplicateSuccessfulBrowserSubmitOutput(snapshot, call);
-    if (duplicateSubmit !== null) {
-      return this.#recordToolResult(snapshot, ownerId, signal, pending, duplicateSubmit);
     }
 
     const duplicateFailure = duplicateFailedBrowserTypeOutput(snapshot, call);

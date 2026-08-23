@@ -4,6 +4,7 @@ import type { DebuggerSession, DebuggerTransport } from '../debugger/debugger-tr
 import type { TargetSessionRegistry } from '../debugger/target-session-registry';
 import type { ReadablePageContent } from './content-extractor';
 import type { ElementRefStore, ObservedElementTarget } from './element-ref-store';
+import { mapConcurrentOrdered } from './bounded-map';
 import { prepareModelScreenshot } from './model-screenshot';
 import {
   SEMANTIC_SNAPSHOT_STYLES,
@@ -24,6 +25,7 @@ const DEEP_INTERACTIVE_BUDGET = {
   characters: 60_000,
 } as const;
 const MAX_INTERACTIVE_SNAPSHOT_TABS = 50;
+const MAX_SESSION_OBSERVATION_CONCURRENCY = 3;
 const INTERACTIVE_ENTRY_KEYS =
   'd=depth,r=role(default generic),n=name,s=state,a=extra actions(ref defaults click),f=frame';
 const MAX_CONTENT_CHARACTERS = 40_000;
@@ -634,50 +636,62 @@ export class PageObserver {
       })),
     ];
 
-    for (const sessionTarget of sessionTargets) {
-      throwIfAborted(signal);
-      const [tree, domSnapshot, frameTree, metrics] = await Promise.all([
-        this.#dependencies.transport.send<Protocol.Accessibility.GetFullAXTreeResponse>(
-          sessionTarget.session,
-          'Accessibility.getFullAXTree',
-        ),
-        this.#dependencies.transport.send<Protocol.DOMSnapshot.CaptureSnapshotResponse>(
-          sessionTarget.session,
-          'DOMSnapshot.captureSnapshot',
-          {
-            computedStyles: [...SEMANTIC_SNAPSHOT_STYLES],
-            includeDOMRects: true,
-            includePaintOrder: true,
-          },
-        ),
-        this.#dependencies.transport.send<Protocol.Page.GetFrameTreeResponse>(
-          sessionTarget.session,
-          'Page.getFrameTree',
-        ),
-        this.#dependencies.transport
-          .send<Protocol.Page.GetLayoutMetricsResponse>(
+    const sessionObservations = await mapConcurrentOrdered(
+      sessionTargets,
+      MAX_SESSION_OBSERVATION_CONCURRENCY,
+      async (sessionTarget) => {
+        throwIfAborted(signal);
+        const [tree, domSnapshot, frameTree, metrics] = await Promise.all([
+          this.#dependencies.transport.send<Protocol.Accessibility.GetFullAXTreeResponse>(
             sessionTarget.session,
-            'Page.getLayoutMetrics',
-          )
-          .catch(() => ({}) as Protocol.Page.GetLayoutMetricsResponse),
-      ]);
-      const loaders = this.#frameLoaders(frameTree.frameTree);
+            'Accessibility.getFullAXTree',
+          ),
+          this.#dependencies.transport.send<Protocol.DOMSnapshot.CaptureSnapshotResponse>(
+            sessionTarget.session,
+            'DOMSnapshot.captureSnapshot',
+            {
+              computedStyles: [...SEMANTIC_SNAPSHOT_STYLES],
+              includeDOMRects: true,
+              includePaintOrder: true,
+            },
+          ),
+          this.#dependencies.transport.send<Protocol.Page.GetFrameTreeResponse>(
+            sessionTarget.session,
+            'Page.getFrameTree',
+          ),
+          this.#dependencies.transport
+            .send<Protocol.Page.GetLayoutMetricsResponse>(
+              sessionTarget.session,
+              'Page.getLayoutMetrics',
+            )
+            .catch(() => ({}) as Protocol.Page.GetLayoutMetricsResponse),
+        ]);
+        const loaders = this.#frameLoaders(frameTree.frameTree);
+        const viewport = viewportFromLayoutMetrics(metrics);
+        return {
+          sessionTarget,
+          loaders,
+          metrics,
+          semantic: buildSemanticPageSnapshot({
+            axNodes: tree.nodes,
+            domSnapshot,
+            frame: sessionTarget.frame,
+            ...(viewport === undefined ? {} : { viewport }),
+          }),
+        };
+      },
+    );
+
+    for (const { sessionTarget, loaders, metrics, semantic } of sessionObservations) {
       documentEpochParts.push(
         JSON.stringify([
           sessionTarget.frame,
           [...loaders.entries()].toSorted(([left], [right]) => left.localeCompare(right)),
         ]),
       );
-      const viewport = viewportFromLayoutMetrics(metrics);
       if (sessionTarget.frame === 'main') {
         mainDocumentCoverage = documentViewportCoverage(metrics);
       }
-      const semantic = buildSemanticPageSnapshot({
-        axNodes: tree.nodes,
-        domSnapshot,
-        frame: sessionTarget.frame,
-        ...(viewport === undefined ? {} : { viewport }),
-      });
       hasVisualSurface ||= semantic.hasVisualSurface;
       const localTargetIndexes = new Map<number, number>();
       semantic.targets.forEach((target, localIndex) => {
@@ -720,6 +734,7 @@ export class PageObserver {
     const budget = deep ? DEEP_INTERACTIVE_BUDGET : INTERACTIVE_BUDGET;
     const selectedEntryIndexes: number[] = [];
     const usedTargetIndexes = new Set<number>();
+    let serializedCharacters = JSON.stringify({ mode: 'interactive', elements: [] }).length;
     for (const entryIndex of interactiveCandidateIndexes(entries, deep)) {
       if (selectedEntryIndexes.length >= budget.elements) break;
       const entry = entries[entryIndex];
@@ -731,23 +746,11 @@ export class PageObserver {
       ) {
         continue;
       }
+      const entryCharacters = JSON.stringify(entry).length + (selectedEntryIndexes.length ? 1 : 0);
+      if (serializedCharacters + entryCharacters > budget.characters) break;
       selectedEntryIndexes.push(entryIndex);
+      serializedCharacters += entryCharacters;
       if (entry.targetIndex !== undefined) usedTargetIndexes.add(entry.targetIndex);
-      if (
-        JSON.stringify({
-          mode: 'interactive',
-          elements: selectedEntryIndexes.map((index) => entries[index]),
-        }).length > budget.characters
-      ) {
-        selectedEntryIndexes.pop();
-        if (entry.targetIndex !== undefined) {
-          const stillUsed = selectedEntryIndexes.some(
-            (index) => entries[index]?.targetIndex === entry.targetIndex,
-          );
-          if (!stillUsed) usedTargetIndexes.delete(entry.targetIndex);
-        }
-        break;
-      }
     }
     const boundedEntries = selectedEntryIndexes
       .toSorted((left, right) => left - right)

@@ -1,9 +1,11 @@
 import { z } from 'zod';
 import { providerErrorFromCode } from '../../providers/provider-errors';
-import type { ModelToolDefinition } from '../../providers/provider-types';
+import { strictFunctionTool } from '../../tools/contracts/model-tool';
+import {
+  parseToolCallArguments,
+  type ModelToolCallSource,
+} from '../../tools/contracts/tool-call-envelope';
 
-const MAX_TOOL_CALL_ID_CHARACTERS = 256;
-const MAX_TOOL_ARGUMENTS_JSON_CHARACTERS = 32 * 1_024;
 const MAX_PATH_CHARACTERS = 4_096;
 const MAX_COMMAND_CHARACTERS = 20_000;
 
@@ -60,58 +62,31 @@ export type ParsedSandboxToolCall =
       readonly arguments: SandboxExecToolInput;
     };
 
-export interface SandboxToolCallSource {
-  readonly callId: string;
-  readonly name: string;
-  readonly argumentsJson: string;
-}
+export type SandboxToolCallSource = ModelToolCallSource;
 
-export const SANDBOX_TOOL_DEFINITIONS: readonly ModelToolDefinition[] = [
-  {
-    type: 'function',
-    name: 'sandbox_read',
-    description:
-      'Read a bounded range from an absolute text-file path on the configured Sandbox. Read a selected SKILL.md completely before following it, continuing with later line ranges when truncated.',
-    parameters: {
-      type: 'object',
-      properties: {
-        path: { type: 'string', minLength: 1, maxLength: MAX_PATH_CHARACTERS },
-        startLine: { type: 'integer', minimum: 1 },
-        maxLines: { type: 'integer', minimum: 1, maximum: 400 },
-      },
-      required: ['path', 'startLine', 'maxLines'],
-      additionalProperties: false,
+export const SANDBOX_TOOL_DEFINITIONS = [
+  strictFunctionTool(
+    'sandbox_read',
+    'Read a bounded range from an absolute text-file path on the configured Sandbox. Read a selected SKILL.md completely before following it, continuing with later line ranges when truncated.',
+    {
+      path: { type: 'string', minLength: 1, maxLength: MAX_PATH_CHARACTERS },
+      startLine: { type: 'integer', minimum: 1 },
+      maxLines: { type: 'integer', minimum: 1, maximum: 400 },
     },
-    strict: true,
-  },
-  {
-    type: 'function',
-    name: 'sandbox_exec',
-    description:
-      'Run one necessary Bash command on the configured Sandbox. Prefer built-in ChatBrowserX tools for overlapping capabilities. Resolve Skill-relative commands from the SKILL.md directory. Redirect large output to a file and paginate it with sandbox_read.',
-    parameters: {
-      type: 'object',
-      properties: {
-        command: { type: 'string', minLength: 1, maxLength: MAX_COMMAND_CHARACTERS },
-        cwd: { type: ['string', 'null'], minLength: 1, maxLength: MAX_PATH_CHARACTERS },
-      },
-      required: ['command', 'cwd'],
-      additionalProperties: false,
+  ),
+  strictFunctionTool(
+    'sandbox_exec',
+    'Run one necessary Bash command on the configured Sandbox. Prefer built-in ChatBrowserX tools for overlapping capabilities. Resolve Skill-relative commands from the SKILL.md directory. Redirect large output to a file and paginate it with sandbox_read.',
+    {
+      command: { type: 'string', minLength: 1, maxLength: MAX_COMMAND_CHARACTERS },
+      cwd: { type: ['string', 'null'], minLength: 1, maxLength: MAX_PATH_CHARACTERS },
     },
-    strict: true,
-  },
+  ),
 ];
 
 export function parseSandboxToolCall(input: SandboxToolCallSource): ParsedSandboxToolCall {
   try {
-    if (
-      input.callId.trim().length === 0 ||
-      input.callId.length > MAX_TOOL_CALL_ID_CHARACTERS ||
-      input.argumentsJson.length > MAX_TOOL_ARGUMENTS_JSON_CHARACTERS
-    ) {
-      throw new Error('Invalid Sandbox tool call envelope.');
-    }
-    const value: unknown = JSON.parse(input.argumentsJson);
+    const value = parseToolCallArguments(input);
     if (input.name === 'sandbox_read') {
       return {
         family: 'sandbox',

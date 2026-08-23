@@ -1,12 +1,15 @@
 import 'fake-indexeddb/auto';
 import { describe, expect, it } from 'vitest';
 import { openChatBrowserDatabase } from '../../src/persistence/open-database';
+import { IndexedDbAttachmentRepository } from '../../src/persistence/attachment-repository';
 import { IndexedDbTaskRepository } from '../../src/persistence/task-repository';
 import { createTask } from '../../src/tasks/task-factory';
 import { transitionTask } from '../../src/tasks/task-transition';
 import type { Checkpoint } from '../../src/tasks/checkpoint-types';
+import type { Conversation } from '../../src/tasks/conversation-types';
+import type { MessageRecord } from '../../src/tasks/message-types';
 import type { TaskEvent, TaskRun } from '../../src/tasks/task-types';
-import { createTestDatabaseName } from './test-helpers';
+import { createTestDatabaseName, seedConversation, seedTask } from './test-helpers';
 
 const clock = { now: () => 1_000 };
 const ids = { create: (prefix: string) => `${prefix}_1` };
@@ -375,9 +378,201 @@ describe('IndexedDbTaskRepository', () => {
     database.close();
   });
 
-  it('allows only one continuation from the latest cancelled WorkSession run', async () => {
+  it('replaces the previous full checkpoint when saving a task transition', async () => {
+    const database = await openChatBrowserDatabase(createTestDatabaseName('checkpoint-replace'));
+    const repository = new IndexedDbTaskRepository(database);
+    const queued = {
+      ...createTask(
+        { conversationId: 'conv_1', tabId: 7, goal: 'Keep bounded state' },
+        { clock, ids },
+      ),
+      checkpointId: 'checkpoint_initial',
+    };
+    const initial: Checkpoint = {
+      id: 'checkpoint_initial',
+      taskId: queued.id,
+      sequence: 0,
+      taskStatus: 'queued',
+      completedToolResults: [],
+      continuationItems: [],
+      pendingToolCall: null,
+      browserToolCallsInAttempt: 0,
+      createdAt: queued.createdAt,
+    };
+    await repository.createInitial(queued, initial);
+    const planning = transitionTask(queued, {
+      type: 'planning.started',
+      at: 1_001,
+      reason: 'Start planning.',
+    });
+    const nextTask = { ...planning, checkpointId: 'checkpoint_planning' };
+    const nextCheckpoint: Checkpoint = {
+      ...initial,
+      id: 'checkpoint_planning',
+      sequence: 1,
+      taskStatus: 'planning',
+      createdAt: 1_001,
+    };
+
+    await repository.saveTransition({
+      task: nextTask,
+      event: createEvent(nextTask),
+      checkpoint: nextCheckpoint,
+    });
+
+    const stored = await database.getAllFromIndex('checkpoints', 'by-task', queued.id);
+    expect(stored.map(({ id }) => id)).toEqual(['checkpoint_planning']);
+    await expect(repository.getCheckpoint('checkpoint_initial')).resolves.toBeUndefined();
+    database.close();
+  });
+
+  it('prunes only unreferenced checkpoints and their unique tool attachment references', async () => {
+    const database = await openChatBrowserDatabase(createTestDatabaseName('checkpoint-prune'));
+    const repository = new IndexedDbTaskRepository(database);
+    const attachments = new IndexedDbAttachmentRepository(database);
+    const queued = {
+      ...createTask(
+        { conversationId: 'conv_1', tabId: 7, goal: 'Prune old state' },
+        { clock, ids },
+      ),
+      checkpointId: 'checkpoint_current',
+    };
+    const result = (resultRef: string, attachmentId: string) => ({
+      callId: `call_${resultRef}`,
+      toolName: 'browser_capture_screenshot',
+      argumentsJson: '{}',
+      output: '{"ok":true}',
+      resultRef,
+      attachmentIds: [attachmentId],
+    });
+    await repository.createInitial(queued, {
+      id: 'checkpoint_current',
+      taskId: queued.id,
+      sequence: 0,
+      taskStatus: 'queued',
+      completedToolResults: [result('result_shared', 'attachment_shared')],
+      continuationItems: [],
+      pendingToolCall: null,
+      browserToolCallsInAttempt: 0,
+      createdAt: queued.createdAt,
+    });
+    await database.add('checkpoints', {
+      id: 'checkpoint_stale',
+      taskId: queued.id,
+      sequence: 0,
+      taskStatus: 'queued',
+      completedToolResults: [
+        result('result_shared', 'attachment_shared'),
+        result('result_stale', 'attachment_stale'),
+      ],
+      continuationItems: [],
+      pendingToolCall: null,
+      browserToolCallsInAttempt: 0,
+      createdAt: queued.createdAt,
+    });
+    for (const attachmentId of ['attachment_shared', 'attachment_stale']) {
+      await attachments.put({
+        id: attachmentId,
+        blob: new Blob([new Uint8Array([1])], { type: 'image/png' }),
+        mimeType: 'image/png',
+        byteSize: 1,
+        width: 1,
+        height: 1,
+        source: 'viewport_capture',
+        createdAt: 1,
+      });
+    }
+    await attachments.addReference('attachment_shared', 'result_shared');
+    await attachments.addReference('attachment_stale', 'result_stale');
+
+    await expect(repository.pruneObsoleteCheckpoints()).resolves.toBe(1);
+
+    expect((await database.getAll('checkpoints')).map(({ id }) => id)).toEqual([
+      'checkpoint_current',
+    ]);
+    await expect(attachments.deleteUnreferenced(10)).resolves.toBe(1);
+    await expect(attachments.get('attachment_shared')).resolves.toBeDefined();
+    await expect(attachments.get('attachment_stale')).resolves.toBeUndefined();
+    database.close();
+  });
+
+  it('rolls back the complete user submission when task insertion fails', async () => {
+    const database = await openChatBrowserDatabase(createTestDatabaseName('submission-rollback'));
+    const repository = new IndexedDbTaskRepository(database);
+    const existing = createTask(
+      { conversationId: 'existing', tabId: 7, goal: 'Existing task' },
+      { clock, ids: { create: () => 'task_collision' } },
+    );
+    await seedTask(database, { ...existing, status: 'completed' });
+    const conversation: Conversation = {
+      id: 'conversation_submission',
+      tabId: 7,
+      title: 'Atomic submission',
+      createdAt: 2_000,
+      updatedAt: 2_000,
+    };
+    const task: TaskRun = {
+      ...createTask(
+        { conversationId: conversation.id, tabId: 7, goal: 'Submit atomically' },
+        { clock: { now: () => 2_000 }, ids: { create: () => 'task_collision' } },
+      ),
+      checkpointId: 'checkpoint_submission',
+    };
+    const checkpoint: Checkpoint = {
+      id: 'checkpoint_submission',
+      taskId: task.id,
+      sequence: 0,
+      taskStatus: 'queued',
+      completedToolResults: [],
+      continuationItems: [{ type: 'message_ref', messageId: 'message_submission' }],
+      pendingToolCall: null,
+      browserToolCallsInAttempt: 0,
+      browserTargetTabId: 7,
+      createdAt: 2_000,
+    };
+    const message: MessageRecord = {
+      id: 'message_submission',
+      kind: 'conversation',
+      conversationId: conversation.id,
+      taskId: task.id,
+      role: 'user',
+      status: 'complete',
+      text: 'Submit atomically',
+      attachmentIds: [],
+      createdAt: 2_000,
+      updatedAt: 2_000,
+    };
+
+    await expect(
+      repository.createSubmission({
+        conversation,
+        createConversation: true,
+        message,
+        task,
+        checkpoint,
+      }),
+    ).rejects.toBeDefined();
+
+    await expect(database.get('conversations', conversation.id)).resolves.toBeUndefined();
+    await expect(database.get('messages', message.id)).resolves.toBeUndefined();
+    await expect(database.get('checkpoints', checkpoint.id)).resolves.toBeUndefined();
+    await expect(database.get('tasks', existing.id)).resolves.toEqual(
+      expect.objectContaining({ status: 'completed' }),
+    );
+    database.close();
+  });
+
+  it('atomically allows only one continuation from a cancelled WorkSession run', async () => {
     const database = await openChatBrowserDatabase(createTestDatabaseName('task-continuation'));
     const repository = new IndexedDbTaskRepository(database);
+    const conversation: Conversation = {
+      id: 'conv_1',
+      tabId: 7,
+      title: 'Initial request',
+      createdAt: 1_000,
+      updatedAt: 1_000,
+    };
+    await seedConversation(database, conversation);
     const source = {
       ...createTask(
         { conversationId: 'conv_1', tabId: 7, goal: 'Initial request' },
@@ -461,19 +656,34 @@ describe('IndexedDbTaskRepository', () => {
       checkpointId: 'checkpoint_cont_2',
     };
 
-    await repository.createContinuation(
-      source.id,
-      first,
-      continuationCheckpoint(first.id, 'checkpoint_cont_1'),
-    );
-    await expect(
-      repository.createContinuation(
-        source.id,
-        second,
-        continuationCheckpoint(second.id, 'checkpoint_cont_2'),
-      ),
-    ).rejects.toThrow(/latest cancelled/i);
-    await expect(repository.get(second.id)).resolves.toBeUndefined();
+    const submission = (task: TaskRun, messageId: string, checkpointId: string) =>
+      repository.createSubmission({
+        conversation,
+        createConversation: false,
+        message: {
+          id: messageId,
+          kind: 'conversation',
+          conversationId: conversation.id,
+          taskId: task.id,
+          role: 'user',
+          status: 'complete',
+          text: task.goal,
+          attachmentIds: [],
+          createdAt: task.createdAt,
+          updatedAt: task.createdAt,
+        },
+        task,
+        checkpoint: continuationCheckpoint(task.id, checkpointId),
+        continuationSourceTaskId: source.id,
+      });
+    const attempts = await Promise.allSettled([
+      submission(first, 'message_task_cont_1', 'checkpoint_cont_1'),
+      submission(second, 'message_task_cont_2', 'checkpoint_cont_2'),
+    ]);
+
+    expect(attempts.filter(({ status }) => status === 'fulfilled')).toHaveLength(1);
+    expect(attempts.filter(({ status }) => status === 'rejected')).toHaveLength(1);
+    await expect(repository.listAll()).resolves.toHaveLength(2);
     database.close();
   });
 
@@ -485,7 +695,7 @@ describe('IndexedDbTaskRepository', () => {
       { conversationId: 'conv_1', tabId: 7, goal: 'Fill the form' },
       { clock, ids },
     );
-    await repository.create(queued);
+    await seedTask(database, queued);
 
     const planning = transitionTask(queued, {
       type: 'planning.started',
@@ -519,7 +729,7 @@ describe('IndexedDbTaskRepository', () => {
       { conversationId: 'conv_1', tabId: 7, goal: 'Fill the form' },
       { clock, ids },
     );
-    await repository.create(queued);
+    await seedTask(database, queued);
     const planning = transitionTask(queued, {
       type: 'planning.started',
       at: 1_001,
@@ -567,8 +777,8 @@ describe('IndexedDbTaskRepository', () => {
       ),
       status: 'paused' as const,
     };
-    await repository.create(firstTask);
-    await repository.create(pausedTask);
+    await seedTask(database, firstTask);
+    await seedTask(database, pausedTask);
 
     const firstLease = await repository.tryAcquireLease({
       taskId: firstTask.id,
@@ -603,7 +813,7 @@ describe('IndexedDbTaskRepository', () => {
       lease: { ownerId: 'runner_b', generation: 2 },
     });
     await expect(repository.listRecoverable(31_001)).resolves.toEqual([]);
-    await expect(repository.listUnfinished()).resolves.toHaveLength(2);
+    await expect(repository.listAll()).resolves.toHaveLength(2);
 
     await repository.releaseLease(firstTask.id, 'runner_b', 2);
     await expect(repository.listRecoverable(31_001)).resolves.toEqual([
@@ -619,7 +829,7 @@ describe('IndexedDbTaskRepository', () => {
       { conversationId: 'conv_1', tabId: 7, goal: 'Renew me' },
       { clock, ids },
     );
-    await repository.create(task);
+    await seedTask(database, task);
     await repository.tryAcquireLease({
       taskId: task.id,
       ownerId: 'runner_a',

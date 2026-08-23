@@ -56,6 +56,12 @@ describe('native context compaction', () => {
     expect(shouldUseNativeContextCompaction(checkpoint())).toBe(true);
     expect(
       shouldUseNativeContextCompaction(
+        checkpoint({ lastModelInputTokens: AUTO_COMPACT_INPUT_TOKEN_HIGH_WATER - 4_000 }),
+        4_000,
+      ),
+    ).toBe(true);
+    expect(
+      shouldUseNativeContextCompaction(
         checkpoint({ continuationItems: [{ type: 'message_ref', messageId: 'message_user' }] }),
       ),
     ).toBe(false);

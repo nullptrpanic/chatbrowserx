@@ -9,6 +9,7 @@ export interface Message<TType extends string, TPayload> {
 
 export type ExtensionMessage =
   | Message<'system.ping', Record<string, never>>
+  | Message<'panel.getStateVersion', Record<string, never>>
   | Message<'panel.getSnapshot', { tabId: number; conversationId?: string | undefined }>
   | Message<'panel.getTaskDetails', { taskId: string }>
   | Message<
@@ -46,6 +47,12 @@ export type ExtensionMessage =
   | Message<'screenshot.capture', { tabId: number; mode: 'viewport' | 'region' }>
   | Message<'image.preview.open', { tabId: number; attachmentId: string }>
   | Message<'page.features.ensure', { tabId: number }>;
+
+export interface PanelStateChangedNotification {
+  readonly version: typeof PROTOCOL_VERSION;
+  readonly type: 'panel.stateChanged';
+  readonly stateVersion: number;
+}
 
 export type PageCommand =
   | Message<'page.ping', Record<string, never>>

@@ -67,10 +67,81 @@ const sourcePage: PanelMessageSourcePage = {
 };
 
 afterEach(() => {
+  vi.useRealTimers();
   vi.unstubAllGlobals();
 });
 
 describe('PanelClient', () => {
+  it('refreshes once for a newer pushed state version and ignores duplicate notifications', async () => {
+    let current = { ...snapshot(), stateVersion: 1 };
+    let notify: ((value: unknown) => void) | undefined;
+    const send = vi.fn<RuntimePort['send']>(async (message) => ({
+      version: 1,
+      requestId: message.requestId,
+      ok: true,
+      data: message.type === 'panel.getSnapshot' ? current : { connected: true },
+    }));
+    const client = new PanelClient(
+      {
+        send,
+        subscribe(listener) {
+          notify = listener;
+          return () => {
+            notify = undefined;
+          };
+        },
+      },
+      { getActiveTab: vi.fn(async () => ({ id: 7 })) },
+      { pollIntervalMs: 60_000 },
+    );
+    await client.connect();
+
+    current = { ...snapshot(2), stateVersion: 2 };
+    notify?.({ version: 1, type: 'panel.stateChanged', stateVersion: 2 });
+    await vi.waitFor(() => {
+      expect(client.getSnapshot().snapshot?.stateVersion).toBe(2);
+    });
+    notify?.({ version: 1, type: 'panel.stateChanged', stateVersion: 2 });
+    await Promise.resolve();
+
+    expect(
+      send.mock.calls.filter(([message]) => message.type === 'panel.getSnapshot'),
+    ).toHaveLength(2);
+    client.dispose();
+  });
+
+  it('uses a version-only recovery poll when durable state is unchanged', async () => {
+    vi.useFakeTimers();
+    const current = { ...snapshot(), stateVersion: 7 };
+    const send = vi.fn<RuntimePort['send']>(async (message) => ({
+      version: 1,
+      requestId: message.requestId,
+      ok: true,
+      data:
+        message.type === 'panel.getSnapshot'
+          ? current
+          : message.type === 'panel.getStateVersion'
+            ? { stateVersion: 7 }
+            : { connected: true },
+    }));
+    const client = new PanelClient(
+      { send },
+      { getActiveTab: vi.fn(async () => ({ id: 7 })) },
+      { pollIntervalMs: 250 },
+    );
+    await client.connect();
+
+    await vi.advanceTimersByTimeAsync(250);
+
+    expect(
+      send.mock.calls.filter(([message]) => message.type === 'panel.getSnapshot'),
+    ).toHaveLength(1);
+    expect(
+      send.mock.calls.filter(([message]) => message.type === 'panel.getStateVersion'),
+    ).toHaveLength(1);
+    client.dispose();
+  });
+
   it('sends the explicit cancelled-task context clear command and refreshes shared state', async () => {
     const current = snapshot();
     const send = vi.fn<RuntimePort['send']>(async (message) => ({

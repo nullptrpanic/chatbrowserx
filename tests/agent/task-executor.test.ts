@@ -17,7 +17,7 @@ import { SandboxClientError } from '../../src/sandbox/sandbox-client';
 import type { SandboxExecutionPort } from '../../src/sandbox/sandbox-tool-executor';
 import { TaskCommandService } from '../../src/tasks/task-command-service';
 import type { MessageRecord } from '../../src/tasks/message-types';
-import { createTestDatabaseName } from '../persistence/test-helpers';
+import { createTestDatabaseName, seedConversation } from '../persistence/test-helpers';
 
 function sources() {
   let now = 1_000;
@@ -526,7 +526,7 @@ describe('TaskExecutor', () => {
     database.close();
   });
 
-  it('does not submit the same successful editor input twice in consecutive model turns', async () => {
+  it('dispatches a new successful submit call even when its arguments match an older call', async () => {
     const database = await openChatBrowserDatabase(
       createTestDatabaseName('duplicate-browser-submit-success'),
     );
@@ -591,16 +591,14 @@ describe('TaskExecutor', () => {
     const result = await executor.run(created.task.id, new AbortController().signal);
 
     expect(result.task.status).toBe('completed');
-    expect(execute).toHaveBeenCalledOnce();
-    expect(JSON.parse(result.checkpoint.completedToolResults[1]?.output ?? '')).toMatchObject({
-      ok: true,
-      data: {
-        action: 'type',
-        submitted: true,
-        verified: true,
-        replayed: true,
-      },
-    });
+    expect(execute).toHaveBeenCalledTimes(2);
+    expect(result.checkpoint.completedToolResults).toHaveLength(2);
+    expect(result.checkpoint.completedToolResults.map((entry) => JSON.parse(entry.output))).toEqual(
+      [
+        expect.objectContaining({ ok: true, data: expect.objectContaining({ submitted: true }) }),
+        expect.objectContaining({ ok: true, data: expect.objectContaining({ submitted: true }) }),
+      ],
+    );
     database.close();
   });
 
@@ -2708,7 +2706,7 @@ describe('TaskExecutor', () => {
     const repository = new IndexedDbTaskRepository(database);
     const conversations = new IndexedDbConversationRepository(database);
     const dependencies = sources();
-    await conversations.create({
+    await seedConversation(database, {
       id: 'conversation_1',
       tabId: 7,
       title: 'Research this',
@@ -2840,7 +2838,7 @@ describe('TaskExecutor', () => {
     const repository = new IndexedDbTaskRepository(database);
     const conversations = new IndexedDbConversationRepository(database);
     const dependencies = sources();
-    await conversations.create({
+    await seedConversation(database, {
       id: 'conversation_1',
       tabId: 7,
       title: 'Answer this',

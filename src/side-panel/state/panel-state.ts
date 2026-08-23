@@ -123,6 +123,7 @@ const panelTaskSchema = z
 
 export const panelSnapshotSchema: z.ZodType<PanelSnapshot> = z
   .object({
+    stateVersion: z.number().int().nonnegative().optional(),
     generatedAt: timestampSchema,
     tab: z
       .object({

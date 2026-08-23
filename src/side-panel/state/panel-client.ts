@@ -34,6 +34,38 @@ export interface PanelClientOptions {
 
 type PanelListener = () => void;
 
+function snapshotVersion(snapshot: PanelSnapshot | null): number {
+  return snapshot?.stateVersion ?? snapshot?.generatedAt ?? -1;
+}
+
+function readStateVersion(value: unknown): number | null {
+  if (
+    typeof value !== 'object' ||
+    value === null ||
+    !('stateVersion' in value) ||
+    typeof value.stateVersion !== 'number' ||
+    !Number.isSafeInteger(value.stateVersion) ||
+    value.stateVersion < 0
+  ) {
+    return null;
+  }
+  return value.stateVersion;
+}
+
+function readPushedStateVersion(value: unknown): number | null {
+  if (
+    typeof value !== 'object' ||
+    value === null ||
+    !('version' in value) ||
+    value.version !== PROTOCOL_VERSION ||
+    !('type' in value) ||
+    value.type !== 'panel.stateChanged'
+  ) {
+    return null;
+  }
+  return readStateVersion(value);
+}
+
 /** Creates one cryptographically unique runtime request identifier. */
 function requestId(): string {
   return `panel_${crypto.randomUUID()}`;
@@ -66,6 +98,9 @@ export class PanelClient {
   #tabId: number | null = null;
   #generation = 0;
   #timer: ReturnType<typeof setTimeout> | null = null;
+  #unsubscribeRuntime: (() => void) | null = null;
+  #notificationRefresh: Promise<void> | null = null;
+  #requestedStateVersion = -1;
   #disposed = false;
   #featuresEnsuredKey: string | null = null;
   readonly #detailedTasks = new Map<string, NonNullable<PanelSnapshot['task']>>();
@@ -80,7 +115,7 @@ export class PanelClient {
   ) {
     this.#runtime = runtime;
     this.#environment = environment;
-    this.#pollIntervalMs = Math.max(250, options.pollIntervalMs ?? 750);
+    this.#pollIntervalMs = Math.max(250, options.pollIntervalMs ?? 5_000);
   }
 
   /** Returns the immutable external-store snapshot consumed through useSyncExternalStore. */
@@ -95,6 +130,7 @@ export class PanelClient {
   /** Connects to the active tab, requests recovery, loads state, and begins bounded polling. */
   async connect(): Promise<void> {
     if (this.#disposed) return;
+    this.#unsubscribeRuntime ??= this.#runtime.subscribe?.(this.#handleRuntimeNotification) ?? null;
     this.#setState({ ...this.#state, status: 'loading', error: null });
     await this.#send({
       version: PROTOCOL_VERSION,
@@ -386,10 +422,39 @@ export class PanelClient {
     this.#generation += 1;
     if (this.#timer !== null) clearTimeout(this.#timer);
     this.#timer = null;
+    this.#unsubscribeRuntime?.();
+    this.#unsubscribeRuntime = null;
     this.#listeners.clear();
     this.#detailedTasks.clear();
     this.#taskDetailLoads.clear();
     this.#taskDetailTargets.clear();
+  }
+
+  /** Coalesces pushed versions and refreshes only when they are newer than rendered state. */
+  readonly #handleRuntimeNotification = (value: unknown): void => {
+    const stateVersion = readPushedStateVersion(value);
+    if (
+      this.#disposed ||
+      stateVersion === null ||
+      stateVersion <= snapshotVersion(this.#state.snapshot) ||
+      stateVersion <= this.#requestedStateVersion
+    ) {
+      return;
+    }
+    this.#requestedStateVersion = stateVersion;
+    this.#queueNotificationRefresh();
+  };
+
+  /** Runs at most one pushed refresh at a time and follows only genuinely newer queued versions. */
+  #queueNotificationRefresh(): void {
+    if (this.#notificationRefresh !== null || this.#disposed) return;
+    const refreshTarget = this.#requestedStateVersion;
+    this.#notificationRefresh = Promise.resolve()
+      .then(() => this.refresh())
+      .finally(() => {
+        this.#notificationRefresh = null;
+        if (this.#requestedStateVersion > refreshTarget) this.#queueNotificationRefresh();
+      });
   }
 
   /** Repeats a local detail read when an in-flight response predates a newer requested boundary. */
@@ -491,12 +556,32 @@ export class PanelClient {
     for (const listener of [...this.#listeners]) listener();
   }
 
-  /** Schedules the next full snapshot after the current event loop remains idle. */
+  /** Performs a cheap recovery check and reloads only for a changed tab or durable version. */
+  async #recoverIfChanged(): Promise<void> {
+    const activeTab = await this.#environment.getActiveTab();
+    if (activeTab === null || activeTab.id !== this.#tabId || this.#state.snapshot === null) {
+      await this.refresh();
+      return;
+    }
+    const data = await this.#send({
+      version: PROTOCOL_VERSION,
+      requestId: requestId(),
+      type: 'panel.getStateVersion',
+      payload: {},
+    });
+    const stateVersion = readStateVersion(data);
+    if (stateVersion === null) throw new Error('Panel state version is invalid.');
+    if (stateVersion > snapshotVersion(this.#state.snapshot)) await this.refresh();
+  }
+
+  /** Schedules the next cheap recovery probe after the current event loop remains idle. */
   #schedulePoll(): void {
     if (this.#disposed || this.#timer !== null) return;
     this.#timer = setTimeout(() => {
       this.#timer = null;
-      void this.refresh().finally(() => this.#schedulePoll());
+      void this.#recoverIfChanged()
+        .catch(() => undefined)
+        .finally(() => this.#schedulePoll());
     }, this.#pollIntervalMs);
   }
 }

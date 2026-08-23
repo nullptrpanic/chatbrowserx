@@ -1,13 +1,13 @@
-import type { ModelToolChoice, ModelToolDefinition } from '../../providers/provider-types';
 import type { Checkpoint } from '../../tasks/checkpoint-types';
 import type { ContinuationItem } from '../../tasks/continuation-types';
+import type { ModelToolChoice, ModelToolDefinition } from '../../tools/contracts/model-tool';
 import {
   BROWSER_TOOL_DEFINITIONS,
   BROWSER_TOOL_DEFINITION_BY_NAME,
   type BrowserToolName,
 } from './browser-tool-schema';
 
-const CORE_TOOL_NAMES = new Set<BrowserToolName>([
+const DISCOVERY_TOOL_NAMES = new Set<BrowserToolName>([
   'browser_list_tabs',
   'browser_open_tab',
   'browser_switch_tab',
@@ -16,6 +16,11 @@ const CORE_TOOL_NAMES = new Set<BrowserToolName>([
   'browser_reload',
   'browser_inspect',
   'browser_capture_screenshot',
+  'browser_wait',
+  'browser_network_start',
+]);
+
+const INTERACTIVE_TOOL_NAMES = new Set<BrowserToolName>([
   'browser_click',
   'browser_set_checked',
   'browser_type',
@@ -25,8 +30,6 @@ const CORE_TOOL_NAMES = new Set<BrowserToolName>([
   'browser_hover',
   'browser_select',
   'browser_drag',
-  'browser_wait',
-  'browser_network_start',
 ]);
 
 const VISUAL_INVALIDATING_TOOLS = new Set<BrowserToolName>([
@@ -52,6 +55,7 @@ const VISUAL_INVALIDATING_TOOLS = new Set<BrowserToolName>([
 ]);
 
 interface CapabilityState {
+  semanticSnapshotCurrent: boolean;
   visualSnapshotCurrent: boolean;
   networkActive: boolean;
   selectableRefs: Set<string>;
@@ -140,14 +144,8 @@ function bindScrollableTargets(
 }
 
 function successfulRecord(output: string): Readonly<Record<string, unknown>> | null {
-  try {
-    const value: unknown = JSON.parse(output);
-    if (typeof value !== 'object' || value === null || Array.isArray(value)) return null;
-    const record = value as Readonly<Record<string, unknown>>;
-    return record.ok === true ? record : null;
-  } catch {
-    return null;
-  }
+  const record = jsonRecord(output);
+  return record?.ok === true ? record : null;
 }
 
 function jsonRecord(value: string): Readonly<Record<string, unknown>> | null {
@@ -171,6 +169,10 @@ function childRecord(
     : null;
 }
 
+function isSemanticInspectionMode(value: unknown): boolean {
+  return value === 'interactive' || value === 'interactive_deep';
+}
+
 function integerContinuationDelta(value: unknown): number | null {
   if (typeof value !== 'number' || !Number.isFinite(value)) return null;
   return Math.sign(value) * Math.ceil(Math.abs(value));
@@ -190,7 +192,7 @@ function embeddedInteractiveObservations(
       )
     : [];
   return [...direct, ...segmented].filter(
-    (value) => value.mode === 'interactive' && typeof value.snapshot === 'string',
+    (value) => isSemanticInspectionMode(value.mode) && typeof value.snapshot === 'string',
   );
 }
 
@@ -407,7 +409,7 @@ export function browserScrollContinuationForCheckpoint(
   return state.continuation;
 }
 
-function scrollableRefFromEntry(value: unknown): string | null {
+function refWithAction(value: unknown, action: string): string | null {
   if (typeof value !== 'object' || value === null || Array.isArray(value)) return null;
   const entry = value as Readonly<Record<string, unknown>>;
   const actions = Array.isArray(entry.a)
@@ -415,11 +417,15 @@ function scrollableRefFromEntry(value: unknown): string | null {
     : Array.isArray(entry.actions)
       ? entry.actions
       : [];
-  return typeof entry.ref === 'string' && actions.includes('scroll') ? entry.ref : null;
+  return typeof entry.ref === 'string' && actions.includes(action) ? entry.ref : null;
+}
+
+function scrollableRefFromEntry(value: unknown): string | null {
+  return refWithAction(value, 'scroll');
 }
 
 function scrollableRefs(data: Readonly<Record<string, unknown>> | null): readonly string[] {
-  if (data === null || data.mode !== 'interactive') return [];
+  if (data === null || !isSemanticInspectionMode(data.mode)) return [];
   const refs = new Set<string>();
   if (Array.isArray(data.elements)) {
     for (const entry of data.elements) {
@@ -452,14 +458,7 @@ function browserToolName(value: string): BrowserToolName | null {
 }
 
 function selectableRefFromEntry(value: unknown): string | null {
-  if (typeof value !== 'object' || value === null || Array.isArray(value)) return null;
-  const entry = value as Readonly<Record<string, unknown>>;
-  const actions = Array.isArray(entry.a)
-    ? entry.a
-    : Array.isArray(entry.actions)
-      ? entry.actions
-      : [];
-  return typeof entry.ref === 'string' && actions.includes('set_checked') ? entry.ref : null;
+  return refWithAction(value, 'set_checked');
 }
 
 function applySemanticRefState(
@@ -469,7 +468,7 @@ function applySemanticRefState(
 ): void {
   if (typeof data !== 'object' || data === null || Array.isArray(data)) return;
   const record = data as Readonly<Record<string, unknown>>;
-  if (record.mode === 'interactive' && Array.isArray(record.elements)) {
+  if (isSemanticInspectionMode(record.mode) && Array.isArray(record.elements)) {
     refs.clear();
     for (const entry of record.elements) {
       const ref = refFromEntry(entry);
@@ -505,6 +504,7 @@ function applySuccessfulBrowserResult(
       : null;
   if (name === 'browser_inspect') {
     state.visualSnapshotCurrent = data?.mode === 'screenshot';
+    state.semanticSnapshotCurrent = isSemanticInspectionMode(data?.mode);
     applySemanticRefState(data, state.selectableRefs, selectableRefFromEntry);
     applySemanticRefState(data, state.scrollableRefs, scrollableRefFromEntry);
     if (data !== null) {
@@ -516,7 +516,10 @@ function applySuccessfulBrowserResult(
     }
     return;
   }
-  if (VISUAL_INVALIDATING_TOOLS.has(name)) state.visualSnapshotCurrent = false;
+  if (VISUAL_INVALIDATING_TOOLS.has(name)) {
+    state.visualSnapshotCurrent = false;
+    state.semanticSnapshotCurrent = false;
+  }
   if (
     name === 'browser_navigate' ||
     name === 'browser_reload' ||
@@ -529,6 +532,7 @@ function applySuccessfulBrowserResult(
   if (name === 'browser_network_start') state.networkActive = true;
   else if (name === 'browser_network_stop') state.networkActive = false;
   for (const observation of embeddedInteractiveObservations(data)) {
+    state.semanticSnapshotCurrent = true;
     applySemanticRefState(observation, state.selectableRefs, selectableRefFromEntry);
     applySemanticRefState(observation, state.scrollableRefs, scrollableRefFromEntry);
     const coverageTargets = coverageScrollTargets(observation);
@@ -553,6 +557,7 @@ function availableBrowserToolDefinitions(
   checkpoint: Pick<Checkpoint, 'continuationItems' | 'completedToolResults'>,
 ): readonly ModelToolDefinition[] {
   const state: CapabilityState = {
+    semanticSnapshotCurrent: false,
     visualSnapshotCurrent: false,
     networkActive: false,
     selectableRefs: new Set(),
@@ -565,6 +570,7 @@ function availableBrowserToolDefinitions(
   >();
   for (const item of checkpoint.continuationItems) {
     if (item.type === 'compaction') {
+      state.semanticSnapshotCurrent = false;
       state.visualSnapshotCurrent = false;
       state.networkActive = false;
       state.selectableRefs.clear();
@@ -582,6 +588,7 @@ function availableBrowserToolDefinitions(
     pendingCalls.delete(item.callId);
     if (!call) continue;
     if (successfulCommit(call, item)) {
+      state.semanticSnapshotCurrent = false;
       state.visualSnapshotCurrent = false;
       state.networkActive = false;
       state.selectableRefs.clear();
@@ -601,6 +608,7 @@ function availableBrowserToolDefinitions(
     for (const observation of embeddedInteractiveObservations(
       failed === null ? null : childRecord(failed, 'data'),
     )) {
+      state.semanticSnapshotCurrent = true;
       applySemanticRefState(observation, state.selectableRefs, selectableRefFromEntry);
       applySemanticRefState(observation, state.scrollableRefs, scrollableRefFromEntry);
       const coverageTargets = coverageScrollTargets(observation);
@@ -611,7 +619,10 @@ function availableBrowserToolDefinitions(
     }
   }
 
-  const enabled = new Set<BrowserToolName>([...CORE_TOOL_NAMES, ...state.usedTools]);
+  const enabled = new Set<BrowserToolName>([...DISCOVERY_TOOL_NAMES, ...state.usedTools]);
+  if (state.semanticSnapshotCurrent) {
+    for (const name of INTERACTIVE_TOOL_NAMES) enabled.add(name);
+  }
   if (state.visualSnapshotCurrent) {
     enabled.add('browser_click_point');
     enabled.add('browser_drag_point');

@@ -1,3 +1,8 @@
+import type { IDBPDatabase } from 'idb';
+import type { ChatBrowserDatabase } from '../../src/persistence/database-schema';
+import type { Conversation } from '../../src/tasks/conversation-types';
+import type { TaskRun } from '../../src/tasks/task-types';
+
 let databaseSequence = 0;
 
 /**
@@ -6,6 +11,22 @@ let databaseSequence = 0;
 export function createTestDatabaseName(label: string): string {
   databaseSequence += 1;
   return `chatbrowserx-test-${label}-${databaseSequence}`;
+}
+
+/** Seeds a conversation without expanding the production repository API for test setup. */
+export async function seedConversation(
+  database: IDBPDatabase<ChatBrowserDatabase>,
+  conversation: Conversation,
+): Promise<void> {
+  await database.add('conversations', conversation);
+}
+
+/** Seeds a task without expanding the production repository API for test setup. */
+export async function seedTask(
+  database: IDBPDatabase<ChatBrowserDatabase>,
+  task: TaskRun,
+): Promise<void> {
+  await database.add('tasks', task);
 }
 
 export class MemoryStorageArea {

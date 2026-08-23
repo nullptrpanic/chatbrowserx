@@ -8,6 +8,7 @@ import type { Checkpoint } from '../../tasks/checkpoint-types';
 import type { ContinuationItem } from '../../tasks/continuation-types';
 import type { MessageRecord } from '../../tasks/message-types';
 import type { TaskRun } from '../../tasks/task-types';
+import { loadWorkSessionView, type WorkSessionView } from '../work-session-view';
 import {
   MAX_MODEL_IMAGE_BYTES,
   MAX_MODEL_IMAGE_COUNT,
@@ -25,11 +26,19 @@ export interface AgentContextInput {
   readonly historyMessageLimit: number;
 }
 
-export interface AgentContextDependencies {
+interface AgentContextRepositoryDependencies {
   readonly conversations: Pick<ConversationRepository, 'listMessages'>;
   readonly tasks: Pick<TaskRepository, 'listByConversation'>;
   readonly attachments: Pick<AttachmentRepository, 'get'>;
 }
+
+interface AgentContextViewDependencies {
+  readonly workSession: WorkSessionView;
+  readonly attachments: Pick<AttachmentRepository, 'get'>;
+}
+
+export type AgentContextDependencies =
+  AgentContextRepositoryDependencies | AgentContextViewDependencies;
 
 export interface AgentContext {
   readonly systemPrompt: string;
@@ -385,12 +394,11 @@ export async function buildAgentContext(
   context: AgentContextInput,
   dependencies: AgentContextDependencies,
 ): Promise<AgentContext> {
-  const [messages, tasks] = await Promise.all([
-    dependencies.conversations.listMessages(context.task.conversationId),
-    dependencies.tasks.listByConversation(context.task.conversationId),
-  ]);
-  const tasksById = new Map(tasks.map((task) => [task.id, task]));
-  const messagesById = new Map(messages.map((message) => [message.id, message]));
+  const workSession =
+    'workSession' in dependencies
+      ? dependencies.workSession
+      : await loadWorkSessionView(context.task.conversationId, dependencies);
+  const { messages, tasks, messagesById, tasksById } = workSession;
   const history = selectedHistoryMessages(
     messages,
     tasks,

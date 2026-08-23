@@ -6,7 +6,7 @@ import { openChatBrowserDatabase } from '../../src/persistence/open-database';
 import { IndexedDbTaskRepository } from '../../src/persistence/task-repository';
 import { TaskLeaseManager } from '../../src/tasks/task-lease';
 import { createTask } from '../../src/tasks/task-factory';
-import { createTestDatabaseName } from '../persistence/test-helpers';
+import { createTestDatabaseName, seedTask } from '../persistence/test-helpers';
 
 describe('TaskLeaseManager', () => {
   it('allows takeover only after a 30-second lease expires', async () => {
@@ -17,7 +17,7 @@ describe('TaskLeaseManager', () => {
       { conversationId: 'conv_1', tabId: 7, goal: 'Complete the page' },
       { clock: { now: () => 1_000 }, ids: { create: () => 'task_1' } },
     );
-    await repository.create(task);
+    await seedTask(database, task);
 
     await expect(manager.acquire(task.id, 'runner_a', 1_000)).resolves.toBe(true);
     await expect(manager.acquire(task.id, 'runner_b', 1_001)).resolves.toBe(false);
@@ -40,7 +40,7 @@ describe('TaskLeaseManager', () => {
       { conversationId: 'conv_1', tabId: 7, goal: 'Complete the page' },
       { clock: { now: () => 1_000 }, ids: { create: () => 'task_1' } },
     );
-    await repository.create(task);
+    await seedTask(database, task);
 
     await manager.acquire(task.id, 'runner_a', 1_000);
     await expect(manager.renew(task.id, 'runner_a', 10_000)).resolves.toBe(true);

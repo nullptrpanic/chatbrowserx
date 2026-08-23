@@ -45,7 +45,6 @@ function buildSnapshot(): TaskSnapshot {
 function buildCommands(snapshot: TaskSnapshot): TaskCommandPort {
   return {
     create: vi.fn(async () => snapshot),
-    continueCancelled: vi.fn(async () => snapshot),
     getSnapshot: vi.fn(async () => snapshot),
     pause: vi.fn(async () => snapshot),
     resume: vi.fn(async () => snapshot),
@@ -102,6 +101,7 @@ function buildPanel() {
     settings,
   };
   return {
+    getStateVersion: vi.fn(() => ({ stateVersion: 7 })),
     getSnapshot: vi.fn(async () => snapshot),
     getTaskDetails: vi.fn(async (): Promise<PanelTask> => ({
       id: 'task_1',

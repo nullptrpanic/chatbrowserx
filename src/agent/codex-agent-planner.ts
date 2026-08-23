@@ -9,13 +9,14 @@ import type { ModelStreamEvent, ModelUsage } from '../providers/stream-events';
 import type { IdGenerator } from '../shared/ids';
 import type { Clock } from '../shared/time';
 import {
+  sandboxCatalogForCompletedTools,
   sandboxCatalogInstructions,
   type SkillCatalogPort,
-  type SkillCatalogSnapshot,
 } from '../sandbox/skill-catalog';
 import type { MessageRecord } from '../tasks/message-types';
 import type { ModelOutputContinuationItem } from '../tasks/continuation-types';
 import { buildAgentContext } from './context/agent-context';
+import { estimateUnmeasuredContextTokens } from './context/context-headroom';
 import {
   createNativeCompactionContinuation,
   shouldUseNativeContextCompaction,
@@ -26,6 +27,7 @@ import { browserToolContractForCheckpoint } from './tools/browser-tool-availabil
 import { parseBrowserToolCall } from './tools/browser-tool-schema';
 import { SANDBOX_TOOL_DEFINITIONS, parseSandboxToolCall } from './tools/sandbox-tool-schema';
 import { TAVILY_TOOL_DEFINITIONS, parseTavilyToolCall } from './tools/tavily-tool-schema';
+import { loadWorkSessionView, type WorkSessionView } from './work-session-view';
 
 export interface TavilyAvailabilityPort {
   isConfigured(): Promise<boolean>;
@@ -126,22 +128,18 @@ export class CodexAgentPlanner implements AgentPlanner {
 
   /** Runs one model turn that yields either one validated Tavily call or final text. */
   async *plan(input: AgentPlanInput, signal: AbortSignal): AsyncGenerator<AgentEvent> {
-    const settings = await this.#dependencies.settings.get();
     const browserContract = browserToolContractForCheckpoint(input.checkpoint);
-    let tavilyConfigured = false;
-    let skillCatalog: SkillCatalogSnapshot | null = null;
-    if (browserContract.toolChoice === undefined) {
-      try {
-        tavilyConfigured = await this.#dependencies.tavilyAvailability.isConfigured();
-      } catch {
-        tavilyConfigured = false;
-      }
-      try {
-        skillCatalog = (await this.#dependencies.skillCatalog?.get(signal)) ?? null;
-      } catch {
-        skillCatalog = null;
-      }
-    }
+    const optionalToolsAvailable = browserContract.toolChoice === undefined;
+    const [settings, workSession, tavilyConfigured, skillCatalog] = await Promise.all([
+      this.#dependencies.settings.get(),
+      loadWorkSessionView(input.task.conversationId, this.#dependencies),
+      optionalToolsAvailable
+        ? this.#dependencies.tavilyAvailability.isConfigured().catch(() => false)
+        : Promise.resolve(false),
+      optionalToolsAvailable
+        ? (this.#dependencies.skillCatalog?.get(signal).catch(() => null) ?? Promise.resolve(null))
+        : Promise.resolve(null),
+    ]);
     const tools = [
       ...browserContract.tools,
       ...(tavilyConfigured ? TAVILY_TOOL_DEFINITIONS : []),
@@ -159,13 +157,16 @@ export class CodexAgentPlanner implements AgentPlanner {
         historyMessageLimit: settings.historyMessageLimit,
       },
       {
-        conversations: this.#dependencies.conversations,
-        tasks: this.#dependencies.tasks,
+        workSession,
         attachments: this.#dependencies.attachments,
       },
     );
     const catalogInstructions =
-      skillCatalog === null ? '' : sandboxCatalogInstructions(skillCatalog);
+      skillCatalog === null
+        ? ''
+        : sandboxCatalogInstructions(
+            sandboxCatalogForCompletedTools(skillCatalog, input.checkpoint.completedToolResults),
+          );
     const systemPrompt =
       catalogInstructions.length === 0
         ? context.systemPrompt
@@ -173,7 +174,13 @@ export class CodexAgentPlanner implements AgentPlanner {
     if (
       this.#dependencies.provider.compact !== undefined &&
       browserContract.scrollContinuation === undefined &&
-      shouldUseNativeContextCompaction(input.checkpoint)
+      shouldUseNativeContextCompaction(
+        input.checkpoint,
+        estimateUnmeasuredContextTokens(
+          context.activeInput,
+          input.checkpoint.completedToolResults.at(-1)?.callId,
+        ),
+      )
     ) {
       const compacted = await this.#dependencies.provider.compact(
         {
@@ -194,7 +201,7 @@ export class CodexAgentPlanner implements AgentPlanner {
       };
       return;
     }
-    const reusableMessage = await this.#prepareReusableMessage(input);
+    const reusableMessage = await this.#prepareReusableMessage(input, workSession);
     const state: ModelTurnState = {
       responseId: null,
       completed: false,
@@ -373,8 +380,11 @@ export class CodexAgentPlanner implements AgentPlanner {
   }
 
   /** Normalizes stale or uncommitted replies and returns the latest one for in-place regeneration. */
-  async #prepareReusableMessage(input: AgentPlanInput): Promise<MessageRecord | null> {
-    const messages = await this.#dependencies.conversations.listMessages(input.task.conversationId);
+  async #prepareReusableMessage(
+    input: AgentPlanInput,
+    workSession: WorkSessionView,
+  ): Promise<MessageRecord | null> {
+    const { messages } = workSession;
     const now = this.#dependencies.clock.now();
     const checkpointMessageIds = new Set(
       input.checkpoint.continuationItems.flatMap((item) => {

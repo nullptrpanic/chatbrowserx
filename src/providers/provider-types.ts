@@ -1,4 +1,7 @@
 import type { ModelStreamEvent } from './stream-events';
+import type { ModelToolChoice, ModelToolDefinition } from '../tools/contracts/model-tool';
+
+export type { ModelToolChoice, ModelToolDefinition } from '../tools/contracts/model-tool';
 
 export type ModelReasoningEffort = 'low' | 'medium' | 'high' | 'xhigh';
 
@@ -45,16 +48,6 @@ export type ModelInputItem =
       readonly itemId: string;
       readonly encryptedContent: string;
     };
-
-export interface ModelToolDefinition {
-  readonly type: 'function';
-  readonly name: string;
-  readonly description: string;
-  readonly parameters: Readonly<Record<string, unknown>>;
-  readonly strict: true;
-}
-
-export type ModelToolChoice = 'auto' | { readonly type: 'function'; readonly name: string };
 
 export interface ModelRequest {
   readonly model: string;

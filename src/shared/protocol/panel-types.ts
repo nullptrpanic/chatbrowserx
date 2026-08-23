@@ -130,6 +130,8 @@ export interface PanelEditableSettings {
 }
 
 export interface PanelSnapshot {
+  /** Optional only while an older live background instance is still connected. */
+  readonly stateVersion?: number | undefined;
   readonly generatedAt: number;
   readonly tab: PanelTabContext;
   readonly conversation: PanelConversationSummary | null;

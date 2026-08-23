@@ -39,9 +39,7 @@ function buildFixture() {
   const dependencies = {
     conversations: {
       listAll: vi.fn(async () => [conversation]),
-      listByTab: vi.fn(async () => [conversation]),
       get: vi.fn(async (): Promise<typeof conversation | undefined> => conversation),
-      create: vi.fn(async () => undefined),
       listMessages: vi.fn(async (): Promise<MessageRecord[]> => [
         {
           id: 'message_1',
@@ -56,13 +54,11 @@ function buildFixture() {
           updatedAt: 1_010,
         },
       ]),
-      appendMessage: vi.fn(async () => undefined),
-      updateMessage: vi.fn(async () => undefined),
       appendSupplement: vi.fn(async () => undefined),
       clearConversation: vi.fn(async () => undefined),
     },
     tasks: {
-      listUnfinished: vi.fn(async (): Promise<TaskRun[]> => []),
+      listAll: vi.fn(async (): Promise<TaskRun[]> => [task]),
       listByConversation: vi.fn(async (conversationId: string): Promise<TaskRun[]> => {
         void conversationId;
         return [task];
@@ -124,8 +120,8 @@ function buildFixture() {
       setSandboxToken: vi.fn(async () => undefined),
     },
     commands: {
-      create: vi.fn(async () => ({ task, checkpoint, events: [] })),
-      continueCancelled: vi.fn(async () => ({ task, checkpoint, events: [] })),
+      createSubmission: vi.fn(async () => ({ task, checkpoint, events: [] })),
+      continueCancelledSubmission: vi.fn(async () => ({ task, checkpoint, events: [] })),
     },
     cancelTask: vi.fn(async () => ({ task, checkpoint, events: [] })),
     tabs: {
@@ -142,6 +138,7 @@ function buildFixture() {
     },
     clock: { now: () => 2_000 },
     ids: { create: (prefix: string) => `${prefix}_new` },
+    stateVersion: { get: () => 0, changed: vi.fn() },
     scheduleTask: vi.fn(async (...arguments_: [string]) => {
       void arguments_;
     }),
@@ -150,6 +147,37 @@ function buildFixture() {
 }
 
 describe('PanelService', () => {
+  it('reads all task summaries once instead of querying once per conversation', async () => {
+    const fixture = buildFixture();
+    const anotherConversation = {
+      id: 'conversation_2',
+      tabId: 8,
+      title: 'Another task',
+      createdAt: 900,
+      updatedAt: 1_100,
+    };
+    fixture.dependencies.conversations.listAll.mockResolvedValue([
+      anotherConversation,
+      fixture.conversation,
+    ]);
+    const listAll = vi.fn(async () => [fixture.task]);
+    const service = new PanelService({
+      ...fixture.dependencies,
+      tasks: { ...fixture.dependencies.tasks, listAll },
+      stateVersion: { get: () => 17, changed: vi.fn() },
+    });
+
+    const snapshot = await service.getSnapshot(7, fixture.conversation.id);
+
+    expect(listAll).toHaveBeenCalledOnce();
+    expect(fixture.dependencies.tasks.listByConversation).not.toHaveBeenCalled();
+    expect(snapshot.stateVersion).toBe(17);
+    expect(snapshot.conversations).toMatchObject([
+      { id: anotherConversation.id, taskStatus: null },
+      { id: fixture.conversation.id, taskStatus: 'completed' },
+    ]);
+  });
+
   it('shares history across tabs while keeping the current page context separate', async () => {
     const fixture = buildFixture();
     const otherConversation = {
@@ -163,7 +191,6 @@ describe('PanelService', () => {
       otherConversation,
       fixture.conversation,
     ]);
-    fixture.dependencies.conversations.listByTab.mockResolvedValue([otherConversation]);
     fixture.dependencies.tasks.listByConversation.mockImplementation(async (conversationId) =>
       conversationId === fixture.conversation.id ? [fixture.task] : [],
     );
@@ -196,12 +223,20 @@ describe('PanelService', () => {
       attachmentIds: [],
     });
 
-    expect(fixture.dependencies.commands.create).toHaveBeenCalledWith({
-      conversationId: fixture.conversation.id,
-      tabId: 9,
-      goal: 'Continue from another page',
-      userMessageId: 'message_new',
-    });
+    expect(fixture.dependencies.commands.createSubmission).toHaveBeenCalledWith(
+      expect.objectContaining({
+        conversation: fixture.conversation,
+        createConversation: false,
+        tabId: 9,
+        goal: 'Continue from another page',
+        message: expect.objectContaining({
+          id: 'message_new',
+          conversationId: fixture.conversation.id,
+          taskId: null,
+          text: 'Continue from another page',
+        }),
+      }),
+    );
   });
 
   it('persists the source page snapshot on each submitted user message', async () => {
@@ -221,13 +256,15 @@ describe('PanelService', () => {
       attachmentIds: [],
     });
 
-    expect(fixture.dependencies.conversations.appendMessage).toHaveBeenCalledWith(
+    expect(fixture.dependencies.commands.createSubmission).toHaveBeenCalledWith(
       expect.objectContaining({
-        sourcePage: {
-          title: 'Median of Two Sorted Arrays',
-          url: 'https://leetcode.com/problems/median-of-two-sorted-arrays/description/',
-          favIconUrl: 'https://leetcode.com/favicon.ico',
-        },
+        message: expect.objectContaining({
+          sourcePage: {
+            title: 'Median of Two Sorted Arrays',
+            url: 'https://leetcode.com/problems/median-of-two-sorted-arrays/description/',
+            favIconUrl: 'https://leetcode.com/favicon.ico',
+          },
+        }),
       }),
     );
   });
@@ -276,7 +313,7 @@ describe('PanelService', () => {
       tabId: 9,
     };
     fixture.dependencies.tasks.listByConversation.mockResolvedValue([cancelledTask]);
-    fixture.dependencies.commands.continueCancelled.mockResolvedValue({
+    fixture.dependencies.commands.continueCancelledSubmission.mockResolvedValue({
       task: continuedTask,
       checkpoint: {
         id: 'checkpoint_continued',
@@ -302,13 +339,16 @@ describe('PanelService', () => {
       attachmentIds: [],
     });
 
-    expect(fixture.dependencies.commands.continueCancelled).toHaveBeenCalledWith({
-      sourceTaskId: cancelledTask.id,
-      tabId: 9,
-      goal: 'Continue after cancellation',
-      userMessageId: 'message_new',
-    });
-    expect(fixture.dependencies.commands.create).not.toHaveBeenCalled();
+    expect(fixture.dependencies.commands.continueCancelledSubmission).toHaveBeenCalledWith(
+      expect.objectContaining({
+        sourceTaskId: cancelledTask.id,
+        tabId: 9,
+        goal: 'Continue after cancellation',
+        conversation: fixture.conversation,
+        message: expect.objectContaining({ id: 'message_new', taskId: null }),
+      }),
+    );
+    expect(fixture.dependencies.commands.createSubmission).not.toHaveBeenCalled();
     expect(fixture.dependencies.scheduleTask).toHaveBeenCalledWith(continuedTask.id);
   });
 
@@ -334,7 +374,7 @@ describe('PanelService', () => {
         error: null,
       },
     ]);
-    fixture.dependencies.commands.create.mockResolvedValue({
+    fixture.dependencies.commands.createSubmission.mockResolvedValue({
       task: freshTask,
       checkpoint: {
         id: 'checkpoint_fresh',
@@ -361,13 +401,15 @@ describe('PanelService', () => {
       attachmentIds: [],
     });
 
-    expect(fixture.dependencies.commands.continueCancelled).not.toHaveBeenCalled();
-    expect(fixture.dependencies.commands.create).toHaveBeenCalledWith({
-      conversationId: fixture.conversation.id,
-      tabId: 9,
-      goal: 'Start from a clean task context',
-      userMessageId: 'message_new',
-    });
+    expect(fixture.dependencies.commands.continueCancelledSubmission).not.toHaveBeenCalled();
+    expect(fixture.dependencies.commands.createSubmission).toHaveBeenCalledWith(
+      expect.objectContaining({
+        conversationId: fixture.conversation.id,
+        tabId: 9,
+        goal: 'Start from a clean task context',
+        message: expect.objectContaining({ id: 'message_new', taskId: null }),
+      }),
+    );
   });
 
   it('falls back to the latest global conversation after another panel deletes the selection', async () => {
@@ -664,6 +706,7 @@ describe('PanelService', () => {
     fixture.dependencies.tasks.get.mockImplementation(async (taskId) =>
       taskId === continuedTask.id ? continuedTask : cancelledTask,
     );
+    fixture.dependencies.tasks.listAll.mockResolvedValue([cancelledTask, continuedTask]);
     fixture.dependencies.tasks.listByConversation.mockResolvedValue([continuedTask, cancelledTask]);
     fixture.dependencies.tasks.listEvents.mockImplementation(async (taskId) =>
       taskId === cancelledTask.id
@@ -1009,6 +1052,7 @@ describe('PanelService', () => {
         updatedAt: 1_300,
       },
     ]);
+    fixture.dependencies.tasks.listAll.mockResolvedValue([fixture.task, secondTask]);
     fixture.dependencies.tasks.listByConversation.mockResolvedValue([fixture.task, secondTask]);
     fixture.dependencies.tasks.listEvents.mockImplementation(async (taskId) =>
       taskId === secondTask.id
@@ -1202,17 +1246,10 @@ describe('PanelService', () => {
 
   it('creates a conversation, durable user message, task, and scheduler handoff in order', async () => {
     const fixture = buildFixture();
-    fixture.dependencies.conversations.listByTab.mockResolvedValueOnce([]);
     fixture.dependencies.conversations.get.mockResolvedValueOnce(undefined);
     const order: string[] = [];
-    fixture.dependencies.conversations.create.mockImplementationOnce(async () => {
-      order.push('conversation');
-    });
-    fixture.dependencies.conversations.appendMessage.mockImplementationOnce(async () => {
-      order.push('message');
-    });
-    fixture.dependencies.commands.create.mockImplementationOnce(async () => {
-      order.push('task');
+    fixture.dependencies.commands.createSubmission.mockImplementationOnce(async () => {
+      order.push('submission');
       return {
         task: fixture.task,
         checkpoint: await fixture.dependencies.tasks.getCheckpoint('checkpoint_1'),
@@ -1226,41 +1263,20 @@ describe('PanelService', () => {
 
     await service.submit({ tabId: 7, text: 'Book a room', attachmentIds: [] });
 
-    expect(order).toEqual(['conversation', 'message', 'task', 'schedule']);
-    expect(fixture.dependencies.conversations.updateMessage).toHaveBeenCalledWith(
-      expect.objectContaining({ taskId: fixture.task.id }),
-    );
-  });
-
-  it('rejects a second task while the selected conversation still has unfinished work', async () => {
-    const fixture = buildFixture();
-    fixture.dependencies.tasks.listByConversation.mockResolvedValueOnce([
-      { ...fixture.task, status: 'paused' },
-    ]);
-    const service = new PanelService(fixture.dependencies);
-
-    await expect(
-      service.submit({
-        tabId: 7,
-        conversationId: fixture.conversation.id,
-        text: 'Start another task',
-        attachmentIds: [],
+    expect(order).toEqual(['submission', 'schedule']);
+    expect(fixture.dependencies.commands.createSubmission).toHaveBeenCalledWith(
+      expect.objectContaining({
+        createConversation: true,
+        message: expect.objectContaining({ taskId: null }),
       }),
-    ).rejects.toMatchObject({ code: 'TASK_ALREADY_RUNNING', message: '已有任务运行中' });
-    expect(fixture.dependencies.conversations.appendMessage).not.toHaveBeenCalled();
-    expect(fixture.dependencies.commands.create).not.toHaveBeenCalled();
+    );
   });
 
   it('rejects a new task when any other global conversation has unfinished work', async () => {
     const fixture = buildFixture();
-    fixture.dependencies.tasks.listUnfinished.mockResolvedValue([
-      {
-        ...fixture.task,
-        id: 'task_running_elsewhere',
-        conversationId: 'conversation_elsewhere',
-        status: 'planning',
-      },
-    ]);
+    fixture.dependencies.commands.createSubmission.mockRejectedValueOnce(
+      Object.assign(new Error('已有任务运行中'), { code: 'TASK_ALREADY_RUNNING' }),
+    );
     const service = new PanelService(fixture.dependencies);
 
     await expect(
@@ -1269,31 +1285,8 @@ describe('PanelService', () => {
       code: 'TASK_ALREADY_RUNNING',
       message: '已有任务运行中',
     });
-    expect(fixture.dependencies.conversations.create).not.toHaveBeenCalled();
-    expect(fixture.dependencies.conversations.appendMessage).not.toHaveBeenCalled();
-    expect(fixture.dependencies.commands.create).not.toHaveBeenCalled();
-  });
-
-  it('serializes concurrent submissions before either can create a second task', async () => {
-    const fixture = buildFixture();
-    let releaseCheck: (() => void) | undefined;
-    fixture.dependencies.tasks.listUnfinished.mockImplementationOnce(
-      () =>
-        new Promise<TaskRun[]>((resolve) => {
-          releaseCheck = () => resolve([]);
-        }),
-    );
-    const service = new PanelService(fixture.dependencies);
-
-    const first = service.submit({ tabId: 7, text: 'First task', attachmentIds: [] });
-    await Promise.resolve();
-    await expect(
-      service.submit({ tabId: 7, text: 'Second task', attachmentIds: [] }),
-    ).rejects.toMatchObject({ code: 'TASK_ALREADY_RUNNING' });
-    releaseCheck?.();
-    await first;
-
-    expect(fixture.dependencies.commands.create).toHaveBeenCalledTimes(1);
+    expect(fixture.dependencies.commands.createSubmission).toHaveBeenCalledTimes(1);
+    expect(fixture.dependencies.scheduleTask).not.toHaveBeenCalled();
   });
 
   it('saves only supplied secrets and clears terminal history before garbage collection', async () => {

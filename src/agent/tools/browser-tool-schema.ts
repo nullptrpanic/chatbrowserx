@@ -1,9 +1,11 @@
 import { z } from 'zod';
 import { providerErrorFromCode } from '../../providers/provider-errors';
-import type { ModelToolDefinition } from '../../providers/provider-types';
+import { strictFunctionTool, type ModelToolDefinition } from '../../tools/contracts/model-tool';
+import {
+  parseToolCallArguments,
+  type ModelToolCallSource,
+} from '../../tools/contracts/tool-call-envelope';
 
-const MAX_TOOL_CALL_ID_CHARACTERS = 256;
-const MAX_TOOL_ARGUMENTS_JSON_CHARACTERS = 32 * 1_024;
 const MAX_TAB_ID = 2_147_483_647;
 const MAX_COORDINATE = 1_000_000;
 const MAX_SCROLL_DELTA = 10_000;
@@ -257,11 +259,7 @@ export type BrowserOperation =
 
 export type BrowserToolInput = z.infer<(typeof BROWSER_SCHEMAS)[BrowserToolName]>;
 
-export interface BrowserToolCallSource {
-  readonly callId: string;
-  readonly name: string;
-  readonly argumentsJson: string;
-}
+export type BrowserToolCallSource = ModelToolCallSource;
 
 export interface ParsedBrowserToolCall {
   readonly family: 'browser';
@@ -321,18 +319,7 @@ function toolDefinition(
   description: string,
   properties: Readonly<Record<string, FlatProperty>>,
 ): ModelToolDefinition {
-  return {
-    type: 'function',
-    name,
-    description,
-    parameters: {
-      type: 'object',
-      properties,
-      required: Object.keys(properties),
-      additionalProperties: false,
-    },
-    strict: true,
-  };
+  return strictFunctionTool(name, description, properties);
 }
 
 const TAB_ID_PROPERTY = {
@@ -595,16 +582,11 @@ export const BROWSER_TOOL_DEFINITION_BY_NAME = Object.freeze(
 /** Parses one browser call while replacing all unsafe validation details. */
 export function parseBrowserToolCall(input: BrowserToolCallSource): ParsedBrowserToolCall {
   try {
-    if (
-      input.callId.trim().length === 0 ||
-      input.callId.length > MAX_TOOL_CALL_ID_CHARACTERS ||
-      input.argumentsJson.length > MAX_TOOL_ARGUMENTS_JSON_CHARACTERS ||
-      !Object.hasOwn(BROWSER_SCHEMAS, input.name)
-    ) {
+    if (!Object.hasOwn(BROWSER_SCHEMAS, input.name)) {
       throw new Error('Invalid browser tool call envelope.');
     }
     const name = input.name as BrowserToolName;
-    const value: unknown = JSON.parse(input.argumentsJson);
+    const value = parseToolCallArguments(input);
     const arguments_ = BROWSER_SCHEMAS[name].parse(value) as BrowserToolInput;
     return {
       family: 'browser',

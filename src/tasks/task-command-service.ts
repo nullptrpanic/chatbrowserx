@@ -1,9 +1,11 @@
 import type { ConversationRepository } from '../persistence/conversation-repository';
-import type { TaskRepository } from '../persistence/task-repository';
+import { TaskRepositoryBusyError, type TaskRepository } from '../persistence/task-repository';
 import type { IdGenerator, MessageId, TaskId } from '../shared/ids';
 import type { Clock } from '../shared/time';
 import type { Checkpoint } from './checkpoint-types';
+import type { Conversation } from './conversation-types';
 import type { ContinuationItem, PendingToolCall } from './continuation-types';
+import type { MessageRecord } from './message-types';
 import { createTask, type CreateTaskInput } from './task-factory';
 import { retainTaskReply } from './task-reply-retention';
 import { transitionTask } from './task-transition';
@@ -23,22 +25,40 @@ export interface CreateTaskCommandInput extends CreateTaskInput {
   readonly userMessageId?: MessageId;
 }
 
-export interface ContinueCancelledTaskInput {
+interface ContinuationSnapshotInput {
   readonly sourceTaskId: TaskId;
   readonly tabId: number;
   readonly goal: string;
   readonly userMessageId: MessageId;
 }
 
+export interface CreateTaskSubmissionInput extends CreateTaskInput {
+  readonly conversation: Conversation;
+  readonly createConversation: boolean;
+  readonly message: MessageRecord;
+}
+
+export interface ContinueCancelledTaskSubmissionInput {
+  readonly sourceTaskId: TaskId;
+  readonly tabId: number;
+  readonly goal: string;
+  readonly conversation: Conversation;
+  readonly message: MessageRecord;
+}
+
 export interface TaskCommandPort {
   create(input: CreateTaskCommandInput): Promise<TaskSnapshot>;
-  continueCancelled(input: ContinueCancelledTaskInput): Promise<TaskSnapshot>;
   getSnapshot(taskId: TaskId): Promise<TaskSnapshot>;
   pause(taskId: TaskId): Promise<TaskSnapshot>;
   resume(taskId: TaskId): Promise<TaskSnapshot>;
   retry(taskId: TaskId): Promise<TaskSnapshot>;
   cancel(taskId: TaskId): Promise<TaskSnapshot>;
   clearContext(taskId: TaskId): Promise<TaskSnapshot>;
+}
+
+export interface TaskSubmissionPort {
+  createSubmission(input: CreateTaskSubmissionInput): Promise<TaskSnapshot>;
+  continueCancelledSubmission(input: ContinueCancelledTaskSubmissionInput): Promise<TaskSnapshot>;
 }
 
 export class TaskCommandError extends Error {
@@ -84,7 +104,7 @@ function insertBeforePendingToolCall(
   return [...items.slice(0, pendingIndex), ...trailingItems, ...additions, pendingItem];
 }
 
-export class TaskCommandService implements TaskCommandPort {
+export class TaskCommandService implements TaskCommandPort, TaskSubmissionPort {
   readonly #repository: TaskRepository;
   readonly #clock: Clock;
   readonly #ids: IdGenerator;
@@ -105,18 +125,45 @@ export class TaskCommandService implements TaskCommandPort {
     this.#conversations = conversations;
   }
 
-  /** Rejects creation boundaries while any durable task still owns the global run slot. */
-  async #assertNoUnfinishedTask(): Promise<void> {
-    if ((await this.#repository.listUnfinished()).length > 0) {
-      throw new TaskCommandError('TASK_ALREADY_RUNNING', '已有任务运行中');
-    }
-  }
-
   /**
    * Creates a queued task and its sequence-zero checkpoint before exposing the task to scheduling.
    */
   async create(input: CreateTaskCommandInput): Promise<TaskSnapshot> {
-    await this.#assertNoUnfinishedTask();
+    const snapshot = this.#createInitialSnapshot(input, input.userMessageId);
+    await this.#mapBusyError(() =>
+      this.#repository.createInitial(snapshot.task, snapshot.checkpoint),
+    );
+    return snapshot;
+  }
+
+  /** Atomically creates a conversation message with its queued task and initial checkpoint. */
+  async createSubmission(input: CreateTaskSubmissionInput): Promise<TaskSnapshot> {
+    if (
+      input.message.conversationId !== input.conversation.id ||
+      input.conversation.id !== input.conversationId
+    ) {
+      throw new TaskCommandError(
+        'TASK_STATE_INVALID',
+        'Submission conversation records do not match.',
+      );
+    }
+    const snapshot = this.#createInitialSnapshot(input, input.message.id);
+    await this.#mapBusyError(() =>
+      this.#repository.createSubmission({
+        conversation: input.conversation,
+        createConversation: input.createConversation,
+        message: { ...input.message, taskId: snapshot.task.id },
+        task: snapshot.task,
+        checkpoint: snapshot.checkpoint,
+      }),
+    );
+    return snapshot;
+  }
+
+  #createInitialSnapshot(
+    input: CreateTaskInput,
+    userMessageId: MessageId | undefined,
+  ): TaskSnapshot {
     const initialTask = createTask(input, {
       clock: this.#clock,
       ids: this.#ids,
@@ -130,12 +177,12 @@ export class TaskCommandService implements TaskCommandPort {
       taskStatus: 'queued',
       completedToolResults: [],
       continuationItems:
-        input.userMessageId === undefined
+        userMessageId === undefined
           ? []
           : [
               {
                 type: 'message_ref',
-                messageId: this.#readMessageId(input.userMessageId),
+                messageId: this.#readMessageId(userMessageId),
               },
             ],
       pendingToolCall: null,
@@ -143,14 +190,39 @@ export class TaskCommandService implements TaskCommandPort {
       browserTargetTabId: task.tabId,
       createdAt: task.createdAt,
     };
-
-    await this.#repository.createInitial(task, checkpoint);
     return { task, checkpoint, events: [] };
   }
 
-  /** Creates a fresh TaskRun while preserving the cancelled run's ordered WorkSession state. */
-  async continueCancelled(input: ContinueCancelledTaskInput): Promise<TaskSnapshot> {
-    await this.#assertNoUnfinishedTask();
+  /** Atomically stores a continuation message with its fresh queued WorkSession task. */
+  async continueCancelledSubmission(
+    input: ContinueCancelledTaskSubmissionInput,
+  ): Promise<TaskSnapshot> {
+    if (input.message.conversationId !== input.conversation.id) {
+      throw new TaskCommandError(
+        'TASK_STATE_INVALID',
+        'Continuation conversation records do not match.',
+      );
+    }
+    const snapshot = await this.#createContinuationSnapshot({
+      sourceTaskId: input.sourceTaskId,
+      tabId: input.tabId,
+      goal: input.goal,
+      userMessageId: input.message.id,
+    });
+    await this.#mapBusyError(() =>
+      this.#repository.createSubmission({
+        conversation: input.conversation,
+        createConversation: false,
+        message: { ...input.message, taskId: snapshot.task.id },
+        task: snapshot.task,
+        checkpoint: snapshot.checkpoint,
+        continuationSourceTaskId: input.sourceTaskId,
+      }),
+    );
+    return snapshot;
+  }
+
+  async #createContinuationSnapshot(input: ContinuationSnapshotInput): Promise<TaskSnapshot> {
     const source = await this.getSnapshot(input.sourceTaskId);
     if (source.task.status !== 'cancelled') {
       throw new TaskCommandError(
@@ -231,8 +303,18 @@ export class TaskCommandService implements TaskCommandPort {
       createdAt: task.createdAt,
     };
 
-    await this.#repository.createContinuation(source.task.id, task, checkpoint);
     return { task, checkpoint, events: [] };
+  }
+
+  async #mapBusyError(operation: () => Promise<void>): Promise<void> {
+    try {
+      await operation();
+    } catch (error) {
+      if (error instanceof TaskRepositoryBusyError) {
+        throw new TaskCommandError('TASK_ALREADY_RUNNING', '已有任务运行中');
+      }
+      throw error;
+    }
   }
 
   /**

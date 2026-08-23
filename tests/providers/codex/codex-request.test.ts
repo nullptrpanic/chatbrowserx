@@ -1,5 +1,4 @@
 import { describe, expect, it } from 'vitest';
-import { CONTEXT_COMMIT_TOOL_DEFINITION } from '../../../src/agent/tools/context-commit-tool-schema';
 import {
   CODEX_COMPACT_URL,
   CODEX_MODEL,
@@ -62,6 +61,9 @@ const MODEL_REQUEST: ModelRequest = {
     },
   ],
 };
+
+const LOOKUP_TOOL = MODEL_REQUEST.tools[0];
+if (LOOKUP_TOOL === undefined) throw new Error('Expected lookup tool fixture.');
 
 describe('buildCodexRequest', () => {
   it('replays one opaque native compaction item without exposing or modifying it', () => {
@@ -224,19 +226,18 @@ describe('buildCodexRequest', () => {
       accountId: 'acct_123',
       request: { ...MODEL_REQUEST, toolChoice: 'auto' },
     });
-    const namedCommit = buildCodexRequest({
+    const namedLookup = buildCodexRequest({
       accessToken: 'synthetic-token-value',
       accountId: 'acct_123',
       request: {
         ...MODEL_REQUEST,
-        tools: [...MODEL_REQUEST.tools, CONTEXT_COMMIT_TOOL_DEFINITION],
-        toolChoice: { type: 'function', name: 'commit_context' },
+        toolChoice: { type: 'function', name: 'lookup_record' },
       },
     });
 
     expect(defaultChoice.body.tool_choice).toBe('auto');
     expect(explicitAuto.body.tool_choice).toBe('auto');
-    expect(namedCommit.body.tool_choice).toEqual({ type: 'function', name: 'commit_context' });
+    expect(namedLookup.body.tool_choice).toEqual({ type: 'function', name: 'lookup_record' });
   });
 
   it('rejects named choices that are unavailable or invalid on the Codex wire', () => {
@@ -269,7 +270,7 @@ describe('buildCodexRequest', () => {
           ...MODEL_REQUEST,
           tools: [
             {
-              ...CONTEXT_COMMIT_TOOL_DEFINITION,
+              ...LOOKUP_TOOL,
               name: 'invalid tool name',
             },
           ],

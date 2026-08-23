@@ -1,7 +1,11 @@
 import { describe, expect, it, vi } from 'vitest';
 import { DEFAULT_APP_SETTINGS } from '../../src/persistence/settings-store';
 import type { SandboxClientPort, SandboxExecResponse } from '../../src/sandbox/sandbox-client';
-import { SkillCatalog, sandboxCatalogInstructions } from '../../src/sandbox/skill-catalog';
+import {
+  SkillCatalog,
+  sandboxCatalogForCompletedTools,
+  sandboxCatalogInstructions,
+} from '../../src/sandbox/skill-catalog';
 import type { Clock } from '../../src/shared/time';
 import { MemoryStorageArea } from '../persistence/test-helpers';
 
@@ -110,7 +114,7 @@ describe('SkillCatalog discovery', () => {
     expect(request).toEqual({ command: expect.any(String) });
     expect(request?.command).toContain('$HOME/.codex/skills');
     expect(request?.command).toContain('$HOME/.agents/skills');
-    expect(request?.command).toContain('head -c 16384');
+    expect(request?.command).toContain('head -c 4096');
     expect(request?.command).toContain('count" -ge 512');
     expect(JSON.stringify(storage.values)).not.toContain('secret body');
   });
@@ -232,8 +236,37 @@ describe('sandboxCatalogInstructions', () => {
     expect(instructions).toContain('Built-in ChatBrowserX tools take priority');
     expect(instructions).toContain('read its SKILL.md completely');
     expect(instructions).toContain('catalog is truncated');
-    expect(instructions).toContain(
-      JSON.stringify([{ name: 'a', description: 'A skill.', path: '/skills/a/SKILL.md' }]),
-    );
+    expect(instructions).toContain(JSON.stringify([['a', 'A skill.', '/skills/a/SKILL.md']]));
+  });
+
+  it('keeps only the selected Skill after its SKILL.md was read successfully', () => {
+    const snapshot = {
+      entries: [
+        { name: 'a', description: 'A skill.', path: '/skills/a/SKILL.md' },
+        { name: 'b', description: 'B skill.', path: '/skills/b/SKILL.md' },
+      ],
+      refreshedAt: 1,
+      truncated: false,
+    };
+
+    expect(
+      sandboxCatalogForCompletedTools(snapshot, [
+        {
+          callId: 'call_read',
+          toolName: 'sandbox_read',
+          argumentsJson: JSON.stringify({
+            path: '/skills/b/SKILL.md',
+            startLine: 1,
+            maxLines: 400,
+          }),
+          output: JSON.stringify({ code: 0, path: '/skills/b/SKILL.md', content: '---' }),
+          resultRef: 'result_read',
+        },
+      ]),
+    ).toEqual({
+      entries: [{ name: 'b', description: 'B skill.', path: '/skills/b/SKILL.md' }],
+      refreshedAt: 1,
+      truncated: false,
+    });
   });
 });

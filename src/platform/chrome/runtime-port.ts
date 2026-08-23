@@ -4,12 +4,22 @@ import {
   type ExtensionResponse,
 } from '../../shared/protocol/message-types';
 
+export type RuntimeNotificationListener = (value: unknown) => void;
+
 export interface RuntimePort {
   send(message: ExtensionMessage): Promise<ExtensionResponse>;
+  subscribe?(listener: RuntimeNotificationListener): () => void;
 }
 
 export interface RuntimeMessenger {
   sendMessage(message: ExtensionMessage): Promise<unknown>;
+}
+
+export interface RuntimeNotificationSource {
+  readonly onMessage: {
+    addListener(listener: (message: unknown) => void): void;
+    removeListener(listener: (message: unknown) => void): void;
+  };
 }
 
 /**
@@ -33,12 +43,17 @@ function isMatchingResponse(value: unknown, requestId: string): value is Extensi
 
 export class ChromeRuntimePort implements RuntimePort {
   readonly #messenger: RuntimeMessenger;
+  readonly #notifications: RuntimeNotificationSource;
 
   /**
    * Creates a protocol port over the real or injected Chrome runtime messenger.
    */
-  constructor(messenger: RuntimeMessenger = chrome.runtime) {
+  constructor(
+    messenger: RuntimeMessenger = chrome.runtime,
+    notifications: RuntimeNotificationSource = chrome.runtime,
+  ) {
     this.#messenger = messenger;
+    this.#notifications = notifications;
   }
 
   /**
@@ -50,6 +65,13 @@ export class ChromeRuntimePort implements RuntimePort {
       throw new Error('Background returned an invalid protocol response.');
     }
     return response;
+  }
+
+  /** Subscribes to validated-by-consumer one-way background notifications. */
+  subscribe(listener: RuntimeNotificationListener): () => void {
+    const runtimeListener = (message: unknown): void => listener(message);
+    this.#notifications.onMessage.addListener(runtimeListener);
+    return () => this.#notifications.onMessage.removeListener(runtimeListener);
   }
 }
 

@@ -1,18 +1,30 @@
 import type { IDBPDatabase } from 'idb';
 import type { ConversationId, TaskId } from '../shared/ids';
 import type { Checkpoint } from '../tasks/checkpoint-types';
+import type { Conversation } from '../tasks/conversation-types';
 import type {
   ContinuationItem,
   ModelOutputContinuationItem,
   PendingToolCall,
 } from '../tasks/continuation-types';
+import type { MessageRecord } from '../tasks/message-types';
 import type { TaskEvent, TaskLease, TaskRun, TaskStatus } from '../tasks/task-types';
 import type { ChatBrowserDatabase } from './database-schema';
+import { checkpointResultReferences } from '../tasks/checkpoint-attachments';
 
 export interface SaveTransitionInput {
   readonly task: TaskRun;
   readonly event: TaskEvent;
   readonly checkpoint: Checkpoint;
+}
+
+export interface CreateSubmissionInput {
+  readonly conversation: Conversation;
+  readonly createConversation: boolean;
+  readonly message: MessageRecord;
+  readonly task: TaskRun;
+  readonly checkpoint: Checkpoint;
+  readonly continuationSourceTaskId?: TaskId;
 }
 
 export interface AcquireLeaseInput {
@@ -31,16 +43,23 @@ export class TaskRepositoryConflictError extends Error {
   }
 }
 
+export class TaskRepositoryBusyError extends Error {
+  constructor() {
+    super('Another task is already running.');
+    this.name = 'TaskRepositoryBusyError';
+  }
+}
+
 export interface TaskRepository {
-  create(task: TaskRun): Promise<void>;
   createInitial(task: TaskRun, checkpoint: Checkpoint): Promise<void>;
-  createContinuation(sourceTaskId: TaskId, task: TaskRun, checkpoint: Checkpoint): Promise<void>;
+  createSubmission(input: CreateSubmissionInput): Promise<void>;
   get(taskId: TaskId): Promise<TaskRun | undefined>;
   listByConversation(conversationId: ConversationId): Promise<TaskRun[]>;
+  listAll(): Promise<TaskRun[]>;
   listEvents(taskId: TaskId, afterSequence?: number): Promise<TaskEvent[]>;
   getCheckpoint(checkpointId: string): Promise<Checkpoint | undefined>;
   saveTransition(input: SaveTransitionInput): Promise<void>;
-  listUnfinished(): Promise<TaskRun[]>;
+  pruneObsoleteCheckpoints(): Promise<number>;
   listRecoverable(now: number): Promise<TaskRun[]>;
   tryAcquireLease(input: AcquireLeaseInput): Promise<TaskLease | null>;
   releaseLease(taskId: TaskId, ownerId: string, generation: number): Promise<void>;
@@ -57,6 +76,23 @@ const currentStatuses = new Set<string>([
   'failed',
   'cancelled',
 ]);
+
+function assertInitialTaskRecords(task: TaskRun, checkpoint: Checkpoint): void {
+  if (
+    task.status !== 'queued' ||
+    task.checkpointId !== checkpoint.id ||
+    checkpoint.taskId !== task.id ||
+    checkpoint.sequence !== 0 ||
+    checkpoint.taskStatus !== 'queued' ||
+    checkpoint.createdAt !== task.createdAt
+  ) {
+    throw new Error('Initial task records do not describe the same queued boundary.');
+  }
+}
+
+function hasUnfinishedTask(tasks: readonly TaskRun[]): boolean {
+  return tasks.map(normalizeTask).some((task) => !terminalStatuses.has(task.status));
+}
 
 /** Maps removed concrete-tool states to a safe user-resumable boundary. */
 function normalizedStatus(value: string): TaskStatus {
@@ -408,94 +444,120 @@ function conversationTimeRange(conversationId: ConversationId): IDBKeyRange {
 
 export class IndexedDbTaskRepository implements TaskRepository {
   readonly #database: IDBPDatabase<ChatBrowserDatabase>;
+  readonly #onMutation: () => void;
 
   /**
    * Creates a task repository over an already opened application database.
    */
-  constructor(database: IDBPDatabase<ChatBrowserDatabase>) {
+  constructor(database: IDBPDatabase<ChatBrowserDatabase>, onMutation: () => void = () => {}) {
     this.#database = database;
-  }
-
-  /**
-   * Inserts a new task and rejects identifier collisions instead of overwriting prior history.
-   */
-  async create(task: TaskRun): Promise<void> {
-    await this.#database.add('tasks', task);
+    this.#onMutation = onMutation;
   }
 
   /**
    * Atomically inserts a queued task and its sequence-zero recovery checkpoint.
    */
   async createInitial(task: TaskRun, checkpoint: Checkpoint): Promise<void> {
-    if (
-      task.status !== 'queued' ||
-      task.checkpointId !== checkpoint.id ||
-      checkpoint.taskId !== task.id ||
-      checkpoint.sequence !== 0 ||
-      checkpoint.taskStatus !== 'queued' ||
-      checkpoint.createdAt !== task.createdAt
-    ) {
-      throw new Error('Initial task records do not describe the same queued boundary.');
-    }
+    assertInitialTaskRecords(task, checkpoint);
 
     const transaction = this.#database.transaction(['tasks', 'checkpoints'], 'readwrite');
+    if (hasUnfinishedTask(await transaction.objectStore('tasks').getAll())) {
+      throw new TaskRepositoryBusyError();
+    }
     await transaction.objectStore('tasks').add(task);
     await transaction.objectStore('checkpoints').add(checkpoint);
     await transaction.done;
+    this.#onMutation();
   }
 
-  /**
-   * Atomically creates one queued continuation only from the latest cancelled run in a WorkSession.
-   */
-  async createContinuation(
-    sourceTaskId: TaskId,
-    task: TaskRun,
-    checkpoint: Checkpoint,
-  ): Promise<void> {
+  /** Atomically stores a user message with its owning queued task and initial checkpoint. */
+  async createSubmission(input: CreateSubmissionInput): Promise<void> {
+    assertInitialTaskRecords(input.task, input.checkpoint);
     if (
-      task.status !== 'queued' ||
-      task.checkpointId !== checkpoint.id ||
-      checkpoint.taskId !== task.id ||
-      checkpoint.sequence !== 0 ||
-      checkpoint.taskStatus !== 'queued' ||
-      checkpoint.createdAt !== task.createdAt
+      input.message.kind !== 'conversation' ||
+      input.message.role !== 'user' ||
+      input.message.status !== 'complete' ||
+      input.message.taskId !== input.task.id ||
+      input.message.conversationId !== input.conversation.id ||
+      input.task.conversationId !== input.conversation.id ||
+      !input.checkpoint.continuationItems.some(
+        (item) => item.type === 'message_ref' && item.messageId === input.message.id,
+      )
     ) {
-      throw new Error('Continuation records do not describe the same queued boundary.');
+      throw new Error('Submission records do not describe the same user task boundary.');
     }
 
-    const transaction = this.#database.transaction(['tasks', 'checkpoints'], 'readwrite');
-    const sourceValue = await transaction.objectStore('tasks').get(sourceTaskId);
-    if (sourceValue === undefined) {
-      throw new Error('Continuation source task does not exist.');
-    }
-    const source = normalizeTask(sourceValue);
-    const conversationTasks = await transaction
-      .objectStore('tasks')
-      .index('by-conversation')
-      .getAll(source.conversationId);
-    const workSessionTasks = conversationTasks
-      .map(normalizeTask)
-      .filter((candidate) => candidate.workSessionId === source.workSessionId)
-      .sort(
-        (left, right) =>
-          left.createdAt - right.createdAt ||
-          left.updatedAt - right.updatedAt ||
-          left.id.localeCompare(right.id),
-      );
-    const latest = workSessionTasks.at(-1);
-    if (source.status !== 'cancelled' || latest?.id !== source.id) {
-      throw new Error('Continuation source must be the latest cancelled WorkSession task.');
-    }
-    if (
-      task.conversationId !== source.conversationId ||
-      task.workSessionId !== source.workSessionId
-    ) {
-      throw new Error('Continuation task must remain in the source WorkSession.');
-    }
+    const transaction = this.#database.transaction(
+      ['conversations', 'messages', 'tasks', 'checkpoints', 'attachments', 'attachment-references'],
+      'readwrite',
+    );
+    try {
+      const storedTasks = await transaction.objectStore('tasks').getAll();
+      if (hasUnfinishedTask(storedTasks)) throw new TaskRepositoryBusyError();
 
-    await transaction.objectStore('tasks').add(task);
-    await transaction.objectStore('checkpoints').add(checkpoint);
-    await transaction.done;
+      let conversation = await transaction.objectStore('conversations').get(input.conversation.id);
+      if (input.createConversation) {
+        if (conversation !== undefined) throw new Error('Conversation already exists.');
+        await transaction.objectStore('conversations').add(input.conversation);
+        conversation = input.conversation;
+      } else if (conversation === undefined) {
+        throw new Error('Conversation does not exist.');
+      }
+
+      if (input.continuationSourceTaskId !== undefined) {
+        const sourceValue = await transaction
+          .objectStore('tasks')
+          .get(input.continuationSourceTaskId);
+        if (sourceValue === undefined) throw new Error('Continuation source task does not exist.');
+        const source = normalizeTask(sourceValue);
+        const workSessionTasks = storedTasks
+          .map(normalizeTask)
+          .filter((candidate) => candidate.workSessionId === source.workSessionId)
+          .sort(
+            (left, right) =>
+              left.createdAt - right.createdAt ||
+              left.updatedAt - right.updatedAt ||
+              left.id.localeCompare(right.id),
+          );
+        if (
+          source.status !== 'cancelled' ||
+          workSessionTasks.at(-1)?.id !== source.id ||
+          input.task.workSessionId !== source.workSessionId ||
+          input.task.conversationId !== source.conversationId
+        ) {
+          throw new Error('Continuation source must be the latest cancelled WorkSession task.');
+        }
+      }
+
+      for (const attachmentId of input.message.attachmentIds) {
+        if ((await transaction.objectStore('attachments').get(attachmentId)) === undefined) {
+          throw new Error('Attachment does not exist.');
+        }
+      }
+      await transaction.objectStore('messages').add(input.message);
+      for (const attachmentId of input.message.attachmentIds) {
+        await transaction.objectStore('attachment-references').put({
+          attachmentId,
+          referenceId: `message:${input.message.id}`,
+        });
+      }
+      await transaction.objectStore('conversations').put({
+        ...conversation,
+        updatedAt: Math.max(conversation.updatedAt, input.message.updatedAt),
+      });
+      await transaction.objectStore('tasks').add(input.task);
+      await transaction.objectStore('checkpoints').add(input.checkpoint);
+      await transaction.done;
+      this.#onMutation();
+    } catch (error) {
+      try {
+        transaction.abort();
+      } catch {
+        // The underlying request may already have aborted the transaction.
+      }
+      await transaction.done.catch(() => undefined);
+      throw error;
+    }
   }
 
   /**
@@ -511,6 +573,12 @@ export class IndexedDbTaskRepository implements TaskRepository {
    */
   async listByConversation(conversationId: ConversationId): Promise<TaskRun[]> {
     const tasks = await this.#database.getAllFromIndex('tasks', 'by-conversation', conversationId);
+    return tasks.map(normalizeTask).sort((left, right) => left.updatedAt - right.updatedAt);
+  }
+
+  /** Lists all tasks once so global conversation summaries do not issue N queries. */
+  async listAll(): Promise<TaskRun[]> {
+    const tasks = await this.#database.getAll('tasks');
     return tasks.map(normalizeTask).sort((left, right) => left.updatedAt - right.updatedAt);
   }
 
@@ -607,18 +675,46 @@ export class IndexedDbTaskRepository implements TaskRepository {
     await transaction.objectStore('tasks').put(input.task);
     await transaction.objectStore('task-events').add(input.event);
     await transaction.objectStore('checkpoints').add(input.checkpoint);
+    if (existingTask.checkpointId !== null && existingTask.checkpointId !== input.checkpoint.id) {
+      await transaction.objectStore('checkpoints').delete(existingTask.checkpointId);
+    }
     await transaction.done;
+    this.#onMutation();
   }
 
-  /**
-   * Lists every non-terminal task for browser-startup recovery decisions.
-   */
-  async listUnfinished(): Promise<TaskRun[]> {
-    const tasks = await this.#database.getAll('tasks');
-    return tasks
-      .map(normalizeTask)
-      .filter((task) => !terminalStatuses.has(task.status))
-      .sort((left, right) => left.updatedAt - right.updatedAt);
+  /** Removes full checkpoints not referenced by a task and releases their unique tool assets. */
+  async pruneObsoleteCheckpoints(): Promise<number> {
+    const transaction = this.#database.transaction(
+      ['tasks', 'checkpoints', 'attachment-references'],
+      'readwrite',
+    );
+    const [tasks, checkpoints] = await Promise.all([
+      transaction.objectStore('tasks').getAll(),
+      transaction.objectStore('checkpoints').getAll(),
+    ]);
+    const currentCheckpointIds = new Set(
+      tasks.flatMap((task) => (task.checkpointId === null ? [] : [task.checkpointId])),
+    );
+    const retained = checkpoints.filter((checkpoint) => currentCheckpointIds.has(checkpoint.id));
+    const obsolete = checkpoints.filter((checkpoint) => !currentCheckpointIds.has(checkpoint.id));
+    const retainedResultReferences = checkpointResultReferences(retained);
+    for (const resultReference of checkpointResultReferences(obsolete)) {
+      if (retainedResultReferences.has(resultReference)) continue;
+      const references = await transaction
+        .objectStore('attachment-references')
+        .index('by-reference')
+        .getAll(resultReference);
+      for (const reference of references) {
+        await transaction
+          .objectStore('attachment-references')
+          .delete([reference.attachmentId, reference.referenceId]);
+      }
+    }
+    for (const checkpoint of obsolete) {
+      await transaction.objectStore('checkpoints').delete(checkpoint.id);
+    }
+    await transaction.done;
+    return obsolete.length;
   }
 
   /**

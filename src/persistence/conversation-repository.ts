@@ -3,13 +3,12 @@ import type { ConversationId } from '../shared/ids';
 import type { Conversation } from '../tasks/conversation-types';
 import type { MessageRecord } from '../tasks/message-types';
 import type { TaskStatus } from '../tasks/task-types';
+import { checkpointResultReferences } from '../tasks/checkpoint-attachments';
 import type { ChatBrowserDatabase } from './database-schema';
 
 export interface ConversationRepository {
-  create(conversation: Conversation): Promise<void>;
   get(conversationId: ConversationId): Promise<Conversation | undefined>;
   listAll(): Promise<Conversation[]>;
-  listByTab(tabId: number): Promise<Conversation[]>;
   listMessages(conversationId: ConversationId): Promise<MessageRecord[]>;
   appendMessage(message: MessageRecord): Promise<void>;
   appendSupplement(message: MessageRecord): Promise<void>;
@@ -52,19 +51,14 @@ async function deleteStringKeys(
 
 export class IndexedDbConversationRepository implements ConversationRepository {
   readonly #database: IDBPDatabase<ChatBrowserDatabase>;
+  readonly #onMutation: () => void;
 
   /**
    * Creates a conversation repository over an already opened application database.
    */
-  constructor(database: IDBPDatabase<ChatBrowserDatabase>) {
+  constructor(database: IDBPDatabase<ChatBrowserDatabase>, onMutation: () => void = () => {}) {
     this.#database = database;
-  }
-
-  /**
-   * Inserts one new conversation and rejects identifier collisions.
-   */
-  async create(conversation: Conversation): Promise<void> {
-    await this.#database.add('conversations', conversation);
+    this.#onMutation = onMutation;
   }
 
   /**
@@ -79,18 +73,6 @@ export class IndexedDbConversationRepository implements ConversationRepository {
    */
   async listAll(): Promise<Conversation[]> {
     const conversations = await this.#database.getAll('conversations');
-    return conversations.sort((left, right) => right.updatedAt - left.updatedAt);
-  }
-
-  /**
-   * Lists conversations for one tab from most recently to least recently updated.
-   */
-  async listByTab(tabId: number): Promise<Conversation[]> {
-    const conversations = await this.#database.getAllFromIndex(
-      'conversations',
-      'by-tab-updated-at',
-      IDBKeyRange.bound([tabId, 0], [tabId, Number.MAX_SAFE_INTEGER]),
-    );
     return conversations.sort((left, right) => right.updatedAt - left.updatedAt);
   }
 
@@ -138,6 +120,7 @@ export class IndexedDbConversationRepository implements ConversationRepository {
       updatedAt: Math.max(conversation.updatedAt, message.updatedAt),
     });
     await transaction.done;
+    this.#onMutation();
   }
 
   /**
@@ -191,6 +174,7 @@ export class IndexedDbConversationRepository implements ConversationRepository {
       updatedAt: Math.max(conversation.updatedAt, message.updatedAt),
     });
     await transaction.done;
+    this.#onMutation();
   }
 
   /**
@@ -238,6 +222,7 @@ export class IndexedDbConversationRepository implements ConversationRepository {
       updatedAt: Math.max(conversation.updatedAt, message.updatedAt),
     });
     await transaction.done;
+    this.#onMutation();
   }
 
   /**
@@ -278,18 +263,30 @@ export class IndexedDbConversationRepository implements ConversationRepository {
         transaction.objectStore('task-events').delete(key),
       );
 
-      const checkpointKeys = await transaction
+      const checkpoints = await transaction
         .objectStore('checkpoints')
         .index('by-task')
-        .getAllKeys(task.id);
-      await deleteStringKeys(checkpointKeys, (key) =>
-        transaction.objectStore('checkpoints').delete(key),
-      );
+        .getAll(task.id);
+      for (const resultReference of checkpointResultReferences(checkpoints)) {
+        const references = await transaction
+          .objectStore('attachment-references')
+          .index('by-reference')
+          .getAll(resultReference);
+        for (const reference of references) {
+          await transaction
+            .objectStore('attachment-references')
+            .delete([reference.attachmentId, reference.referenceId]);
+        }
+      }
+      for (const checkpoint of checkpoints) {
+        await transaction.objectStore('checkpoints').delete(checkpoint.id);
+      }
 
       await transaction.objectStore('tasks').delete(task.id);
     }
 
     await transaction.objectStore('conversations').delete(conversationId);
     await transaction.done;
+    this.#onMutation();
   }
 }

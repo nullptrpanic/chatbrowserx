@@ -21,6 +21,7 @@ export interface MessageRouterDependencies {
   readonly panel: Pick<
     PanelService,
     | 'getSnapshot'
+    | 'getStateVersion'
     | 'getTaskDetails'
     | 'submit'
     | 'supplement'
@@ -97,6 +98,8 @@ async function routeMessage(
         message.requestId,
         await dependencies.panel.getSnapshot(message.payload.tabId, message.payload.conversationId),
       );
+    case 'panel.getStateVersion':
+      return successResponse(message.requestId, dependencies.panel.getStateVersion());
     case 'panel.getTaskDetails':
       return successResponse(
         message.requestId,

@@ -59,22 +59,28 @@ function continuationPressure(items: readonly ContinuationItem[]): ContinuationP
   };
 }
 
-/** Uses measured provider usage plus a durable cooldown to avoid consecutive compaction turns. */
-export function shouldUseNativeContextCompaction(checkpoint: Checkpoint): boolean {
-  const inputTokens = checkpoint.lastModelInputTokens;
+/** Uses measured Provider usage plus the unmeasured continuation suffix and a durable cooldown. */
+export function shouldUseNativeContextCompaction(
+  checkpoint: Checkpoint,
+  unmeasuredInputTokens = 0,
+): boolean {
+  const measuredInputTokens = checkpoint.lastModelInputTokens;
   if (
     checkpoint.pendingToolCall !== null ||
-    inputTokens === undefined ||
-    inputTokens < AUTO_COMPACT_INPUT_TOKEN_HIGH_WATER
+    measuredInputTokens === undefined ||
+    !Number.isSafeInteger(unmeasuredInputTokens) ||
+    unmeasuredInputTokens < 0
   ) {
     return false;
   }
+  const projectedInputTokens = measuredInputTokens + unmeasuredInputTokens;
+  if (projectedInputTokens < AUTO_COMPACT_INPUT_TOKEN_HIGH_WATER) return false;
   const pressure = continuationPressure(checkpoint.continuationItems);
   if (pressure.completedPairsAfterBoundary === 0) return false;
   if (!pressure.hasPriorBoundary) return true;
   return (
     pressure.completedPairsAfterBoundary >= MIN_TOOL_PAIRS_AFTER_COMPACTION ||
-    inputTokens >= AUTO_COMPACT_INPUT_TOKEN_HARD_WATER
+    projectedInputTokens >= AUTO_COMPACT_INPUT_TOKEN_HARD_WATER
   );
 }
 

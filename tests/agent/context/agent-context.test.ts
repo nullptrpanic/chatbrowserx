@@ -63,10 +63,8 @@ function message(
 /** Creates a repository stub with only context-building methods active. */
 function conversationRepository(messages: MessageRecord[]): ConversationRepository {
   return {
-    create: vi.fn(async () => undefined),
     get: vi.fn(async () => undefined),
     listAll: vi.fn(async () => []),
-    listByTab: vi.fn(async () => []),
     listMessages: vi.fn(async () => messages),
     appendMessage: vi.fn(async () => undefined),
     appendSupplement: vi.fn(async () => undefined),

@@ -18,7 +18,7 @@ import type { Clock } from '../shared/time';
 import type { SkillCatalogPort } from '../sandbox/skill-catalog';
 import type { Checkpoint, CompletedToolResult } from './checkpoint-types';
 import type { MessageRecord, MessageSourcePage } from './message-types';
-import { TaskCommandError, type TaskCommandPort, type TaskSnapshot } from './task-command-service';
+import type { TaskSnapshot, TaskSubmissionPort } from './task-command-service';
 import type { TaskEvent, TaskRun } from './task-types';
 
 const ATTACHMENT_GC_GRACE_MS = 24 * 60 * 60 * 1_000;
@@ -35,18 +35,11 @@ const previewImageTypes = new Set<string>(IMAGE_POLICY.acceptedMimeTypes);
 export interface PanelServiceDependencies {
   readonly conversations: Pick<
     ConversationRepository,
-    | 'listAll'
-    | 'get'
-    | 'create'
-    | 'listMessages'
-    | 'appendMessage'
-    | 'appendSupplement'
-    | 'updateMessage'
-    | 'clearConversation'
+    'listAll' | 'get' | 'listMessages' | 'appendSupplement' | 'clearConversation'
   >;
   readonly tasks: Pick<
     TaskRepository,
-    'get' | 'listByConversation' | 'listEvents' | 'getCheckpoint' | 'listUnfinished'
+    'get' | 'listAll' | 'listByConversation' | 'listEvents' | 'getCheckpoint'
   >;
   readonly attachments: Pick<AttachmentRepository, 'get' | 'deleteUnreferenced'>;
   readonly settings: Pick<SettingsStore, 'get' | 'save'>;
@@ -60,7 +53,7 @@ export interface PanelServiceDependencies {
     | 'setSandboxToken'
   >;
   readonly sandboxCatalog?: Pick<SkillCatalogPort, 'invalidate'>;
-  readonly commands: Pick<TaskCommandPort, 'create' | 'continueCancelled'>;
+  readonly commands: TaskSubmissionPort;
   readonly cancelTask: (taskId: string) => Promise<TaskSnapshot>;
   readonly tabs: {
     get(tabId: number): Promise<{
@@ -79,6 +72,7 @@ export interface PanelServiceDependencies {
   readonly clock: Clock;
   readonly ids: IdGenerator;
   readonly scheduleTask: (taskId: string) => Promise<void>;
+  readonly stateVersion: { readonly get: () => number; readonly changed: () => void };
 }
 
 export interface SubmitPanelMessageInput {
@@ -270,7 +264,6 @@ function taskDetailIndexes(
 
 export class PanelService {
   readonly #dependencies: PanelServiceDependencies;
-  #submissionInFlight = false;
 
   /** Creates the sanitized Side Panel query and command boundary. */
   constructor(dependencies: PanelServiceDependencies) {
@@ -279,10 +272,12 @@ export class PanelService {
 
   /** Builds a fresh global-conversation snapshot with current-tab page context. */
   async getSnapshot(tabId: number, conversationId?: string): Promise<PanelSnapshot> {
-    const [tab, conversations, settings] = await Promise.all([
+    const stateVersion = this.#dependencies.stateVersion.get();
+    const [tab, conversations, settings, allTasks] = await Promise.all([
       this.#dependencies.tabs.get(tabId),
       this.#dependencies.conversations.listAll(),
       this.#readSettings(),
+      this.#dependencies.tasks.listAll(),
     ]);
     const url = (tab.url ?? '').slice(0, 4_096);
     const webOrigin = readWebOrigin(url);
@@ -292,10 +287,14 @@ export class PanelService {
         : await this.#dependencies.permissions
             .contains({ origins: [webOrigin.pattern] })
             .catch(() => false);
-    const taskLists = await Promise.all(
-      conversations.map((conversation) =>
-        this.#dependencies.tasks.listByConversation(conversation.id),
-      ),
+    const tasksByConversation = new Map<string, TaskRun[]>();
+    for (const task of allTasks) {
+      const tasks = tasksByConversation.get(task.conversationId);
+      if (tasks === undefined) tasksByConversation.set(task.conversationId, [task]);
+      else tasks.push(task);
+    }
+    const taskLists = conversations.map(
+      (conversation) => tasksByConversation.get(conversation.id) ?? [],
     );
     const summaries: PanelConversationSummary[] = conversations.map((conversation, index) => {
       const task = taskLists[index]?.at(-1) ?? null;
@@ -348,6 +347,7 @@ export class PanelService {
       latestTask === null ? null : (panelTasks.find((task) => task.id === latestTask.id) ?? null);
 
     return {
+      stateVersion,
       generatedAt: this.#dependencies.clock.now(),
       tab: {
         id: tab.id ?? tabId,
@@ -378,6 +378,11 @@ export class PanelService {
       task: panelTask,
       settings,
     };
+  }
+
+  /** Returns the cheap process-wide durable-state version used by recovery polling. */
+  getStateVersion(): { readonly stateVersion: number } {
+    return { stateVersion: this.#dependencies.stateVersion.get() };
   }
 
   /** Loads result bodies aligned with the retained event window for one expanded task. */
@@ -423,90 +428,66 @@ export class PanelService {
       throw new Error('Message attachments are invalid.');
     }
 
-    if (this.#submissionInFlight) {
-      throw new TaskCommandError('TASK_ALREADY_RUNNING', '已有任务运行中');
+    const sourceTab = await this.#dependencies.tabs.get(input.tabId);
+    const sourcePage = readMessageSourcePage({
+      title: sourceTab.title ?? '',
+      url: sourceTab.url ?? '',
+      favIconUrl: sourceTab.favIconUrl ?? null,
+    });
+    const now = this.#dependencies.clock.now();
+    let latestTask: TaskRun | undefined;
+    const conversation =
+      input.conversationId === undefined
+        ? {
+            id: this.#createId('conversation'),
+            tabId: input.tabId,
+            title: conversationTitle(text, attachmentIds.length > 0),
+            createdAt: now,
+            updatedAt: now,
+          }
+        : await this.#dependencies.conversations.get(input.conversationId);
+    if (conversation === undefined) {
+      throw new Error('Conversation is unavailable.');
     }
-    this.#submissionInFlight = true;
-
-    try {
-      if ((await this.#dependencies.tasks.listUnfinished()).length > 0) {
-        throw new TaskCommandError('TASK_ALREADY_RUNNING', '已有任务运行中');
-      }
-
-      const sourceTab = await this.#dependencies.tabs.get(input.tabId);
-      const sourcePage = readMessageSourcePage({
-        title: sourceTab.title ?? '',
-        url: sourceTab.url ?? '',
-        favIconUrl: sourceTab.favIconUrl ?? null,
-      });
-      const now = this.#dependencies.clock.now();
-      let latestTask: TaskRun | undefined;
-      const conversation =
-        input.conversationId === undefined
-          ? {
-              id: this.#createId('conversation'),
-              tabId: input.tabId,
-              title: conversationTitle(text, attachmentIds.length > 0),
-              createdAt: now,
-              updatedAt: now,
-            }
-          : await this.#dependencies.conversations.get(input.conversationId);
-      if (conversation === undefined) {
-        throw new Error('Conversation is unavailable.');
-      }
-      if (input.conversationId !== undefined) {
-        const tasks = await this.#dependencies.tasks.listByConversation(conversation.id);
-        latestTask = tasks.at(-1);
-        if (tasks.some((task) => !terminalTaskStatuses.has(task.status))) {
-          throw new TaskCommandError('TASK_ALREADY_RUNNING', '已有任务运行中');
-        }
-      }
-      if (input.conversationId === undefined) {
-        await this.#dependencies.conversations.create(conversation);
-      }
-
-      const message: MessageRecord = {
-        id: this.#createId('message'),
-        kind: 'conversation',
-        conversationId: conversation.id,
-        taskId: null,
-        role: 'user',
-        status: 'complete',
-        text,
-        attachmentIds,
-        ...(sourcePage === undefined ? {} : { sourcePage }),
-        createdAt: now,
-        updatedAt: now,
-      };
-      await this.#dependencies.conversations.appendMessage(message);
-      const goal = taskGoal(text);
-      const snapshot =
-        latestTask?.status === 'cancelled' &&
-        !(await this.#dependencies.tasks
-          .listEvents(latestTask.id)
-          .then((events) => events.some((event) => event.type === 'task.context-cleared')))
-          ? await this.#dependencies.commands.continueCancelled({
-              sourceTaskId: latestTask.id,
-              tabId: input.tabId,
-              goal,
-              userMessageId: message.id,
-            })
-          : await this.#dependencies.commands.create({
-              conversationId: conversation.id,
-              tabId: input.tabId,
-              goal,
-              userMessageId: message.id,
-            });
-      await this.#dependencies.conversations.updateMessage({
-        ...message,
-        taskId: snapshot.task.id,
-        updatedAt: Math.max(message.updatedAt, snapshot.task.createdAt),
-      });
-      await this.#dependencies.scheduleTask(snapshot.task.id);
-      return snapshot;
-    } finally {
-      this.#submissionInFlight = false;
+    if (input.conversationId !== undefined) {
+      latestTask = (await this.#dependencies.tasks.listByConversation(conversation.id)).at(-1);
     }
+    const message: MessageRecord = {
+      id: this.#createId('message'),
+      kind: 'conversation',
+      conversationId: conversation.id,
+      taskId: null,
+      role: 'user',
+      status: 'complete',
+      text,
+      attachmentIds,
+      ...(sourcePage === undefined ? {} : { sourcePage }),
+      createdAt: now,
+      updatedAt: now,
+    };
+    const goal = taskGoal(text);
+    const snapshot =
+      latestTask?.status === 'cancelled' &&
+      !(await this.#dependencies.tasks
+        .listEvents(latestTask.id)
+        .then((events) => events.some((event) => event.type === 'task.context-cleared')))
+        ? await this.#dependencies.commands.continueCancelledSubmission({
+            sourceTaskId: latestTask.id,
+            tabId: input.tabId,
+            goal,
+            conversation,
+            message,
+          })
+        : await this.#dependencies.commands.createSubmission({
+            conversation,
+            createConversation: input.conversationId === undefined,
+            conversationId: conversation.id,
+            tabId: input.tabId,
+            goal,
+            message,
+          });
+    await this.#dependencies.scheduleTask(snapshot.task.id);
+    return snapshot;
   }
 
   /** Persists additional text or images for the next safe loop boundary of a running task. */
@@ -615,6 +596,7 @@ export class PanelService {
     if (sandboxServer !== currentSandboxServer || input.sandboxToken !== undefined) {
       await this.#dependencies.sandboxCatalog?.invalidate();
     }
+    this.#dependencies.stateVersion.changed();
     return this.#readSettings();
   }
 

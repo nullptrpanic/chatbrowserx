@@ -1,5 +1,6 @@
 import type { Protocol } from 'devtools-protocol';
 import { readSelectionState } from '../selection-state';
+import { SemanticSnapshotIndex } from './semantic-snapshot-index';
 
 export const SEMANTIC_SNAPSHOT_STYLES = [
   'cursor',
@@ -698,7 +699,7 @@ function boundedDescendants(start: SnapshotDomNode): readonly SnapshotDomNode[] 
 
 function associatedSelectableControl(
   target: SnapshotDomNode,
-  domByBackendId: ReadonlyMap<number, SnapshotDomNode>,
+  index: SemanticSnapshotIndex<SnapshotDomNode>,
 ): { readonly node: SnapshotDomNode; readonly role: string } | undefined {
   const directRole = selectableRole(target);
   if (directRole) return { node: target, role: directRole };
@@ -710,14 +711,10 @@ function associatedSelectableControl(
     if (current.nodeName === 'LABEL') {
       const controlId = current.attributes.get('for');
       if (controlId) {
-        for (const candidate of domByBackendId.values()) {
-          if (
-            candidate.documentFrameId === current.documentFrameId &&
-            candidate.attributes.get('id') === controlId
-          ) {
-            const candidateRole = selectableRole(candidate);
-            if (candidateRole) return { node: candidate, role: candidateRole };
-          }
+        const candidate = index.findByDomId(current.documentFrameId, controlId);
+        if (candidate) {
+          const candidateRole = selectableRole(candidate);
+          if (candidateRole) return { node: candidate, role: candidateRole };
         }
       }
       for (const candidate of boundedDescendants(current)) {
@@ -1108,6 +1105,7 @@ export function buildSemanticPageSnapshot(
   const seenEntries = new Set<string>();
   const representedDomBackendIds = new Set<number>();
   const domNodes = [...domByBackendId.values()];
+  const snapshotIndex = new SemanticSnapshotIndex(domNodes, input.viewport);
 
   for (const node of orderedAxNodes(input.axNodes)) {
     if (node.ignored) continue;
@@ -1131,13 +1129,19 @@ export function buildSemanticPageSnapshot(
       }
     }
     if (!targetDomNode) actions = [];
-    else if (fullyCoveredByHigherLayer(targetDomNode, domNodes, input.viewport)) {
+    else if (
+      fullyCoveredByHigherLayer(
+        targetDomNode,
+        snapshotIndex.coverageCandidates(targetDomNode.bounds),
+        input.viewport,
+      )
+    ) {
       actions = [];
       targetDomNode = undefined;
     }
 
     const selectable = targetDomNode
-      ? associatedSelectableControl(targetDomNode, domByBackendId)
+      ? associatedSelectableControl(targetDomNode, snapshotIndex)
       : undefined;
     const effectiveRole =
       selectable?.role ??
@@ -1244,7 +1248,15 @@ export function buildSemanticPageSnapshot(
       }
       continue;
     }
-    if (fullyCoveredByHigherLayer(pointerTarget ?? domNode, domNodes, input.viewport)) continue;
+    if (
+      fullyCoveredByHigherLayer(
+        pointerTarget ?? domNode,
+        snapshotIndex.coverageCandidates((pointerTarget ?? domNode).bounds),
+        input.viewport,
+      )
+    ) {
+      continue;
+    }
     const declaredRole = normalizedText(domNode.attributes.get('role'), 100).toLowerCase();
     const role =
       editableRole ??
@@ -1303,6 +1315,6 @@ export function buildSemanticPageSnapshot(
 
   return {
     ...compactTargetEntries(entries, targets),
-    hasVisualSurface: [...domByBackendId.values()].some(isVisualSurface),
+    hasVisualSurface: domNodes.some(isVisualSurface),
   };
 }

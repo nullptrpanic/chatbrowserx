@@ -1,14 +1,16 @@
 import { z } from 'zod';
 import { providerErrorFromCode } from '../../providers/provider-errors';
-import type { ModelToolDefinition } from '../../providers/provider-types';
+import {
+  parseToolCallArguments,
+  type ModelToolCallSource,
+} from '../../tools/contracts/tool-call-envelope';
 
-const MAX_TOOL_CALL_ID_CHARACTERS = 256;
-const MAX_TOOL_ARGUMENTS_JSON_CHARACTERS = 32 * 1_024;
 const MAX_CONTEXT_STATE_CHARACTERS = 8_192;
+const MAX_CONTEXT_CURSOR_CHARACTERS = 256;
 
 export const CONTEXT_COMMIT_TOOL_NAME = 'commit_context' as const;
 
-export const contextCommitToolSchema = z
+const recordedContextCommitSchema = z
   .object({
     state: z
       .string()
@@ -18,27 +20,23 @@ export const contextCommitToolSchema = z
     throughCallId: z
       .string()
       .min(1)
-      .max(MAX_TOOL_CALL_ID_CHARACTERS)
+      .max(MAX_CONTEXT_CURSOR_CHARACTERS)
       .refine((value) => value.trim().length > 0),
   })
   .strict();
 
-export type ContextCommitToolInput = z.infer<typeof contextCommitToolSchema>;
-
-const legacyContextCommitToolSchema = contextCommitToolSchema.omit({
+const legacyContextCommitSchema = recordedContextCommitSchema.omit({
   throughCallId: true,
 });
+
+export type ContextCommitToolInput = z.infer<typeof recordedContextCommitSchema>;
 
 export interface RecordedContextCommitToolInput {
   readonly state: string;
   readonly throughCallId?: string;
 }
 
-export interface ContextCommitToolCallSource {
-  readonly callId: string;
-  readonly name: string;
-  readonly argumentsJson: string;
-}
+export type ContextCommitToolCallSource = ModelToolCallSource;
 
 export interface ParsedContextCommitToolCall {
   readonly callId: string;
@@ -47,126 +45,33 @@ export interface ParsedContextCommitToolCall {
   readonly arguments: ContextCommitToolInput;
 }
 
-export interface ParsedRecordedContextCommitToolCall {
-  readonly callId: string;
-  readonly name: typeof CONTEXT_COMMIT_TOOL_NAME;
-  readonly argumentsJson: string;
-  readonly arguments: RecordedContextCommitToolInput;
-}
-
-function contextCommitToolDefinition(validThroughCallIds?: readonly string[]): ModelToolDefinition {
-  return {
-    type: 'function',
-    name: CONTEXT_COMMIT_TOOL_NAME,
-    description:
-      'Commit a self-contained working-state checkpoint. Call this when the current ' +
-      'working state should replace raw tool calls and outputs through a specific completed ' +
-      'non-commit tool call, for example after completing a meaningful phase or establishing ' +
-      "a new stable task state. Copy that function call's call_id into throughCallId. Future " +
-      'model requests will omit tool pairs through that call inclusively, retain later tool ' +
-      'pairs in raw form, and retain this checkpoint at that boundary. The state must preserve ' +
-      'everything important through throughCallId. Prioritize completeness over brevity within ' +
-      'the state limit. Prefer a boundary that keeps recent raw tool pairs when their exact ' +
-      'outputs may still affect the next action. Choose the boundary based on the task state: ' +
-      'compress older, completed phases while retaining recent, unresolved, or actively used ' +
-      'evidence in raw form. ' +
-      'Retain all relevant user requirements and runtime supplements, verified ' +
-      'facts, decisions, exact identifiers or URLs, current browser or task state, unresolved ' +
-      'issues, important evidence, and failed actions. Remove only redundant raw logs and details ' +
-      'that cannot affect correct continuation. Record only evidence-backed state: do not turn ' +
-      'an unverified recovery idea into a future instruction, and do not claim that retrying, ' +
-      'reloading, or taking a screenshot worked unless a later successful result verified it. ' +
-      'Leave uncertain choices unresolved. This operation does not delete user ' +
-      'messages, system instructions, or local audit records. Do not call immediately ' +
-      'before a final answer unless the checkpoint is needed for later continuation.',
-    parameters: {
-      type: 'object',
-      properties: {
-        state: {
-          type: 'string',
-          minLength: 1,
-          maxLength: MAX_CONTEXT_STATE_CHARACTERS,
-          description:
-            'A compact but complete, self-contained, evidence-backed working-state summary. ' +
-            'Do not omit important user requirements, runtime supplements, verified facts, ' +
-            'decisions, identifiers, current state, failed actions, or unresolved issues needed ' +
-            'to continue correctly without reading the earlier raw tool results. Remove only ' +
-            'redundant raw logs and exclude speculative next-step instructions.',
-        },
-        throughCallId: {
-          type: 'string',
-          minLength: 1,
-          maxLength: MAX_TOOL_CALL_ID_CHARACTERS,
-          ...(validThroughCallIds === undefined ? {} : { enum: [...validThroughCallIds] }),
-          description:
-            'The call_id of a completed non-commit function call. The prior checkpoint and ' +
-            'every completed tool pair through this call are replaced inclusively; later tool ' +
-            'pairs remain available in raw form.',
-        },
-      },
-      required: ['state', 'throughCallId'],
-      additionalProperties: false,
-    },
-    strict: true,
-  };
-}
-
-export const CONTEXT_COMMIT_TOOL_DEFINITION = contextCommitToolDefinition();
-
-/** Binds the commit cursor to IDs that are present in the current model continuation. */
-export function createContextCommitToolDefinition(
-  validThroughCallIds: readonly string[],
-): ModelToolDefinition {
-  return contextCommitToolDefinition(validThroughCallIds);
-}
-
-/** Parses one internal context commit while replacing unsafe validation details. */
+/** Keeps the injected AgentPlanner contract compatible without exposing this tool to Codex. */
 export function parseContextCommitToolCall(
   input: ContextCommitToolCallSource,
 ): ParsedContextCommitToolCall {
   try {
-    if (
-      input.callId.trim().length === 0 ||
-      input.callId.length > MAX_TOOL_CALL_ID_CHARACTERS ||
-      input.name !== CONTEXT_COMMIT_TOOL_NAME ||
-      input.argumentsJson.length > MAX_TOOL_ARGUMENTS_JSON_CHARACTERS
-    ) {
+    if (input.name !== CONTEXT_COMMIT_TOOL_NAME) {
       throw new Error('Invalid context commit envelope.');
     }
-    const value: unknown = JSON.parse(input.argumentsJson);
     return {
       callId: input.callId,
       name: CONTEXT_COMMIT_TOOL_NAME,
       argumentsJson: input.argumentsJson,
-      arguments: contextCommitToolSchema.parse(value),
+      arguments: recordedContextCommitSchema.parse(parseToolCallArguments(input)),
     };
   } catch {
     throw providerErrorFromCode('INVALID_RESPONSE');
   }
 }
 
-/** Parses a durable commit while accepting the cursorless shape recorded by older builds. */
+/** Parses only durable legacy checkpoints; new model requests never expose this tool. */
 export function parseRecordedContextCommitToolCall(
   input: ContextCommitToolCallSource,
-): ParsedRecordedContextCommitToolCall {
-  try {
-    if (
-      input.callId.trim().length === 0 ||
-      input.callId.length > MAX_TOOL_CALL_ID_CHARACTERS ||
-      input.name !== CONTEXT_COMMIT_TOOL_NAME ||
-      input.argumentsJson.length > MAX_TOOL_ARGUMENTS_JSON_CHARACTERS
-    ) {
-      throw new Error('Invalid context commit envelope.');
-    }
-    const value: unknown = JSON.parse(input.argumentsJson);
-    const current = contextCommitToolSchema.safeParse(value);
-    return {
-      callId: input.callId,
-      name: CONTEXT_COMMIT_TOOL_NAME,
-      argumentsJson: input.argumentsJson,
-      arguments: current.success ? current.data : legacyContextCommitToolSchema.parse(value),
-    };
-  } catch {
-    throw providerErrorFromCode('INVALID_RESPONSE');
+): RecordedContextCommitToolInput {
+  if (input.name !== CONTEXT_COMMIT_TOOL_NAME) {
+    throw new Error('Recorded context commit is invalid.');
   }
+  const value = parseToolCallArguments(input);
+  const current = recordedContextCommitSchema.safeParse(value);
+  return current.success ? current.data : legacyContextCommitSchema.parse(value);
 }
