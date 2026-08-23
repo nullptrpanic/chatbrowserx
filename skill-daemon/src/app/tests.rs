@@ -4,7 +4,7 @@ use serde_json::Value;
 use std::time::Duration;
 use tower::ServiceExt;
 
-use super::router;
+use super::{router, router_with_limits};
 
 const TEST_SECRET: &str = "0123456789abcdef0123456789abcdef";
 const TEST_TOKEN: &str = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiJ0ZXN0LXBsdWdpbiIsImlhdCI6MTcyNDMyODAwMCwiZXhwIjo0MTAyNDQ0ODAwfQ.J2vAPeluNLAT2qx8vVNLuhXY7JZ5uhMaHi64Nkmwuj0";
@@ -151,6 +151,64 @@ async fn rejects_invalid_json_and_unknown_fields() {
 
         assert_eq!(response.status(), StatusCode::BAD_REQUEST);
     }
+}
+
+#[tokio::test]
+async fn rejects_oversized_request_bodies_before_dispatch() {
+    let app = router(TEST_SECRET.to_string(), Duration::from_secs(1));
+    let request = Request::post("/exec")
+        .header("authorization", format!("Bearer {TEST_TOKEN}"))
+        .header("content-type", "application/json")
+        .body(Body::from(format!(
+            "{{\"command\":\"{}\"}}",
+            "x".repeat(300_000)
+        )))
+        .unwrap();
+
+    let response = app.oneshot(request).await.unwrap();
+
+    assert_eq!(response.status(), StatusCode::PAYLOAD_TOO_LARGE);
+}
+
+#[tokio::test]
+async fn rejects_saturated_command_concurrency_without_dispatching() {
+    let app = router_with_limits(
+        TEST_SECRET.to_string(),
+        Duration::from_secs(1),
+        1,
+        1024,
+        1024,
+    );
+    let first = Request::post("/exec")
+        .header("authorization", format!("Bearer {TEST_TOKEN}"))
+        .body(Body::from(r#"{"command":"sleep 0.2"}"#))
+        .unwrap();
+    let first_run = tokio::spawn(app.clone().oneshot(first));
+    tokio::time::sleep(Duration::from_millis(20)).await;
+    let second = Request::post("/exec")
+        .header("authorization", format!("Bearer {TEST_TOKEN}"))
+        .body(Body::from(r#"{"command":"true"}"#))
+        .unwrap();
+
+    let response = app.clone().oneshot(second).await.unwrap();
+
+    assert_eq!(response.status(), StatusCode::TOO_MANY_REQUESTS);
+    assert_eq!(first_run.await.unwrap().unwrap().status(), StatusCode::OK);
+}
+
+#[tokio::test]
+async fn terminates_commands_that_exceed_the_output_limit() {
+    let app = router_with_limits(TEST_SECRET.to_string(), Duration::from_secs(1), 1, 64, 64);
+    let request = Request::post("/exec")
+        .header("authorization", format!("Bearer {TEST_TOKEN}"))
+        .body(Body::from(
+            r#"{"command":"head -c 4096 /dev/zero | tr '\\0' x"}"#,
+        ))
+        .unwrap();
+
+    let response = app.oneshot(request).await.unwrap();
+
+    assert_eq!(response.status(), StatusCode::INSUFFICIENT_STORAGE);
 }
 
 #[tokio::test]

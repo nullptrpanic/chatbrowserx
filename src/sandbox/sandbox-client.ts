@@ -2,7 +2,7 @@ import { z } from 'zod';
 import type { CredentialStore } from '../persistence/credential-store';
 import type { SettingsStore } from '../persistence/settings-store';
 
-const MAX_RESPONSE_BYTES = 20 * 1024 * 1024;
+const MAX_RESPONSE_BYTES = 8 * 1024 * 1024;
 
 export type SandboxFetchPort = (input: RequestInfo | URL, init?: RequestInit) => Promise<Response>;
 export type SandboxClientErrorCode = 'AUTH' | 'UNAVAILABLE' | 'INVALID_RESPONSE' | 'ABORTED';

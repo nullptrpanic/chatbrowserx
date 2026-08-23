@@ -112,7 +112,7 @@ describe('SandboxClient execution', () => {
     [new Response('{broken', { headers: { 'Content-Type': 'application/json' } })],
     [jsonResponse({ code: '0', stdout: '', stderr: '' })],
     [
-      new Response('x'.repeat(20 * 1024 * 1024 + 1), {
+      new Response('x'.repeat(8 * 1024 * 1024 + 1), {
         headers: { 'Content-Type': 'application/json' },
       }),
     ],
