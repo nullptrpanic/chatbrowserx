@@ -26,6 +26,29 @@ function readBlobText(blob: Blob): Promise<string> {
 }
 
 describe('ToolResult reviewed labels', () => {
+  it('keeps Sandbox file reads in the generic pretty-JSON result view', async () => {
+    const user = userEvent.setup();
+    render(
+      <ToolResult
+        result={{
+          callId: 'call_read',
+          toolName: 'sandbox_read',
+          argumentsJson: '{"path":"/tmp/SKILL.md","startLine":1,"maxLines":400}',
+          output: '{"code":0,"content":"skill body\\n","truncated":false}',
+          resultRef: 'result_read',
+          attachmentIds: [],
+        }}
+        attachments={attachments}
+        t={createTranslator('zh-CN')}
+      />,
+    );
+
+    await user.click(screen.getByRole('button', { name: /展开\s*读取沙箱文件\s*结果/ }));
+    expect(document.querySelectorAll('.tool-result-content code')).toHaveLength(2);
+    expect(screen.getByRole('button', { name: '复制调用参数' })).toBeVisible();
+    expect(screen.getByRole('button', { name: '复制工具结果' })).toBeVisible();
+  });
+
   it.each([
     ['zh-CN', '搜索网页'],
     ['en', 'Search web'],

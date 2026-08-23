@@ -86,6 +86,57 @@ describe('App background connection', () => {
     );
   });
 
+  it('edits Sandbox Server and Token on a separate settings tab', async () => {
+    const send = vi.fn<RuntimePort['send']>(async (message) => {
+      const settings = {
+        ...buildSnapshot().settings,
+        sandboxServer: 'https://sandbox.example.com/root',
+        hasSandboxToken: true,
+      };
+      return {
+        version: 1,
+        requestId: message.requestId,
+        ok: true,
+        data:
+          message.type === 'panel.getSnapshot'
+            ? { ...buildSnapshot(), settings }
+            : message.type === 'settings.get'
+              ? {
+                  ...settings,
+                  codexAccessToken: '',
+                  tavilyKey: '',
+                  sandboxToken: '',
+                }
+              : message.type === 'settings.save'
+                ? settings
+                : { connected: true },
+      };
+    });
+    const user = userEvent.setup();
+
+    render(<App runtimePort={{ send }} environment={environment} attachmentClient={attachments} />);
+    await user.click(await screen.findByRole('button', { name: '设置' }));
+    await user.click(await screen.findByRole('tab', { name: '沙箱' }));
+    const server = await screen.findByLabelText('Sandbox Server');
+    const token = await screen.findByLabelText(/Sandbox Token/);
+    expect(server).toHaveValue('https://sandbox.example.com/root');
+    expect(token).toHaveAttribute('placeholder', '已保存；留空表示保持不变');
+    await user.clear(server);
+    await user.type(server, 'http://localhost:8787');
+    await user.type(token, 'new-sandbox-token');
+    await user.click(screen.getByRole('button', { name: '保存设置' }));
+
+    expect(send).toHaveBeenCalledWith(
+      expect.objectContaining({
+        type: 'settings.save',
+        payload: expect.objectContaining({
+          sandboxServer: 'http://localhost:8787',
+          sandboxToken: 'new-sandbox-token',
+        }),
+      }),
+    );
+  });
+
   it('loads persisted credentials into masked settings fields and reveals them on request', async () => {
     const send = vi.fn<RuntimePort['send']>(async (message) => ({
       version: 1,

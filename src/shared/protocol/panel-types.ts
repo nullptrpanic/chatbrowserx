@@ -110,8 +110,10 @@ export interface PanelSettingsSnapshot {
   readonly systemPrompt: string;
   readonly language: 'system' | 'zh-CN' | 'en' | 'ja';
   readonly historyMessageLimit: number;
+  readonly sandboxServer?: string;
   readonly hasCodexToken: boolean;
   readonly hasTavilyKey: boolean;
+  readonly hasSandboxToken?: boolean;
 }
 
 /** Settings returned only to the trusted settings screen after an explicit request. */
@@ -121,8 +123,10 @@ export interface PanelEditableSettings {
   readonly systemPrompt: string;
   readonly language: 'system' | 'zh-CN' | 'en' | 'ja';
   readonly historyMessageLimit: number;
+  readonly sandboxServer?: string;
   readonly codexAccessToken: string;
   readonly tavilyKey: string;
+  readonly sandboxToken?: string;
 }
 
 export interface PanelSnapshot {

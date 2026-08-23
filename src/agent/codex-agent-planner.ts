@@ -8,6 +8,11 @@ import type { ModelProvider } from '../providers/provider-types';
 import type { ModelStreamEvent, ModelUsage } from '../providers/stream-events';
 import type { IdGenerator } from '../shared/ids';
 import type { Clock } from '../shared/time';
+import {
+  sandboxCatalogInstructions,
+  type SkillCatalogPort,
+  type SkillCatalogSnapshot,
+} from '../sandbox/skill-catalog';
 import type { MessageRecord } from '../tasks/message-types';
 import type { ModelOutputContinuationItem } from '../tasks/continuation-types';
 import { buildAgentContext } from './context/agent-context';
@@ -19,6 +24,7 @@ import type { AgentEvent, AgentModelTurn, AgentPlanInput, AgentPlanner } from '.
 import { StreamPersistenceBuffer } from './stream-persistence-buffer';
 import { browserToolContractForCheckpoint } from './tools/browser-tool-availability';
 import { parseBrowserToolCall } from './tools/browser-tool-schema';
+import { SANDBOX_TOOL_DEFINITIONS, parseSandboxToolCall } from './tools/sandbox-tool-schema';
 import { TAVILY_TOOL_DEFINITIONS, parseTavilyToolCall } from './tools/tavily-tool-schema';
 
 export interface TavilyAvailabilityPort {
@@ -28,6 +34,7 @@ export interface TavilyAvailabilityPort {
 export interface CodexAgentPlannerDependencies {
   readonly provider: ModelProvider;
   readonly tavilyAvailability: TavilyAvailabilityPort;
+  readonly skillCatalog?: SkillCatalogPort;
   readonly settings: Pick<SettingsStore, 'get'>;
   readonly conversations: Pick<
     ConversationRepository,
@@ -122,14 +129,24 @@ export class CodexAgentPlanner implements AgentPlanner {
     const settings = await this.#dependencies.settings.get();
     const browserContract = browserToolContractForCheckpoint(input.checkpoint);
     let tavilyConfigured = false;
+    let skillCatalog: SkillCatalogSnapshot | null = null;
     if (browserContract.toolChoice === undefined) {
       try {
         tavilyConfigured = await this.#dependencies.tavilyAvailability.isConfigured();
       } catch {
         tavilyConfigured = false;
       }
+      try {
+        skillCatalog = (await this.#dependencies.skillCatalog?.get(signal)) ?? null;
+      } catch {
+        skillCatalog = null;
+      }
     }
-    const tools = [...browserContract.tools, ...(tavilyConfigured ? TAVILY_TOOL_DEFINITIONS : [])];
+    const tools = [
+      ...browserContract.tools,
+      ...(tavilyConfigured ? TAVILY_TOOL_DEFINITIONS : []),
+      ...(skillCatalog === null ? [] : SANDBOX_TOOL_DEFINITIONS),
+    ];
     const availableToolNames = new Set(tools.map(({ name }) => name));
     if (availableToolNames.size !== tools.length) {
       throw new Error('Model tool definitions contain duplicate names.');
@@ -147,6 +164,12 @@ export class CodexAgentPlanner implements AgentPlanner {
         attachments: this.#dependencies.attachments,
       },
     );
+    const catalogInstructions =
+      skillCatalog === null ? '' : sandboxCatalogInstructions(skillCatalog);
+    const systemPrompt =
+      catalogInstructions.length === 0
+        ? context.systemPrompt
+        : `${context.systemPrompt}\n\n${catalogInstructions}`;
     if (
       this.#dependencies.provider.compact !== undefined &&
       browserContract.scrollContinuation === undefined &&
@@ -156,7 +179,7 @@ export class CodexAgentPlanner implements AgentPlanner {
         {
           model: CODEX_MODEL,
           reasoningEffort: settings.reasoningEffort,
-          systemPrompt: context.systemPrompt,
+          systemPrompt,
           input: context.activeInput,
           tools,
         },
@@ -193,7 +216,7 @@ export class CodexAgentPlanner implements AgentPlanner {
         {
           model: CODEX_MODEL,
           reasoningEffort: settings.reasoningEffort,
-          systemPrompt: context.systemPrompt,
+          systemPrompt,
           input: context.input,
           tools,
           ...(browserContract.toolChoice === undefined
@@ -312,6 +335,11 @@ export class CodexAgentPlanner implements AgentPlanner {
         if (state.tool.name.startsWith('browser_')) {
           const call = parseBrowserToolCall(source);
           yield { type: 'browser.call', call, modelTurn, modelOutputItems };
+          return;
+        }
+        if (state.tool.name.startsWith('sandbox_')) {
+          const call = parseSandboxToolCall(source);
+          yield { type: 'sandbox.call', call, modelTurn, modelOutputItems };
           return;
         }
         const call = parseTavilyToolCall(source);

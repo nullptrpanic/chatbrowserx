@@ -5,6 +5,8 @@ const reviewedToolKeys: Readonly<Record<string, MessageKey>> = {
   tavily_search: 'tavilyToolSearch',
   tavily_extract: 'tavilyToolExtract',
   tavily_crawl: 'tavilyToolCrawl',
+  sandbox_read: 'sandboxToolRead',
+  sandbox_exec: 'sandboxToolExec',
   browser_get_current_tab: 'browserToolGetCurrentTab',
   browser_list_tabs: 'browserToolListTabs',
   browser_open_tab: 'browserToolOpenTab',

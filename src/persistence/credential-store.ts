@@ -6,10 +6,13 @@ export interface CredentialStore {
   setCodexAccessToken(value: string): Promise<void>;
   getTavilyKey(): Promise<string | undefined>;
   setTavilyKey(value: string): Promise<void>;
+  getSandboxToken(): Promise<string | undefined>;
+  setSandboxToken(value: string): Promise<void>;
 }
 
 const CODEX_TOKEN_KEY = 'credentials.codexAccessToken';
 const TAVILY_KEY = 'credentials.tavilyKey';
+const SANDBOX_TOKEN_KEY = 'credentials.sandboxToken';
 
 export class ChromeCredentialStore implements CredentialStore {
   readonly #storage: TrustedStorageAreaPort;
@@ -50,6 +53,16 @@ export class ChromeCredentialStore implements CredentialStore {
   /** Saves a nonblank Tavily Key and redacts any lower-level storage failure. */
   async setTavilyKey(value: string): Promise<void> {
     await this.#writeCredential(TAVILY_KEY, value, 'Tavily Key');
+  }
+
+  /** Reads the Sandbox Token only for trusted extension services. */
+  async getSandboxToken(): Promise<string | undefined> {
+    return this.#readCredential(SANDBOX_TOKEN_KEY, 'Sandbox Token');
+  }
+
+  /** Saves a nonblank Sandbox Token and redacts any lower-level storage failure. */
+  async setSandboxToken(value: string): Promise<void> {
+    await this.#writeCredential(SANDBOX_TOKEN_KEY, value, 'Sandbox Token');
   }
 
   /**

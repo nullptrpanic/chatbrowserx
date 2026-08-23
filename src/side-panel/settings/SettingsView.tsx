@@ -15,14 +15,17 @@ export interface SettingsViewProps {
   readonly onSave: (input: SavePanelSettingsInput) => Promise<unknown>;
 }
 
-/** Renders the fixed Codex settings surface without generic Provider or Base URL fields. */
+/** Renders the fixed Codex settings surface plus the optional Sandbox connection. */
 export function SettingsView({ settings, t, onLoad, onSave }: SettingsViewProps) {
+  const [activeTab, setActiveTab] = useState<'general' | 'sandbox'>('general');
   const [reasoningEffort, setReasoningEffort] = useState(settings.reasoningEffort);
   const [systemPrompt, setSystemPrompt] = useState(settings.systemPrompt);
   const [language, setLanguage] = useState(settings.language);
   const [historyMessageLimit, setHistoryMessageLimit] = useState(settings.historyMessageLimit);
   const [codexAccessToken, setCodexAccessToken] = useState('');
   const [tavilyKey, setTavilyKey] = useState('');
+  const [sandboxServer, setSandboxServer] = useState(settings.sandboxServer ?? '');
+  const [sandboxToken, setSandboxToken] = useState('');
   const [status, setStatus] = useState<'idle' | 'saving' | 'saved' | 'error'>('idle');
   const [loadFailed, setLoadFailed] = useState(false);
 
@@ -31,10 +34,12 @@ export function SettingsView({ settings, t, onLoad, onSave }: SettingsViewProps)
     setSystemPrompt(settings.systemPrompt);
     setLanguage(settings.language);
     setHistoryMessageLimit(settings.historyMessageLimit);
+    setSandboxServer(settings.sandboxServer ?? '');
   }, [
     settings.historyMessageLimit,
     settings.language,
     settings.reasoningEffort,
+    settings.sandboxServer,
     settings.systemPrompt,
   ]);
 
@@ -50,6 +55,8 @@ export function SettingsView({ settings, t, onLoad, onSave }: SettingsViewProps)
         setHistoryMessageLimit(loaded.historyMessageLimit);
         setCodexAccessToken(loaded.codexAccessToken);
         setTavilyKey(loaded.tavilyKey);
+        setSandboxServer(loaded.sandboxServer ?? '');
+        setSandboxToken(loaded.sandboxToken ?? '');
       })
       .catch(() => {
         if (active) setLoadFailed(true);
@@ -68,10 +75,12 @@ export function SettingsView({ settings, t, onLoad, onSave }: SettingsViewProps)
       systemPrompt,
       language,
       historyMessageLimit,
+      sandboxServer: sandboxServer.trim(),
       ...(codexAccessToken.trim().length === 0
         ? {}
         : { codexAccessToken: codexAccessToken.trim() }),
       ...(tavilyKey.trim().length === 0 ? {} : { tavilyKey: tavilyKey.trim() }),
+      ...(sandboxToken.trim().length === 0 ? {} : { sandboxToken: sandboxToken.trim() }),
     };
     try {
       await onSave(input);
@@ -96,80 +105,131 @@ export function SettingsView({ settings, t, onLoad, onSave }: SettingsViewProps)
           void save();
         }}
       >
-        <SecretField
-          id="codex-access-token"
-          label={t('codexToken')}
-          hint={settings.hasCodexToken ? t('tokenStored') : t('codexToken')}
-          value={codexAccessToken}
-          onChange={setCodexAccessToken}
-          t={t}
-        />
-        <SecretField
-          id="tavily-api-key"
-          label={t('tavilyKey')}
-          hint={settings.hasTavilyKey ? t('tokenStored') : t('tavilyKey')}
-          value={tavilyKey}
-          onChange={setTavilyKey}
-          t={t}
-        />
-        <label className="form-field" htmlFor="model">
-          <span>{t('model')}</span>
-          <input id="model" value={settings.model} readOnly />
-        </label>
-        <label className="form-field" htmlFor="reasoning-effort">
-          <span>{t('reasoningEffort')}</span>
-          <select
-            id="reasoning-effort"
-            value={reasoningEffort}
-            onChange={(event) =>
-              setReasoningEffort(event.target.value as PanelSettingsSnapshot['reasoningEffort'])
-            }
+        <div className="settings-tabs" role="tablist" aria-label={t('settingsTitle')}>
+          <button
+            type="button"
+            role="tab"
+            aria-selected={activeTab === 'general'}
+            aria-controls="general-settings-panel"
+            className={activeTab === 'general' ? 'is-active' : undefined}
+            onClick={() => setActiveTab('general')}
           >
-            <option value="low">Low</option>
-            <option value="medium">Medium</option>
-            <option value="high">High</option>
-            <option value="xhigh">XHigh</option>
-          </select>
-        </label>
-        <label className="form-field" htmlFor="system-prompt">
-          <span>{t('systemPrompt')}</span>
-          <textarea
-            id="system-prompt"
-            value={systemPrompt}
-            maxLength={20_000}
-            rows={5}
-            onChange={(event) => setSystemPrompt(event.target.value)}
-          />
-        </label>
-        <label className="form-field" htmlFor="language">
-          <span>{t('language')}</span>
-          <select
-            id="language"
-            value={language}
-            onChange={(event) =>
-              setLanguage(event.target.value as PanelSettingsSnapshot['language'])
-            }
+            {t('settingsGeneralTab')}
+          </button>
+          <button
+            type="button"
+            role="tab"
+            aria-selected={activeTab === 'sandbox'}
+            aria-controls="sandbox-settings-panel"
+            className={activeTab === 'sandbox' ? 'is-active' : undefined}
+            onClick={() => setActiveTab('sandbox')}
           >
-            <option value="system">{t('languageSystem')}</option>
-            <option value="zh-CN">{t('languageChinese')}</option>
-            <option value="en">{t('languageEnglish')}</option>
-            <option value="ja">{t('languageJapanese')}</option>
-          </select>
-        </label>
-        <label className="form-field" htmlFor="history-message-limit">
-          <span>{t('historyMessageLimit')}</span>
-          <input
-            id="history-message-limit"
-            type="number"
-            min={1}
-            max={50}
-            step={1}
-            value={historyMessageLimit}
-            aria-label={t('historyMessageLimit')}
-            onChange={(event) => setHistoryMessageLimit(Number(event.target.value))}
-          />
-          <small>{t('historyMessageLimitHint')}</small>
-        </label>
+            {t('settingsSandboxTab')}
+          </button>
+        </div>
+        {activeTab === 'general' ? (
+          <div id="general-settings-panel" className="settings-tab-panel" role="tabpanel">
+            <SecretField
+              id="codex-access-token"
+              label={t('codexToken')}
+              hint={settings.hasCodexToken ? t('tokenStored') : t('codexToken')}
+              value={codexAccessToken}
+              onChange={setCodexAccessToken}
+              t={t}
+            />
+            <SecretField
+              id="tavily-api-key"
+              label={t('tavilyKey')}
+              hint={settings.hasTavilyKey ? t('tokenStored') : t('tavilyKey')}
+              value={tavilyKey}
+              onChange={setTavilyKey}
+              t={t}
+            />
+            <label className="form-field" htmlFor="model">
+              <span>{t('model')}</span>
+              <input id="model" value={settings.model} readOnly />
+            </label>
+            <label className="form-field" htmlFor="reasoning-effort">
+              <span>{t('reasoningEffort')}</span>
+              <select
+                id="reasoning-effort"
+                value={reasoningEffort}
+                onChange={(event) =>
+                  setReasoningEffort(event.target.value as PanelSettingsSnapshot['reasoningEffort'])
+                }
+              >
+                <option value="low">Low</option>
+                <option value="medium">Medium</option>
+                <option value="high">High</option>
+                <option value="xhigh">XHigh</option>
+              </select>
+            </label>
+            <label className="form-field" htmlFor="system-prompt">
+              <span>{t('systemPrompt')}</span>
+              <textarea
+                id="system-prompt"
+                value={systemPrompt}
+                maxLength={20_000}
+                rows={5}
+                onChange={(event) => setSystemPrompt(event.target.value)}
+              />
+            </label>
+            <label className="form-field" htmlFor="language">
+              <span>{t('language')}</span>
+              <select
+                id="language"
+                value={language}
+                onChange={(event) =>
+                  setLanguage(event.target.value as PanelSettingsSnapshot['language'])
+                }
+              >
+                <option value="system">{t('languageSystem')}</option>
+                <option value="zh-CN">{t('languageChinese')}</option>
+                <option value="en">{t('languageEnglish')}</option>
+                <option value="ja">{t('languageJapanese')}</option>
+              </select>
+            </label>
+            <label className="form-field" htmlFor="history-message-limit">
+              <span>{t('historyMessageLimit')}</span>
+              <input
+                id="history-message-limit"
+                type="number"
+                min={1}
+                max={50}
+                step={1}
+                value={historyMessageLimit}
+                aria-label={t('historyMessageLimit')}
+                onChange={(event) => setHistoryMessageLimit(Number(event.target.value))}
+              />
+              <small>{t('historyMessageLimitHint')}</small>
+            </label>
+          </div>
+        ) : (
+          <div id="sandbox-settings-panel" className="settings-tab-panel" role="tabpanel">
+            <label className="form-field" htmlFor="sandbox-server">
+              <span>{t('sandboxServer')}</span>
+              <input
+                id="sandbox-server"
+                aria-label={t('sandboxServer')}
+                type="url"
+                maxLength={2_048}
+                value={sandboxServer}
+                placeholder="https://sandbox.example.com"
+                spellCheck={false}
+                onChange={(event) => setSandboxServer(event.target.value)}
+              />
+              <small>{t('sandboxServerHint')}</small>
+            </label>
+            <SecretField
+              id="sandbox-token"
+              label={t('sandboxToken')}
+              hint={settings.hasSandboxToken ? t('tokenStored') : t('sandboxToken')}
+              value={sandboxToken}
+              onChange={setSandboxToken}
+              t={t}
+            />
+          </div>
+        )}
         <div className="settings-actions">
           <span
             className={`settings-save-status is-${loadFailed ? 'error' : status}`}

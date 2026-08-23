@@ -15,6 +15,7 @@ import type {
 import type { IdGenerator } from '../shared/ids';
 import { bytesToBase64 } from '../shared/base64';
 import type { Clock } from '../shared/time';
+import type { SkillCatalogPort } from '../sandbox/skill-catalog';
 import type { Checkpoint, CompletedToolResult } from './checkpoint-types';
 import type { MessageRecord, MessageSourcePage } from './message-types';
 import { TaskCommandError, type TaskCommandPort, type TaskSnapshot } from './task-command-service';
@@ -51,8 +52,14 @@ export interface PanelServiceDependencies {
   readonly settings: Pick<SettingsStore, 'get' | 'save'>;
   readonly credentials: Pick<
     CredentialStore,
-    'getCodexAccessToken' | 'setCodexAccessToken' | 'getTavilyKey' | 'setTavilyKey'
+    | 'getCodexAccessToken'
+    | 'setCodexAccessToken'
+    | 'getTavilyKey'
+    | 'setTavilyKey'
+    | 'getSandboxToken'
+    | 'setSandboxToken'
   >;
+  readonly sandboxCatalog?: Pick<SkillCatalogPort, 'invalidate'>;
   readonly commands: Pick<TaskCommandPort, 'create' | 'continueCancelled'>;
   readonly cancelTask: (taskId: string) => Promise<TaskSnapshot>;
   readonly tabs: {
@@ -94,6 +101,8 @@ export interface SavePanelSettingsInput {
   readonly historyMessageLimit?: number | undefined;
   readonly codexAccessToken?: string | undefined;
   readonly tavilyKey?: string | undefined;
+  readonly sandboxServer?: string | undefined;
+  readonly sandboxToken?: string | undefined;
 }
 
 /** Returns a supported origin and permission pattern without accepting internal browser pages. */
@@ -584,18 +593,27 @@ export class PanelService {
   /** Saves non-secret settings and only credential fields explicitly supplied by the trusted UI. */
   async saveSettings(input: SavePanelSettingsInput): Promise<PanelSettingsSnapshot> {
     const current = await this.#dependencies.settings.get();
+    const currentSandboxServer = current.sandboxServer ?? '';
+    const sandboxServer = input.sandboxServer ?? currentSandboxServer;
     await this.#dependencies.settings.save({
       ...current,
       reasoningEffort: input.reasoningEffort,
       systemPrompt: input.systemPrompt,
       language: input.language,
       historyMessageLimit: input.historyMessageLimit ?? current.historyMessageLimit,
+      sandboxServer,
     });
     if (input.codexAccessToken !== undefined) {
       await this.#dependencies.credentials.setCodexAccessToken(input.codexAccessToken);
     }
     if (input.tavilyKey !== undefined) {
       await this.#dependencies.credentials.setTavilyKey(input.tavilyKey);
+    }
+    if (input.sandboxToken !== undefined) {
+      await this.#dependencies.credentials.setSandboxToken(input.sandboxToken);
+    }
+    if (sandboxServer !== currentSandboxServer || input.sandboxToken !== undefined) {
+      await this.#dependencies.sandboxCatalog?.invalidate();
     }
     return this.#readSettings();
   }
@@ -609,8 +627,10 @@ export class PanelService {
     ]);
     return {
       ...settings,
+      sandboxServer: settings.sandboxServer ?? '',
       codexAccessToken: codexAccessToken ?? '',
       tavilyKey: tavilyKey ?? '',
+      sandboxToken: '',
     };
   }
 
@@ -794,15 +814,18 @@ export class PanelService {
 
   /** Reads persisted app settings plus credential-presence booleans without exposing their values. */
   async #readSettings(): Promise<PanelSettingsSnapshot> {
-    const [settings, codexToken, tavilyKey] = await Promise.all([
+    const [settings, codexToken, tavilyKey, sandboxToken] = await Promise.all([
       this.#dependencies.settings.get(),
       this.#dependencies.credentials.getCodexAccessToken().catch(() => undefined),
       this.#dependencies.credentials.getTavilyKey().catch(() => undefined),
+      this.#dependencies.credentials.getSandboxToken().catch(() => undefined),
     ]);
     return {
       ...settings,
+      sandboxServer: settings.sandboxServer ?? '',
       hasCodexToken: codexToken !== undefined,
       hasTavilyKey: tavilyKey !== undefined,
+      hasSandboxToken: sandboxToken !== undefined,
     };
   }
 

@@ -14,6 +14,7 @@ describe('ChromeSettingsStore', () => {
 
     await expect(new ChromeSettingsStore(storage).get()).resolves.toMatchObject({
       historyMessageLimit: 50,
+      sandboxServer: '',
     });
   });
 
@@ -28,6 +29,7 @@ describe('ChromeSettingsStore', () => {
       systemPrompt: 'Keep browser actions concise.',
       language: 'zh-CN',
       historyMessageLimit: 42,
+      sandboxServer: ' https://sandbox.test/base/ ',
     });
 
     await expect(store.get()).resolves.toEqual({
@@ -36,7 +38,35 @@ describe('ChromeSettingsStore', () => {
       systemPrompt: 'Keep browser actions concise.',
       language: 'zh-CN',
       historyMessageLimit: 42,
+      sandboxServer: 'https://sandbox.test/base',
     });
+  });
+
+  it.each([
+    ['http://localhost:8787/', 'http://localhost:8787'],
+    ['http://127.0.0.1:8787', 'http://127.0.0.1:8787'],
+    ['http://[::1]:8787/root/', 'http://[::1]:8787/root'],
+    ['https://sandbox.example.com/root/', 'https://sandbox.example.com/root'],
+  ])('accepts and normalizes sandbox server %s', async (sandboxServer, expected) => {
+    const store = new ChromeSettingsStore(new MemoryStorageArea());
+
+    await store.save({ ...DEFAULT_APP_SETTINGS, sandboxServer });
+
+    await expect(store.get()).resolves.toMatchObject({ sandboxServer: expected });
+  });
+
+  it.each([
+    'http://sandbox.example.com',
+    'https://user:password@sandbox.example.com',
+    'https://sandbox.example.com/path?query=1',
+    'https://sandbox.example.com/path#fragment',
+    'ftp://sandbox.example.com',
+  ])('rejects unsafe sandbox server %s', async (sandboxServer) => {
+    const store = new ChromeSettingsStore(new MemoryStorageArea());
+
+    await expect(store.save({ ...DEFAULT_APP_SETTINGS, sandboxServer })).rejects.toThrow(
+      /invalid app settings/i,
+    );
   });
 
   it('clamps a previously valid stored history limit above 50', async () => {

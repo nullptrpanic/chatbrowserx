@@ -32,6 +32,8 @@ export type ExtensionMessage =
         historyMessageLimit?: number | undefined;
         codexAccessToken?: string | undefined;
         tavilyKey?: string | undefined;
+        sandboxServer?: string | undefined;
+        sandboxToken?: string | undefined;
       }
     >
   | Message<'task.create', { tabId: number; conversationId: string; goal: string }>

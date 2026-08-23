@@ -21,11 +21,11 @@ struct AppState {
 
 pub(crate) fn router(secret: String, timeout: Duration) -> Router {
     Router::new()
-        .route("/bash", post(run_bash))
+        .route("/exec", post(run_exec))
         .with_state(AppState { secret, timeout })
 }
 
-async fn run_bash(State(state): State<AppState>, headers: HeaderMap, body: Bytes) -> Response {
+async fn run_exec(State(state): State<AppState>, headers: HeaderMap, body: Bytes) -> Response {
     let token = headers
         .get("authorization")
         .and_then(|value| value.to_str().ok())

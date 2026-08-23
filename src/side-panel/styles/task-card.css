@@ -410,6 +410,51 @@
     monospace;
 }
 
+.terminal-cwd {
+  display: flex;
+  min-width: 0;
+  gap: 7px;
+  margin: 0;
+  padding: 1px 10px 3px 24px;
+  color: #8e9aae;
+  font-size: 9px;
+}
+
+.terminal-cwd code {
+  min-width: 0;
+  overflow-wrap: anywhere;
+  color: #c7d0df;
+}
+
+.terminal-output-heading {
+  display: inline-flex;
+  min-width: 0;
+  align-items: center;
+  gap: 7px;
+}
+
+.terminal-output-heading > span + span {
+  padding-left: 7px;
+  border-left: 1px solid #394459;
+  color: #c7d0df;
+  font-weight: 400;
+}
+
+.terminal-stream + .terminal-stream {
+  border-top: 1px dashed #293345;
+}
+
+.terminal-stream-label {
+  display: block;
+  padding: 1px 10px 1px 24px;
+  color: #77849a;
+  font-size: 8px;
+}
+
+.terminal-stream.is-stderr .terminal-output {
+  color: #f1a4a4;
+}
+
 .terminal-command code {
   min-width: 0;
   overflow-wrap: anywhere;

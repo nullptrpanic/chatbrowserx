@@ -13,6 +13,8 @@ function environmentCredentialStore(token: string): CredentialStore {
     setCodexAccessToken: async () => undefined,
     getTavilyKey: async () => undefined,
     setTavilyKey: async () => undefined,
+    getSandboxToken: async () => undefined,
+    setSandboxToken: async () => undefined,
   };
 }
 

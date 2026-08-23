@@ -11,10 +11,12 @@ describe('ChromeCredentialStore', () => {
     await store.initialize();
     await store.setCodexAccessToken('  codex-token  ');
     await store.setTavilyKey('  new-tavily-key  ');
+    await store.setSandboxToken('  sandbox-token  ');
 
     expect(storage.accessLevel).toBe('TRUSTED_CONTEXTS');
     await expect(store.getCodexAccessToken()).resolves.toBe('codex-token');
     await expect(store.getTavilyKey()).resolves.toBe('new-tavily-key');
+    await expect(store.getSandboxToken()).resolves.toBe('sandbox-token');
   });
 
   it('rejects blank credentials', async () => {
@@ -22,6 +24,7 @@ describe('ChromeCredentialStore', () => {
 
     await expect(store.setCodexAccessToken('   ')).rejects.toThrow(/codex access token/i);
     await expect(store.setTavilyKey('   ')).rejects.toThrow(/tavily key/i);
+    await expect(store.setSandboxToken('   ')).rejects.toThrow(/sandbox token/i);
   });
 
   it('redacts credential values from lower-level storage errors', async () => {
@@ -48,6 +51,20 @@ describe('ChromeCredentialStore', () => {
     await expect(store.setTavilyKey(secret)).rejects.toThrow(/unable to store tavily key/i);
     try {
       await store.setTavilyKey(secret);
+    } catch (error) {
+      expect(String(error)).not.toContain(secret);
+    }
+  });
+
+  it('redacts Sandbox token values from lower-level storage errors', async () => {
+    const storage = new MemoryStorageArea();
+    storage.failWrites = true;
+    const store = new ChromeCredentialStore(storage);
+    const secret = 'secret-sandbox-value';
+
+    await expect(store.setSandboxToken(secret)).rejects.toThrow(/unable to store sandbox token/i);
+    try {
+      await store.setSandboxToken(secret);
     } catch (error) {
       expect(String(error)).not.toContain(secret);
     }

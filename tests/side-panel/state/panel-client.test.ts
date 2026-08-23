@@ -218,7 +218,11 @@ describe('PanelClient', () => {
       { pollIntervalMs: 60_000 },
     );
 
-    await expect(client.getSettings()).resolves.toEqual(editableSettings);
+    await expect(client.getSettings()).resolves.toEqual({
+      ...editableSettings,
+      sandboxServer: '',
+      sandboxToken: '',
+    });
     expect(send).toHaveBeenCalledWith(
       expect.objectContaining({ type: 'settings.get', payload: {} }),
     );

@@ -15,6 +15,7 @@ import { IndexedDbConversationRepository } from '../persistence/conversation-rep
 import { ChromeCredentialStore } from '../persistence/credential-store';
 import { openChatBrowserDatabase } from '../persistence/open-database';
 import { ChromeSettingsStore } from '../persistence/settings-store';
+import { ChromeLocalStorageArea } from '../persistence/storage-area';
 import { IndexedDbTaskRepository } from '../persistence/task-repository';
 import { ContentScriptInstaller } from '../platform/chrome/content-script-installer';
 import { ChromePageObservationPort } from '../platform/chrome/page-observation-port';
@@ -29,6 +30,9 @@ import {
 } from '../platform/chrome/register-background';
 import { CodexProvider } from '../providers/codex/codex-provider';
 import { TavilyClient } from '../providers/tavily/tavily-client';
+import { SandboxClient } from '../sandbox/sandbox-client';
+import { SandboxToolExecutor } from '../sandbox/sandbox-tool-executor';
+import { SkillCatalog } from '../sandbox/skill-catalog';
 import type { IdGenerator, TaskId } from '../shared/ids';
 import type { Clock } from '../shared/time';
 import { RecoveryScanner } from '../tasks/recovery-scanner';
@@ -88,6 +92,14 @@ async function createBackgroundServices(
   });
   const codex = new CodexProvider(credentials);
   const tavily = new TavilyClient(credentials);
+  const sandboxClient = new SandboxClient(settings, credentials);
+  const sandboxCatalog = new SkillCatalog(
+    sandboxClient,
+    settings,
+    new ChromeLocalStorageArea(),
+    systemClock,
+  );
+  const sandbox = new SandboxToolExecutor(sandboxClient);
   const debuggerTransport = new ChromeDebuggerTransport();
   const browserSessions = new TargetSessionRegistry(debuggerTransport);
   const browserRefs = new ElementRefStore(cryptoIds);
@@ -130,6 +142,7 @@ async function createBackgroundServices(
   });
   const planner = new CodexAgentPlanner({
     provider: codex,
+    skillCatalog: sandboxCatalog,
     tavilyAvailability: {
       async isConfigured() {
         try {
@@ -151,6 +164,7 @@ async function createBackgroundServices(
     conversations,
     planner,
     tavily,
+    sandbox,
     browser,
     attachments: attachmentService,
     clock: systemClock,
@@ -170,6 +184,7 @@ async function createBackgroundServices(
     attachments,
     settings,
     credentials,
+    sandboxCatalog,
     commands,
     tabs: chrome.tabs,
     permissions: {

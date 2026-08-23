@@ -121,6 +121,36 @@
   gap: 15px;
 }
 
+.settings-tabs {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 3px;
+  padding: 3px;
+  border: 1px solid var(--cbx-divider);
+  border-radius: 9px;
+  background: var(--cbx-subtle);
+}
+
+.settings-tabs button {
+  min-height: 31px;
+  border-radius: 6px;
+  color: var(--cbx-muted);
+  background: transparent;
+  cursor: pointer;
+  font-size: 11px;
+}
+
+.settings-tabs button.is-active {
+  color: var(--cbx-text);
+  background: var(--cbx-raised);
+  box-shadow: 0 1px 2px color-mix(in srgb, var(--cbx-text) 8%, transparent);
+}
+
+.settings-tab-panel {
+  display: grid;
+  gap: 15px;
+}
+
 .form-field {
   display: grid;
   gap: 6px;

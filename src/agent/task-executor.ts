@@ -6,6 +6,8 @@ import { isProviderError, type ProviderError } from '../providers/provider-error
 import type { TavilyExecutionPort, TavilyResultSet } from '../providers/tavily/tavily-types';
 import type { IdGenerator, TaskId } from '../shared/ids';
 import type { Clock } from '../shared/time';
+import { SandboxClientError } from '../sandbox/sandbox-client';
+import type { SandboxExecutionPort } from '../sandbox/sandbox-tool-executor';
 import type { Checkpoint, CompletedToolResult } from '../tasks/checkpoint-types';
 import type { ContinuationItem, PendingToolCall } from '../tasks/continuation-types';
 import type { TaskSnapshot } from '../tasks/task-command-service';
@@ -25,6 +27,7 @@ import {
 import { parseBrowserToolCall } from './tools/browser-tool-schema';
 import { browserScrollContinuationForCheckpoint } from './tools/browser-tool-availability';
 import { CONTEXT_COMMIT_TOOL_NAME } from './tools/context-commit-tool-schema';
+import { parseSandboxToolCall } from './tools/sandbox-tool-schema';
 import { parseTavilyToolCall } from './tools/tavily-tool-schema';
 
 export type TaskExecutorErrorCode =
@@ -53,6 +56,7 @@ export interface TaskExecutorDependencies {
   readonly planner: AgentPlanner;
   readonly tavily: TavilyExecutionPort;
   readonly browser: BrowserExecutionPort;
+  readonly sandbox?: SandboxExecutionPort;
   readonly attachments?: Pick<AttachmentRepository, 'addReference' | 'removeReference'>;
   readonly clock: Clock;
   readonly ids: IdGenerator;
@@ -78,8 +82,10 @@ type AgentOutcome = Exclude<AgentEvent, { readonly type: 'reasoning.summary' }>;
 const runnableStatuses = new Set<TaskRun['status']>(['queued', 'planning']);
 const TAVILY_TOOL_CALL_LIMIT = 8;
 const BROWSER_TOOL_CALL_LIMIT = 256;
+const SANDBOX_TOOL_CALL_LIMIT = 128;
 const MODEL_TRANSIENT_RETRY_LIMIT = 1;
 const tavilyToolNames = new Set(['tavily_search', 'tavily_extract', 'tavily_crawl']);
+const sandboxToolNames = new Set(['sandbox_read', 'sandbox_exec']);
 const readOnlyBrowserToolNames = new Set([
   'browser_get_current_tab',
   'browser_list_tabs',
@@ -128,7 +134,7 @@ function taskInputError(): TaskError {
   };
 }
 
-function toolCallLimitError(family: 'Tavily' | 'browser'): TaskError {
+function toolCallLimitError(family: 'Tavily' | 'browser' | 'Sandbox'): TaskError {
   return {
     code: 'ToolCallLimitError',
     retryable: false,
@@ -884,7 +890,11 @@ export class TaskExecutor {
         }
 
         const call =
-          result.type === 'browser.call' || result.type === 'context.commit' ? result.call : result;
+          result.type === 'browser.call' ||
+          result.type === 'context.commit' ||
+          result.type === 'sandbox.call'
+            ? result.call
+            : result;
         if (
           snapshot.checkpoint.completedToolResults.some(
             (completed) => completed.callId === call.callId,
@@ -898,23 +908,33 @@ export class TaskExecutor {
         }
         if (result.type !== 'context.commit') {
           const isBrowserCall = result.type === 'browser.call';
+          const isSandboxCall = result.type === 'sandbox.call';
           const completedFamilyCalls = isBrowserCall
             ? (snapshot.checkpoint.browserToolCallsInAttempt ?? 0)
             : snapshot.checkpoint.completedToolResults.filter((completed) =>
-                tavilyToolNames.has(completed.toolName),
+                (isSandboxCall ? sandboxToolNames : tavilyToolNames).has(completed.toolName),
               ).length;
-          const familyLimit = isBrowserCall ? BROWSER_TOOL_CALL_LIMIT : TAVILY_TOOL_CALL_LIMIT;
+          const familyLimit = isBrowserCall
+            ? BROWSER_TOOL_CALL_LIMIT
+            : isSandboxCall
+              ? SANDBOX_TOOL_CALL_LIMIT
+              : TAVILY_TOOL_CALL_LIMIT;
           if (completedFamilyCalls >= familyLimit) {
+            const family = isBrowserCall ? 'browser' : isSandboxCall ? 'sandbox' : 'tavily';
             return this.#saveBoundary(snapshot, ownerId, signal, {
               type: 'task.failed',
-              reason: `${isBrowserCall ? 'browser' : 'tavily'}_tool_call_limit_reached`,
-              error: toolCallLimitError(isBrowserCall ? 'browser' : 'Tavily'),
+              reason: `${family}_tool_call_limit_reached`,
+              error: toolCallLimitError(
+                isBrowserCall ? 'browser' : isSandboxCall ? 'Sandbox' : 'Tavily',
+              ),
             });
           }
         }
 
         const toolName =
-          result.type === 'browser.call' || result.type === 'context.commit'
+          result.type === 'browser.call' ||
+          result.type === 'context.commit' ||
+          result.type === 'sandbox.call'
             ? result.call.name
             : `tavily_${result.operation}`;
 
@@ -968,6 +988,9 @@ export class TaskExecutor {
     if (pending.name.startsWith('browser_')) {
       return this.#executePendingBrowserTool(snapshot, ownerId, signal, pending);
     }
+    if (pending.name.startsWith('sandbox_')) {
+      return this.#executePendingSandboxTool(snapshot, ownerId, signal, pending);
+    }
 
     let call: Extract<AgentEvent, { readonly type: 'tavily.call' }>;
     let toolResult: TavilyResultSet;
@@ -990,6 +1013,61 @@ export class TaskExecutor {
         truncated: toolResult.truncated,
       }),
     );
+  }
+
+  async #executePendingSandboxTool(
+    snapshot: TaskSnapshot,
+    ownerId: string,
+    signal: AbortSignal,
+    pending: PendingToolCall,
+  ): Promise<TaskSnapshot> {
+    let call: ReturnType<typeof parseSandboxToolCall>;
+    try {
+      call = parseSandboxToolCall(pending);
+    } catch (error) {
+      return this.#handleFailure(snapshot, ownerId, signal, error, 'sandbox');
+    }
+
+    if (call.operation === 'exec' && pending.executionState === 'may_have_dispatched') {
+      return this.#recordToolResult(
+        snapshot,
+        ownerId,
+        signal,
+        pending,
+        JSON.stringify({
+          ok: false,
+          code: 'AMBIGUOUS_EXECUTION',
+          message:
+            'The previous Sandbox command may already have run. Inspect its effects before choosing the next action.',
+          retryable: false,
+        }),
+      );
+    }
+
+    if (call.replay === 'mutation') {
+      snapshot = await this.#saveBoundary(snapshot, ownerId, signal, {
+        type: 'tool.execution-started',
+        reason: `${call.name}_execution_started`,
+        pendingToolCall: { ...pending, executionState: 'may_have_dispatched' },
+      });
+    }
+
+    const sandbox = this.#dependencies.sandbox;
+    if (!sandbox) {
+      return this.#handleFailure(
+        snapshot,
+        ownerId,
+        signal,
+        new Error('Sandbox execution is unavailable.'),
+        'sandbox',
+      );
+    }
+    try {
+      const output = await sandbox.execute(call, signal);
+      return this.#recordToolResult(snapshot, ownerId, signal, pending, output);
+    } catch (error) {
+      return this.#handleSandboxFailure(snapshot, ownerId, signal, pending, call, error);
+    }
   }
 
   /** Resolves the internal commit without dispatching an external side effect. */
@@ -1320,13 +1398,75 @@ export class TaskExecutor {
     }
   }
 
+  async #handleSandboxFailure(
+    snapshot: TaskSnapshot,
+    ownerId: string,
+    signal: AbortSignal,
+    pending: PendingToolCall,
+    call: ReturnType<typeof parseSandboxToolCall>,
+    error: unknown,
+  ): Promise<TaskSnapshot> {
+    if (signal.aborted || isAbortError(error)) throw error;
+    if (!(error instanceof SandboxClientError)) {
+      return this.#handleFailure(snapshot, ownerId, signal, error, 'sandbox');
+    }
+    if (error.code === 'ABORTED') throw error;
+
+    const definitelyRetryable =
+      call.replay === 'safe' || error.dispatchState === 'definitely_not_dispatched';
+    const pendingToolCall = definitelyRetryable
+      ? { ...pending, executionState: 'recorded' as const }
+      : snapshot.checkpoint.pendingToolCall;
+    const taskError: TaskError =
+      error.code === 'AUTH'
+        ? {
+            code: 'AuthError',
+            retryable: false,
+            recoveryAction: 'update_credentials',
+            userMessage:
+              'Sandbox authentication is required. Update the Sandbox Token in Settings.',
+            evidenceRef: null,
+          }
+        : error.code === 'INVALID_RESPONSE'
+          ? {
+              code: 'InvalidProviderResponse',
+              retryable: false,
+              recoveryAction: 'review_provider_status',
+              userMessage: 'The Sandbox returned an invalid response.',
+              evidenceRef: null,
+            }
+          : {
+              code: 'TransientProviderError',
+              retryable: true,
+              recoveryAction: 'resume_task',
+              userMessage: 'The Sandbox is temporarily unavailable.',
+              evidenceRef: null,
+            };
+    return this.#saveBoundary(snapshot, ownerId, signal, {
+      type:
+        error.code === 'AUTH'
+          ? 'task.auth-required'
+          : error.code === 'INVALID_RESPONSE'
+            ? 'task.failed'
+            : 'task.paused',
+      reason:
+        error.code === 'AUTH'
+          ? 'sandbox_authentication_required'
+          : error.code === 'INVALID_RESPONSE'
+            ? 'invalid_sandbox_response'
+            : 'sandbox_retry_required',
+      error: taskError,
+      pendingToolCall,
+    });
+  }
+
   /** Converts one safe model or Tavily failure into its durable task boundary. */
   async #handleFailure(
     snapshot: TaskSnapshot,
     ownerId: string,
     signal: AbortSignal,
     error: unknown,
-    source: 'model' | 'tavily' | 'browser',
+    source: 'model' | 'tavily' | 'browser' | 'sandbox',
   ): Promise<TaskSnapshot> {
     if (signal.aborted || isAbortError(error)) throw error;
     if (error instanceof TaskExecutorError && error.code === 'PLANNER_RESULT_INVALID') {
@@ -1344,12 +1484,14 @@ export class TaskExecutor {
             ? 'tavily_execution_failed'
             : source === 'browser'
               ? 'browser_execution_failed'
-              : 'task_input_preparation_failed',
+              : source === 'sandbox'
+                ? 'sandbox_execution_failed'
+                : 'task_input_preparation_failed',
         error: taskInputError(),
       });
     }
     if (error.code === 'ABORTED') throw error;
-    const taskError = taskErrorFromProvider(error, source === 'browser' ? 'model' : source);
+    const taskError = taskErrorFromProvider(error, source === 'tavily' ? 'tavily' : 'model');
     return this.#saveBoundary(snapshot, ownerId, signal, {
       type:
         error.code === 'AUTH'

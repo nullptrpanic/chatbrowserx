@@ -111,6 +111,7 @@ function buildFixture() {
         systemPrompt: '',
         language: 'zh-CN' as const,
         historyMessageLimit: 50,
+        sandboxServer: '',
       })),
       save: vi.fn(async () => undefined),
     },
@@ -119,6 +120,8 @@ function buildFixture() {
       setCodexAccessToken: vi.fn(async () => undefined),
       getTavilyKey: vi.fn(async () => 'secret-tavily-key'),
       setTavilyKey: vi.fn(async () => undefined),
+      getSandboxToken: vi.fn(async (): Promise<string | undefined> => undefined),
+      setSandboxToken: vi.fn(async () => undefined),
     },
     commands: {
       create: vi.fn(async () => ({ task, checkpoint, events: [] })),
@@ -1178,8 +1181,10 @@ describe('PanelService', () => {
       systemPrompt: '',
       language: 'zh-CN',
       historyMessageLimit: 50,
+      sandboxServer: '',
       codexAccessToken: 'secret-token',
       tavilyKey: 'secret-tavily-key',
+      sandboxToken: '',
     });
   });
 
@@ -1316,6 +1321,45 @@ describe('PanelService', () => {
     expect(fixture.dependencies.attachments.deleteUnreferenced).toHaveBeenCalledWith(
       2_000 - 24 * 60 * 60 * 1_000,
     );
+  });
+
+  it('saves optional Sandbox settings, blanks the editable token, and invalidates metadata', async () => {
+    const fixture = buildFixture();
+    fixture.dependencies.settings.get.mockResolvedValue({
+      model: 'gpt-5.6-terra',
+      reasoningEffort: 'medium',
+      systemPrompt: '',
+      language: 'zh-CN',
+      historyMessageLimit: 50,
+      sandboxServer: 'https://old-sandbox.example.com',
+    });
+    fixture.dependencies.credentials.getSandboxToken.mockResolvedValue('stored-sandbox-token');
+    const invalidate = vi.fn(async () => undefined);
+    const service = new PanelService({
+      ...fixture.dependencies,
+      sandboxCatalog: { invalidate },
+    });
+
+    await service.saveSettings({
+      reasoningEffort: 'high',
+      systemPrompt: 'Be concise',
+      language: 'en',
+      historyMessageLimit: 24,
+      sandboxServer: 'https://new-sandbox.example.com/root',
+      sandboxToken: 'new-sandbox-token',
+    });
+
+    expect(fixture.dependencies.settings.save).toHaveBeenCalledWith(
+      expect.objectContaining({ sandboxServer: 'https://new-sandbox.example.com/root' }),
+    );
+    expect(fixture.dependencies.credentials.setSandboxToken).toHaveBeenCalledWith(
+      'new-sandbox-token',
+    );
+    expect(invalidate).toHaveBeenCalledOnce();
+    await expect(service.getSettings()).resolves.toMatchObject({
+      sandboxServer: 'https://old-sandbox.example.com',
+      sandboxToken: '',
+    });
   });
 
   it('cancels unfinished work before deleting the complete conversation aggregate', async () => {

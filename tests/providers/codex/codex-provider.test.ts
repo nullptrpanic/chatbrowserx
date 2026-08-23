@@ -23,6 +23,8 @@ function credentialStore(token?: string): CredentialStore {
     setCodexAccessToken: vi.fn(async () => undefined),
     getTavilyKey: vi.fn(async () => undefined),
     setTavilyKey: vi.fn(async () => undefined),
+    getSandboxToken: vi.fn(async () => undefined),
+    setSandboxToken: vi.fn(async () => undefined),
   };
 }
 

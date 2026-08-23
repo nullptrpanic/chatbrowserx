@@ -100,6 +100,8 @@ const settingsSaveSchema = z
         historyMessageLimit: z.number().int().min(1).max(50).default(50),
         codexAccessToken: z.string().trim().min(1).max(20_000).optional(),
         tavilyKey: z.string().trim().min(1).max(20_000).optional(),
+        sandboxServer: z.string().trim().max(2_048).optional(),
+        sandboxToken: z.string().trim().min(1).max(20_000).optional(),
       })
       .strict(),
   })

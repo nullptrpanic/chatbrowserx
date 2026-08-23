@@ -93,6 +93,8 @@ function responsesProvider(
     setCodexAccessToken: vi.fn(async () => undefined),
     getTavilyKey: vi.fn(async () => undefined),
     setTavilyKey: vi.fn(async () => undefined),
+    getSandboxToken: vi.fn(async () => undefined),
+    setSandboxToken: vi.fn(async () => undefined),
   };
   const body = `${events
     .map(({ event, data }) => `event: ${event}\ndata: ${JSON.stringify(data)}\n\n`)
@@ -327,6 +329,96 @@ describe('CodexAgentPlanner', () => {
       'tavily_extract',
       'tavily_crawl',
     ]);
+  });
+
+  it('keeps the exact current prompt and tools when Sandbox is not configured', async () => {
+    const model = provider(async function* () {
+      yield { type: 'response.started', responseId: 'resp_without_sandbox' };
+      yield { type: 'text.delta', delta: 'No Sandbox.' };
+      yield { type: 'response.completed', responseId: 'resp_without_sandbox', usage: null };
+    });
+    const storage = repositories();
+    const skillCatalog = { get: vi.fn(async () => null), invalidate: vi.fn(async () => undefined) };
+    const planner = new CodexAgentPlanner({
+      provider: model.instance,
+      tavilyAvailability: CONFIGURED_TAVILY,
+      skillCatalog,
+      settings: settings(),
+      conversations: storage.conversations,
+      tasks: storage.tasks,
+      attachments: storage.attachments,
+      ids: { create: (prefix) => `${prefix}_without_sandbox` },
+      clock: { now: () => 500 },
+    });
+
+    await collect(planner);
+
+    expect(skillCatalog.get).toHaveBeenCalledOnce();
+    expect(model.requests[0]?.systemPrompt).toBe('Custom safe preference.');
+    expect(model.requests[0]?.tools.map(({ name }) => name)).toEqual([
+      ...BROWSER_TOOL_NAMES,
+      'tavily_search',
+      'tavily_extract',
+      'tavily_crawl',
+    ]);
+  });
+
+  it('appends a configured catalog, registers fixed tools, and parses Sandbox calls', async () => {
+    const model = provider(async function* () {
+      yield { type: 'response.started', responseId: 'resp_sandbox' };
+      yield { type: 'tool.started', callId: 'call_sandbox', name: 'sandbox_exec' };
+      yield {
+        type: 'tool.completed',
+        callId: 'call_sandbox',
+        name: 'sandbox_exec',
+        argumentsJson: JSON.stringify({ command: 'bash scripts/run.sh', cwd: '/skills/example' }),
+      };
+      yield { type: 'response.completed', responseId: 'resp_sandbox', usage: null };
+    });
+    const storage = repositories();
+    const skillCatalog = {
+      get: vi.fn(async () => ({
+        entries: [
+          {
+            name: 'example',
+            description: 'Run the example workflow.',
+            path: '/skills/example/SKILL.md',
+          },
+        ],
+        truncated: false,
+        refreshedAt: 500,
+      })),
+      invalidate: vi.fn(async () => undefined),
+    };
+    const planner = new CodexAgentPlanner({
+      provider: model.instance,
+      tavilyAvailability: CONFIGURED_TAVILY,
+      skillCatalog,
+      settings: settings(),
+      conversations: storage.conversations,
+      tasks: storage.tasks,
+      attachments: storage.attachments,
+      ids: { create: (prefix) => `${prefix}_sandbox` },
+      clock: { now: () => 500 },
+    });
+
+    await expect(collect(planner)).resolves.toMatchObject([
+      {
+        type: 'sandbox.call',
+        call: {
+          family: 'sandbox',
+          operation: 'exec',
+          replay: 'mutation',
+          name: 'sandbox_exec',
+        },
+      },
+    ]);
+    expect(model.requests[0]?.tools.map(({ name }) => name).slice(-2)).toEqual([
+      'sandbox_read',
+      'sandbox_exec',
+    ]);
+    expect(model.requests[0]?.systemPrompt.startsWith('Custom safe preference.\n\n')).toBe(true);
+    expect(model.requests[0]?.systemPrompt).toContain('Run the example workflow.');
   });
 
   it('replays the complete local WorkSession on every model turn', async () => {
@@ -1430,9 +1522,14 @@ describe('CodexAgentPlanner', () => {
       encryptedContent: 'opaque-unfinished-scroll',
     }));
     const storage = repositories();
+    const skillCatalog = {
+      get: vi.fn(async () => ({ entries: [], truncated: false, refreshedAt: 500 })),
+      invalidate: vi.fn(async () => undefined),
+    };
     const planner = new CodexAgentPlanner({
       provider: { ...model.instance, compact },
       tavilyAvailability: CONFIGURED_TAVILY,
+      skillCatalog,
       settings: settings(),
       conversations: storage.conversations,
       tasks: storage.tasks,
@@ -1487,6 +1584,7 @@ describe('CodexAgentPlanner', () => {
     ]);
 
     expect(compact).not.toHaveBeenCalled();
+    expect(skillCatalog.get).not.toHaveBeenCalled();
     expect(model.requests).toHaveLength(1);
     expect(model.requests[0]?.toolChoice).toEqual({
       type: 'function',

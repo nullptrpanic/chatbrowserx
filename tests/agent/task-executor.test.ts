@@ -6,12 +6,15 @@ import { TaskExecutor } from '../../src/agent/task-executor';
 import type { AgentEvent, AgentPlanInput } from '../../src/agent/execution-types';
 import { parseBrowserToolCall } from '../../src/agent/tools/browser-tool-schema';
 import { parseContextCommitToolCall } from '../../src/agent/tools/context-commit-tool-schema';
+import { parseSandboxToolCall } from '../../src/agent/tools/sandbox-tool-schema';
 import type { BrowserExecutionPort } from '../../src/browser/browser-execution-types';
 import { openChatBrowserDatabase } from '../../src/persistence/open-database';
 import { IndexedDbConversationRepository } from '../../src/persistence/conversation-repository';
 import { IndexedDbTaskRepository } from '../../src/persistence/task-repository';
 import { providerErrorFromCode } from '../../src/providers/provider-errors';
 import type { TavilyExecutionPort } from '../../src/providers/tavily/tavily-types';
+import { SandboxClientError } from '../../src/sandbox/sandbox-client';
+import type { SandboxExecutionPort } from '../../src/sandbox/sandbox-tool-executor';
 import { TaskCommandService } from '../../src/tasks/task-command-service';
 import type { MessageRecord } from '../../src/tasks/message-types';
 import { createTestDatabaseName } from '../persistence/test-helpers';
@@ -96,6 +99,17 @@ function contextCommitCall(callId: string, state: string, throughCallId: string)
       callId,
       name: 'commit_context',
       argumentsJson: JSON.stringify({ state, throughCallId }),
+    }),
+  };
+}
+
+function sandboxCall(callId: string, name: string, arguments_: unknown): AgentEvent {
+  return {
+    type: 'sandbox.call',
+    call: parseSandboxToolCall({
+      callId,
+      name,
+      argumentsJson: JSON.stringify(arguments_),
     }),
   };
 }
@@ -1581,6 +1595,267 @@ describe('TaskExecutor', () => {
       output: '{"ok":true,"tabId":91}',
     });
     expect(result.checkpoint.browserTargetTabId).toBe(91);
+    database.close();
+  });
+
+  it('records Sandbox reads and durably marks Sandbox exec before dispatch', async () => {
+    const database = await openChatBrowserDatabase(createTestDatabaseName('sandbox-tools'));
+    const repository = new IndexedDbTaskRepository(database);
+    const dependencies = sources();
+    const commands = new TaskCommandService(
+      repository,
+      dependencies.clock,
+      dependencies.ids,
+      dependencies.conversations,
+    );
+    const created = await commands.create({
+      conversationId: 'conversation_1',
+      tabId: 7,
+      goal: 'Use one Sandbox Skill',
+    });
+    let turn = 0;
+    const planner = {
+      plan: () =>
+        (async function* () {
+          turn += 1;
+          if (turn === 1) {
+            yield sandboxCall('call_read', 'sandbox_read', {
+              path: '/skills/example/SKILL.md',
+              startLine: 1,
+              maxLines: 400,
+            });
+          } else if (turn === 2) {
+            yield sandboxCall('call_exec', 'sandbox_exec', {
+              command: 'bash scripts/run.sh',
+              cwd: '/skills/example',
+            });
+          } else {
+            yield {
+              type: 'task.completed',
+              reason: 'model_response_completed',
+              messageId: 'message_answer',
+            } as const;
+          }
+        })(),
+    };
+    const execute = vi.fn<SandboxExecutionPort['execute']>(async (call) => {
+      if (call.operation === 'exec') {
+        const dispatchBoundary = await commands.getSnapshot(created.task.id);
+        expect(dispatchBoundary.events.at(-1)?.type).toBe('tool.execution-started');
+        expect(dispatchBoundary.checkpoint.pendingToolCall).toMatchObject({
+          callId: 'call_exec',
+          executionState: 'may_have_dispatched',
+        });
+        return '{"code":0,"stdout":"done","stderr":"","truncated":false}';
+      }
+      return '{"code":0,"content":"skill","truncated":false}';
+    });
+    const executor = new TaskExecutor({
+      repository,
+      conversations: dependencies.conversations,
+      planner,
+      tavily: tavilyPort(),
+      browser: browserPort(),
+      sandbox: { execute },
+      clock: dependencies.clock,
+      ids: dependencies.ids,
+    });
+
+    const result = await executor.run(created.task.id, new AbortController().signal);
+
+    expect(execute).toHaveBeenCalledTimes(2);
+    expect(result.events.map(({ type }) => type)).toEqual([
+      'planning.started',
+      'tool.call-recorded',
+      'tool.result-recorded',
+      'tool.call-recorded',
+      'tool.execution-started',
+      'tool.result-recorded',
+      'task.completed',
+    ]);
+    expect(result.checkpoint.completedToolResults.map(({ toolName }) => toolName)).toEqual([
+      'sandbox_read',
+      'sandbox_exec',
+    ]);
+    expect(
+      result.checkpoint.continuationItems.filter(
+        (item) => 'callId' in item && item.callId === 'call_exec',
+      ),
+    ).toMatchObject([
+      { type: 'function_call', callId: 'call_exec', name: 'sandbox_exec' },
+      { type: 'function_call_output', callId: 'call_exec' },
+    ]);
+    database.close();
+  });
+
+  it('never redispatches a Sandbox exec that may already have run', async () => {
+    const database = await openChatBrowserDatabase(createTestDatabaseName('sandbox-ambiguous'));
+    const repository = new IndexedDbTaskRepository(database);
+    const dependencies = sources();
+    const commands = new TaskCommandService(
+      repository,
+      dependencies.clock,
+      dependencies.ids,
+      dependencies.conversations,
+    );
+    const created = await commands.create({
+      conversationId: 'conversation_1',
+      tabId: 7,
+      goal: 'Run one command at most once',
+    });
+    let turn = 0;
+    const planner = {
+      plan: () =>
+        (async function* () {
+          turn += 1;
+          if (turn === 1) {
+            yield sandboxCall('call_exec', 'sandbox_exec', { command: 'touch marker', cwd: null });
+          } else {
+            yield {
+              type: 'task.completed',
+              reason: 'model_response_completed',
+              messageId: 'message_answer',
+            } as const;
+          }
+        })(),
+    };
+    const execute = vi.fn<SandboxExecutionPort['execute']>(async () => {
+      throw new DOMException('Stopped after dispatch.', 'AbortError');
+    });
+    const executor = new TaskExecutor({
+      repository,
+      conversations: dependencies.conversations,
+      planner,
+      tavily: tavilyPort(),
+      browser: browserPort(),
+      sandbox: { execute },
+      clock: dependencies.clock,
+      ids: dependencies.ids,
+    });
+
+    await expect(executor.run(created.task.id, new AbortController().signal)).rejects.toMatchObject(
+      { name: 'AbortError' },
+    );
+    await expect(commands.getSnapshot(created.task.id)).resolves.toMatchObject({
+      checkpoint: {
+        pendingToolCall: {
+          callId: 'call_exec',
+          executionState: 'may_have_dispatched',
+        },
+      },
+    });
+
+    const recovered = await executor.run(created.task.id, new AbortController().signal);
+
+    expect(execute).toHaveBeenCalledOnce();
+    expect(recovered.task.status).toBe('completed');
+    expect(
+      JSON.parse(
+        recovered.checkpoint.completedToolResults.find(({ callId }) => callId === 'call_exec')
+          ?.output ?? '{}',
+      ),
+    ).toMatchObject({ code: 'AMBIGUOUS_EXECUTION', retryable: false });
+    database.close();
+  });
+
+  it('keeps a definitely undispatched Sandbox exec retryable after authentication failure', async () => {
+    const database = await openChatBrowserDatabase(createTestDatabaseName('sandbox-auth'));
+    const repository = new IndexedDbTaskRepository(database);
+    const dependencies = sources();
+    const commands = new TaskCommandService(
+      repository,
+      dependencies.clock,
+      dependencies.ids,
+      dependencies.conversations,
+    );
+    const created = await commands.create({
+      conversationId: 'conversation_1',
+      tabId: 7,
+      goal: 'Run after credentials are fixed',
+    });
+    const executor = new TaskExecutor({
+      repository,
+      conversations: dependencies.conversations,
+      planner: {
+        plan: () =>
+          (async function* () {
+            yield sandboxCall('call_exec', 'sandbox_exec', { command: 'true', cwd: null });
+          })(),
+      },
+      tavily: tavilyPort(),
+      browser: browserPort(),
+      sandbox: {
+        execute: vi.fn(async () => {
+          throw new SandboxClientError('AUTH', 'definitely_not_dispatched');
+        }),
+      },
+      clock: dependencies.clock,
+      ids: dependencies.ids,
+    });
+
+    const result = await executor.run(created.task.id, new AbortController().signal);
+
+    expect(result.task.status).toBe('waiting_for_auth');
+    expect(result.task.lastError).toMatchObject({
+      code: 'AuthError',
+      userMessage: 'Sandbox authentication is required. Update the Sandbox Token in Settings.',
+    });
+    expect(result.checkpoint.pendingToolCall).toMatchObject({
+      callId: 'call_exec',
+      executionState: 'recorded',
+    });
+    database.close();
+  });
+
+  it('enforces an independent 128-call Sandbox ceiling', async () => {
+    const database = await openChatBrowserDatabase(createTestDatabaseName('sandbox-limit'));
+    const repository = new IndexedDbTaskRepository(database);
+    const dependencies = sources();
+    const commands = new TaskCommandService(
+      repository,
+      dependencies.clock,
+      dependencies.ids,
+      dependencies.conversations,
+    );
+    const created = await commands.create({
+      conversationId: 'conversation_1',
+      tabId: 7,
+      goal: 'Stop an unbounded Sandbox loop',
+    });
+    let turn = 0;
+    const execute = vi.fn<SandboxExecutionPort['execute']>(async () =>
+      JSON.stringify({ code: 0, content: '', truncated: false }),
+    );
+    const executor = new TaskExecutor({
+      repository,
+      conversations: dependencies.conversations,
+      planner: {
+        plan: () =>
+          (async function* () {
+            turn += 1;
+            yield sandboxCall(`call_read_${String(turn)}`, 'sandbox_read', {
+              path: '/skills/example/SKILL.md',
+              startLine: turn,
+              maxLines: 1,
+            });
+          })(),
+      },
+      tavily: tavilyPort(),
+      browser: browserPort(),
+      sandbox: { execute },
+      clock: dependencies.clock,
+      ids: dependencies.ids,
+    });
+
+    const result = await executor.run(created.task.id, new AbortController().signal);
+
+    expect(result.task.status).toBe('failed');
+    expect(result.task.lastError).toMatchObject({
+      code: 'ToolCallLimitError',
+      userMessage: 'The task exceeded the Sandbox tool-call limit.',
+    });
+    expect(execute).toHaveBeenCalledTimes(128);
+    expect(result.checkpoint.completedToolResults).toHaveLength(128);
     database.close();
   });
 

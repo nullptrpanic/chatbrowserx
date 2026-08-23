@@ -10,6 +10,7 @@ export interface AppSettings {
   readonly systemPrompt: string;
   readonly language: AppLanguage;
   readonly historyMessageLimit: number;
+  readonly sandboxServer?: string;
 }
 
 export interface SettingsStore {
@@ -19,6 +20,39 @@ export interface SettingsStore {
 }
 
 const SETTINGS_KEY = 'settings.app';
+const sandboxServerSchema = z
+  .string()
+  .trim()
+  .max(2_048)
+  .transform((value, context) => {
+    if (value.length === 0) {
+      return '';
+    }
+
+    let url: URL;
+    try {
+      url = new URL(value);
+    } catch {
+      context.addIssue({ code: 'custom', message: 'Sandbox Server must be a valid URL.' });
+      return z.NEVER;
+    }
+
+    const isLoopback =
+      url.hostname === 'localhost' || url.hostname === '127.0.0.1' || url.hostname === '[::1]';
+    if (
+      (url.protocol !== 'https:' && !(url.protocol === 'http:' && isLoopback)) ||
+      url.username.length > 0 ||
+      url.password.length > 0 ||
+      url.search.length > 0 ||
+      url.hash.length > 0
+    ) {
+      context.addIssue({ code: 'custom', message: 'Sandbox Server URL is not allowed.' });
+      return z.NEVER;
+    }
+
+    const pathname = url.pathname === '/' ? '' : url.pathname.replace(/\/+$/, '');
+    return `${url.origin}${pathname}`;
+  });
 const storedAppSettingsSchema = z
   .object({
     model: z.string().trim().min(1).max(256),
@@ -26,6 +60,7 @@ const storedAppSettingsSchema = z
     systemPrompt: z.string().max(20_000),
     language: z.enum(['system', 'zh-CN', 'en', 'ja']),
     historyMessageLimit: z.number().int().min(1).max(200).default(50),
+    sandboxServer: sandboxServerSchema.default(''),
   })
   .strict();
 const appSettingsSchema = storedAppSettingsSchema.extend({
@@ -38,6 +73,7 @@ export const DEFAULT_APP_SETTINGS: AppSettings = Object.freeze({
   systemPrompt: '',
   language: 'system',
   historyMessageLimit: 50,
+  sandboxServer: '',
 });
 
 export class ChromeSettingsStore implements SettingsStore {

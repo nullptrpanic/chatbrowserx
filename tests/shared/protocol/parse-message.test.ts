@@ -43,6 +43,30 @@ describe('parseExtensionMessage', () => {
     });
   });
 
+  it('accepts trimmed optional Sandbox settings without requiring them from older panels', () => {
+    expect(
+      parseExtensionMessage({
+        version: 1,
+        requestId: 'req_sandbox_settings',
+        type: 'settings.save',
+        payload: {
+          reasoningEffort: 'medium',
+          systemPrompt: '',
+          language: 'zh-CN',
+          historyMessageLimit: 50,
+          sandboxServer: '  https://sandbox.example.com/root/  ',
+          sandboxToken: '  signed-token  ',
+        },
+      }),
+    ).toMatchObject({
+      type: 'settings.save',
+      payload: {
+        sandboxServer: 'https://sandbox.example.com/root/',
+        sandboxToken: 'signed-token',
+      },
+    });
+  });
+
   it('rejects history limits above the completed-message cap', () => {
     expect(() =>
       parseExtensionMessage({

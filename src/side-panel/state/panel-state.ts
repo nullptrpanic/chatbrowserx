@@ -41,8 +41,10 @@ const settingsSchema = z
     systemPrompt: z.string().max(20_000),
     language: z.enum(['system', 'zh-CN', 'en', 'ja']),
     historyMessageLimit: z.number().int().min(1).max(50).default(50),
+    sandboxServer: z.string().max(2_048).default(''),
     hasCodexToken: z.boolean(),
     hasTavilyKey: z.boolean().default(false),
+    hasSandboxToken: z.boolean().default(false),
   })
   .strict();
 const editableSettingsSchema = z
@@ -52,8 +54,10 @@ const editableSettingsSchema = z
     systemPrompt: z.string().max(20_000),
     language: z.enum(['system', 'zh-CN', 'en', 'ja']),
     historyMessageLimit: z.number().int().min(1).max(50).default(50),
+    sandboxServer: z.string().max(2_048).default(''),
     codexAccessToken: z.string().max(20_000),
     tavilyKey: z.string().max(20_000),
+    sandboxToken: z.string().max(20_000).default(''),
   })
   .strict();
 const completedToolResultSchema = z

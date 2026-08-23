@@ -2,7 +2,10 @@ import { render, screen } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { createTranslator } from '../../../src/shared/i18n/i18n';
-import { TerminalToolResult } from '../../../src/side-panel/tasks/TerminalToolResult';
+import {
+  isTerminalToolName,
+  TerminalToolResult,
+} from '../../../src/side-panel/tasks/TerminalToolResult';
 
 const t = createTranslator('zh-CN');
 const originalClipboard = Object.getOwnPropertyDescriptor(navigator, 'clipboard');
@@ -13,6 +16,42 @@ afterEach(() => {
 });
 
 describe('TerminalToolResult', () => {
+  it('recognizes Sandbox command execution as terminal output', () => {
+    expect(isTerminalToolName('sandbox_exec')).toBe(true);
+    expect(isTerminalToolName('sandbox_read')).toBe(false);
+  });
+
+  it('renders bounded Sandbox command metadata and streams in the terminal view', async () => {
+    const user = userEvent.setup();
+    render(
+      <TerminalToolResult
+        result={{
+          callId: 'call_sandbox',
+          toolName: 'sandbox_exec',
+          argumentsJson: JSON.stringify({ command: 'bash scripts/run.sh', cwd: '/tmp/fixture' }),
+          output: JSON.stringify({
+            code: 7,
+            stdout: 'partial output\n',
+            stderr: 'fixture failed\n',
+            truncated: true,
+          }),
+          resultRef: 'result_sandbox',
+        }}
+        t={t}
+      />,
+    );
+
+    expect(screen.getByText('执行沙箱命令')).toBeVisible();
+    await user.click(screen.getByRole('button', { name: '展开终端输出' }));
+    expect(screen.getByText('bash scripts/run.sh')).toBeVisible();
+    expect(screen.getByText('/tmp/fixture')).toBeVisible();
+    expect(screen.getByText('退出码 7')).toBeVisible();
+    expect(screen.getByText('输出已截断')).toBeVisible();
+    expect(screen.getByText('partial output')).toBeVisible();
+    expect(screen.getByText('fixture failed')).toBeVisible();
+    expect(screen.queryByText(/"stdout"/)).not.toBeInTheDocument();
+  });
+
   it('renders the persisted Bash command and output without inventing an exit code', async () => {
     const user = userEvent.setup();
     render(

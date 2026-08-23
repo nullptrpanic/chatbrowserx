@@ -44,7 +44,7 @@ fn startup_rejects_a_missing_configured_secret() {
 }
 
 #[test]
-fn serves_bash_and_writes_json_logs() {
+fn serves_exec_and_writes_json_logs() {
     let directory = tempfile::tempdir().unwrap();
     let log_file = directory.path().join("logs/daemon.jsonl");
     let port = available_port();
@@ -86,7 +86,7 @@ fn serves_bash_and_writes_json_logs() {
     let mut stream = TcpStream::connect(("127.0.0.1", port)).unwrap();
     write!(
         stream,
-        "POST /bash HTTP/1.1\r\nHost: 127.0.0.1\r\nAuthorization: Bearer {token}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+        "POST /exec HTTP/1.1\r\nHost: 127.0.0.1\r\nAuthorization: Bearer {token}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
         body.len(),
         body
     )
