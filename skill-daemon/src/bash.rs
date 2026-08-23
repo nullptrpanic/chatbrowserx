@@ -11,7 +11,7 @@ pub(crate) struct BashCommand {
 }
 
 pub(crate) struct BashOutput {
-    pub(crate) exit_code: i32,
+    pub(crate) code: i32,
     pub(crate) stdout: String,
     pub(crate) stderr: String,
 }
@@ -57,7 +57,7 @@ pub(crate) async fn execute(
         .map_err(|_| BashError::Timeout)?
         .map_err(BashError::Execute)?;
     Ok(BashOutput {
-        exit_code: output.status.code().unwrap_or(1),
+        code: output.status.code().unwrap_or(1),
         stdout: String::from_utf8_lossy(&output.stdout).into_owned(),
         stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
     })

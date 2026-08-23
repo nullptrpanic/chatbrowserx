@@ -10,6 +10,7 @@ fn loads_config_and_resolves_relative_log_file() {
         r#"{
             "host": "127.0.0.1",
             "port": 43129,
+            "secret": "0123456789abcdef0123456789abcdef",
             "log_file": "runtime/logs/skill-daemon.log",
             "timeout_seconds": 45
         }"#,
@@ -26,6 +27,7 @@ fn loads_config_and_resolves_relative_log_file() {
         config.log_file(),
         directory.path().join("runtime/logs/skill-daemon.log")
     );
+    assert_eq!(config.secret(), "0123456789abcdef0123456789abcdef");
     assert_eq!(config.timeout().as_secs(), 45);
 }
 
@@ -38,6 +40,7 @@ fn rejects_unknown_fields() {
         r#"{
             "host": "127.0.0.1",
             "port": 43129,
+            "secret": "0123456789abcdef0123456789abcdef",
             "log_file": "logs/skill-daemon.log",
             "timeout_seconds": 45,
             "extra": true
@@ -45,7 +48,7 @@ fn rejects_unknown_fields() {
     )
     .unwrap();
 
-    let error = Config::load(&path).unwrap_err();
+    let error = Config::load(&path).err().expect("unknown fields must fail");
 
     assert!(error.to_string().contains("failed to parse daemon config"));
 }
@@ -61,6 +64,7 @@ fn rejects_zero_port_and_timeout() {
                 r#"{{
                     "host": "127.0.0.1",
                     "port": {port},
+                    "secret": "0123456789abcdef0123456789abcdef",
                     "log_file": "logs/skill-daemon.log",
                     "timeout_seconds": {timeout}
                 }}"#
@@ -70,4 +74,23 @@ fn rejects_zero_port_and_timeout() {
 
         assert!(Config::load(&path).is_err());
     }
+}
+
+#[test]
+fn rejects_a_secret_shorter_than_32_bytes() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("daemon.json");
+    std::fs::write(
+        &path,
+        r#"{
+            "host": "127.0.0.1",
+            "port": 43129,
+            "secret": "too-short",
+            "log_file": "logs/skill-daemon.log",
+            "timeout_seconds": 45
+        }"#,
+    )
+    .unwrap();
+
+    assert!(Config::load(&path).is_err());
 }

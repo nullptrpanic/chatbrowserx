@@ -1,21 +1,42 @@
 mod app;
+mod auth;
 mod bash;
 mod config;
 pub mod logger;
 
 use anyhow::{Context, Result, bail};
-use clap::Parser;
+use clap::{Parser, Subcommand};
 use std::fs::{File, OpenOptions};
 use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
 use std::path::{Path, PathBuf};
 
-const TOKEN_ENVIRONMENT: &str = "CHATBROWSERX_SKILL_TOKEN";
-
 #[derive(Parser)]
 #[command(name = "chatbrowserx-skill-daemon")]
 struct Arguments {
-    #[arg(short = 'c', long)]
-    config: PathBuf,
+    #[command(subcommand)]
+    command: Command,
+}
+
+#[derive(Subcommand)]
+enum Command {
+    Daemon {
+        #[arg(short = 'c', long)]
+        config: PathBuf,
+    },
+    Key {
+        #[arg(short = 'c', long)]
+        config: PathBuf,
+        #[arg(short = 'g', long = "generate")]
+        plugin_identifier: String,
+        #[arg(
+            short = 'e',
+            long = "expire",
+            default_value_t = 7,
+            value_name = "DAYS",
+            help = "Token lifetime in days"
+        )]
+        expiration_days: u64,
+    },
 }
 
 #[tokio::main]
@@ -24,12 +45,18 @@ async fn main() -> Result<()> {
 }
 
 async fn run(arguments: Arguments) -> Result<()> {
-    let config = config::Config::load(&arguments.config)?;
-    let token = std::env::var(TOKEN_ENVIRONMENT)
-        .with_context(|| format!("{TOKEN_ENVIRONMENT} is required"))?;
-    if token.trim().is_empty() {
-        bail!("{TOKEN_ENVIRONMENT} must not be empty");
+    match arguments.command {
+        Command::Daemon { config } => run_daemon(&config).await,
+        Command::Key {
+            config,
+            plugin_identifier,
+            expiration_days,
+        } => issue_key(&config, &plugin_identifier, expiration_days),
     }
+}
+
+async fn run_daemon(config_path: &Path) -> Result<()> {
+    let config = config::Config::load(config_path)?;
     logger::init(open_log(config.log_file())?, logger::LevelFilter::Info)?;
     logger::info!(
         "skill daemon starting listen={} timeout_seconds={}",
@@ -39,9 +66,19 @@ async fn run(arguments: Arguments) -> Result<()> {
     let listener = tokio::net::TcpListener::bind(config.listen())
         .await
         .with_context(|| format!("failed to bind skill daemon to {}", config.listen()))?;
-    axum::serve(listener, app::router(token, config.timeout()))
-        .await
-        .context("skill daemon server failed")?;
+    axum::serve(
+        listener,
+        app::router(config.secret().to_owned(), config.timeout()),
+    )
+    .await
+    .context("skill daemon server failed")?;
+    Ok(())
+}
+
+fn issue_key(config_path: &Path, plugin_identifier: &str, expiration_days: u64) -> Result<()> {
+    let config = config::Config::load(config_path)?;
+    let token = auth::issue(config.secret(), plugin_identifier, expiration_days)?;
+    println!("{token}");
     Ok(())
 }
 

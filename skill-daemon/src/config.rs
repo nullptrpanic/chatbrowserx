@@ -4,9 +4,9 @@ use std::net::{IpAddr, SocketAddr};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-#[derive(Debug)]
 pub(crate) struct Config {
     listen: SocketAddr,
+    secret: String,
     log_file: PathBuf,
     timeout: Duration,
 }
@@ -30,6 +30,7 @@ impl Config {
         if stored.timeout_seconds == 0 {
             bail!("daemon config timeout_seconds must be greater than zero");
         }
+        crate::auth::validate_secret(&stored.secret)?;
         let directory = path.parent().unwrap_or(Path::new("/"));
         let log_file = if stored.log_file.is_absolute() {
             stored.log_file
@@ -38,6 +39,7 @@ impl Config {
         };
         Ok(Self {
             listen: SocketAddr::new(stored.host, stored.port),
+            secret: stored.secret,
             log_file,
             timeout: Duration::from_secs(stored.timeout_seconds),
         })
@@ -51,6 +53,10 @@ impl Config {
         &self.log_file
     }
 
+    pub(crate) fn secret(&self) -> &str {
+        &self.secret
+    }
+
     pub(crate) fn timeout(&self) -> Duration {
         self.timeout
     }
@@ -61,6 +67,7 @@ impl Config {
 struct StoredConfig {
     host: IpAddr,
     port: u16,
+    secret: String,
     log_file: PathBuf,
     timeout_seconds: u64,
 }

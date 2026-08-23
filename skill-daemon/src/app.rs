@@ -15,22 +15,22 @@ use std::time::Instant;
 
 #[derive(Clone)]
 struct AppState {
-    token: String,
+    secret: String,
     timeout: Duration,
 }
 
-pub(crate) fn router(token: String, timeout: Duration) -> Router {
+pub(crate) fn router(secret: String, timeout: Duration) -> Router {
     Router::new()
         .route("/bash", post(run_bash))
-        .with_state(AppState { token, timeout })
+        .with_state(AppState { secret, timeout })
 }
 
 async fn run_bash(State(state): State<AppState>, headers: HeaderMap, body: Bytes) -> Response {
-    let expected = format!("Bearer {}", state.token);
-    if !matches!(
-        headers.get("authorization").and_then(|value| value.to_str().ok()),
-        Some(value) if value == expected
-    ) {
+    let token = headers
+        .get("authorization")
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.strip_prefix("Bearer "));
+    if !matches!(token, Some(token) if crate::auth::verify(&state.secret, token)) {
         return error(StatusCode::UNAUTHORIZED, "unauthorized");
     }
     let request: BashRequest = match serde_json::from_slice(&body) {
@@ -45,7 +45,7 @@ async fn run_bash(State(state): State<AppState>, headers: HeaderMap, body: Bytes
         Ok(output) => {
             crate::logger::info!(
                 entry = LoggerEntry::new()
-                    .with_entry("exit_code", output.exit_code)
+                    .with_entry("code", output.code)
                     .with_entry("duration_ms", started.elapsed().as_millis()),
                 "bash command completed"
             );
@@ -74,7 +74,7 @@ async fn run_bash(State(state): State<AppState>, headers: HeaderMap, body: Bytes
         }
     };
     Json(BashResponse {
-        exit_code: output.exit_code,
+        code: output.code,
         stdout: output.stdout,
         stderr: output.stderr,
     })
@@ -103,18 +103,19 @@ impl From<BashRequest> for BashCommand {
 
 #[derive(Serialize)]
 struct BashResponse {
-    exit_code: i32,
+    code: i32,
     stdout: String,
     stderr: String,
 }
 
 #[derive(Serialize)]
 struct ErrorResponse {
-    error: &'static str,
+    code: i32,
+    message: &'static str,
 }
 
 fn error(status: StatusCode, message: &'static str) -> Response {
-    (status, Json(ErrorResponse { error: message })).into_response()
+    (status, Json(ErrorResponse { code: 1, message })).into_response()
 }
 
 #[cfg(test)]
