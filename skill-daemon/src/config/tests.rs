@@ -1,0 +1,73 @@
+use super::Config;
+use std::net::{IpAddr, Ipv4Addr, SocketAddr};
+
+#[test]
+fn loads_config_and_resolves_relative_log_file() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("daemon.json");
+    std::fs::write(
+        &path,
+        r#"{
+            "host": "127.0.0.1",
+            "port": 43129,
+            "log_file": "runtime/logs/skill-daemon.log",
+            "timeout_seconds": 45
+        }"#,
+    )
+    .unwrap();
+
+    let config = Config::load(&path).unwrap();
+
+    assert_eq!(
+        config.listen(),
+        SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 43129)
+    );
+    assert_eq!(
+        config.log_file(),
+        directory.path().join("runtime/logs/skill-daemon.log")
+    );
+    assert_eq!(config.timeout().as_secs(), 45);
+}
+
+#[test]
+fn rejects_unknown_fields() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("daemon.json");
+    std::fs::write(
+        &path,
+        r#"{
+            "host": "127.0.0.1",
+            "port": 43129,
+            "log_file": "logs/skill-daemon.log",
+            "timeout_seconds": 45,
+            "extra": true
+        }"#,
+    )
+    .unwrap();
+
+    let error = Config::load(&path).unwrap_err();
+
+    assert!(error.to_string().contains("failed to parse daemon config"));
+}
+
+#[test]
+fn rejects_zero_port_and_timeout() {
+    for (port, timeout) in [(0, 45), (43129, 0)] {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("daemon.json");
+        std::fs::write(
+            &path,
+            format!(
+                r#"{{
+                    "host": "127.0.0.1",
+                    "port": {port},
+                    "log_file": "logs/skill-daemon.log",
+                    "timeout_seconds": {timeout}
+                }}"#
+            ),
+        )
+        .unwrap();
+
+        assert!(Config::load(&path).is_err());
+    }
+}

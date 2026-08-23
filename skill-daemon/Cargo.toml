@@ -1,0 +1,20 @@
+[package]
+name = "chatbrowserx-skill-daemon"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+anyhow = "1.0.104"
+axum = "0.8.9"
+chrono = "0.4.45"
+clap = { version = "4.6.5", features = ["derive"] }
+erased-serde = "0.4.10"
+libc = "0.2.189"
+log = { version = "0.4.33", features = ["std", "kv_serde"] }
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.151"
+tokio = { version = "1.53.1", features = ["full"] }
+
+[dev-dependencies]
+tempfile = "3.27.0"
+tower = "0.5.3"

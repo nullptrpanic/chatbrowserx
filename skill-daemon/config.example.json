@@ -1,0 +1,6 @@
+{
+  "host": "127.0.0.1",
+  "port": 43129,
+  "log_file": "runtime/logs/skill-daemon.log",
+  "timeout_seconds": 120
+}
