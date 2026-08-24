@@ -74,15 +74,3 @@ export class ChromeRuntimePort implements RuntimePort {
     return () => this.#notifications.onMessage.removeListener(runtimeListener);
   }
 }
-
-/**
- * Creates the lightweight health request used when the Side Panel mounts.
- */
-export function createSystemPingMessage(): Extract<ExtensionMessage, { type: 'system.ping' }> {
-  return {
-    version: PROTOCOL_VERSION,
-    requestId: `ping_${crypto.randomUUID()}`,
-    type: 'system.ping',
-    payload: {},
-  };
-}

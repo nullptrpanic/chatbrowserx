@@ -37,7 +37,6 @@ export type ExtensionMessage =
         sandboxToken?: string | undefined;
       }
     >
-  | Message<'task.create', { tabId: number; conversationId: string; goal: string }>
   | Message<'task.getSnapshot', { taskId: string }>
   | Message<'task.pause', { taskId: string }>
   | Message<'task.resume', { taskId: string }>

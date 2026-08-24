@@ -217,7 +217,6 @@ async function createBackgroundServices(
   });
   const router = createMessageRouter({
     commands: {
-      create: (input) => commands.create(input),
       getSnapshot: (taskId) => commands.getSnapshot(taskId),
       pause: (taskId) => coordinator.pause(taskId),
       resume: (taskId) => coordinator.resume(taskId),

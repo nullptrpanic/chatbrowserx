@@ -241,7 +241,7 @@ describe('createMessageRouter', () => {
     expect(panel.saveSettings).not.toHaveBeenCalled();
   });
 
-  it('delegates task commands and schedules create, resume, and retry', async () => {
+  it('delegates task commands and schedules resume and retry', async () => {
     const snapshot = buildSnapshot();
     const commands = buildCommands(snapshot);
     const scheduleTask = vi.fn(async () => undefined);
@@ -253,12 +253,6 @@ describe('createMessageRouter', () => {
       scheduleTask,
     });
 
-    await router({
-      version: PROTOCOL_VERSION,
-      requestId: 'req_create',
-      type: 'task.create',
-      payload: { tabId: 7, conversationId: 'conv_1', goal: 'Complete the page' },
-    });
     await router({
       version: PROTOCOL_VERSION,
       requestId: 'req_pause',
@@ -296,11 +290,6 @@ describe('createMessageRouter', () => {
       payload: { taskId: snapshot.task.id },
     });
 
-    expect(commands.create).toHaveBeenCalledWith({
-      tabId: 7,
-      conversationId: 'conv_1',
-      goal: 'Complete the page',
-    });
     expect(commands.pause).toHaveBeenCalledWith(snapshot.task.id);
     expect(commands.getSnapshot).toHaveBeenCalledWith(snapshot.task.id);
     expect(commands.resume).toHaveBeenCalledWith(snapshot.task.id);
@@ -309,7 +298,6 @@ describe('createMessageRouter', () => {
     expect(commands.clearContext).toHaveBeenCalledWith(snapshot.task.id);
     expect(scheduleTask).toHaveBeenNthCalledWith(1, snapshot.task.id);
     expect(scheduleTask).toHaveBeenNthCalledWith(2, snapshot.task.id);
-    expect(scheduleTask).toHaveBeenNthCalledWith(3, snapshot.task.id);
   });
 
   it('maps known and unexpected command failures to stable public errors', async () => {

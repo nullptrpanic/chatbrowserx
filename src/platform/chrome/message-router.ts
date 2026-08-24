@@ -17,7 +17,7 @@ export type MessageRouter = (
 ) => Promise<ExtensionResponse>;
 
 export interface MessageRouterDependencies {
-  readonly commands: TaskCommandPort;
+  readonly commands: Omit<TaskCommandPort, 'create'>;
   readonly panel: Pick<
     PanelService,
     | 'getSnapshot'
@@ -130,11 +130,6 @@ async function routeMessage(
         message.requestId,
         await dependencies.panel.saveSettings(message.payload),
       );
-    case 'task.create': {
-      const snapshot = await dependencies.commands.create(message.payload);
-      await dependencies.scheduleTask(snapshot.task.id);
-      return successResponse(message.requestId, snapshot);
-    }
     case 'task.getSnapshot':
       return successResponse(
         message.requestId,

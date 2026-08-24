@@ -116,21 +116,6 @@ const settingsSaveSchema = z
   })
   .strict();
 
-const taskCreateSchema = z
-  .object({
-    version: z.literal(PROTOCOL_VERSION),
-    requestId: requestIdSchema,
-    type: z.literal('task.create'),
-    payload: z
-      .object({
-        tabId: z.number().int().nonnegative(),
-        conversationId: identifierSchema,
-        goal: z.string().trim().min(1).max(20_000),
-      })
-      .strict(),
-  })
-  .strict();
-
 const taskSnapshotSchema = z
   .object({
     version: z.literal(PROTOCOL_VERSION),
@@ -232,7 +217,6 @@ export const extensionMessageSchema: z.ZodType<ExtensionMessage> = z.discriminat
   conversationClearSchema,
   settingsGetSchema,
   settingsSaveSchema,
-  taskCreateSchema,
   taskSnapshotSchema,
   taskPauseSchema,
   taskResumeSchema,

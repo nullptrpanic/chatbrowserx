@@ -123,7 +123,6 @@ describe('parseExtensionMessage', () => {
 
   it.each([
     ['system.ping', {}],
-    ['task.create', { tabId: 7, conversationId: 'conv_1', goal: 'Fill the form' }],
     ['task.pause', { taskId: 'task_1' }],
     ['task.resume', { taskId: 'task_1' }],
     ['task.cancel', { taskId: 'task_1' }],
@@ -133,6 +132,17 @@ describe('parseExtensionMessage', () => {
     expect(
       parseExtensionMessage({ version: 1, requestId: 'req_supported', type, payload }),
     ).toMatchObject({ type, payload });
+  });
+
+  it('rejects the legacy task.create command that cannot persist its user message', () => {
+    expect(() =>
+      parseExtensionMessage({
+        version: 1,
+        requestId: 'req_removed_create',
+        type: 'task.create',
+        payload: { tabId: 7, conversationId: 'conv_1', goal: 'Fill the form' },
+      }),
+    ).toThrow(/invalid extension message/i);
   });
 
   it('rejects unknown versions and extra credential fields without leaking their values', () => {
