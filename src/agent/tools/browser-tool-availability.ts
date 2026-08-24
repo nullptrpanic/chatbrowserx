@@ -64,6 +64,16 @@ interface CapabilityState {
   readonly usedTools: Set<BrowserToolName>;
 }
 
+type MaterializedFunctionOutput = Extract<
+  MaterializedContinuationItem,
+  { readonly type: 'function_call_output' }
+>;
+
+interface BrowserToolHistory {
+  readonly items: readonly MaterializedContinuationItem[];
+  readonly outputRecords: Map<MaterializedFunctionOutput, Readonly<Record<string, unknown>> | null>;
+}
+
 export interface BrowserScrollContinuation {
   readonly next: 'inspect' | 'scroll' | 'scroll_until';
   readonly resumeOperation?: 'scroll_until';
@@ -144,11 +154,6 @@ function bindScrollableTargets(
   };
 }
 
-function successfulRecord(output: string): Readonly<Record<string, unknown>> | null {
-  const record = jsonRecord(output);
-  return record?.ok === true ? record : null;
-}
-
 function jsonRecord(value: string): Readonly<Record<string, unknown>> | null {
   try {
     const parsed: unknown = JSON.parse(value);
@@ -158,6 +163,31 @@ function jsonRecord(value: string): Readonly<Record<string, unknown>> | null {
   } catch {
     return null;
   }
+}
+
+/** Materializes one checkpoint and parses each stored tool result at most once per model turn. */
+function browserToolHistory(
+  checkpoint: Pick<Checkpoint, 'continuationItems' | 'completedToolResults'>,
+): BrowserToolHistory {
+  return { items: materializeContinuationItems(checkpoint), outputRecords: new Map() };
+}
+
+function outputRecord(
+  history: BrowserToolHistory,
+  output: MaterializedFunctionOutput,
+): Readonly<Record<string, unknown>> | null {
+  if (history.outputRecords.has(output)) return history.outputRecords.get(output) ?? null;
+  const record = jsonRecord(output.output);
+  history.outputRecords.set(output, record);
+  return record;
+}
+
+function successfulOutputRecord(
+  history: BrowserToolHistory,
+  output: MaterializedFunctionOutput,
+): Readonly<Record<string, unknown>> | null {
+  const record = outputRecord(history, output);
+  return record?.ok === true ? record : null;
 }
 
 function childRecord(
@@ -209,6 +239,10 @@ const SCROLL_INVALIDATING_TOOLS = new Set([
 export function browserScrollContinuationForCheckpoint(
   checkpoint: Pick<Checkpoint, 'continuationItems' | 'completedToolResults'>,
 ): BrowserScrollContinuation | null {
+  return browserScrollContinuation(browserToolHistory(checkpoint));
+}
+
+function browserScrollContinuation(history: BrowserToolHistory): BrowserScrollContinuation | null {
   const calls = new Map<
     string,
     Extract<MaterializedContinuationItem, { readonly type: 'function_call' }>
@@ -217,7 +251,7 @@ export function browserScrollContinuationForCheckpoint(
     continuation: BrowserScrollContinuation | null;
     continuationFailures: number;
   } = { continuation: null, continuationFailures: 0 };
-  for (const item of materializeContinuationItems(checkpoint)) {
+  for (const item of history.items) {
     if (item.type === 'compaction') {
       calls.clear();
       state.continuation = null;
@@ -232,7 +266,7 @@ export function browserScrollContinuationForCheckpoint(
     const call = calls.get(item.callId);
     calls.delete(item.callId);
     if (!call) continue;
-    const output = successfulRecord(item.output);
+    const output = successfulOutputRecord(history, item);
     if (SCROLL_INVALIDATING_TOOLS.has(call.name) && output !== null) {
       state.continuation = null;
       state.continuationFailures = 0;
@@ -549,19 +583,20 @@ function applySuccessfulBrowserResult(
 
 function successfulCommit(
   call: MaterializedContinuationItem,
-  output: MaterializedContinuationItem,
+  output: MaterializedFunctionOutput,
+  history: BrowserToolHistory,
 ): boolean {
   return (
     call.type === 'function_call' &&
     call.name === 'commit_context' &&
-    output.type === 'function_call_output' &&
-    successfulRecord(output.output) !== null
+    successfulOutputRecord(history, output) !== null
   );
 }
 
 /** Selects only tools justified by durable executor state, while keeping replay compatibility. */
 function availableBrowserToolDefinitions(
   checkpoint: Pick<Checkpoint, 'continuationItems' | 'completedToolResults'>,
+  history: BrowserToolHistory,
 ): readonly ModelToolDefinition[] {
   const state: CapabilityState = {
     semanticSnapshotCurrent: false,
@@ -575,7 +610,7 @@ function availableBrowserToolDefinitions(
     string,
     Extract<MaterializedContinuationItem, { readonly type: 'function_call' }>
   >();
-  for (const item of materializeContinuationItems(checkpoint)) {
+  for (const item of history.items) {
     if (item.type === 'compaction') {
       state.semanticSnapshotCurrent = false;
       state.visualSnapshotCurrent = false;
@@ -594,7 +629,7 @@ function availableBrowserToolDefinitions(
     const call = pendingCalls.get(item.callId);
     pendingCalls.delete(item.callId);
     if (!call) continue;
-    if (successfulCommit(call, item)) {
+    if (successfulCommit(call, item, history)) {
       state.semanticSnapshotCurrent = false;
       state.visualSnapshotCurrent = false;
       state.networkActive = false;
@@ -606,12 +641,12 @@ function availableBrowserToolDefinitions(
     const name = browserToolName(call.name);
     if (!name) continue;
     state.usedTools.add(name);
-    const output = successfulRecord(item.output);
+    const output = successfulOutputRecord(history, item);
     if (output) {
       applySuccessfulBrowserResult(name, output, state);
       continue;
     }
-    const failed = jsonRecord(item.output);
+    const failed = outputRecord(history, item);
     for (const observation of embeddedInteractiveObservations(
       failed === null ? null : childRecord(failed, 'data'),
     )) {
@@ -747,7 +782,8 @@ function constrainedContinuationDefinition(
 export function browserToolContractForCheckpoint(
   checkpoint: Pick<Checkpoint, 'continuationItems' | 'completedToolResults'>,
 ): BrowserToolContract {
-  const scrollContinuation = browserScrollContinuationForCheckpoint(checkpoint);
+  const history = browserToolHistory(checkpoint);
+  const scrollContinuation = browserScrollContinuation(history);
   if (scrollContinuation !== null) {
     const name =
       scrollContinuation.next === 'inspect'
@@ -761,7 +797,7 @@ export function browserToolContractForCheckpoint(
       scrollContinuation,
     };
   }
-  return { tools: availableBrowserToolDefinitions(checkpoint) };
+  return { tools: availableBrowserToolDefinitions(checkpoint, history) };
 }
 
 export function browserToolDefinitionsForCheckpoint(

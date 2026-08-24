@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 
 import {
   browserToolContractForCheckpoint,
@@ -52,6 +52,28 @@ function names(value: Checkpoint): readonly string[] {
 }
 
 describe('browserToolDefinitionsForCheckpoint', () => {
+  it('parses each stored browser result only once while building one contract', () => {
+    const output = JSON.stringify({
+      ok: true,
+      data: {
+        mode: 'interactive',
+        snapshot: 'snapshot_1',
+        elements: [{ d: 1, r: 'button', n: 'Submit', ref: 'ref_submit' }],
+      },
+    });
+    const parse = vi.spyOn(JSON, 'parse');
+
+    try {
+      browserToolContractForCheckpoint(
+        checkpoint(pair('inspect_once', 'browser_inspect', { tabId: 0 }, output)),
+      );
+
+      expect(parse.mock.calls.filter(([value]) => value === output)).toHaveLength(1);
+    } finally {
+      parse.mockRestore();
+    }
+  });
+
   it('keeps semantic action tools stable from the first model turn', () => {
     const available = names(checkpoint());
 
