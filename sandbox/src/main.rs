@@ -11,7 +11,7 @@ use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
 use std::path::{Path, PathBuf};
 
 #[derive(Parser)]
-#[command(name = "chatbrowserx-skill-daemon")]
+#[command(name = "chatbrowserx-sandbox")]
 struct Arguments {
     #[command(subcommand)]
     command: Command,
@@ -46,7 +46,7 @@ async fn main() -> Result<()> {
 
 async fn run(arguments: Arguments) -> Result<()> {
     match arguments.command {
-        Command::Daemon { config } => run_daemon(&config).await,
+        Command::Daemon { config } => run_sandbox(&config).await,
         Command::Key {
             config,
             plugin_identifier,
@@ -55,23 +55,23 @@ async fn run(arguments: Arguments) -> Result<()> {
     }
 }
 
-async fn run_daemon(config_path: &Path) -> Result<()> {
+async fn run_sandbox(config_path: &Path) -> Result<()> {
     let config = config::Config::load(config_path)?;
     logger::init(open_log(config.log_file())?, logger::LevelFilter::Info)?;
     logger::info!(
-        "skill daemon starting listen={} timeout_seconds={}",
+        "sandbox starting listen={} timeout_seconds={}",
         config.listen(),
         config.timeout().as_secs()
     );
     let listener = tokio::net::TcpListener::bind(config.listen())
         .await
-        .with_context(|| format!("failed to bind skill daemon to {}", config.listen()))?;
+        .with_context(|| format!("failed to bind sandbox to {}", config.listen()))?;
     axum::serve(
         listener,
         app::router(config.secret().to_owned(), config.timeout()),
     )
     .await
-    .context("skill daemon server failed")?;
+    .context("sandbox server failed")?;
     Ok(())
 }
 

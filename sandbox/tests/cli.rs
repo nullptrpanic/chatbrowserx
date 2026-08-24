@@ -19,7 +19,7 @@ impl Drop for ChildGuard {
 #[test]
 fn startup_rejects_a_missing_configured_secret() {
     let directory = tempfile::tempdir().unwrap();
-    let config = directory.path().join("daemon.json");
+    let config = directory.path().join("sandbox.json");
     std::fs::write(
         &config,
         format!(
@@ -29,12 +29,12 @@ fn startup_rejects_a_missing_configured_secret() {
                 "log_file": {},
                 "timeout_seconds": 30
             }}"#,
-            serde_json::to_string(&directory.path().join("logs/skill-daemon.log")).unwrap()
+            serde_json::to_string(&directory.path().join("logs/sandbox.log")).unwrap()
         ),
     )
     .unwrap();
 
-    let output = Command::new(env!("CARGO_BIN_EXE_chatbrowserx-skill-daemon"))
+    let output = Command::new(env!("CARGO_BIN_EXE_chatbrowserx-sandbox"))
         .args(["daemon", "--config", config.to_str().unwrap()])
         .output()
         .unwrap();
@@ -46,9 +46,9 @@ fn startup_rejects_a_missing_configured_secret() {
 #[test]
 fn serves_exec_and_writes_json_logs() {
     let directory = tempfile::tempdir().unwrap();
-    let log_file = directory.path().join("logs/daemon.jsonl");
+    let log_file = directory.path().join("logs/sandbox.jsonl");
     let port = available_port();
-    let config = directory.path().join("daemon.json");
+    let config = directory.path().join("sandbox.json");
     std::fs::write(
         &config,
         format!(
@@ -63,7 +63,7 @@ fn serves_exec_and_writes_json_logs() {
         ),
     )
     .unwrap();
-    let key_output = Command::new(env!("CARGO_BIN_EXE_chatbrowserx-skill-daemon"))
+    let key_output = Command::new(env!("CARGO_BIN_EXE_chatbrowserx-sandbox"))
         .args(["key", "-c", config.to_str().unwrap(), "-g", "test-plugin"])
         .output()
         .unwrap();
@@ -73,7 +73,7 @@ fn serves_exec_and_writes_json_logs() {
     let token = token.trim();
     assert_eq!(token.split('.').count(), 3);
 
-    let child = Command::new(env!("CARGO_BIN_EXE_chatbrowserx-skill-daemon"))
+    let child = Command::new(env!("CARGO_BIN_EXE_chatbrowserx-sandbox"))
         .args(["daemon", "-c", config.to_str().unwrap()])
         .stdout(Stdio::null())
         .stderr(Stdio::null())
@@ -98,7 +98,7 @@ fn serves_exec_and_writes_json_logs() {
     assert!(response.contains(r#""code":0"#), "{response}");
     assert!(response.contains(r#""stdout":"live""#), "{response}");
     let log = std::fs::read_to_string(log_file).unwrap();
-    assert!(log.contains(r#""message":"skill daemon starting"#));
+    assert!(log.contains(r#""message":"sandbox starting"#));
     assert!(log.contains(r#""message":"bash command completed""#));
     assert!(log.contains(r#""code":0"#));
     assert!(!log.contains(token));
@@ -138,7 +138,7 @@ fn key_rejects_zero_expiration_days() {
     let directory = tempfile::tempdir().unwrap();
     let config = write_config(directory.path(), 43129);
 
-    let output = Command::new(env!("CARGO_BIN_EXE_chatbrowserx-skill-daemon"))
+    let output = Command::new(env!("CARGO_BIN_EXE_chatbrowserx-sandbox"))
         .args([
             "key",
             "-c",
@@ -160,7 +160,7 @@ fn key_rejects_an_empty_plugin_identifier() {
     let directory = tempfile::tempdir().unwrap();
     let config = write_config(directory.path(), 43129);
 
-    let output = Command::new(env!("CARGO_BIN_EXE_chatbrowserx-skill-daemon"))
+    let output = Command::new(env!("CARGO_BIN_EXE_chatbrowserx-sandbox"))
         .args(["key", "-c", config.to_str().unwrap(), "-g", "   "])
         .output()
         .unwrap();
@@ -172,7 +172,7 @@ fn key_rejects_an_empty_plugin_identifier() {
 }
 
 fn write_config(directory: &std::path::Path, port: u16) -> std::path::PathBuf {
-    let config = directory.join("daemon.json");
+    let config = directory.join("sandbox.json");
     std::fs::write(
         &config,
         format!(
@@ -183,7 +183,7 @@ fn write_config(directory: &std::path::Path, port: u16) -> std::path::PathBuf {
                 "log_file": {},
                 "timeout_seconds": 30
             }}"#,
-            serde_json::to_string(&directory.join("daemon.log")).unwrap()
+            serde_json::to_string(&directory.join("sandbox.log")).unwrap()
         ),
     )
     .unwrap();
@@ -191,7 +191,7 @@ fn write_config(directory: &std::path::Path, port: u16) -> std::path::PathBuf {
 }
 
 fn issue_key(config: &std::path::Path, extra_arguments: &[&str]) -> String {
-    let mut command = Command::new(env!("CARGO_BIN_EXE_chatbrowserx-skill-daemon"));
+    let mut command = Command::new(env!("CARGO_BIN_EXE_chatbrowserx-sandbox"));
     command.args(["key", "-c", config.to_str().unwrap(), "-g", "test-plugin"]);
     command.args(extra_arguments);
     let output = command.output().unwrap();
@@ -228,5 +228,5 @@ fn wait_for_server(port: u16) {
         }
         thread::sleep(Duration::from_millis(20));
     }
-    panic!("skill daemon did not start on port {port}");
+    panic!("sandbox did not start on port {port}");
 }

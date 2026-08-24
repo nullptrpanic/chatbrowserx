@@ -14,13 +14,13 @@ import { SkillCatalog } from '../src/sandbox/skill-catalog';
 
 const execFileAsync = promisify(execFile);
 const projectRoot = dirname(dirname(fileURLToPath(import.meta.url)));
-const daemonManifest = join(projectRoot, 'skill-daemon', 'Cargo.toml');
-const daemonBinary = join(
+const sandboxManifest = join(projectRoot, 'sandbox', 'Cargo.toml');
+const sandboxBinary = join(
   projectRoot,
-  'skill-daemon',
+  'sandbox',
   'target',
   'debug',
-  process.platform === 'win32' ? 'chatbrowserx-skill-daemon.exe' : 'chatbrowserx-skill-daemon',
+  process.platform === 'win32' ? 'chatbrowserx-sandbox.exe' : 'chatbrowserx-sandbox',
 );
 let currentStage = 'initialize';
 
@@ -79,7 +79,7 @@ async function waitForPort(port: number): Promise<void> {
     if (connected) return;
     await new Promise((resolve) => setTimeout(resolve, 20));
   }
-  throw new Error('Sandbox daemon did not become ready.');
+  throw new Error('Sandbox server did not become ready.');
 }
 
 async function stopProcess(child: ChildProcess | null): Promise<void> {
@@ -96,7 +96,7 @@ async function stopProcess(child: ChildProcess | null): Promise<void> {
 async function checkSandbox(): Promise<void> {
   currentStage = 'create fixture';
   const temporaryHome = await mkdtemp(join(tmpdir(), 'chatbrowserx-sandbox-check-'));
-  let daemon: ChildProcess | null = null;
+  let sandbox: ChildProcess | null = null;
   try {
     const skillDirectory = join(temporaryHome, '.codex', 'skills', 'fixture-skill');
     const scriptDirectory = join(skillDirectory, 'scripts');
@@ -114,23 +114,23 @@ async function checkSandbox(): Promise<void> {
     await chmod(scriptPath, 0o700);
 
     const port = await availablePort();
-    const configPath = join(temporaryHome, 'daemon.json');
+    const configPath = join(temporaryHome, 'sandbox.json');
     await writeFile(
       configPath,
       JSON.stringify({
         host: '127.0.0.1',
         port,
         secret: randomBytes(32).toString('hex'),
-        log_file: join(temporaryHome, 'daemon.log'),
+        log_file: join(temporaryHome, 'sandbox.log'),
         timeout_seconds: 10,
       }),
       { mode: 0o600 },
     );
 
-    currentStage = 'build daemon';
-    await execFileAsync('cargo', ['build', '--quiet', '--manifest-path', daemonManifest]);
+    currentStage = 'build sandbox';
+    await execFileAsync('cargo', ['build', '--quiet', '--manifest-path', sandboxManifest]);
     currentStage = 'issue token';
-    const issued = await execFileAsync(daemonBinary, [
+    const issued = await execFileAsync(sandboxBinary, [
       'key',
       '-c',
       configPath,
@@ -142,8 +142,8 @@ async function checkSandbox(): Promise<void> {
     const token = issued.stdout.trim();
     assert.ok(token.length > 0);
 
-    currentStage = 'start daemon';
-    daemon = spawn(daemonBinary, ['daemon', '-c', configPath], {
+    currentStage = 'start sandbox';
+    sandbox = spawn(sandboxBinary, ['daemon', '-c', configPath], {
       env: { ...process.env, HOME: temporaryHome },
       stdio: 'ignore',
     });
@@ -215,7 +215,7 @@ async function checkSandbox(): Promise<void> {
     assert.equal(execResult.stderr, '');
     assert.equal(execResult.truncated, false);
   } finally {
-    await stopProcess(daemon);
+    await stopProcess(sandbox);
     await rm(temporaryHome, { recursive: true, force: true });
   }
 }

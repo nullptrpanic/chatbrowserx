@@ -71,7 +71,7 @@ fn copied_logger_writes_plain_structured_and_fallback_records() {
     let record = crate::logger::log::Record::builder()
         .args(arguments)
         .level(crate::logger::log::Level::Info)
-        .file(Some("crates/skill-daemon/src/main.rs"))
+        .file(Some("crates/sandbox/src/main.rs"))
         .build();
     crate::logger::log::logger().log(&record);
 
@@ -96,7 +96,7 @@ fn copied_logger_writes_plain_structured_and_fallback_records() {
     assert!(content.contains("\"message\":\"run 1\""));
     assert!(content.contains("\"message\":\"external record\""));
     assert!(content.contains("\"file\":\"external.rs\""));
-    assert!(content.contains("\"file\":\"skill-daemon/src/main.rs\""));
+    assert!(content.contains("\"file\":\"sandbox/src/main.rs\""));
     assert!(content.contains("\"line\":7"));
     assert!(content.contains("\"logger_error\""));
     assert!(content.contains("\"first\":1"));
@@ -107,7 +107,7 @@ fn copied_logger_writes_plain_structured_and_fallback_records() {
 #[test]
 fn open_log_creates_private_files_and_rejects_symlinks() {
     let directory = tempfile::tempdir().unwrap();
-    let path = directory.path().join("logs/skill-daemon.log");
+    let path = directory.path().join("logs/sandbox.log");
 
     let output = open_log(&path).unwrap();
 
@@ -131,7 +131,7 @@ fn open_log_reports_an_unusable_directory() {
     let blocked = directory.path().join("blocked");
     std::fs::write(&blocked, b"not a directory").unwrap();
 
-    let error = open_log(&blocked.join("skill-daemon.log")).unwrap_err();
+    let error = open_log(&blocked.join("sandbox.log")).unwrap_err();
 
     assert!(error.to_string().contains("failed to create log directory"));
 }

@@ -105,7 +105,7 @@ pub(crate) fn verify(secret: &str, token: &str) -> bool {
 
 pub(crate) fn validate_secret(secret: &str) -> Result<()> {
     if secret.len() < MINIMUM_SECRET_LENGTH {
-        bail!("daemon config secret must be at least 32 bytes");
+        bail!("sandbox config secret must be at least 32 bytes");
     }
     Ok(())
 }

@@ -21,14 +21,14 @@ impl Config {
                 .join(path)
         };
         let file = std::fs::File::open(&path)
-            .with_context(|| format!("failed to open daemon config {}", path.display()))?;
+            .with_context(|| format!("failed to open sandbox config {}", path.display()))?;
         let stored: StoredConfig = serde_json::from_reader(file)
-            .with_context(|| format!("failed to parse daemon config {}", path.display()))?;
+            .with_context(|| format!("failed to parse sandbox config {}", path.display()))?;
         if stored.port == 0 {
-            bail!("daemon config port must be greater than zero");
+            bail!("sandbox config port must be greater than zero");
         }
         if stored.timeout_seconds == 0 {
-            bail!("daemon config timeout_seconds must be greater than zero");
+            bail!("sandbox config timeout_seconds must be greater than zero");
         }
         crate::auth::validate_secret(&stored.secret)?;
         let directory = path.parent().unwrap_or(Path::new("/"));
