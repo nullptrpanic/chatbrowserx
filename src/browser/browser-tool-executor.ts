@@ -15,6 +15,7 @@ import { readSelectionState } from './selection-state';
 import { compactBrowserModelOutput } from './browser-model-output';
 
 const MAX_OUTPUT_CHARACTERS = 100 * 1_024;
+const MIN_MODEL_OUTPUT_SAVINGS_CHARACTERS = 128;
 const RELOAD_RECOVERY_FAILURES = new Set<BrowserToolFailureCode>([
   'LOAD_TIMEOUT',
   'PAGE_UNAVAILABLE',
@@ -340,17 +341,20 @@ function success(tab: BrowserTabState, data: Readonly<Record<string, unknown>>) 
 }
 
 function result(
-  _operation: ParsedBrowserToolCall['operation'],
+  operation: ParsedBrowserToolCall['operation'],
   output: unknown,
   attachmentIds: readonly string[] = [],
   modelAttachmentIds?: readonly string[],
 ): BrowserToolExecutionResult {
   const serialized = JSON.stringify(output);
   if (serialized.length <= MAX_OUTPUT_CHARACTERS) {
-    const compact = compactBrowserModelOutput(serialized);
+    const compact =
+      operation === 'scroll_until' ? compactBrowserModelOutput(serialized) : serialized;
     return {
       output: serialized,
-      ...(compact.length < serialized.length ? { modelOutput: compact } : {}),
+      ...(serialized.length - compact.length >= MIN_MODEL_OUTPUT_SAVINGS_CHARACTERS
+        ? { modelOutput: compact }
+        : {}),
       attachmentIds,
       ...(modelAttachmentIds === undefined ? {} : { modelAttachmentIds }),
     };

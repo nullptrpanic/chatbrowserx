@@ -5,7 +5,11 @@ import type { TaskRepository } from '../../persistence/task-repository';
 import type { ModelInputItem, ModelMessageContent } from '../../providers/provider-types';
 import { bytesToBase64 } from '../../shared/base64';
 import type { Checkpoint } from '../../tasks/checkpoint-types';
-import type { ContinuationItem } from '../../tasks/continuation-types';
+import { materializeContinuationItems } from '../../tasks/continuation-materialization';
+import type {
+  ContinuationItem,
+  MaterializedContinuationItem,
+} from '../../tasks/continuation-types';
 import type { MessageRecord } from '../../tasks/message-types';
 import type { TaskRun } from '../../tasks/task-types';
 import { loadWorkSessionView, type WorkSessionView } from '../work-session-view';
@@ -174,7 +178,7 @@ async function resolveMessageImages(
 
 /** Rehydrates the newest screenshot outputs before spending the remaining budget on history. */
 async function resolveFunctionOutputImages(
-  items: readonly ContinuationItem[],
+  items: readonly MaterializedContinuationItem[],
   attachments: Pick<AttachmentRepository, 'get'>,
   budget: ImageBudget,
 ): Promise<ReadonlyMap<string, readonly string[]>> {
@@ -263,9 +267,8 @@ function continuationItems(
           argumentsJson: result.argumentsJson,
         },
         {
-          type: 'function_call_output',
+          type: 'function_call_output_ref',
           callId: result.callId,
-          output: result.output,
           resultRef: result.resultRef,
           attachmentIds: result.attachmentIds ?? [],
         },
@@ -277,7 +280,7 @@ function continuationItems(
 
 /** Validates message ownership and function-call ordering before provider materialization. */
 function validateContinuation(
-  items: readonly ContinuationItem[],
+  items: readonly MaterializedContinuationItem[],
   checkpoint: Checkpoint,
   task: TaskRun,
   messagesById: ReadonlyMap<string, MessageRecord>,
@@ -405,7 +408,11 @@ export async function buildAgentContext(
     context.task.workSessionId,
     context.historyMessageLimit,
   );
-  const orderedItems = continuationItems(context.checkpoint, messages, context.task);
+  const storedItems = continuationItems(context.checkpoint, messages, context.task);
+  const orderedItems = materializeContinuationItems({
+    completedToolResults: context.checkpoint.completedToolResults,
+    continuationItems: storedItems,
+  });
   const activeMessages = validateContinuation(
     orderedItems,
     context.checkpoint,

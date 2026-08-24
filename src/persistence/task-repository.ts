@@ -220,6 +220,9 @@ function normalizeCompletedToolResult(
     toolName: result.toolName,
     argumentsJson: result.argumentsJson,
     output: result.output,
+    ...(typeof result.modelOutput === 'string' && result.modelOutput.length < result.output.length
+      ? { modelOutput: result.modelOutput }
+      : {}),
     resultRef: result.resultRef,
     attachmentIds: normalizeAttachmentIds(result.attachmentIds),
   };
@@ -237,9 +240,8 @@ function continuationFromCompletedResults(
       argumentsJson: result.argumentsJson,
     },
     {
-      type: 'function_call_output',
+      type: 'function_call_output_ref',
       callId: result.callId,
-      output: result.output,
       resultRef: result.resultRef,
       attachmentIds: result.attachmentIds ?? [],
     },
@@ -255,6 +257,7 @@ interface NormalizedContinuation {
 function normalizeStoredContinuation(
   rawItems: unknown,
   rawPendingToolCall: unknown,
+  completedToolResults: Checkpoint['completedToolResults'],
 ): NormalizedContinuation | null {
   if (!Array.isArray(rawItems)) return null;
 
@@ -324,24 +327,43 @@ function normalizeStoredContinuation(
       });
       continue;
     }
-    if (item.type === 'function_call_output') {
+    if (item.type === 'function_call_output' || item.type === 'function_call_output_ref') {
       if (
         unresolvedCall === null ||
         typeof item.callId !== 'string' ||
         item.callId !== unresolvedCall.callId ||
-        typeof item.output !== 'string' ||
         typeof item.resultRef !== 'string' ||
-        item.resultRef.length === 0
+        item.resultRef.length === 0 ||
+        (item.type === 'function_call_output' && typeof item.output !== 'string')
       ) {
         return null;
       }
-      items.push({
-        type: 'function_call_output',
-        callId: item.callId,
-        output: item.output,
-        resultRef: item.resultRef,
-        attachmentIds: normalizeAttachmentIds(item.attachmentIds),
-      });
+      const attachmentIds = normalizeAttachmentIds(item.attachmentIds);
+      if (item.type === 'function_call_output_ref') {
+        const result = completedToolResults.find(
+          (candidate) => candidate.callId === item.callId && candidate.resultRef === item.resultRef,
+        );
+        if (
+          result === undefined ||
+          attachmentIds.some((id) => !(result.attachmentIds ?? []).includes(id))
+        ) {
+          return null;
+        }
+        items.push({
+          type: 'function_call_output_ref',
+          callId: item.callId,
+          resultRef: item.resultRef,
+          attachmentIds,
+        });
+      } else {
+        items.push({
+          type: 'function_call_output',
+          callId: item.callId,
+          output: item.output as string,
+          resultRef: item.resultRef,
+          attachmentIds,
+        });
+      }
       unresolvedCall = null;
       continue;
     }
@@ -391,6 +413,7 @@ function normalizeCheckpoint(checkpoint: Checkpoint): Checkpoint {
   const storedContinuation = normalizeStoredContinuation(
     raw.continuationItems,
     raw.pendingToolCall,
+    completedToolResults,
   );
   const browserTargetTabId =
     raw.browserTargetTabId === null ||

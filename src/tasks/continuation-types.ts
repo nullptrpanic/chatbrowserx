@@ -35,10 +35,21 @@ export type ContinuationItem =
       readonly attachmentIds?: readonly string[];
     }
   | {
+      readonly type: 'function_call_output_ref';
+      readonly callId: string;
+      readonly resultRef: string;
+      readonly attachmentIds?: readonly string[];
+    }
+  | {
       readonly type: 'compaction';
       readonly itemId: string;
       readonly encryptedContent: string;
     };
+
+export type MaterializedContinuationItem = Exclude<
+  ContinuationItem,
+  { readonly type: 'function_call_output_ref' }
+>;
 
 export interface PendingToolCall {
   readonly callId: string;

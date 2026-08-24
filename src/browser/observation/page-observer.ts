@@ -672,6 +672,10 @@ export class PageObserver {
           sessionTarget,
           loaders,
           metrics,
+          pageUrl:
+            sessionTarget.frame === 'main' && frameTree.frameTree.frame.url.length > 0
+              ? frameTree.frameTree.frame.url.slice(0, 4_096)
+              : null,
           semantic: buildSemanticPageSnapshot({
             axNodes: tree.nodes,
             domSnapshot,
@@ -782,7 +786,10 @@ export class PageObserver {
       if (ref && metrics) scrollMetricsByRef.set(ref, metrics);
     });
     const coverage = interactiveCoverage(visibleElements, mainDocumentCoverage, scrollMetricsByRef);
-    const metadata = await this.#pageMetadata(browserSession.root);
+    const frameUrl = sessionObservations.find(
+      ({ sessionTarget }) => sessionTarget.frame === 'main',
+    )?.pageUrl;
+    const pageUrl = frameUrl ?? (await this.#pageMetadata(browserSession.root)).url;
     const snapshotId = createInteractiveSnapshotId();
     const truncated = boundedEntries.length < originalCount;
     const previous = this.#interactiveSnapshots.get(tabId);
@@ -824,7 +831,7 @@ export class PageObserver {
         )
           return {
             tabId,
-            url: metadata.url,
+            url: pageUrl,
             data: deltaData,
             observation: null,
             attachmentIds: [],
@@ -835,7 +842,7 @@ export class PageObserver {
     }
     return {
       tabId,
-      url: metadata.url,
+      url: pageUrl,
       data: {
         mode: 'interactive',
         snapshot: snapshotId,

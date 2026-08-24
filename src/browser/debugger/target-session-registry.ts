@@ -223,25 +223,40 @@ export class TargetSessionRegistry {
 
   async #attach(tabId: number): Promise<MutableSessionState> {
     try {
-      await this.#transport.attach(tabId);
-      const state: MutableSessionState = {
-        tabId,
-        generation: this.#advanceGeneration(tabId),
-        root: { tabId },
-        children: new Map(),
-      };
-      this.#states.set(tabId, state);
-      await this.#configureSession(state.root);
-      return state;
+      return await this.#attachOnce(tabId);
     } catch {
       this.#states.delete(tabId);
       try {
         await this.#transport.detach(tabId);
       } catch {
-        // A failed attach may not own the target, so detach can also fail.
+        // Another debugger may own the target; never interfere or retry in that case.
+        throw new TargetSessionRegistryError('The browser debugger is unavailable for this tab.');
       }
-      throw new TargetSessionRegistryError('The browser debugger is unavailable for this tab.');
+      try {
+        return await this.#attachOnce(tabId);
+      } catch {
+        this.#states.delete(tabId);
+        try {
+          await this.#transport.detach(tabId);
+        } catch {
+          // The bounded recovery attempt may have failed before acquiring ownership.
+        }
+        throw new TargetSessionRegistryError('The browser debugger is unavailable for this tab.');
+      }
     }
+  }
+
+  async #attachOnce(tabId: number): Promise<MutableSessionState> {
+    await this.#transport.attach(tabId);
+    const state: MutableSessionState = {
+      tabId,
+      generation: this.#advanceGeneration(tabId),
+      root: { tabId },
+      children: new Map(),
+    };
+    this.#states.set(tabId, state);
+    await this.#configureSession(state.root);
+    return state;
   }
 
   async #configureSession(session: DebuggerSession): Promise<void> {

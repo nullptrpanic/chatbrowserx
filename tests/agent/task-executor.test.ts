@@ -526,7 +526,7 @@ describe('TaskExecutor', () => {
     database.close();
   });
 
-  it('dispatches a new successful submit call even when its arguments match an older call', async () => {
+  it('does not redispatch an immediately repeated verified submit', async () => {
     const database = await openChatBrowserDatabase(
       createTestDatabaseName('duplicate-browser-submit-success'),
     );
@@ -572,6 +572,7 @@ describe('TaskExecutor', () => {
         data: {
           action: 'type',
           submitted: true,
+          submissionVerified: true,
           verified: true,
         },
         observation: null,
@@ -591,14 +592,18 @@ describe('TaskExecutor', () => {
     const result = await executor.run(created.task.id, new AbortController().signal);
 
     expect(result.task.status).toBe('completed');
-    expect(execute).toHaveBeenCalledTimes(2);
+    expect(execute).toHaveBeenCalledOnce();
     expect(result.checkpoint.completedToolResults).toHaveLength(2);
-    expect(result.checkpoint.completedToolResults.map((entry) => JSON.parse(entry.output))).toEqual(
-      [
-        expect.objectContaining({ ok: true, data: expect.objectContaining({ submitted: true }) }),
-        expect.objectContaining({ ok: true, data: expect.objectContaining({ submitted: true }) }),
-      ],
-    );
+    expect(JSON.parse(result.checkpoint.completedToolResults[1]?.output ?? '')).toMatchObject({
+      ok: true,
+      data: {
+        action: 'type',
+        submitted: true,
+        submissionVerified: true,
+        verified: true,
+        replayed: true,
+      },
+    });
     database.close();
   });
 
@@ -1287,10 +1292,10 @@ describe('TaskExecutor', () => {
     });
     expect(
       result.checkpoint.continuationItems.find(
-        (item) => item.type === 'function_call_output' && item.callId === 'call_screenshot',
+        (item) => item.type === 'function_call_output_ref' && item.callId === 'call_screenshot',
       ),
     ).toMatchObject({
-      type: 'function_call_output',
+      type: 'function_call_output_ref',
       callId: 'call_screenshot',
       attachmentIds: ['attachment_screenshot'],
     });
@@ -1353,17 +1358,18 @@ describe('TaskExecutor', () => {
 
     const result = await executor.run(created.task.id, new AbortController().signal);
 
-    expect(result.checkpoint.completedToolResults[0]?.output).toBe(
-      '{"ok":true,"data":{"full":"audit"}}',
-    );
-    expect(
-      result.checkpoint.continuationItems.find(
-        (item) => item.type === 'function_call_output' && item.callId === 'call_inspect',
-      ),
-    ).toMatchObject({
-      type: 'function_call_output',
-      output: '{"ok":true,"verified":true}',
+    expect(result.checkpoint.completedToolResults[0]).toMatchObject({
+      output: '{"ok":true,"data":{"full":"audit"}}',
+      modelOutput: '{"ok":true,"verified":true}',
     });
+    const continuationOutput = result.checkpoint.continuationItems.find(
+      (item) => 'callId' in item && item.callId === 'call_inspect' && item.type !== 'function_call',
+    );
+    expect(continuationOutput).toMatchObject({
+      type: 'function_call_output_ref',
+      callId: 'call_inspect',
+    });
+    expect(continuationOutput).not.toHaveProperty('output');
     database.close();
   });
 
@@ -1438,12 +1444,12 @@ describe('TaskExecutor', () => {
     const result = await executor.run(created.task.id, new AbortController().signal);
     const completed = result.checkpoint.completedToolResults[0];
     const continuation = result.checkpoint.continuationItems.find(
-      (item) => item.type === 'function_call_output' && item.callId === 'call_capture',
+      (item) => item.type === 'function_call_output_ref' && item.callId === 'call_capture',
     );
 
     expect(completed?.attachmentIds).toEqual(['attachment_capture']);
     expect(continuation).toMatchObject({
-      type: 'function_call_output',
+      type: 'function_call_output_ref',
       callId: 'call_capture',
       attachmentIds: [],
     });
@@ -1681,7 +1687,7 @@ describe('TaskExecutor', () => {
       ),
     ).toMatchObject([
       { type: 'function_call', callId: 'call_exec', name: 'sandbox_exec' },
-      { type: 'function_call_output', callId: 'call_exec' },
+      { type: 'function_call_output_ref', callId: 'call_exec' },
     ]);
     database.close();
   });
@@ -2390,7 +2396,7 @@ describe('TaskExecutor', () => {
         }),
       },
       expect.objectContaining({
-        type: 'function_call_output',
+        type: 'function_call_output_ref',
         callId: 'call_commit',
         attachmentIds: [],
       }),
@@ -2401,15 +2407,14 @@ describe('TaskExecutor', () => {
         argumentsJson: JSON.stringify(SEARCH_ARGUMENTS),
       },
       expect.objectContaining({
-        type: 'function_call_output',
+        type: 'function_call_output_ref',
         callId: 'call_search_2',
-        output: '{"ok":true,"results":[],"truncated":false}',
         attachmentIds: [],
       }),
     ]);
     expect(
       JSON.parse(
-        inputs[3]?.checkpoint.continuationItems.find((item) => item.type === 'function_call_output')
+        inputs[3]?.checkpoint.completedToolResults.find((item) => item.callId === 'call_commit')
           ?.output ?? '',
       ),
     ).toMatchObject({ ok: true, compactedCalls: 1, releasedImages: 0 });
@@ -2489,9 +2494,7 @@ describe('TaskExecutor', () => {
       ),
     ).toBe(true);
     expect(
-      retryInput?.continuationItems.find(
-        (item) => item.type === 'function_call_output' && item.callId === 'call_bad_commit',
-      ),
+      retryInput?.completedToolResults.find((item) => item.callId === 'call_bad_commit'),
     ).toMatchObject({
       output: JSON.stringify({
         ok: false,
@@ -2509,8 +2512,7 @@ describe('TaskExecutor', () => {
     expect(
       result.checkpoint.continuationItems.some(
         (item) =>
-          (item.type === 'function_call' || item.type === 'function_call_output') &&
-          (item.callId === 'call_search' || item.callId === 'call_bad_commit'),
+          'callId' in item && (item.callId === 'call_search' || item.callId === 'call_bad_commit'),
       ),
     ).toBe(false);
     database.close();
@@ -2753,7 +2755,7 @@ describe('TaskExecutor', () => {
         }
         expect(input.checkpoint.continuationItems.slice(-3)).toEqual([
           expect.objectContaining({
-            type: 'function_call_output',
+            type: 'function_call_output_ref',
             callId: 'call_search',
           }),
           { type: 'message_ref', messageId: 'supplement_during_tool' },

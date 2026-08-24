@@ -9,7 +9,12 @@ import type { Clock } from '../shared/time';
 import { SandboxClientError } from '../sandbox/sandbox-client';
 import type { SandboxExecutionPort } from '../sandbox/sandbox-tool-executor';
 import type { Checkpoint, CompletedToolResult } from '../tasks/checkpoint-types';
-import type { ContinuationItem, PendingToolCall } from '../tasks/continuation-types';
+import { materializeContinuationItems } from '../tasks/continuation-materialization';
+import type {
+  ContinuationItem,
+  MaterializedContinuationItem,
+  PendingToolCall,
+} from '../tasks/continuation-types';
 import type { TaskSnapshot } from '../tasks/task-command-service';
 import type { TaskError } from '../tasks/task-errors';
 import { TaskLeaseManager } from '../tasks/task-lease';
@@ -285,6 +290,13 @@ interface VerifiedSelectionProgress {
   readonly output: Readonly<Record<string, unknown>>;
 }
 
+interface VerifiedSubmitProgress {
+  readonly callFingerprint: string;
+  readonly pageEpoch: string | null;
+  readonly mutationVersion: number;
+  readonly output: Readonly<Record<string, unknown>>;
+}
+
 interface ImmobileScrollProgress {
   readonly callFingerprint: string;
   readonly pageEpoch: string | null;
@@ -298,6 +310,7 @@ interface BrowserProgressState {
   readonly pageEpoch: string | null;
   readonly mutationVersion: number;
   readonly verifiedSelection?: VerifiedSelectionProgress;
+  readonly verifiedSubmit?: VerifiedSubmitProgress;
   readonly immobileScroll?: ImmobileScrollProgress;
 }
 
@@ -449,13 +462,30 @@ function outputImmobileScroll(
   return data.position === undefined ? {} : { position: data.position };
 }
 
+function outputVerifiedSubmit(record: Readonly<Record<string, unknown>>): boolean {
+  if (record.ok !== true) return false;
+  const data = childRecord(record, 'data');
+  return (
+    data?.action === 'type' &&
+    data.submitted === true &&
+    data.submissionVerified === true &&
+    data.verified === true
+  );
+}
+
 /** Reconstructs page-state evidence while keeping user supplements as non-destructive boundaries. */
-function recentBrowserProgress(items: readonly ContinuationItem[]): BrowserProgressState {
-  const calls = new Map<string, Extract<ContinuationItem, { readonly type: 'function_call' }>>();
+function recentBrowserProgress(
+  items: readonly MaterializedContinuationItem[],
+): BrowserProgressState {
+  const calls = new Map<
+    string,
+    Extract<MaterializedContinuationItem, { readonly type: 'function_call' }>
+  >();
   const completed: CompletedBrowserProgress[] = [];
   let pageEpoch: string | null = null;
   let mutationVersion = 0;
   let verifiedSelection: VerifiedSelectionProgress | undefined;
+  let verifiedSubmit: VerifiedSubmitProgress | undefined;
   let immobileScroll: ImmobileScrollProgress | undefined;
   for (const item of items) {
     if (item.type === 'message_ref' || item.type === 'compaction') {
@@ -464,6 +494,7 @@ function recentBrowserProgress(items: readonly ContinuationItem[]): BrowserProgr
       pageEpoch = null;
       mutationVersion = 0;
       verifiedSelection = undefined;
+      verifiedSubmit = undefined;
       immobileScroll = undefined;
       continue;
     }
@@ -474,6 +505,7 @@ function recentBrowserProgress(items: readonly ContinuationItem[]): BrowserProgr
         pageEpoch = null;
         mutationVersion = 0;
         verifiedSelection = undefined;
+        verifiedSubmit = undefined;
         immobileScroll = undefined;
         continue;
       }
@@ -498,6 +530,7 @@ function recentBrowserProgress(items: readonly ContinuationItem[]): BrowserProgr
       pageEpoch = null;
       mutationVersion += 1;
       verifiedSelection = undefined;
+      verifiedSubmit = undefined;
       immobileScroll = undefined;
       continue;
     }
@@ -509,6 +542,7 @@ function recentBrowserProgress(items: readonly ContinuationItem[]): BrowserProgr
           childRecord(output, 'data')?.unchanged === true ? immobileScroll : undefined;
         pageEpoch = nextEpoch;
         verifiedSelection = undefined;
+        verifiedSubmit = undefined;
         immobileScroll =
           previousImmobileScroll === undefined
             ? undefined
@@ -524,11 +558,13 @@ function recentBrowserProgress(items: readonly ContinuationItem[]): BrowserProgr
     if (browserSemanticMutationToolNames.has(call.name) && immobile === null) {
       mutationVersion += 1;
       verifiedSelection = undefined;
+      verifiedSubmit = undefined;
       immobileScroll = undefined;
     }
     if (nextEpoch !== null && nextEpoch !== pageEpoch) {
       pageEpoch = nextEpoch;
       verifiedSelection = undefined;
+      verifiedSubmit = undefined;
       immobileScroll = undefined;
     }
 
@@ -536,6 +572,14 @@ function recentBrowserProgress(items: readonly ContinuationItem[]): BrowserProgr
     if (selection !== null && pageEpoch !== null) {
       verifiedSelection = {
         ...selection,
+        pageEpoch,
+        mutationVersion,
+        output,
+      };
+    }
+    if (call.name === 'browser_type' && outputVerifiedSubmit(output)) {
+      verifiedSubmit = {
+        callFingerprint,
         pageEpoch,
         mutationVersion,
         output,
@@ -561,6 +605,7 @@ function recentBrowserProgress(items: readonly ContinuationItem[]): BrowserProgr
     pageEpoch,
     mutationVersion,
     ...(verifiedSelection === undefined ? {} : { verifiedSelection }),
+    ...(verifiedSubmit === undefined ? {} : { verifiedSubmit }),
     ...(immobileScroll === undefined ? {} : { immobileScroll }),
   };
 }
@@ -596,6 +641,31 @@ function replayVerifiedSelectionOutput(
   });
 }
 
+function replayVerifiedSubmitOutput(
+  progress: BrowserProgressState,
+  pending: PendingToolCall,
+): string | null {
+  const evidence = progress.verifiedSubmit;
+  if (
+    pending.name !== 'browser_type' ||
+    evidence === undefined ||
+    evidence.callFingerprint !== browserCallFingerprint(pending.name, pending.argumentsJson) ||
+    evidence.pageEpoch !== progress.pageEpoch ||
+    evidence.mutationVersion !== progress.mutationVersion
+  ) {
+    return null;
+  }
+  const data = childRecord(evidence.output, 'data') ?? {};
+  return JSON.stringify({
+    ...evidence.output,
+    data: {
+      ...data,
+      dispatched: false,
+      replayed: true,
+    },
+  });
+}
+
 function immobileScrollOutput(
   progress: BrowserProgressState,
   pending: PendingToolCall,
@@ -626,12 +696,14 @@ function immobileScrollOutput(
 
 /** Stops a repeated read/failure strategy only after two semantically identical cycles. */
 function noProgressBrowserOutput(
-  items: readonly ContinuationItem[],
+  checkpoint: Pick<Checkpoint, 'completedToolResults' | 'continuationItems'>,
   pending: PendingToolCall,
 ): string | null {
-  const progress = recentBrowserProgress(items);
+  const progress = recentBrowserProgress(materializeContinuationItems(checkpoint));
   const replayedSelection = replayVerifiedSelectionOutput(progress, pending);
   if (replayedSelection !== null) return replayedSelection;
+  const replayedSubmit = replayVerifiedSubmitOutput(progress, pending);
+  if (replayedSubmit !== null) return replayedSubmit;
   const stoppedScroll = immobileScrollOutput(progress, pending);
   if (stoppedScroll !== null) return stoppedScroll;
 
@@ -1031,17 +1103,18 @@ export class TaskExecutor {
     let compaction: ReturnType<typeof compactContextAtCommit>;
     try {
       compaction = compactContextAtCommit(
-        snapshot.checkpoint.continuationItems,
+        materializeContinuationItems(snapshot.checkpoint),
         pending,
         resultRef,
       );
     } catch (error) {
       if (error instanceof ContextCommitCursorError) {
         const currentCommit = snapshot.checkpoint.continuationItems.at(-1);
+        const materializedItems = materializeContinuationItems(snapshot.checkpoint);
         const candidateItems =
           currentCommit?.type === 'function_call' && currentCommit.callId === pending.callId
-            ? snapshot.checkpoint.continuationItems.slice(0, -1)
-            : snapshot.checkpoint.continuationItems;
+            ? materializedItems.slice(0, -1)
+            : materializedItems;
         return this.#recordToolResult(
           snapshot,
           ownerId,
@@ -1067,12 +1140,28 @@ export class TaskExecutor {
       resultRef,
       attachmentIds: [],
     };
+    const referencedResultRefs = new Set(
+      snapshot.checkpoint.continuationItems.flatMap((item) =>
+        item.type === 'function_call_output_ref' ? [item.resultRef] : [],
+      ),
+    );
+    const continuationItems: ContinuationItem[] = compaction.continuationItems.map((item) =>
+      item.type === 'function_call_output' &&
+      (item.callId === pending.callId || referencedResultRefs.has(item.resultRef))
+        ? {
+            type: 'function_call_output_ref',
+            callId: item.callId,
+            resultRef: item.resultRef,
+            attachmentIds: item.attachmentIds ?? [],
+          }
+        : item,
+    );
     this.#dependencies.browser.resetObservationBaselines();
     return this.#saveBoundary(snapshot, ownerId, signal, {
       type: 'tool.result-recorded',
       reason: `${pending.name}_result_recorded`,
       completedToolResults: [...snapshot.checkpoint.completedToolResults, completedResult],
-      continuationItems: compaction.continuationItems,
+      continuationItems,
       pendingToolCall: null,
     });
   }
@@ -1112,10 +1201,7 @@ export class TaskExecutor {
       return this.#recordToolResult(snapshot, ownerId, signal, pending, duplicateFailure);
     }
 
-    const noProgressFailure = noProgressBrowserOutput(
-      snapshot.checkpoint.continuationItems,
-      pending,
-    );
+    const noProgressFailure = noProgressBrowserOutput(snapshot.checkpoint, pending);
     if (noProgressFailure !== null) {
       return this.#recordToolResult(snapshot, ownerId, signal, pending, noProgressFailure);
     }
@@ -1197,6 +1283,9 @@ export class TaskExecutor {
         toolName: pending.name,
         argumentsJson: pending.argumentsJson,
         output,
+        ...(modelOutput === undefined || modelOutput.length >= output.length
+          ? {}
+          : { modelOutput }),
         resultRef,
         attachmentIds: durableAttachmentIds,
       };
@@ -1207,9 +1296,8 @@ export class TaskExecutor {
         continuationItems: [
           ...snapshot.checkpoint.continuationItems,
           {
-            type: 'function_call_output',
+            type: 'function_call_output_ref',
             callId: pending.callId,
-            output: modelOutput ?? output,
             resultRef: completedResult.resultRef,
             attachmentIds: continuationAttachmentIds,
           },

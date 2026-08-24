@@ -1,7 +1,11 @@
 import { CODEX_EFFECTIVE_CONTEXT_WINDOW_TOKENS } from '../../providers/codex/codex-constants';
 import type { ModelCompactionResult } from '../../providers/provider-types';
 import type { Checkpoint } from '../../tasks/checkpoint-types';
-import type { ContinuationItem } from '../../tasks/continuation-types';
+import { materializeContinuationItems } from '../../tasks/continuation-materialization';
+import type {
+  ContinuationItem,
+  MaterializedContinuationItem,
+} from '../../tasks/continuation-types';
 import { CONTEXT_COMMIT_TOOL_NAME } from '../tools/context-commit-tool-schema';
 
 export const AUTO_COMPACT_INPUT_TOKEN_HIGH_WATER = 220_000;
@@ -27,9 +31,14 @@ function successfulLegacyCommit(output: string): boolean {
   }
 }
 
-function continuationPressure(items: readonly ContinuationItem[]): ContinuationPressure {
+function continuationPressure(
+  items: readonly MaterializedContinuationItem[],
+): ContinuationPressure {
   let boundaryIndex = -1;
-  let pendingCall: Extract<ContinuationItem, { readonly type: 'function_call' }> | null = null;
+  let pendingCall: Extract<
+    MaterializedContinuationItem,
+    { readonly type: 'function_call' }
+  > | null = null;
   const completedPairIndexes: number[] = [];
   for (let index = 0; index < items.length; index += 1) {
     const item = items[index];
@@ -75,7 +84,7 @@ export function shouldUseNativeContextCompaction(
   }
   const projectedInputTokens = measuredInputTokens + unmeasuredInputTokens;
   if (projectedInputTokens < AUTO_COMPACT_INPUT_TOKEN_HIGH_WATER) return false;
-  const pressure = continuationPressure(checkpoint.continuationItems);
+  const pressure = continuationPressure(materializeContinuationItems(checkpoint));
   if (pressure.completedPairsAfterBoundary === 0) return false;
   if (!pressure.hasPriorBoundary) return true;
   return (

@@ -7,6 +7,8 @@ export interface CompletedToolResult {
   readonly toolName: string;
   readonly argumentsJson: string;
   readonly output: string;
+  /** Optional smaller representation replayed to the model instead of the audit output. */
+  readonly modelOutput?: string;
   readonly resultRef: string;
   /** Durable Blob references used to reconstruct multimodal tool output on demand. */
   readonly attachmentIds?: readonly string[];

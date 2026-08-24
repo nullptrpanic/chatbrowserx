@@ -78,14 +78,7 @@ describe('BrowserToolExecutor', () => {
       data: { title: 'Current page', active: true, taskBound: true },
       observation: null,
     });
-    expect(result.modelOutput).toBe(
-      JSON.stringify({
-        ok: true,
-        tabId: 7,
-        url: 'https://example.com/current',
-        data: { title: 'Current page', active: true, taskBound: true },
-      }),
-    );
+    expect(result.modelOutput).toBeUndefined();
   });
 
   it('inspects an explicitly selected background tab without activating it', async () => {
@@ -1544,8 +1537,8 @@ describe('BrowserToolExecutor', () => {
                   base: `snapshot_${String(sequence - 1)}`,
                   upsert: [
                     {
-                      k: `node:batch_${String(sequence)}`,
-                      e: { r: 'statictext', n: `${String(sequence)}${'x'.repeat(20_000)}` },
+                      k: 'node:repeated_status',
+                      e: { r: 'statictext', n: `Status ${'x'.repeat(20_000)}` },
                     },
                   ],
                 },
@@ -1614,6 +1607,8 @@ describe('BrowserToolExecutor', () => {
       },
     });
     expect(result.output.length).toBeLessThanOrEqual(100 * 1_024);
+    expect(result.modelOutput).toBeDefined();
+    expect(result.modelOutput?.length).toBeLessThan(result.output.length);
   });
 
   it('preserves partial scroll-until evidence when a later action fails', async () => {

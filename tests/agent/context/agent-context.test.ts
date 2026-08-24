@@ -495,6 +495,58 @@ describe('buildAgentContext', () => {
     ]);
   });
 
+  it('materializes a lightweight tool-result reference with its compact model output', async () => {
+    const messages = [
+      message({
+        id: 'current',
+        taskId: TASK.id,
+        role: 'user',
+        text: 'Inspect the page.',
+      }),
+    ];
+    const context = await buildAgentContext(
+      {
+        task: TASK,
+        checkpoint: {
+          ...CHECKPOINT,
+          completedToolResults: [
+            {
+              callId: 'call_inspect',
+              toolName: 'browser_inspect',
+              argumentsJson: '{"tabId":0,"mode":"interactive"}',
+              output: '{"ok":true,"audit":"full"}',
+              modelOutput: '{"ok":true}',
+              resultRef: 'result_inspect',
+            },
+          ],
+          continuationItems: [
+            { type: 'message_ref', messageId: 'current' },
+            {
+              type: 'function_call',
+              callId: 'call_inspect',
+              name: 'browser_inspect',
+              argumentsJson: '{"tabId":0,"mode":"interactive"}',
+            },
+            {
+              type: 'function_call_output_ref',
+              callId: 'call_inspect',
+              resultRef: 'result_inspect',
+            },
+          ],
+        },
+        customSystemPrompt: '',
+        historyMessageLimit: 50,
+      },
+      contextDependencies(messages, { get: vi.fn(async () => undefined) }),
+    );
+
+    expect(context.input.at(-1)).toEqual({
+      type: 'function_call_output',
+      callId: 'call_inspect',
+      output: '{"ok":true}',
+    });
+  });
+
   it('keeps supplements and post-commit results ordered while loading only new screenshots', async () => {
     const commitArguments = JSON.stringify({
       state: 'Goal: continue with the corrected detail.',

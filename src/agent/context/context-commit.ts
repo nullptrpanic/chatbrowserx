@@ -118,7 +118,11 @@ export function contextCommitCandidateCallIds(
       pendingCall = item;
       continue;
     }
-    if (!pendingCall || item.callId !== pendingCall.callId) {
+    if (
+      item.type !== 'function_call_output' ||
+      !pendingCall ||
+      item.callId !== pendingCall.callId
+    ) {
       invalidContinuation();
     }
     if (pendingCall.name === CONTEXT_COMMIT_TOOL_NAME) {
@@ -185,7 +189,7 @@ export function compactContextAtCommit(
       openCall = item;
       continue;
     }
-    if (!openCall || item.callId !== openCall.callId) {
+    if (item.type !== 'function_call_output' || !openCall || item.callId !== openCall.callId) {
       invalidContinuation();
     }
     units.push({ type: 'tool_pair', call: openCall, output: item });

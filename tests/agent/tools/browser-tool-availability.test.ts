@@ -52,20 +52,22 @@ function names(value: Checkpoint): readonly string[] {
 }
 
 describe('browserToolDefinitionsForCheckpoint', () => {
-  it('starts with discovery tools and exposes ref actions only after interactive inspection', () => {
+  it('keeps semantic action tools stable from the first model turn', () => {
     const available = names(checkpoint());
 
     expect(available).toEqual(
       expect.arrayContaining([
         'browser_inspect',
         'browser_navigate',
+        'browser_click',
+        'browser_set_checked',
+        'browser_type',
+        'browser_scroll',
+        'browser_scroll_until',
         'browser_wait',
         'browser_network_start',
       ]),
     );
-    expect(available).not.toContain('browser_click');
-    expect(available).not.toContain('browser_set_checked');
-    expect(available).not.toContain('browser_scroll_until');
     expect(available).not.toContain('browser_get_current_tab');
     expect(available).not.toContain('browser_click_point');
 
@@ -195,7 +197,14 @@ describe('browserToolDefinitionsForCheckpoint', () => {
     const afterNavigation = browserToolDefinitionsForCheckpoint(
       checkpoint([...inspected, ...navigated]),
     ).find(({ name }) => name === 'browser_scroll_until');
-    expect(afterNavigation).toBeUndefined();
+    expect(afterNavigation).toBeDefined();
+    expect(
+      (
+        afterNavigation?.parameters.properties as Readonly<
+          Record<string, Readonly<Record<string, unknown>>>
+        >
+      ).target,
+    ).not.toHaveProperty('enum');
   });
 
   it('binds bounded scroll-until to a scrollable document viewport from coverage', () => {

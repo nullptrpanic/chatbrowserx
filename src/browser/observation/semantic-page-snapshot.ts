@@ -90,6 +90,8 @@ interface SnapshotDomNode {
   readonly cursor: string;
   readonly visible: boolean;
   readonly paintOrder?: number;
+  readonly clipsOverflowX: boolean;
+  readonly clipsOverflowY: boolean;
   readonly scrollableX: boolean;
   readonly scrollableY: boolean;
   readonly bounds?: readonly [number, number, number, number];
@@ -360,6 +362,21 @@ function tupleBounds(value: Protocol.DOMSnapshot.Rectangle | undefined) {
   return [x, y, width, height] as const;
 }
 
+type SnapshotBounds = readonly [number, number, number, number];
+
+function intersectBounds(
+  bounds: SnapshotBounds,
+  clip: SnapshotBounds,
+  clipX: boolean,
+  clipY: boolean,
+): SnapshotBounds | undefined {
+  const left = clipX ? Math.max(bounds[0], clip[0]) : bounds[0];
+  const top = clipY ? Math.max(bounds[1], clip[1]) : bounds[1];
+  const right = clipX ? Math.min(bounds[0] + bounds[2], clip[0] + clip[2]) : bounds[0] + bounds[2];
+  const bottom = clipY ? Math.min(bounds[1] + bounds[3], clip[1] + clip[3]) : bounds[1] + bounds[3];
+  return right > left && bottom > top ? [left, top, right - left, bottom - top] : undefined;
+}
+
 function parseAttributes(
   strings: readonly string[],
   encoded: Protocol.DOMSnapshot.ArrayOfStrings | undefined,
@@ -426,6 +443,12 @@ function snapshotDomNodes(
       const clientRect = layout?.clientRect;
       const scrollableOverflow = (value: string): boolean =>
         value === 'auto' || value === 'scroll' || value === 'overlay' || value === 'hidden';
+      const clipsOverflow = (value: string): boolean =>
+        value === 'auto' ||
+        value === 'scroll' ||
+        value === 'overlay' ||
+        value === 'hidden' ||
+        value === 'clip';
       const node: SnapshotDomNode = {
         backendNodeId,
         documentFrameId,
@@ -438,6 +461,8 @@ function snapshotDomNodes(
         inputChecked: inputChecked.has(nodeIndex),
         optionSelected: optionSelected.has(nodeIndex),
         cursor: styles.cursor ?? '',
+        clipsOverflowX: clipsOverflow(overflowX),
+        clipsOverflowY: clipsOverflow(overflowY),
         scrollableX:
           scrollableOverflow(overflowX) &&
           scrollRect !== undefined &&
@@ -506,19 +531,50 @@ function domNodesAreRelated(left: SnapshotDomNode, right: SnapshotDomNode): bool
   return reaches(left, right) || reaches(right, left);
 }
 
+function clippedPaintBounds(
+  node: SnapshotDomNode,
+  viewport: NonNullable<BuildSemanticPageSnapshotInput['viewport']>,
+): SnapshotBounds | undefined {
+  let clipped = node.bounds;
+  if (!clipped) return undefined;
+  clipped = intersectBounds(
+    clipped,
+    [viewport.x, viewport.y, viewport.width, viewport.height],
+    true,
+    true,
+  );
+  let ancestor = node.parent;
+  while (clipped && ancestor) {
+    if (ancestor.clipsOverflowX || ancestor.clipsOverflowY) {
+      const clip = ancestor.clientRect ?? ancestor.bounds;
+      if (clip) {
+        clipped = intersectBounds(clipped, clip, ancestor.clipsOverflowX, ancestor.clipsOverflowY);
+      }
+    }
+    ancestor = ancestor.parent;
+  }
+  return clipped;
+}
+
 function fullyCoveredByHigherLayer(
   target: SnapshotDomNode,
   candidates: Iterable<SnapshotDomNode>,
   viewport: BuildSemanticPageSnapshotInput['viewport'],
+  clippedBoundsCache: Map<SnapshotDomNode, SnapshotBounds | undefined>,
 ): boolean {
-  const bounds = target.bounds;
   const targetPaintOrder = target.paintOrder;
-  if (!bounds || targetPaintOrder === undefined || !viewport) return false;
-  const left = Math.max(bounds[0], viewport.x);
-  const top = Math.max(bounds[1], viewport.y);
-  const right = Math.min(bounds[0] + bounds[2], viewport.x + viewport.width);
-  const bottom = Math.min(bounds[1] + bounds[3], viewport.y + viewport.height);
-  if (right <= left || bottom <= top) return false;
+  if (targetPaintOrder === undefined || !viewport) return false;
+  const boundsFor = (node: SnapshotDomNode): SnapshotBounds | undefined => {
+    if (clippedBoundsCache.has(node)) return clippedBoundsCache.get(node);
+    const bounds = clippedPaintBounds(node, viewport);
+    clippedBoundsCache.set(node, bounds);
+    return bounds;
+  };
+  const bounds = boundsFor(target);
+  if (!bounds) return false;
+  const [left, top, width, height] = bounds;
+  const right = left + width;
+  const bottom = top + height;
 
   const points = [
     [0.5, 0.5],
@@ -547,7 +603,7 @@ function fullyCoveredByHigherLayer(
     coveringNodes.length > 0 &&
     points.every(({ x, y }) =>
       coveringNodes.some((candidate) => {
-        const candidateBounds = candidate.bounds;
+        const candidateBounds = boundsFor(candidate);
         return (
           candidateBounds !== undefined &&
           x >= candidateBounds[0] &&
@@ -1106,6 +1162,7 @@ export function buildSemanticPageSnapshot(
   const representedDomBackendIds = new Set<number>();
   const domNodes = [...domByBackendId.values()];
   const snapshotIndex = new SemanticSnapshotIndex(domNodes, input.viewport);
+  const clippedBoundsCache = new Map<SnapshotDomNode, SnapshotBounds | undefined>();
 
   for (const node of orderedAxNodes(input.axNodes)) {
     if (node.ignored) continue;
@@ -1134,6 +1191,7 @@ export function buildSemanticPageSnapshot(
         targetDomNode,
         snapshotIndex.coverageCandidates(targetDomNode.bounds),
         input.viewport,
+        clippedBoundsCache,
       )
     ) {
       actions = [];
@@ -1253,6 +1311,7 @@ export function buildSemanticPageSnapshot(
         pointerTarget ?? domNode,
         snapshotIndex.coverageCandidates((pointerTarget ?? domNode).bounds),
         input.viewport,
+        clippedBoundsCache,
       )
     ) {
       continue;

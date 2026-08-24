@@ -117,9 +117,8 @@ describe('IndexedDbTaskRepository', () => {
           argumentsJson: '{}',
         },
         {
-          type: 'function_call_output',
+          type: 'function_call_output_ref',
           callId: 'call_tavily',
-          output: '{"ok":true}',
           resultRef: 'result_tavily',
         },
       ],
@@ -277,7 +276,8 @@ describe('IndexedDbTaskRepository', () => {
           callId: 'call_inspect',
           toolName: 'browser_inspect',
           argumentsJson: '{}',
-          output: '{"ok":true}',
+          output: '{"ok":true,"audit":"full"}',
+          modelOutput: '{"ok":true}',
           resultRef: 'result_inspect',
         },
       ],
@@ -302,9 +302,8 @@ describe('IndexedDbTaskRepository', () => {
           ],
         },
         {
-          type: 'function_call_output',
+          type: 'function_call_output_ref',
           callId: 'call_inspect',
-          output: '{"ok":true}',
           resultRef: 'result_inspect',
         },
       ],
@@ -313,6 +312,13 @@ describe('IndexedDbTaskRepository', () => {
     });
 
     await expect(repository.getCheckpoint('checkpoint_model_output')).resolves.toMatchObject({
+      completedToolResults: [
+        {
+          callId: 'call_inspect',
+          output: '{"ok":true,"audit":"full"}',
+          modelOutput: '{"ok":true}',
+        },
+      ],
       continuationItems: [
         { type: 'message_ref', messageId: 'message_user' },
         {
@@ -331,7 +337,7 @@ describe('IndexedDbTaskRepository', () => {
             },
           ],
         },
-        { type: 'function_call_output', callId: 'call_inspect' },
+        { type: 'function_call_output_ref', callId: 'call_inspect' },
       ],
     });
     database.close();

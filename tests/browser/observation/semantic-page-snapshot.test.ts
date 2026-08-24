@@ -312,6 +312,72 @@ describe('buildSemanticPageSnapshot', () => {
     expect(result.targets.some((target) => target.name === 'Continue')).toBe(true);
   });
 
+  it('keeps an editor beside scroll content that is clipped by its overflow ancestor', () => {
+    const result = buildSemanticPageSnapshot({
+      axNodes: [axNode('root', 1, 'RootWebArea', 'Messenger')],
+      domSnapshot: domSnapshot([
+        {
+          backendNodeId: 1,
+          nodeName: '#document',
+          parentIndex: -1,
+          bounds: [0, 0, 800, 600],
+          paintOrder: 0,
+        },
+        {
+          backendNodeId: 2,
+          nodeName: 'SECTION',
+          parentIndex: 0,
+          bounds: [20, 20, 600, 200],
+          paintOrder: 1,
+        },
+        {
+          backendNodeId: 3,
+          nodeName: 'DIV',
+          parentIndex: 1,
+          attributes: { 'aria-label': 'Message history' },
+          bounds: [20, 20, 520, 140],
+          paintOrder: 2,
+          overflowY: 'auto',
+          scrollRect: [20, 20, 520, 2_200],
+          clientRect: [20, 20, 520, 140],
+        },
+        {
+          backendNodeId: 4,
+          nodeName: 'DIV',
+          parentIndex: 2,
+          bounds: [20, 20, 520, 2_200],
+          paintOrder: 2,
+        },
+        {
+          backendNodeId: 5,
+          nodeName: 'DIV',
+          parentIndex: 1,
+          bounds: [20, 168, 446, 46],
+          paintOrder: 1,
+        },
+        {
+          backendNodeId: 6,
+          nodeName: 'DIV',
+          parentIndex: 4,
+          attributes: { contenteditable: 'true', 'data-placeholder': 'Message Alex' },
+          bounds: [32, 176, 420, 30],
+          paintOrder: 1,
+        },
+      ]),
+      frame: 'main',
+      viewport: { x: 0, y: 0, width: 800, height: 600 },
+    });
+
+    expect(result.targets).toContainEqual(
+      expect.objectContaining({
+        backendNodeId: 6,
+        role: 'textbox',
+        name: 'Message Alex',
+        actions: ['click', 'type'],
+      }),
+    );
+  });
+
   it('binds editable AX descendants to their nearest contenteditable host', () => {
     const editable = {
       name: 'editable',

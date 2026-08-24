@@ -1,5 +1,6 @@
 import type { Checkpoint } from '../../tasks/checkpoint-types';
-import type { ContinuationItem } from '../../tasks/continuation-types';
+import { materializeContinuationItems } from '../../tasks/continuation-materialization';
+import type { MaterializedContinuationItem } from '../../tasks/continuation-types';
 import type { ModelToolChoice, ModelToolDefinition } from '../../tools/contracts/model-tool';
 import {
   BROWSER_TOOL_DEFINITIONS,
@@ -206,14 +207,17 @@ const SCROLL_INVALIDATING_TOOLS = new Set([
 
 /** Reconstructs one unfinished virtualized scroll without adding mutable checkpoint state. */
 export function browserScrollContinuationForCheckpoint(
-  checkpoint: Pick<Checkpoint, 'continuationItems'>,
+  checkpoint: Pick<Checkpoint, 'continuationItems' | 'completedToolResults'>,
 ): BrowserScrollContinuation | null {
-  const calls = new Map<string, Extract<ContinuationItem, { readonly type: 'function_call' }>>();
+  const calls = new Map<
+    string,
+    Extract<MaterializedContinuationItem, { readonly type: 'function_call' }>
+  >();
   const state: {
     continuation: BrowserScrollContinuation | null;
     continuationFailures: number;
   } = { continuation: null, continuationFailures: 0 };
-  for (const item of checkpoint.continuationItems) {
+  for (const item of materializeContinuationItems(checkpoint)) {
     if (item.type === 'compaction') {
       calls.clear();
       state.continuation = null;
@@ -543,7 +547,10 @@ function applySuccessfulBrowserResult(
   }
 }
 
-function successfulCommit(call: ContinuationItem, output: ContinuationItem): boolean {
+function successfulCommit(
+  call: MaterializedContinuationItem,
+  output: MaterializedContinuationItem,
+): boolean {
   return (
     call.type === 'function_call' &&
     call.name === 'commit_context' &&
@@ -566,9 +573,9 @@ function availableBrowserToolDefinitions(
   };
   const pendingCalls = new Map<
     string,
-    Extract<ContinuationItem, { readonly type: 'function_call' }>
+    Extract<MaterializedContinuationItem, { readonly type: 'function_call' }>
   >();
-  for (const item of checkpoint.continuationItems) {
+  for (const item of materializeContinuationItems(checkpoint)) {
     if (item.type === 'compaction') {
       state.semanticSnapshotCurrent = false;
       state.visualSnapshotCurrent = false;
@@ -619,10 +626,14 @@ function availableBrowserToolDefinitions(
     }
   }
 
-  const enabled = new Set<BrowserToolName>([...DISCOVERY_TOOL_NAMES, ...state.usedTools]);
-  if (state.semanticSnapshotCurrent) {
-    for (const name of INTERACTIVE_TOOL_NAMES) enabled.add(name);
-  }
+  // Keep semantic action definitions stable across model turns. Their ref preconditions remain
+  // executor-enforced; dynamically introducing them after inspection can leave the model anchored
+  // to the smaller first-turn tool set and make it incorrectly report that a declared tool is absent.
+  const enabled = new Set<BrowserToolName>([
+    ...DISCOVERY_TOOL_NAMES,
+    ...INTERACTIVE_TOOL_NAMES,
+    ...state.usedTools,
+  ]);
   if (state.visualSnapshotCurrent) {
     enabled.add('browser_click_point');
     enabled.add('browser_drag_point');

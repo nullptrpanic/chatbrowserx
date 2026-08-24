@@ -199,6 +199,7 @@ describe('TargetSessionRegistry', () => {
     vi.mocked(debuggerTransport.attach).mockRejectedValueOnce(
       new Error('Another debugger owns sensitive target details'),
     );
+    vi.mocked(debuggerTransport.detach).mockRejectedValueOnce(new Error('Not owned'));
     let thrown: unknown;
     try {
       await registry.ensure(9, new AbortController().signal);
@@ -208,6 +209,23 @@ describe('TargetSessionRegistry', () => {
     expect(thrown).toBeInstanceOf(TargetSessionRegistryError);
     expect(thrown).toMatchObject({ code: 'DEBUGGER_UNAVAILABLE' });
     expect(String(thrown)).not.toContain('sensitive target details');
+  });
+
+  it('reattaches once after releasing an attachment left by the same extension', async () => {
+    const debuggerTransport = transport();
+    vi.mocked(debuggerTransport.attach)
+      .mockRejectedValueOnce(new Error('Already attached'))
+      .mockResolvedValueOnce(undefined);
+    const registry = new TargetSessionRegistry(debuggerTransport);
+
+    await expect(registry.ensure(7, new AbortController().signal)).resolves.toMatchObject({
+      tabId: 7,
+      root: { tabId: 7 },
+    });
+
+    expect(debuggerTransport.attach).toHaveBeenCalledTimes(2);
+    expect(debuggerTransport.detach).toHaveBeenCalledOnce();
+    expect(debuggerTransport.detach).toHaveBeenCalledWith(7);
   });
 
   it('detaches only after the last task owner releases a shared tab', async () => {

@@ -330,7 +330,9 @@ describe('PageObserver', () => {
         };
       }
       if (method === 'DOMSnapshot.captureSnapshot') return buttonDomSnapshot();
-      if (method === 'Page.getFrameTree') return mainFrameTree();
+      if (method === 'Page.getFrameTree') {
+        return mainFrameTree('loader-main', 'frame-main', 'https://frame.test/current');
+      }
       if (method === 'Page.getNavigationHistory') {
         return {
           currentIndex: 0,
@@ -369,8 +371,9 @@ describe('PageObserver', () => {
       includeDOMRects: true,
       includePaintOrder: true,
     });
+    expect(transport.send).not.toHaveBeenCalledWith({ tabId: 7 }, 'Page.getNavigationHistory');
     expect(result).toMatchObject({
-      url: 'https://top.test/',
+      url: 'https://frame.test/current',
       debuggerSession: 'ephemeral',
       visualFallbackAllowed: false,
       data: {
@@ -419,7 +422,15 @@ describe('PageObserver', () => {
         };
       }
       if (method === 'DOMSnapshot.captureSnapshot') return buttonDomSnapshot();
-      if (method === 'Page.getFrameTree') return mainFrameTree();
+      if (method === 'Page.getFrameTree') {
+        const tree = mainFrameTree();
+        return {
+          frameTree: {
+            ...tree.frameTree,
+            frame: { ...tree.frameTree.frame, url: '' },
+          },
+        };
+      }
       if (method === 'Page.getLayoutMetrics') {
         return {
           visualViewport: {
@@ -443,6 +454,8 @@ describe('PageObserver', () => {
 
     const result = await observer.inspect(7, 'interactive', new AbortController().signal);
 
+    expect(transport.send).toHaveBeenCalledWith({ tabId: 7 }, 'Page.getNavigationHistory');
+    expect(result.url).toBeNull();
     expect(result.data).toMatchObject({
       mode: 'interactive',
       coverage: {
