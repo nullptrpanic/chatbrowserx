@@ -2,7 +2,6 @@ import { describe, expect, expectTypeOf, it } from 'vitest';
 import type { Checkpoint } from '../../src/tasks/checkpoint-types';
 import type { MessageRecord } from '../../src/tasks/message-types';
 import { createTask } from '../../src/tasks/task-factory';
-import { hasStrictlyIncreasingTaskEventSequence, type TaskEvent } from '../../src/tasks/task-types';
 
 describe('durable task records', () => {
   it('creates a stable WorkSession identifier for a new task', () => {
@@ -72,33 +71,5 @@ describe('durable task records', () => {
       toolName: 'tavily_search',
       resultRef: 'result_1',
     });
-  });
-
-  it('accepts only strictly increasing task-event sequences', () => {
-    const events: readonly [TaskEvent, TaskEvent] = [
-      {
-        id: 'event_1',
-        taskId: 'task_1',
-        sequence: 1,
-        type: 'planning.started',
-        reason: 'Plan.',
-        at: 1,
-        error: null,
-      },
-      {
-        id: 'event_2',
-        taskId: 'task_1',
-        sequence: 2,
-        type: 'task.completed',
-        reason: 'Done.',
-        at: 2,
-        error: null,
-      },
-    ];
-
-    expect(hasStrictlyIncreasingTaskEventSequence(events)).toBe(true);
-    expect(hasStrictlyIncreasingTaskEventSequence([{ ...events[1], sequence: 1 }, events[0]])).toBe(
-      false,
-    );
   });
 });

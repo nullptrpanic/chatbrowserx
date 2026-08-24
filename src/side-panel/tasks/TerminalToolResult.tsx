@@ -48,11 +48,6 @@ function readTerminalInvocation(argumentsJson: string): TerminalInvocation {
   return { command: argumentsJson, cwd: null };
 }
 
-/** Extracts the human-readable command while retaining malformed or unfamiliar arguments. */
-export function readTerminalCommand(argumentsJson: string): string {
-  return readTerminalInvocation(argumentsJson).command;
-}
-
 /** Parses only the bounded Sandbox result fields and otherwise preserves the raw output. */
 function readTerminalOutput(result: PanelCompletedToolResult): TerminalOutput {
   if (result.toolName.trim().toLowerCase() !== 'sandbox_exec') {

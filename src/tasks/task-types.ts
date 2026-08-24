@@ -76,25 +76,3 @@ export interface TaskModelTurnMetrics {
   readonly cacheWriteInputTokens?: number;
   readonly reasoningOutputTokens?: number;
 }
-
-/**
- * Returns whether events use positive, strictly increasing sequence numbers for one task.
- */
-export function hasStrictlyIncreasingTaskEventSequence(events: readonly TaskEvent[]): boolean {
-  let previousSequence = 0;
-  const taskId = events[0]?.taskId;
-
-  for (const event of events) {
-    if (
-      event.sequence <= previousSequence ||
-      !Number.isInteger(event.sequence) ||
-      event.taskId !== taskId
-    ) {
-      return false;
-    }
-
-    previousSequence = event.sequence;
-  }
-
-  return true;
-}
