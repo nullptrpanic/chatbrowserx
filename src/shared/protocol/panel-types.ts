@@ -52,7 +52,6 @@ export interface PanelTaskEvent {
   readonly type: string;
   readonly reason: string;
   readonly at: number;
-  readonly reasoningSummary?: string | undefined;
   readonly supplementIds?: readonly string[] | undefined;
 }
 

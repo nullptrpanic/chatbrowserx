@@ -585,7 +585,6 @@ describe('ConversationView answer execution details', () => {
           sequence: 2,
           type: 'reasoning.summary-recorded',
           reason: 'model_reasoning_summary_recorded',
-          reasoningSummary: '**Checked** two sources before answering.',
           at: 1_200,
         },
         { sequence: 3, type: 'task.completed', reason: 'done', at: 1_300 },

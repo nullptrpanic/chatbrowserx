@@ -440,7 +440,7 @@ describe('PanelService', () => {
     expect(snapshot.tab).not.toHaveProperty('debuggerAttached');
   });
 
-  it('projects a bounded reasoning summary with its corresponding task event', async () => {
+  it('keeps summary snapshots to the latest status event without hidden reasoning text', async () => {
     const fixture = buildFixture();
     fixture.dependencies.tasks.listEvents.mockResolvedValue([
       {
@@ -467,10 +467,13 @@ describe('PanelService', () => {
 
     const snapshot = await service.getSnapshot(7);
 
-    expect(snapshot.task?.events[0]).toMatchObject({
-      type: 'reasoning.summary-recorded',
-      reasoningSummary: 'r'.repeat(20_000),
-    });
+    expect(snapshot.task?.events).toEqual([
+      expect.objectContaining({
+        type: 'task.completed',
+        sequence: 2,
+      }),
+    ]);
+    expect(snapshot.task?.events[0]).not.toHaveProperty('reasoningSummary');
   });
 
   it('projects supplements under their running task without creating chat bubbles', async () => {
@@ -831,7 +834,6 @@ describe('PanelService', () => {
 
     const continuedSummary = snapshot.tasks.find(({ id }) => id === continuedTask.id);
     expect(continuedSummary?.events.map(({ type, at }) => ({ type, at }))).toEqual([
-      { type: 'tool.result-recorded', at: 2_100 },
       { type: 'task.supplements-applied', at: 2_300 },
     ]);
     expect(continuedSummary?.supplements.map(({ id }) => id)).toEqual([
@@ -1160,8 +1162,8 @@ describe('PanelService', () => {
     const summary = await service.getSnapshot(7);
     const details = await service.getTaskDetails(fixture.task.id);
 
-    expect(summary.task?.events).toHaveLength(100);
-    expect(summary.task?.events[0]?.sequence).toBe(343);
+    expect(summary.task?.events).toHaveLength(1);
+    expect(summary.task?.events[0]?.sequence).toBe(442);
     expect(summary.task?.completedToolCallCount).toBe(1);
     expect(details.events).toEqual([]);
     expect(details.completedToolResults).toHaveLength(1);

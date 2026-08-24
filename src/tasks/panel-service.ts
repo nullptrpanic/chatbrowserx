@@ -26,7 +26,6 @@ const MAX_PANEL_MESSAGES = 500;
 const MAX_PANEL_EVENTS = 100;
 const MAX_PANEL_TOOL_ARGUMENTS = 20_000;
 const MAX_PANEL_TOOL_OUTPUT = 100_000;
-const MAX_PANEL_REASONING_SUMMARY = 20_000;
 const MAX_PANEL_SUPPLEMENTS = 100;
 const MAX_SOURCE_FAVICON_URL = 8_192;
 const terminalTaskStatuses = new Set<TaskRun['status']>(['completed', 'failed', 'cancelled']);
@@ -711,7 +710,7 @@ export class PanelService {
     const projectedEvents =
       detailLevel === 'full'
         ? events.filter((event) => retainedFullEvents.has(event))
-        : currentTaskEvents.slice(-MAX_PANEL_EVENTS);
+        : currentTaskEvents.slice(-1);
     const completedToolResults =
       detailLevel === 'full' ? completedResults.slice(-MAX_PANEL_EVENTS) : [];
     return {
@@ -739,9 +738,6 @@ export class PanelService {
         type: event.type,
         reason: event.reason,
         at: event.at,
-        ...(event.reasoningSummary === undefined
-          ? {}
-          : { reasoningSummary: event.reasoningSummary.slice(0, MAX_PANEL_REASONING_SUMMARY) }),
         ...(event.supplementIds === undefined
           ? {}
           : {

@@ -29,7 +29,6 @@ function runningTask(completedToolCallCount: number): PanelTask {
         sequence: 2,
         type: 'reasoning.summary-recorded',
         reason: 'model_reasoning_summary_recorded',
-        reasoningSummary: 'Inspect the current controls.',
         at: 1_100,
       },
       { sequence: 3, type: 'tool.call-recorded', reason: 'inspect_call', at: 1_200 },

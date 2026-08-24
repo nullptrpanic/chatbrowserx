@@ -110,7 +110,6 @@ const panelTaskSchema = z
             type: z.string().max(128),
             reason: z.string().max(500),
             at: timestampSchema,
-            reasoningSummary: z.string().max(20_000).optional(),
             supplementIds: z.array(idSchema).max(100).optional(),
           })
           .strict(),

@@ -207,7 +207,6 @@
   grid-column: 2 / -1;
 }
 
-.task-event-reasoning,
 .task-event-supplement {
   min-width: 0;
   overflow: hidden;
@@ -216,13 +215,11 @@
   background: color-mix(in srgb, var(--cbx-subtle) 62%, transparent);
 }
 
-.task-event-list li > .task-event-reasoning,
 .task-event-list li > .task-event-supplement {
   margin-top: 1px;
   grid-column: 2 / -1;
 }
 
-.reasoning-summary-toggle,
 .task-supplement-toggle {
   display: flex;
   width: 100%;
@@ -237,7 +234,6 @@
   text-align: left;
 }
 
-.reasoning-summary-toggle > span,
 .task-supplement-title {
   min-width: 0;
   flex: 1;
@@ -257,13 +253,11 @@
   color: var(--cbx-warning);
 }
 
-.reasoning-summary-toggle:hover,
 .task-supplement-toggle:hover {
   color: var(--cbx-text);
   background: var(--cbx-hover);
 }
 
-.reasoning-summary-content,
 .task-supplement-content {
   max-height: 220px;
   padding: 7px 8px;
@@ -281,18 +275,6 @@
   display: grid;
   gap: 7px;
   font-size: 10px;
-}
-
-.reasoning-summary-content .message-markdown {
-  font-size: 10px;
-}
-
-.reasoning-summary-content .message-markdown > :first-child {
-  margin-top: 0;
-}
-
-.reasoning-summary-content .message-markdown > :last-child {
-  margin-bottom: 0;
 }
 
 .terminal-result {
