@@ -12,3 +12,7 @@ blob-report/
 *.log
 docs
 spec
+/sandbox/runtime/
+sandbox/target/
+sandbox/config.json
+/workdir/

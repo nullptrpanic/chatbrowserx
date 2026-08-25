@@ -1,7 +1,15 @@
 {
-  "host": "127.0.0.1",
-  "port": 43129,
+  "address": "127.0.0.1:43129",
+  "web_address": "127.0.0.1:43130",
   "secret": "replace-with-at-least-32-random-characters",
   "log_file": "runtime/logs/sandbox.log",
-  "timeout_seconds": 120
+  "timeout_seconds": 120,
+  "sandbox": {
+    "workspace": "runtime/sandbox",
+    "log_file": "logs/audit.jsonl",
+    "filesystem": {
+      "mode": "plain"
+    },
+    "tls": "auto"
+  }
 }

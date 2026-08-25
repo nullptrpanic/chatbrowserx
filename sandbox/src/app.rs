@@ -1,4 +1,8 @@
-use crate::bash::{self, BashCommand, BashError};
+#[cfg(test)]
+use crate::audit::AuditLog;
+#[cfg(test)]
+use crate::execution::DirectRuntime;
+use crate::execution::{ExecutionService, ShellCommand, ShellError};
 use crate::logger::LoggerEntry;
 use axum::Json;
 use axum::Router;
@@ -12,24 +16,27 @@ use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::path::PathBuf;
 use std::sync::Arc;
+#[cfg(test)]
 use std::time::Duration;
 use std::time::Instant;
 use tokio::sync::Semaphore;
 
 const MAX_REQUEST_BODY_BYTES: usize = 256 * 1024;
+#[cfg(test)]
 const MAX_COMMAND_CONCURRENCY: usize = 4;
+#[cfg(test)]
 const MAX_STDOUT_BYTES: usize = 4 * 1024 * 1024;
+#[cfg(test)]
 const MAX_STDERR_BYTES: usize = 1024 * 1024;
 
 #[derive(Clone)]
 struct AppState {
     secret: String,
-    timeout: Duration,
+    executor: ExecutionService,
     commands: Arc<Semaphore>,
-    stdout_limit: usize,
-    stderr_limit: usize,
 }
 
+#[cfg(test)]
 pub(crate) fn router(secret: String, timeout: Duration) -> Router {
     router_with_limits(
         secret,
@@ -40,6 +47,7 @@ pub(crate) fn router(secret: String, timeout: Duration) -> Router {
     )
 }
 
+#[cfg(test)]
 pub(crate) fn router_with_limits(
     secret: String,
     timeout: Duration,
@@ -47,15 +55,28 @@ pub(crate) fn router_with_limits(
     stdout_limit: usize,
     stderr_limit: usize,
 ) -> Router {
+    let executor = ExecutionService::new(
+        Arc::new(DirectRuntime),
+        AuditLog::in_memory(),
+        timeout,
+        stdout_limit,
+        stderr_limit,
+    );
+    router_with_service(secret, executor, max_concurrency)
+}
+
+pub(crate) fn router_with_service(
+    secret: String,
+    executor: ExecutionService,
+    max_concurrency: usize,
+) -> Router {
     Router::new()
         .route("/exec", post(run_exec))
         .layer(DefaultBodyLimit::max(MAX_REQUEST_BODY_BYTES))
         .with_state(AppState {
             secret,
-            timeout,
+            executor,
             commands: Arc::new(Semaphore::new(max_concurrency.max(1))),
-            stdout_limit,
-            stderr_limit,
         })
 }
 
@@ -79,14 +100,7 @@ async fn run_exec(State(state): State<AppState>, headers: HeaderMap, body: Bytes
         Err(_) => return error(StatusCode::TOO_MANY_REQUESTS, "command capacity is full"),
     };
     let started = Instant::now();
-    let output = match bash::execute(
-        request.into(),
-        state.timeout,
-        state.stdout_limit,
-        state.stderr_limit,
-    )
-    .await
-    {
+    let output = match state.executor.execute(request.into()).await {
         Ok(output) => {
             crate::logger::info!(
                 entry = LoggerEntry::new()
@@ -96,7 +110,7 @@ async fn run_exec(State(state): State<AppState>, headers: HeaderMap, body: Bytes
             );
             output
         }
-        Err(BashError::Timeout) => {
+        Err(ShellError::Timeout) => {
             crate::logger::error!(
                 entry = LoggerEntry::new()
                     .with_entry("duration_ms", started.elapsed().as_millis())
@@ -105,7 +119,7 @@ async fn run_exec(State(state): State<AppState>, headers: HeaderMap, body: Bytes
             );
             return error(StatusCode::GATEWAY_TIMEOUT, "command timed out");
         }
-        Err(BashError::OutputLimit) => {
+        Err(ShellError::OutputLimit) => {
             crate::logger::error!(
                 entry = LoggerEntry::new()
                     .with_entry("duration_ms", started.elapsed().as_millis())
@@ -117,7 +131,7 @@ async fn run_exec(State(state): State<AppState>, headers: HeaderMap, body: Bytes
                 "command output exceeded limit",
             );
         }
-        Err(BashError::Execute(execution_error)) => {
+        Err(ShellError::Execute(execution_error)) => {
             crate::logger::error!(
                 entry = LoggerEntry::new()
                     .with_entry("duration_ms", started.elapsed().as_millis())
@@ -148,7 +162,7 @@ struct BashRequest {
     env: BTreeMap<String, String>,
 }
 
-impl From<BashRequest> for BashCommand {
+impl From<BashRequest> for ShellCommand {
     fn from(request: BashRequest) -> Self {
         Self {
             command: request.command,

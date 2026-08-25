@@ -5,19 +5,27 @@ edition = "2024"
 
 [dependencies]
 anyhow = "1.0.104"
-axum = "0.8.9"
+async-trait = "0.1.89"
+axum = { version = "0.8.9", features = ["ws"] }
 base64 = "0.22.1"
 chrono = "0.4.45"
 clap = { version = "4.6.5", features = ["derive"] }
 erased-serde = "0.4.10"
+futures-util = "0.3.32"
 hmac = "0.12.1"
 libc = "0.2.189"
 log = { version = "0.4.33", features = ["std", "kv_serde"] }
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.151"
 sha2 = "0.10.9"
+shell-words = "1.1.1"
 tokio = { version = "1.53.1", features = ["full"] }
+uuid = { version = "1.22.0", features = ["serde", "v4"] }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+agora-sandbox = { git = "https://github.com/nullptrpanic/agora.git", rev = "487e2695977902ae59147eab2a2559d53d08c8ff", default-features = false }
 
 [dev-dependencies]
 tempfile = "3.27.0"
+tokio-tungstenite = "0.29.0"
 tower = "0.5.3"

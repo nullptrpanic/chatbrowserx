@@ -114,12 +114,14 @@ async function checkSandbox(): Promise<void> {
     await chmod(scriptPath, 0o700);
 
     const port = await availablePort();
+    let webPort = await availablePort();
+    while (webPort === port) webPort = await availablePort();
     const configPath = join(temporaryHome, 'sandbox.json');
     await writeFile(
       configPath,
       JSON.stringify({
-        host: '127.0.0.1',
-        port,
+        address: `127.0.0.1:${String(port)}`,
+        web_address: `127.0.0.1:${String(webPort)}`,
         secret: randomBytes(32).toString('hex'),
         log_file: join(temporaryHome, 'sandbox.log'),
         timeout_seconds: 10,

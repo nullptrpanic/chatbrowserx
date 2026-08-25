@@ -1,8 +1,10 @@
 mod app;
+mod audit;
 mod auth;
-mod bash;
 mod config;
+mod execution;
 pub mod logger;
+mod web;
 
 use anyhow::{Context, Result, bail};
 use clap::{Parser, Subcommand};
@@ -59,19 +61,41 @@ async fn run_sandbox(config_path: &Path) -> Result<()> {
     let config = config::Config::load(config_path)?;
     logger::init(open_log(config.log_file())?, logger::LevelFilter::Info)?;
     logger::info!(
-        "sandbox starting listen={} timeout_seconds={}",
-        config.listen(),
+        "sandbox starting address={} web_address={} timeout_seconds={}",
+        config.address(),
+        config.web_address(),
         config.timeout().as_secs()
     );
-    let listener = tokio::net::TcpListener::bind(config.listen())
+    let execution_listener = tokio::net::TcpListener::bind(config.address())
         .await
-        .with_context(|| format!("failed to bind sandbox to {}", config.listen()))?;
-    axum::serve(
-        listener,
-        app::router(config.secret().to_owned(), config.timeout()),
-    )
-    .await
-    .context("sandbox server failed")?;
+        .with_context(|| format!("failed to bind sandbox to {}", config.address()))?;
+    let web_listener = tokio::net::TcpListener::bind(config.web_address())
+        .await
+        .with_context(|| format!("failed to bind sandbox web to {}", config.web_address()))?;
+    let audit_path = config
+        .sandbox()
+        .map(config::SandboxSettings::log_file)
+        .unwrap_or_else(|| config.log_file());
+    let audit = audit::AuditLog::open(audit_path)?;
+    let runtime = execution::select_runtime(config.sandbox())?;
+    let executor = execution::ExecutionService::new(
+        runtime,
+        audit.clone(),
+        config.timeout(),
+        4 * 1024 * 1024,
+        1024 * 1024,
+    );
+    let viewer = web::ViewerGuard::new(config.web_address());
+    println!(
+        "Sandbox audit: {}",
+        web::launch_url(config.web_address(), viewer.token())
+    );
+    let execution_server = axum::serve(
+        execution_listener,
+        app::router_with_service(config.secret().to_owned(), executor, 4),
+    );
+    let web_server = axum::serve(web_listener, web::router(audit, viewer));
+    tokio::try_join!(execution_server, web_server).context("sandbox server failed")?;
     Ok(())
 }
 

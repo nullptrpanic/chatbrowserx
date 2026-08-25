@@ -1,0 +1,182 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>ChatBrowserX Sandbox Audit</title>
+    <link rel="stylesheet" href="/app.css" />
+  </head>
+  <body>
+    <div class="app">
+      <header class="topbar">
+        <div class="brand">
+          <span class="brand-mark" aria-hidden="true"></span>
+          <strong>SANDBOX AUDIT</strong>
+          <span class="local-pill">localhost</span>
+          <span class="connection"
+            ><i aria-hidden="true"></i><span id="connection-label">CONNECTING</span></span
+          >
+        </div>
+        <label class="search">
+          <span aria-hidden="true">⌕</span>
+          <input id="search" type="search" placeholder="Search command, file, process, host…" />
+        </label>
+        <div class="event-total">
+          <span aria-hidden="true">⌁⌁</span><span id="event-total">0 events</span>
+        </div>
+      </header>
+
+      <div class="workspace">
+        <aside class="sidebar">
+          <div class="section-heading">
+            <span>Executions</span><span aria-hidden="true">▽</span>
+          </div>
+          <div id="execution-list" class="execution-list"></div>
+        </aside>
+
+        <div
+          class="panel-resizer"
+          data-resizer="sidebar"
+          role="separator"
+          aria-label="Resize execution list"
+          aria-orientation="vertical"
+          aria-valuemin="220"
+          aria-valuemax="520"
+          aria-valuenow="300"
+        ></div>
+
+        <main class="main">
+          <section class="summary" aria-label="Selected execution">
+            <div class="summary-primary">
+              <div class="summary-title">
+                <h1 id="selected-command">No execution selected</h1>
+                <span id="selected-status" class="status">idle</span>
+              </div>
+              <div id="selected-cwd" class="selected-cwd">default working directory</div>
+              <div class="summary-meta">
+                <span>Run ID <code id="selected-run-id">—</code></span>
+                <span id="monitoring-mode" class="monitoring-mode command-only">Command only</span>
+                <button id="clear-events" class="summary-action" type="button" disabled>
+                  Clear events
+                </button>
+              </div>
+            </div>
+            <div class="summary-stats">
+              <div class="stat">
+                <span class="symbol">▣</span><strong id="process-count">0</strong
+                ><small>Processes</small>
+              </div>
+              <div class="stat">
+                <span class="symbol">▱</span><strong id="file-count">0</strong><small>Files</small>
+              </div>
+              <div class="stat">
+                <span class="symbol">◎</span><strong id="host-count">0</strong><small>Hosts</small>
+              </div>
+              <div class="stat">
+                <span class="symbol">◷</span><strong id="duration">0 ms</strong
+                ><small>Duration</small>
+              </div>
+            </div>
+          </section>
+
+          <div class="tabbar"><div class="tab active">Timeline</div></div>
+
+          <div id="content" class="content" tabindex="0">
+            <section id="timeline" class="panel" aria-label="Timeline">
+              <div class="table-head"><span>Event</span><span>Details</span><span>Time</span></div>
+              <div id="timeline-rows" class="event-list"></div>
+            </section>
+          </div>
+
+          <footer class="footer-tools">
+            <button id="follow" type="button" class="toggle active">
+              <span class="switch"><i></i></span><span>Auto-follow</span>
+            </button>
+            <button id="system-files" type="button" class="toggle">
+              <span>Show system files</span><span class="switch"><i></i></span>
+            </button>
+          </footer>
+        </main>
+
+        <div
+          class="panel-resizer"
+          data-resizer="inspector"
+          role="separator"
+          aria-label="Resize event details"
+          aria-orientation="vertical"
+          aria-valuemin="240"
+          aria-valuemax="520"
+          aria-valuenow="300"
+        ></div>
+
+        <aside id="event-details" class="inspector">
+          <div class="inspector-inner">
+            <h2>Event details</h2>
+            <div id="event-detail-empty" class="detail-empty">
+              Select an event to inspect its process and payload.
+            </div>
+            <div id="event-detail-content" hidden>
+              <div class="detail-heading">
+                <span id="detail-badge" class="badge process">PROCESS</span
+                ><strong id="detail-title">—</strong>
+              </div>
+              <div class="detail-block">
+                <label id="detail-primary-label">Executable</label>
+                <div id="detail-primary" class="path">—</div>
+              </div>
+              <div class="detail-columns">
+                <div class="detail-block">
+                  <label>PID</label>
+                  <div id="detail-pid">—</div>
+                </div>
+                <div class="detail-block">
+                  <label>PPID</label>
+                  <div id="detail-ppid">—</div>
+                </div>
+              </div>
+              <div class="detail-block">
+                <label>Run ID</label>
+                <div><code id="detail-run-id">—</code></div>
+              </div>
+              <div id="detail-input-block" class="detail-block" hidden>
+                <label>Input</label>
+                <pre id="detail-input" class="code"></pre>
+                <button id="copy-input" class="copy-button" type="button">▣ Copy input</button>
+              </div>
+              <div id="detail-output-block" class="detail-block" hidden>
+                <label>Output</label>
+                <pre id="detail-output" class="code"></pre>
+                <button id="copy-output" class="copy-button" type="button">▣ Copy output</button>
+              </div>
+              <div class="detail-block">
+                <label>Payload</label>
+                <pre id="detail-payload" class="code"></pre>
+                <button id="copy-event" class="copy-button" type="button">▣ Copy JSON</button>
+              </div>
+              <div class="related">
+                <h3>Related activity</h3>
+                <div class="related-row">
+                  <span>Child processes</span><strong id="related-processes">0</strong>
+                </div>
+                <div class="related-row">
+                  <span>File events</span><strong id="related-files">0</strong>
+                </div>
+                <div class="related-row">
+                  <span>Network events</span><strong id="related-network">0</strong>
+                </div>
+              </div>
+            </div>
+          </div>
+        </aside>
+      </div>
+    </div>
+
+    <template id="empty-template"
+      ><div class="empty">
+        <strong>No matching audit events</strong
+        ><span>New activity will appear here in real time.</span>
+      </div></template
+    >
+    <script src="/app.js" defer></script>
+  </body>
+</html>

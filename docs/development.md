@@ -16,6 +16,17 @@ npm run build
 npm run audit:bundle
 ```
 
+Rust Sandbox 的独立检查：
+
+```bash
+cargo fmt --manifest-path sandbox/Cargo.toml -- --check
+cargo test --manifest-path sandbox/Cargo.toml --all-targets
+cargo clippy --manifest-path sandbox/Cargo.toml --all-targets --all-features -- -D warnings
+node --check sandbox/src/web/assets/app.js
+```
+
+`sandbox/config.example.json` 使用完整的 `address` 与 `web_address`。macOS 上配置 `sandbox` 对象会加载固定 revision 的 Agora runtime；不配置时保持 Direct runtime。HTTP `/exec` 的请求与响应协议不因 runtime 改变。
+
 `npm run dev` 只启动 Vite 资源服务；真实任务必须从加载了扩展的 Side Panel 发起。源码变更后重新构建，并在 `chrome://extensions` 刷新 `dist/`。
 
 ## 测试分层

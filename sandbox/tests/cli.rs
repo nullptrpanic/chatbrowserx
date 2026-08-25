@@ -24,8 +24,8 @@ fn startup_rejects_a_missing_configured_secret() {
         &config,
         format!(
             r#"{{
-                "host": "127.0.0.1",
-                "port": 43129,
+                "address": "127.0.0.1:43129",
+                "web_address": "127.0.0.1:43130",
                 "log_file": {},
                 "timeout_seconds": 30
             }}"#,
@@ -48,13 +48,14 @@ fn serves_exec_and_writes_json_logs() {
     let directory = tempfile::tempdir().unwrap();
     let log_file = directory.path().join("logs/sandbox.jsonl");
     let port = available_port();
+    let web_port = available_port();
     let config = directory.path().join("sandbox.json");
     std::fs::write(
         &config,
         format!(
             r#"{{
-                "host": "127.0.0.1",
-                "port": {port},
+                "address": "127.0.0.1:{port}",
+                "web_address": "127.0.0.1:{web_port}",
                 "secret": "0123456789abcdef0123456789abcdef",
                 "log_file": {},
                 "timeout_seconds": 30
@@ -81,6 +82,7 @@ fn serves_exec_and_writes_json_logs() {
         .unwrap();
     let _child = ChildGuard(child);
     wait_for_server(port);
+    wait_for_server(web_port);
 
     let body = r#"{"command":"printf live"}"#;
     let mut stream = TcpStream::connect(("127.0.0.1", port)).unwrap();
@@ -97,6 +99,19 @@ fn serves_exec_and_writes_json_logs() {
     assert!(response.starts_with("HTTP/1.1 200 OK"), "{response}");
     assert!(response.contains(r#""code":0"#), "{response}");
     assert!(response.contains(r#""stdout":"live""#), "{response}");
+    let mut web = TcpStream::connect(("127.0.0.1", web_port)).unwrap();
+    write!(
+        web,
+        "GET / HTTP/1.1\r\nHost: 127.0.0.1:{web_port}\r\nConnection: close\r\n\r\n"
+    )
+    .unwrap();
+    let mut web_response = String::new();
+    web.read_to_string(&mut web_response).unwrap();
+    assert!(
+        web_response.starts_with("HTTP/1.1 200 OK"),
+        "{web_response}"
+    );
+    assert!(web_response.contains("Sandbox Audit"), "{web_response}");
     let log = std::fs::read_to_string(log_file).unwrap();
     assert!(log.contains(r#""message":"sandbox starting"#));
     assert!(log.contains(r#""message":"bash command completed""#));
@@ -177,12 +192,13 @@ fn write_config(directory: &std::path::Path, port: u16) -> std::path::PathBuf {
         &config,
         format!(
             r#"{{
-                "host": "127.0.0.1",
-                "port": {port},
+                "address": "127.0.0.1:{port}",
+                "web_address": "127.0.0.1:{}",
                 "secret": "0123456789abcdef0123456789abcdef",
                 "log_file": {},
                 "timeout_seconds": 30
             }}"#,
+            available_port(),
             serde_json::to_string(&directory.join("sandbox.log")).unwrap()
         ),
     )
