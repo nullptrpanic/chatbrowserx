@@ -107,6 +107,7 @@ describe('decodeSseStream', () => {
       name: 'ProviderError',
       code: 'INVALID_RESPONSE',
       retryable: false,
+      invalidResponseStage: 'sse_decode',
     } satisfies Partial<ProviderError>);
   });
 
@@ -118,6 +119,7 @@ describe('decodeSseStream', () => {
     ).rejects.toMatchObject({
       name: 'ProviderError',
       code: 'INVALID_RESPONSE',
+      invalidResponseStage: 'sse_decode',
     } satisfies Partial<ProviderError>);
   });
 

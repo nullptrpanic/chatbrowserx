@@ -32,14 +32,18 @@ const compactResponseSchema = z
 export function parseCodexCompactResponse(value: unknown): ModelCompactionResult {
   const parsed = compactResponseSchema.safeParse(value);
   if (!parsed.success || parsed.data.output.length === 0) {
-    throw providerErrorFromCode('INVALID_RESPONSE');
+    throw providerErrorFromCode('INVALID_RESPONSE', {
+      invalidResponseStage: 'compaction_schema',
+    });
   }
   const compactItems = parsed.data.output.filter(
     (item): item is z.infer<typeof compactItemSchema> => item.type === 'compaction',
   );
   const terminal = parsed.data.output.at(-1);
   if (compactItems.length !== 1 || terminal?.type !== 'compaction') {
-    throw providerErrorFromCode('INVALID_RESPONSE');
+    throw providerErrorFromCode('INVALID_RESPONSE', {
+      invalidResponseStage: 'compaction_schema',
+    });
   }
   return {
     itemId: terminal.id,

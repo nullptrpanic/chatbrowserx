@@ -224,6 +224,7 @@ const BROWSER_TOOL_NAMES = [
   'browser_drag',
   'browser_wait',
   'browser_network_start',
+  'browser_network_stop',
 ] as const;
 
 const CONFIGURED_TAVILY = { isConfigured: async () => true } as const;
@@ -855,6 +856,7 @@ describe('CodexAgentPlanner', () => {
 
     await expect(collect(planner)).rejects.toMatchObject({
       code: 'INVALID_RESPONSE',
+      invalidResponseStage: 'model_turn',
     });
     expect(storage.appendMessage).not.toHaveBeenCalled();
   });
@@ -889,6 +891,7 @@ describe('CodexAgentPlanner', () => {
 
     await expect(collect(invalidPlanner)).rejects.toMatchObject({
       code: 'INVALID_RESPONSE',
+      invalidResponseStage: 'tool_call',
     });
     expect(invalidStorage.appendMessage).not.toHaveBeenCalled();
     expect(invalidStorage.updateMessage).not.toHaveBeenCalled();
@@ -938,7 +941,10 @@ describe('CodexAgentPlanner', () => {
     } catch (error) {
       thrown = error;
     }
-    expect(thrown).toMatchObject({ code: 'INVALID_RESPONSE' });
+    expect(thrown).toMatchObject({
+      code: 'INVALID_RESPONSE',
+      invalidResponseStage: 'tool_call',
+    });
     expect(String(thrown)).not.toContain('secret-value');
     expect(storage.appendMessage).not.toHaveBeenCalled();
   });
@@ -975,6 +981,7 @@ describe('CodexAgentPlanner', () => {
 
     await expect(collect(planner)).rejects.toMatchObject({
       code: 'INVALID_RESPONSE',
+      invalidResponseStage: 'model_turn',
     });
     expect(storage.appendMessage).not.toHaveBeenCalled();
   });

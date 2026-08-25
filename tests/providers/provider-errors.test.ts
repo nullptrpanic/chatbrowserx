@@ -30,4 +30,20 @@ describe('ProviderError', () => {
     expect(isProviderError(new Error('network failed'))).toBe(false);
     expect(isProviderError({ code: 'TRANSIENT' })).toBe(false);
   });
+
+  it('retains only a bounded invalid-response stage for safe diagnostics', () => {
+    const error = providerErrorFromCode('INVALID_RESPONSE', {
+      status: 200,
+      invalidResponseStage: 'sse_protocol',
+    });
+
+    expect(error).toMatchObject({
+      code: 'INVALID_RESPONSE',
+      status: 200,
+      invalidResponseStage: 'sse_protocol',
+      message: 'The model provider returned an invalid response.',
+    });
+    expect(error).not.toHaveProperty('cause');
+    expect(JSON.stringify(error)).not.toContain('encrypted_content');
+  });
 });

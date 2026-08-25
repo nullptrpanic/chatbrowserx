@@ -87,7 +87,9 @@ function finishEvent(pending: PendingEvent): DecodedSseEvent | 'done' | null {
       data: JSON.parse(source) as unknown,
     };
   } catch {
-    throw providerErrorFromCode('INVALID_RESPONSE');
+    throw providerErrorFromCode('INVALID_RESPONSE', {
+      invalidResponseStage: 'sse_decode',
+    });
   }
 }
 
@@ -102,7 +104,9 @@ function resetEvent(pending: PendingEvent): void {
 function assertEventSize(pending: PendingEvent, lineBuffer: string, encoder: TextEncoder): void {
   const partialLineBytes = encoder.encode(lineBuffer).byteLength;
   if (pending.completedLineBytes + partialLineBytes > MAX_EVENT_BYTES) {
-    throw providerErrorFromCode('INVALID_RESPONSE');
+    throw providerErrorFromCode('INVALID_RESPONSE', {
+      invalidResponseStage: 'sse_decode',
+    });
   }
 }
 

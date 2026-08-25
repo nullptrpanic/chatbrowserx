@@ -3421,6 +3421,7 @@ describe('TaskExecutor', () => {
         updatedAt: 1_001,
       },
     ]);
+    let attempts = 0;
     const executor = new TaskExecutor({
       repository,
       conversations: dependencies.conversations,
@@ -3428,7 +3429,10 @@ describe('TaskExecutor', () => {
         plan: () =>
           (async function* () {
             yield* [];
-            throw providerErrorFromCode('INVALID_RESPONSE');
+            attempts += 1;
+            throw providerErrorFromCode('INVALID_RESPONSE', {
+              invalidResponseStage: 'model_turn',
+            });
           })(),
       },
       tavily: tavilyPort(),
@@ -3440,7 +3444,122 @@ describe('TaskExecutor', () => {
     await expect(
       executor.run(created.task.id, new AbortController().signal),
     ).resolves.toMatchObject({ task: { status: 'failed' } });
+    expect(attempts).toBe(2);
     expect(dependencies.conversations.appendMessage).not.toHaveBeenCalled();
+    database.close();
+  });
+
+  it('retries one invalid model response before any tool dispatch and preserves safe evidence', async () => {
+    const database = await openChatBrowserDatabase(createTestDatabaseName('invalid-model-retry'));
+    const repository = new IndexedDbTaskRepository(database);
+    const dependencies = sources();
+    const commands = new TaskCommandService(
+      repository,
+      dependencies.clock,
+      dependencies.ids,
+      dependencies.conversations,
+    );
+    const created = await commands.create({
+      conversationId: 'conversation_1',
+      tabId: 7,
+      goal: 'Retry a malformed model turn safely',
+    });
+    let attempts = 0;
+    const browser = browserPort();
+    const executor = new TaskExecutor({
+      repository,
+      conversations: dependencies.conversations,
+      planner: {
+        plan: () =>
+          (async function* () {
+            attempts += 1;
+            if (attempts === 1) {
+              throw providerErrorFromCode('INVALID_RESPONSE', {
+                invalidResponseStage: 'sse_protocol',
+              });
+            }
+            yield {
+              type: 'task.completed',
+              reason: 'model_response_completed',
+              messageId: 'message_answer',
+            } as const;
+          })(),
+      },
+      tavily: tavilyPort(),
+      browser,
+      clock: dependencies.clock,
+      ids: dependencies.ids,
+    });
+
+    const result = await executor.run(created.task.id, new AbortController().signal);
+
+    expect(result.task.status).toBe('completed');
+    expect(attempts).toBe(2);
+    expect(browser.execute).not.toHaveBeenCalled();
+    expect(result.events).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          type: 'planning.retrying',
+          reason: 'invalid_model_response_retry:sse_protocol',
+          error: null,
+        }),
+      ]),
+    );
+    database.close();
+  });
+
+  it('fails after one invalid-response retry and exposes only the safe stage', async () => {
+    const database = await openChatBrowserDatabase(
+      createTestDatabaseName('invalid-model-retry-exhausted'),
+    );
+    const repository = new IndexedDbTaskRepository(database);
+    const dependencies = sources();
+    const commands = new TaskCommandService(
+      repository,
+      dependencies.clock,
+      dependencies.ids,
+      dependencies.conversations,
+    );
+    const created = await commands.create({
+      conversationId: 'conversation_1',
+      tabId: 7,
+      goal: 'Stop after a bounded malformed model retry',
+    });
+    let attempts = 0;
+    const executor = new TaskExecutor({
+      repository,
+      conversations: dependencies.conversations,
+      planner: {
+        plan: () =>
+          (async function* () {
+            yield* [];
+            attempts += 1;
+            throw providerErrorFromCode('INVALID_RESPONSE', {
+              invalidResponseStage: 'tool_call',
+            });
+          })(),
+      },
+      tavily: tavilyPort(),
+      browser: browserPort(),
+      clock: dependencies.clock,
+      ids: dependencies.ids,
+    });
+
+    const result = await executor.run(created.task.id, new AbortController().signal);
+
+    expect(attempts).toBe(2);
+    expect(result.task).toMatchObject({
+      status: 'failed',
+      lastError: {
+        code: 'InvalidProviderResponse',
+        userMessage: 'The provider returned an invalid response (stage: tool_call).',
+      },
+    });
+    expect(result.events.at(-1)).toMatchObject({
+      type: 'task.failed',
+      reason: 'invalid_model_response:tool_call',
+    });
+    expect(JSON.stringify(result.events)).not.toContain('encrypted_content');
     database.close();
   });
 

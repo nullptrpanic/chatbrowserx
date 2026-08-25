@@ -1,5 +1,9 @@
 import type { CredentialStore } from '../../persistence/credential-store';
-import { isProviderError, providerErrorFromCode } from '../provider-errors';
+import {
+  isProviderError,
+  providerErrorFromCode,
+  throwWithInvalidResponseStage,
+} from '../provider-errors';
 import { isAbortFailure, throwProviderHttpError } from '../provider-http';
 import type { ModelCompactionResult, ModelProvider, ModelRequest } from '../provider-types';
 import { decodeSseStream } from '../sse-decoder';
@@ -18,10 +22,18 @@ async function readBoundedJson(response: Response): Promise<unknown> {
   const contentLength = Number(response.headers.get('Content-Length'));
   if (Number.isFinite(contentLength) && contentLength > MAX_CODEX_COMPACT_RESPONSE_BYTES) {
     await response.body?.cancel().catch(() => undefined);
-    throw providerErrorFromCode('INVALID_RESPONSE', { status: response.status });
+    throw providerErrorFromCode('INVALID_RESPONSE', {
+      status: response.status,
+      invalidResponseStage: 'compaction_schema',
+    });
   }
   const body = response.body;
-  if (body === null) throw providerErrorFromCode('INVALID_RESPONSE', { status: response.status });
+  if (body === null) {
+    throw providerErrorFromCode('INVALID_RESPONSE', {
+      status: response.status,
+      invalidResponseStage: 'compaction_schema',
+    });
+  }
   const reader = body.getReader();
   const chunks: Uint8Array[] = [];
   let size = 0;
@@ -32,7 +44,10 @@ async function readBoundedJson(response: Response): Promise<unknown> {
       size += next.value.byteLength;
       if (size > MAX_CODEX_COMPACT_RESPONSE_BYTES) {
         await reader.cancel().catch(() => undefined);
-        throw providerErrorFromCode('INVALID_RESPONSE', { status: response.status });
+        throw providerErrorFromCode('INVALID_RESPONSE', {
+          status: response.status,
+          invalidResponseStage: 'compaction_schema',
+        });
       }
       chunks.push(next.value);
     }
@@ -48,7 +63,10 @@ async function readBoundedJson(response: Response): Promise<unknown> {
   try {
     return JSON.parse(new TextDecoder().decode(bytes));
   } catch {
-    throw providerErrorFromCode('INVALID_RESPONSE', { status: response.status });
+    throw providerErrorFromCode('INVALID_RESPONSE', {
+      status: response.status,
+      invalidResponseStage: 'compaction_schema',
+    });
   }
 }
 
@@ -87,7 +105,10 @@ export class CodexProvider implements ModelProvider {
     const contentType = response.headers.get('Content-Type')?.trim().toLowerCase() ?? '';
     if (contentType.length > 0 && !contentType.includes('application/json')) {
       await response.body?.cancel().catch(() => undefined);
-      throw providerErrorFromCode('INVALID_RESPONSE', { status: response.status });
+      throw providerErrorFromCode('INVALID_RESPONSE', {
+        status: response.status,
+        invalidResponseStage: 'compaction_schema',
+      });
     }
     try {
       return parseCodexCompactResponse(await readBoundedJson(response));
@@ -148,6 +169,7 @@ export class CodexProvider implements ModelProvider {
       await response.body?.cancel().catch(() => undefined);
       throw providerErrorFromCode('INVALID_RESPONSE', {
         status: response.status,
+        invalidResponseStage: 'response_transport',
       });
     }
 
@@ -169,6 +191,9 @@ export class CodexProvider implements ModelProvider {
         throw providerErrorFromCode('ABORTED');
       }
       if (isProviderError(error)) {
+        if (error.code === 'INVALID_RESPONSE') {
+          throwWithInvalidResponseStage(error, 'sse_protocol');
+        }
         throw error;
       }
       throw providerErrorFromCode('TRANSIENT');

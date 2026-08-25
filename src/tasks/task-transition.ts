@@ -2,6 +2,7 @@ import type { TaskEventType, TaskRun, TaskStatus, TaskTransitionEvent } from './
 
 const eventTargetStatus: Readonly<Record<TaskEventType, TaskStatus>> = {
   'planning.started': 'planning',
+  'planning.retrying': 'planning',
   'reasoning.summary-recorded': 'planning',
   'tool.call-recorded': 'planning',
   'tool.execution-started': 'planning',
@@ -28,6 +29,7 @@ const waitingEvents = new Set<TaskEventType>([
 const allowedEvents: Readonly<Record<TaskStatus, ReadonlySet<TaskEventType>>> = {
   queued: new Set(['planning.started', ...waitingEvents]),
   planning: new Set([
+    'planning.retrying',
     'reasoning.summary-recorded',
     'tool.call-recorded',
     'tool.execution-started',

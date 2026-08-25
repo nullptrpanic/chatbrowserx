@@ -27,6 +27,7 @@ export interface TaskRun {
 
 export type TaskEventType =
   | 'planning.started'
+  | 'planning.retrying'
   | 'reasoning.summary-recorded'
   | 'tool.call-recorded'
   | 'tool.execution-started'

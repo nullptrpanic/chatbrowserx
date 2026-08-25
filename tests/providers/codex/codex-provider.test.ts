@@ -142,6 +142,7 @@ describe('CodexProvider', () => {
 
     await expect(provider.compact(REQUEST, new AbortController().signal)).rejects.toMatchObject({
       code: 'INVALID_RESPONSE',
+      invalidResponseStage: 'compaction_schema',
     });
   });
 
@@ -223,7 +224,116 @@ describe('CodexProvider', () => {
 
     await expect(
       collect(provider.stream(REQUEST, new AbortController().signal)),
-    ).rejects.toMatchObject({ code: 'INVALID_RESPONSE' });
+    ).rejects.toMatchObject({
+      code: 'INVALID_RESPONSE',
+      invalidResponseStage: 'response_transport',
+    });
+  });
+
+  it('accepts exact duplicate lifecycle events without duplicating normalized output', async () => {
+    const responseId = 'resp_duplicate_lifecycle';
+    const provider = new CodexProvider(
+      credentialStore(ACCESS_TOKEN),
+      vi.fn<typeof fetch>(async () =>
+        sseResponse([
+          {
+            event: 'response.created',
+            data: { type: 'response.created', response: { id: responseId } },
+          },
+          {
+            event: 'response.created',
+            data: { type: 'response.created', response: { id: responseId } },
+          },
+          {
+            event: 'response.output_text.delta',
+            data: { type: 'response.output_text.delta', delta: 'Ready' },
+          },
+          {
+            event: 'response.completed',
+            data: { type: 'response.completed', response: { id: responseId } },
+          },
+          {
+            event: 'response.completed',
+            data: { type: 'response.completed', response: { id: responseId } },
+          },
+        ]),
+      ),
+    );
+
+    await expect(collect(provider.stream(REQUEST, new AbortController().signal))).resolves.toEqual([
+      { type: 'response.started', responseId },
+      { type: 'text.delta', delta: 'Ready' },
+      { type: 'response.completed', responseId, usage: null },
+    ]);
+  });
+
+  it('accepts an exact duplicate function-call completion but still emits one call', async () => {
+    const responseId = 'resp_duplicate_tool_done';
+    const item = {
+      id: 'item_duplicate_tool_done',
+      type: 'function_call' as const,
+      call_id: 'call_duplicate_tool_done',
+      name: 'lookup',
+      arguments: '{"query":"safe"}',
+    };
+    const provider = new CodexProvider(
+      credentialStore(ACCESS_TOKEN),
+      vi.fn<typeof fetch>(async () =>
+        sseResponse([
+          {
+            event: 'response.created',
+            data: { type: 'response.created', response: { id: responseId } },
+          },
+          {
+            event: 'response.output_item.added',
+            data: { type: 'response.output_item.added', item },
+          },
+          {
+            event: 'response.function_call_arguments.done',
+            data: {
+              type: 'response.function_call_arguments.done',
+              item_id: item.id,
+              arguments: item.arguments,
+            },
+          },
+          {
+            event: 'response.function_call_arguments.done',
+            data: {
+              type: 'response.function_call_arguments.done',
+              item_id: item.id,
+              arguments: item.arguments,
+            },
+          },
+          {
+            event: 'response.output_item.done',
+            data: { type: 'response.output_item.done', item },
+          },
+          {
+            event: 'response.completed',
+            data: { type: 'response.completed', response: { id: responseId } },
+          },
+        ]),
+      ),
+    );
+
+    await expect(collect(provider.stream(REQUEST, new AbortController().signal))).resolves.toEqual([
+      {
+        type: 'response.started',
+        responseId,
+      },
+      {
+        type: 'tool.started',
+        callId: item.call_id,
+        name: item.name,
+      },
+      {
+        type: 'tool.completed',
+        callId: item.call_id,
+        name: item.name,
+        argumentsJson: item.arguments,
+      },
+      { type: 'response.completed', responseId, usage: null },
+    ]);
   });
 
   it('calls the fetch port without rebinding its receiver', async () => {

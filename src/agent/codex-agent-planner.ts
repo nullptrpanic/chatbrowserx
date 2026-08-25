@@ -3,7 +3,11 @@ import type { ConversationRepository } from '../persistence/conversation-reposit
 import type { SettingsStore } from '../persistence/settings-store';
 import type { TaskRepository } from '../persistence/task-repository';
 import { CODEX_MODEL } from '../providers/codex/codex-constants';
-import { isProviderError, providerErrorFromCode } from '../providers/provider-errors';
+import {
+  isProviderError,
+  providerErrorFromCode,
+  throwWithInvalidResponseStage,
+} from '../providers/provider-errors';
 import type { ModelProvider } from '../providers/provider-types';
 import type { ModelStreamEvent, ModelUsage } from '../providers/stream-events';
 import type { IdGenerator } from '../shared/ids';
@@ -321,7 +325,9 @@ export class CodexAgentPlanner implements AgentPlanner {
           throw providerErrorFromCode('INVALID_RESPONSE');
         }
         if (!availableToolNames.has(state.tool.name)) {
-          throw providerErrorFromCode('INVALID_RESPONSE');
+          throw providerErrorFromCode('INVALID_RESPONSE', {
+            invalidResponseStage: 'tool_call',
+          });
         }
         const source = {
           callId: state.tool.callId,
@@ -340,16 +346,31 @@ export class CodexAgentPlanner implements AgentPlanner {
           });
         }
         if (state.tool.name.startsWith('browser_')) {
-          const call = parseBrowserToolCall(source);
+          let call: ReturnType<typeof parseBrowserToolCall>;
+          try {
+            call = parseBrowserToolCall(source);
+          } catch (error) {
+            throwWithInvalidResponseStage(error, 'tool_call');
+          }
           yield { type: 'browser.call', call, modelTurn, modelOutputItems };
           return;
         }
         if (state.tool.name.startsWith('sandbox_')) {
-          const call = parseSandboxToolCall(source);
+          let call: ReturnType<typeof parseSandboxToolCall>;
+          try {
+            call = parseSandboxToolCall(source);
+          } catch (error) {
+            throwWithInvalidResponseStage(error, 'tool_call');
+          }
           yield { type: 'sandbox.call', call, modelTurn, modelOutputItems };
           return;
         }
-        const call = parseTavilyToolCall(source);
+        let call: ReturnType<typeof parseTavilyToolCall>;
+        try {
+          call = parseTavilyToolCall(source);
+        } catch (error) {
+          throwWithInvalidResponseStage(error, 'tool_call');
+        }
         yield { type: 'tavily.call', ...call, modelTurn, modelOutputItems };
         return;
       }
@@ -368,14 +389,15 @@ export class CodexAgentPlanner implements AgentPlanner {
       if (buffer !== null && !bufferFinalized) {
         if (
           signal.aborted ||
-          (isProviderError(error) && ['ABORTED', 'TRANSIENT', 'RATE_LIMIT'].includes(error.code))
+          (isProviderError(error) &&
+            ['ABORTED', 'TRANSIENT', 'RATE_LIMIT', 'INVALID_RESPONSE'].includes(error.code))
         ) {
           await buffer.interrupt();
         } else {
           await buffer.fail();
         }
       }
-      throw error;
+      throwWithInvalidResponseStage(error, 'model_turn');
     }
   }
 

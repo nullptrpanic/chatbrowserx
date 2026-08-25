@@ -89,6 +89,7 @@ const TAVILY_TOOL_CALL_LIMIT = 8;
 const BROWSER_TOOL_CALL_LIMIT = 256;
 const SANDBOX_TOOL_CALL_LIMIT = 128;
 const MODEL_TRANSIENT_RETRY_LIMIT = 1;
+const MODEL_INVALID_RESPONSE_RETRY_LIMIT = 1;
 const tavilyToolNames = new Set(['tavily_search', 'tavily_extract', 'tavily_crawl']);
 const sandboxToolNames = new Set(['sandbox_read', 'sandbox_exec']);
 const readOnlyBrowserToolNames = new Set([
@@ -771,7 +772,10 @@ function taskErrorFromProvider(error: ProviderError, source: 'model' | 'tavily')
         code: 'InvalidProviderResponse',
         retryable: false,
         recoveryAction: 'review_provider_status',
-        userMessage: 'The provider returned an invalid response.',
+        userMessage:
+          error.invalidResponseStage === null
+            ? 'The provider returned an invalid response.'
+            : `The provider returned an invalid response (stage: ${error.invalidResponseStage}).`,
         evidenceRef: null,
       };
     case 'ABORTED':
@@ -783,6 +787,19 @@ function taskErrorFromProvider(error: ProviderError, source: 'model' | 'tavily')
         evidenceRef: null,
       };
   }
+}
+
+/** Counts bounded automatic invalid-response retries in the current planning attempt. */
+function invalidModelResponseRetryCount(events: readonly TaskEvent[]): number {
+  let planningStartIndex = -1;
+  for (let index = events.length - 1; index >= 0; index -= 1) {
+    if (events[index]?.type === 'planning.started') {
+      planningStartIndex = index;
+      break;
+    }
+  }
+  return events.slice(planningStartIndex + 1).filter((event) => event.type === 'planning.retrying')
+    .length;
 }
 
 /** Projects one completed provider turn onto bounded numeric task telemetry. */
@@ -863,6 +880,17 @@ export class TaskExecutor {
             transientModelRetryCount < MODEL_TRANSIENT_RETRY_LIMIT
           ) {
             transientModelRetryCount += 1;
+            continue;
+          }
+          if (
+            isProviderError(error) &&
+            error.code === 'INVALID_RESPONSE' &&
+            invalidModelResponseRetryCount(snapshot.events) < MODEL_INVALID_RESPONSE_RETRY_LIMIT
+          ) {
+            snapshot = await this.#saveBoundary(snapshot, ownerId, signal, {
+              type: 'planning.retrying',
+              reason: `invalid_model_response_retry:${error.invalidResponseStage ?? 'unknown'}`,
+            });
             continue;
           }
           return await this.#handleFailure(snapshot, ownerId, signal, error, 'model');
@@ -1536,7 +1564,9 @@ export class TaskExecutor {
         error.code === 'AUTH'
           ? `${source}_authentication_required`
           : error.code === 'INVALID_RESPONSE'
-            ? `invalid_${source}_response`
+            ? `invalid_${source}_response${
+                error.invalidResponseStage === null ? '' : `:${error.invalidResponseStage}`
+              }`
             : `${source}_retry_required`,
       error: taskError,
     });

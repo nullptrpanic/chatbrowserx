@@ -14,6 +14,7 @@ const statusKeys: Readonly<Record<PanelTaskStatus, MessageKey>> = {
 
 const eventKeys: Readonly<Record<string, MessageKey>> = {
   'planning.started': 'taskPlanning',
+  'planning.retrying': 'taskPlanning',
   'reasoning.summary-recorded': 'taskReasoningSummaryRecorded',
   'tool.call-recorded': 'taskToolCallRecorded',
   'tool.result-recorded': 'taskToolResultRecorded',

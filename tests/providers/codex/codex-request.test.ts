@@ -280,6 +280,29 @@ describe('buildCodexRequest', () => {
     ).toThrow('The model provider returned an invalid response.');
   });
 
+  it('classifies rejected outbound contracts without exposing request content', () => {
+    let thrown: unknown;
+    try {
+      buildCodexRequest({
+        accessToken: 'synthetic-token-value',
+        accountId: 'acct_123',
+        request: {
+          ...MODEL_REQUEST,
+          tools: [],
+          toolChoice: { type: 'function', name: 'commit_context' },
+        },
+      });
+    } catch (error) {
+      thrown = error;
+    }
+
+    expect(thrown).toMatchObject({
+      code: 'INVALID_RESPONSE',
+      invalidResponseStage: 'request_contract',
+    });
+    expect(String(thrown)).not.toContain('synthetic-token-value');
+  });
+
   it('builds the single fixed Codex HTTP contract and maps normalized input', () => {
     const request = buildCodexRequest({
       accessToken: 'synthetic-token-value',

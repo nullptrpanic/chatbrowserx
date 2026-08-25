@@ -244,6 +244,19 @@ function normalizeUsage(usage: z.infer<typeof usageSchema> | null | undefined): 
   };
 }
 
+/** Compares the bounded normalized usage fields used by duplicate terminal events. */
+function sameUsage(left: ModelUsage | null, right: ModelUsage | null): boolean {
+  if (left === null || right === null) return left === right;
+  return (
+    left.inputTokens === right.inputTokens &&
+    left.outputTokens === right.outputTokens &&
+    left.totalTokens === right.totalTokens &&
+    left.cachedInputTokens === right.cachedInputTokens &&
+    left.cacheWriteInputTokens === right.cacheWriteInputTokens &&
+    left.reasoningOutputTokens === right.reasoningOutputTokens
+  );
+}
+
 export class CodexEventTranslator {
   readonly #calls = new Map<string, FunctionCallState>();
   readonly #encryptedReasoningItems = new Set<string>();
@@ -255,6 +268,8 @@ export class CodexEventTranslator {
   readonly #contentPartKinds = new Map<string, ContentPartKind>();
   #responseId: string | null = null;
   #responseCompleted = false;
+  #terminalKind: 'completed' | 'incomplete' | 'failed' | null = null;
+  #completionUsage: ModelUsage | null = null;
 
   /** Translates one decoded SSE event into zero or more stable model events. */
   translate(event: DecodedSseEvent): readonly ModelStreamEvent[] {
@@ -319,7 +334,8 @@ export class CodexEventTranslator {
   /** Records the unique response identifier. */
   #created(data: unknown): readonly ModelStreamEvent[] {
     const created = parsePayload(createdSchema, data);
-    if (this.#responseId !== null || this.#responseCompleted) {
+    if (this.#responseId !== null) {
+      if (!this.#responseCompleted && this.#responseId === created.response.id) return [];
       throw providerErrorFromCode('INVALID_RESPONSE');
     }
     this.#responseId = created.response.id;
@@ -516,7 +532,11 @@ export class CodexEventTranslator {
   #argumentsDone(data: unknown): readonly ModelStreamEvent[] {
     const done = parsePayload(argumentDoneSchema, data);
     const call = this.#calls.get(done.item_id);
-    if (!call || call.completed) {
+    if (!call) {
+      throw providerErrorFromCode('INVALID_RESPONSE');
+    }
+    if (call.completed) {
+      if (call.argumentsJson === done.arguments) return [];
       throw providerErrorFromCode('INVALID_RESPONSE');
     }
     call.completed = true;
@@ -623,16 +643,29 @@ export class CodexEventTranslator {
   /** Completes the response only after every announced function call is complete. */
   #completed(data: unknown): readonly ModelStreamEvent[] {
     const completed = parsePayload(completedSchema, data);
+    const usage = normalizeUsage(completed.response.usage);
+    if (this.#responseCompleted) {
+      if (
+        this.#terminalKind === 'completed' &&
+        completed.response.id === this.#responseId &&
+        sameUsage(usage, this.#completionUsage)
+      ) {
+        return [];
+      }
+      throw providerErrorFromCode('INVALID_RESPONSE');
+    }
     this.#assertTerminalResponse(completed.response.id);
     if ([...this.#calls.values()].some((call) => !call.completed)) {
       throw providerErrorFromCode('INVALID_RESPONSE');
     }
     this.#responseCompleted = true;
+    this.#terminalKind = 'completed';
+    this.#completionUsage = usage;
     return [
       {
         type: 'response.completed',
         responseId: completed.response.id,
-        usage: normalizeUsage(completed.response.usage),
+        usage,
       },
     ];
   }
@@ -642,6 +675,7 @@ export class CodexEventTranslator {
     const incomplete = parsePayload(incompleteSchema, data);
     this.#assertTerminalResponse(incomplete.response.id);
     this.#responseCompleted = true;
+    this.#terminalKind = 'incomplete';
     throw providerErrorFromCode('TRANSIENT');
   }
 
@@ -650,6 +684,7 @@ export class CodexEventTranslator {
     const failed = parsePayload(failedSchema, data);
     this.#assertTerminalResponse(failed.response.id);
     this.#responseCompleted = true;
+    this.#terminalKind = 'failed';
     throwUpstreamError(failed.response.error?.code);
   }
 

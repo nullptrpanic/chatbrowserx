@@ -79,7 +79,9 @@ function mappedTools(request: ModelRequest): readonly Readonly<Record<string, un
 export function buildCodexRequest(input: BuildCodexRequestInput): CodexHttpRequest {
   const requestedToolChoice = input.request.toolChoice ?? 'auto';
   if (input.request.tools.length === 0 && requestedToolChoice !== 'auto') {
-    throw providerErrorFromCode('INVALID_RESPONSE');
+    throw providerErrorFromCode('INVALID_RESPONSE', {
+      invalidResponseStage: 'request_contract',
+    });
   }
 
   const toolContract =
@@ -92,7 +94,9 @@ export function buildCodexRequest(input: BuildCodexRequestInput): CodexHttpReque
               ? requestedToolChoice
               : (() => {
                   if (!input.request.tools.some((tool) => tool.name === requestedToolChoice.name)) {
-                    throw providerErrorFromCode('INVALID_RESPONSE');
+                    throw providerErrorFromCode('INVALID_RESPONSE', {
+                      invalidResponseStage: 'request_contract',
+                    });
                   }
                   return {
                     type: requestedToolChoice.type,
