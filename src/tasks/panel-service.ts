@@ -601,17 +601,18 @@ export class PanelService {
 
   /** Reads editable settings, including credentials, only for the explicit trusted UI query. */
   async getSettings(): Promise<PanelEditableSettings> {
-    const [settings, codexAccessToken, tavilyKey] = await Promise.all([
+    const [settings, codexAccessToken, tavilyKey, sandboxToken] = await Promise.all([
       this.#dependencies.settings.get(),
       this.#dependencies.credentials.getCodexAccessToken(),
       this.#dependencies.credentials.getTavilyKey(),
+      this.#dependencies.credentials.getSandboxToken(),
     ]);
     return {
       ...settings,
       sandboxServer: settings.sandboxServer ?? '',
       codexAccessToken: codexAccessToken ?? '',
       tavilyKey: tavilyKey ?? '',
-      sandboxToken: '',
+      sandboxToken: sandboxToken ?? '',
     };
   }
 

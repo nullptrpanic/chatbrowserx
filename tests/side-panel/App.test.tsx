@@ -102,10 +102,15 @@ describe('App background connection', () => {
             ? { ...buildSnapshot(), settings }
             : message.type === 'settings.get'
               ? {
-                  ...settings,
+                  model: settings.model,
+                  reasoningEffort: settings.reasoningEffort,
+                  systemPrompt: settings.systemPrompt,
+                  language: settings.language,
+                  historyMessageLimit: settings.historyMessageLimit,
+                  sandboxServer: settings.sandboxServer,
                   codexAccessToken: '',
                   tavilyKey: '',
-                  sandboxToken: '',
+                  sandboxToken: 'stored-sandbox-token',
                 }
               : message.type === 'settings.save'
                 ? settings
@@ -118,11 +123,13 @@ describe('App background connection', () => {
     await user.click(await screen.findByRole('button', { name: '设置' }));
     await user.click(await screen.findByRole('tab', { name: '沙箱' }));
     const server = await screen.findByLabelText('Sandbox Server');
-    const token = await screen.findByLabelText(/Sandbox Token/);
+    const token = await screen.findByDisplayValue('stored-sandbox-token');
     expect(server).toHaveValue('https://sandbox.example.com/root');
-    expect(token).toHaveAttribute('placeholder', '已保存；留空表示保持不变');
+    expect(token).toHaveValue('stored-sandbox-token');
+    expect(token).toHaveAttribute('type', 'password');
     await user.clear(server);
     await user.type(server, 'http://localhost:8787');
+    await user.clear(token);
     await user.type(token, 'new-sandbox-token');
     await user.click(screen.getByRole('button', { name: '保存设置' }));
 

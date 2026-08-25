@@ -1219,6 +1219,7 @@ describe('PanelService', () => {
 
   it('returns persisted credentials only from the explicit settings query', async () => {
     const fixture = buildFixture();
+    fixture.dependencies.credentials.getSandboxToken.mockResolvedValue('secret-sandbox-token');
     const service = new PanelService(fixture.dependencies);
 
     await expect(service.getSettings()).resolves.toEqual({
@@ -1230,7 +1231,7 @@ describe('PanelService', () => {
       sandboxServer: '',
       codexAccessToken: 'secret-token',
       tavilyKey: 'secret-tavily-key',
-      sandboxToken: '',
+      sandboxToken: 'secret-sandbox-token',
     });
   });
 
@@ -1318,7 +1319,7 @@ describe('PanelService', () => {
     );
   });
 
-  it('saves optional Sandbox settings, blanks the editable token, and invalidates metadata', async () => {
+  it('saves optional Sandbox settings and invalidates metadata', async () => {
     const fixture = buildFixture();
     fixture.dependencies.settings.get.mockResolvedValue({
       model: 'gpt-5.6-terra',
@@ -1351,10 +1352,6 @@ describe('PanelService', () => {
       'new-sandbox-token',
     );
     expect(invalidate).toHaveBeenCalledOnce();
-    await expect(service.getSettings()).resolves.toMatchObject({
-      sandboxServer: 'https://old-sandbox.example.com',
-      sandboxToken: '',
-    });
   });
 
   it('cancels unfinished work before deleting the complete conversation aggregate', async () => {
