@@ -4042,6 +4042,72 @@ describe('BrowserActionExecutor', () => {
     });
   });
 
+  it('measures the viewport scroll target in CSS pixels', async () => {
+    const { executor } = harness({
+      responder: (_session, method) =>
+        method === 'Page.getLayoutMetrics'
+          ? {
+              cssVisualViewport: {
+                pageX: 0,
+                pageY: 0,
+                clientWidth: 1_024,
+                clientHeight: 750,
+              },
+            }
+          : undefined,
+    });
+
+    await expect(
+      executor.measureScrollTarget(7, 'viewport', new AbortController().signal),
+    ).resolves.toEqual({ width: 1_024, height: 750 });
+  });
+
+  it('measures the nearest nested scroll container in CSS pixels', async () => {
+    const { executor } = harness({
+      targets: [
+        {
+          frameTargetId: null,
+          documentFrameId: 'frame-main',
+          loaderId: 'loader-1',
+          backendNodeId: 42,
+          role: 'region',
+          name: 'Message history',
+          state: [],
+          actions: ['scroll'],
+          frame: 'main',
+        },
+      ],
+      responder: (_session, method, params) => {
+        if (
+          method === 'Runtime.callFunctionOn' &&
+          typeof params?.functionDeclaration === 'string' &&
+          params.functionDeclaration.includes('__chatbrowserxScrollState')
+        ) {
+          return {
+            result: {
+              type: 'object',
+              value: {
+                found: true,
+                x: 0,
+                y: 120,
+                maxX: 0,
+                maxY: 800,
+                clientWidth: 320,
+                clientHeight: 400,
+                contentKey: 'visible-history',
+              },
+            },
+          };
+        }
+        return undefined;
+      },
+    });
+
+    await expect(
+      executor.measureScrollTarget(7, 'ref_1', new AbortController().signal),
+    ).resolves.toEqual({ width: 320, height: 400 });
+  });
+
   it('requires one same-direction viewport probe before verifying a finite boundary', async () => {
     let pageY = 0;
     const { executor } = harness({

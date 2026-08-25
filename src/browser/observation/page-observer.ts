@@ -82,13 +82,19 @@ interface InteractiveSnapshot {
 }
 
 interface InteractiveCoverage {
-  readonly scope: 'viewport';
+  readonly scope: 'page';
   readonly complete: false;
   readonly moreBefore: boolean | 'unknown';
   readonly moreAfter: boolean | 'unknown';
   readonly targets: readonly string[];
   readonly primaryTarget?: string;
-  readonly recommendedAction: 'browser_scroll_until';
+  readonly traversalTool: 'browser_scroll_until';
+  readonly traversalRequiredFor: readonly [
+    'whole_document',
+    'all_items',
+    'date_range',
+    'page_summary',
+  ];
   readonly contentKey: string;
 }
 
@@ -214,7 +220,11 @@ function interactiveCandidateIndexes(
 function viewportFromLayoutMetrics(
   metrics: Partial<Protocol.Page.GetLayoutMetricsResponse>,
 ): BuildViewport | undefined {
-  const viewport = metrics.visualViewport ?? metrics.layoutViewport;
+  const viewport =
+    metrics.cssVisualViewport ??
+    metrics.cssLayoutViewport ??
+    metrics.visualViewport ??
+    metrics.layoutViewport;
   if (!viewport) return undefined;
   const { pageX, pageY, clientWidth, clientHeight } = viewport;
   if (
@@ -245,8 +255,12 @@ interface DocumentViewportCoverage {
 function documentViewportCoverage(
   metrics: Partial<Protocol.Page.GetLayoutMetricsResponse>,
 ): DocumentViewportCoverage | undefined {
-  const viewport = metrics.visualViewport ?? metrics.layoutViewport;
-  const content = metrics.contentSize;
+  const viewport =
+    metrics.cssVisualViewport ??
+    metrics.cssLayoutViewport ??
+    metrics.visualViewport ??
+    metrics.layoutViewport;
+  const content = metrics.cssContentSize ?? metrics.contentSize;
   if (!viewport || !content) return undefined;
   const values = [
     viewport.pageX,
@@ -449,13 +463,14 @@ function interactiveCoverage(
   const targets = ranked.map(({ ref }) => ref);
   const primaryTarget = primaryScrollTarget(ranked);
   return {
-    scope: 'viewport',
+    scope: 'page',
     complete: false,
     moreBefore: documentCoverage?.moreBefore ?? 'unknown',
     moreAfter: documentCoverage?.moreAfter ?? 'unknown',
     targets,
     ...(primaryTarget === undefined ? {} : { primaryTarget }),
-    recommendedAction: 'browser_scroll_until',
+    traversalTool: 'browser_scroll_until',
+    traversalRequiredFor: ['whole_document', 'all_items', 'date_range', 'page_summary'],
     contentKey: semanticContentKey(elements),
   };
 }

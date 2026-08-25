@@ -19,6 +19,7 @@ const DISCOVERY_TOOL_NAMES = new Set<BrowserToolName>([
   'browser_capture_screenshot',
   'browser_wait',
   'browser_network_start',
+  'browser_network_stop',
 ]);
 
 const INTERACTIVE_TOOL_NAMES = new Set<BrowserToolName>([
@@ -335,6 +336,11 @@ function browserScrollContinuation(history: BrowserToolHistory): BrowserScrollCo
     if (call.name === 'browser_scroll_until') {
       const data = childRecord(output, 'data');
       const arguments_ = jsonRecord(call.argumentsJson);
+      if (data?.stopReason === 'evidence_budget' || data?.stopReason === 'segment_limit') {
+        state.continuation = null;
+        state.continuationFailures = 0;
+        continue;
+      }
       if (
         data?.action !== 'scroll_until' ||
         data.continuationRequired !== true ||
@@ -362,20 +368,10 @@ function browserScrollContinuation(history: BrowserToolHistory): BrowserScrollCo
         state.continuationFailures = 0;
         continue;
       }
-      const hasInteractiveEvidence =
-        embeddedInteractiveObservations(data).length > 0 &&
-        data.verificationUnavailable !== true &&
-        data.continuationFailure === undefined;
-      const directContinuation =
-        hasInteractiveEvidence &&
-        (data.stopReason === 'evidence_budget' || data.stopReason === 'segment_limit');
-      state.continuationFailures = directContinuation
-        ? 0
-        : state.continuation?.resumeOperation === 'scroll_until'
-          ? state.continuationFailures + 1
-          : 1;
+      state.continuationFailures =
+        state.continuation?.resumeOperation === 'scroll_until' ? state.continuationFailures + 1 : 1;
       state.continuation = {
-        next: directContinuation ? 'scroll_until' : 'inspect',
+        next: 'inspect',
         resumeOperation: 'scroll_until',
         tabId:
           typeof arguments_.tabId === 'number' && Number.isInteger(arguments_.tabId)

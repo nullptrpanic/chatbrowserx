@@ -68,6 +68,30 @@ describe('live E2E scenario registry', () => {
     expect(scenario.minimumMarkdownTableRows).toBe(3);
   });
 
+  it('registers one read-only named-section document regression without page-wide scrolling', () => {
+    const scenario = getLiveScenario('lark-doc-named-section');
+
+    expect(scenario.allowRemoteMutation).toBe(false);
+    expect(scenario.startUrl).toBe(
+      'https://bytedance.larkoffice.com/docx/XQmodBxg9oqiQKxq31OcuRMGnBg',
+    );
+    expect(scenario.requiredTools).toEqual(
+      expect.arrayContaining(['browser_inspect', 'browser_click']),
+    );
+    expect(scenario.forbiddenTools).toEqual(
+      expect.arrayContaining([
+        'browser_scroll',
+        'browser_scroll_until',
+        'browser_capture_screenshot',
+        'browser_network_start',
+      ]),
+    );
+    expect(scenario.taskText).toBe('看下关键问题');
+    expect(scenario.taskText).not.toContain('不要求阅读全文');
+    expect(scenario.taskText).not.toContain('不要使用');
+    expect(scenario.finalTextIncludes).toContain('关键问题');
+  });
+
   it('lists stable scenario names without exposing a mutable registry', () => {
     const scenarios = listLiveScenarios();
 
@@ -75,6 +99,7 @@ describe('live E2E scenario registry', () => {
       'lark-messenger-read',
       'lark-messenger-august-history',
       'lark-messenger-multi-group-scroll',
+      'lark-doc-named-section',
       'lark-self-send',
       'lark-self-send-screenshot',
       'lark-five-groups-summary-screenshot-send',

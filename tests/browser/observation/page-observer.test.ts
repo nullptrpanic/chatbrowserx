@@ -436,10 +436,17 @@ describe('PageObserver', () => {
           visualViewport: {
             pageX: 0,
             pageY: 0,
+            clientWidth: 1_600,
+            clientHeight: 1_200,
+          },
+          contentSize: { x: 0, y: 0, width: 1_600, height: 1_200 },
+          cssVisualViewport: {
+            pageX: 0,
+            pageY: 0,
             clientWidth: 800,
             clientHeight: 600,
           },
-          contentSize: { x: 0, y: 0, width: 800, height: 2_400 },
+          cssContentSize: { x: 0, y: 0, width: 800, height: 2_400 },
         };
       }
       if (method === 'Page.getNavigationHistory') return { currentIndex: 0, entries: [] };
@@ -459,13 +466,14 @@ describe('PageObserver', () => {
     expect(result.data).toMatchObject({
       mode: 'interactive',
       coverage: {
-        scope: 'viewport',
+        scope: 'page',
         complete: false,
         moreBefore: false,
         moreAfter: true,
         targets: ['viewport'],
         primaryTarget: 'viewport',
-        recommendedAction: 'browser_scroll_until',
+        traversalTool: 'browser_scroll_until',
+        traversalRequiredFor: ['whole_document', 'all_items', 'date_range', 'page_summary'],
         contentKey: expect.stringMatching(/^[0-9a-f]{8}$/),
       },
     });
@@ -531,7 +539,8 @@ describe('PageObserver', () => {
         moreAfter: 'unknown',
         targets: ['ref_pages'],
         primaryTarget: 'ref_pages',
-        recommendedAction: 'browser_scroll_until',
+        traversalTool: 'browser_scroll_until',
+        traversalRequiredFor: ['whole_document', 'all_items', 'date_range', 'page_summary'],
       },
     });
   });

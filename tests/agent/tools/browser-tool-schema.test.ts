@@ -82,12 +82,31 @@ const CASES = [
     { tabId: 7, fromX: 10, fromY: 20, toX: 300, toY: 400 },
   ],
   ['browser_network_start', 'network_start', 'mutation', { tabId: 7 }],
-  ['browser_network_list', 'network_list', 'safe', { tabId: 7, urlPattern: '/api/', limit: 50 }],
+  [
+    'browser_network_list',
+    'network_list',
+    'safe',
+    { tabId: 7, urlPattern: '/api/', limit: 50, mode: 'endpoint_sample' },
+  ],
   [
     'browser_network_get',
     'network_get',
     'safe',
-    { tabId: 7, requestId: 'request_1', includeBody: true },
+    {
+      tabId: 7,
+      requests: [
+        {
+          requestId: 'request_1',
+          includeRequestBody: true,
+          includeResponseBody: false,
+        },
+        {
+          requestId: 'request_2',
+          includeRequestBody: false,
+          includeResponseBody: true,
+        },
+      ],
+    },
   ],
   ['browser_network_stop', 'network_stop', 'mutation', { tabId: 7 }],
 ] as const;
@@ -149,6 +168,30 @@ describe('BROWSER_TOOL_DEFINITIONS', () => {
     expect(JSON.stringify(parameters.properties.items)).not.toContain('uniqueItems');
   });
 
+  it('advertises bounded per-request body choices for batch network reads', () => {
+    const definition = BROWSER_TOOL_DEFINITIONS.find(({ name }) => name === 'browser_network_get');
+    const parameters = definition?.parameters as {
+      readonly properties: Readonly<Record<string, Readonly<Record<string, unknown>>>>;
+    };
+
+    expect(parameters.properties.requests).toMatchObject({
+      type: 'array',
+      minItems: 1,
+      maxItems: 5,
+      items: {
+        type: 'object',
+        properties: {
+          requestId: { type: 'string', minLength: 1, maxLength: 512 },
+          includeRequestBody: { type: 'boolean' },
+          includeResponseBody: { type: 'boolean' },
+        },
+        required: ['requestId', 'includeRequestBody', 'includeResponseBody'],
+        additionalProperties: false,
+      },
+    });
+    expect(JSON.stringify(parameters.properties.requests)).not.toContain('uniqueItems');
+  });
+
   it('advertises bounded and explicit deep native interactive modes', () => {
     const inspect = BROWSER_TOOL_DEFINITIONS.find(
       (definition) => definition.name === 'browser_inspect',
@@ -181,6 +224,21 @@ describe('BROWSER_TOOL_DEFINITIONS', () => {
     expect(definitions.get('browser_inspect')?.description).toContain(
       'scrollable ref that advertises scroll',
     );
+    expect(definitions.get('browser_inspect')?.description).toContain(
+      'page-global coverage.complete=false does not by itself make a named-section objective incomplete',
+    );
+    expect(definitions.get('browser_inspect')?.description).toContain(
+      'inspect the destination heading and requested content, then answer without traversing unrelated content below it',
+    );
+    expect(definitions.get('browser_inspect')?.description).toContain(
+      'Treat a terse named-section command such as Chinese “看下/看看/打开/定位/跳到/选择 + 章节名” as locate/view only',
+    );
+    expect(definitions.get('browser_inspect')?.description).not.toContain(
+      'When interactive coverage.complete=false, the returned tree is not complete page evidence and the relevant coverage target must be traversed before answering.',
+    );
+    expect(definitions.get('browser_inspect')?.description).toContain(
+      'do not click same-page navigation or table-of-contents links before or after traversal',
+    );
     expect(definitions.get('browser_scroll')?.description).toContain(
       'Do not click passive content to reveal more items',
     );
@@ -201,6 +259,24 @@ describe('BROWSER_TOOL_DEFINITIONS', () => {
     expect(definitions.get('browser_scroll')?.description).toContain('remainingDelta');
     expect(definitions.get('browser_scroll')?.description).toContain(
       'outside the requested interval',
+    );
+    expect(definitions.get('browser_scroll_until')?.description).toContain(
+      'Only when the user explicitly requests reading, analyzing, or summarizing an entire named section, stop at the next same-level or higher-level heading',
+    );
+    expect(definitions.get('browser_scroll_until')?.description).toContain(
+      'Do not use an empty stopText merely to continue to the document boundary for a named section',
+    );
+    expect(definitions.get('browser_scroll_until')?.description).toContain(
+      'do not click anchors, headings, or table-of-contents items before or after traversal',
+    );
+    expect(definitions.get('browser_scroll_until')?.description).toContain(
+      'For whole-document reading or page-summary objectives, regardless of the current viewport, first traverse upward with negative deltaY until the upper boundary is verified; only then traverse downward from that boundary',
+    );
+    expect(definitions.get('browser_scroll_until')?.description).toContain(
+      'Treat a terse request to look at, open, locate, or jump to a named section as locate/view, not complete-section reading',
+    );
+    expect(definitions.get('browser_scroll_until')?.description).not.toContain(
+      'For a complete named-section reading or summary',
     );
     expect(definitions.get('browser_select')?.description).toContain('advertises select');
     expect(definitions.get('browser_select')?.description).toContain('custom dropdown');
@@ -282,7 +358,7 @@ describe('parseBrowserToolCall', () => {
     ['browser_set_checked', { ref: 'ref_1', checked: true }],
     ['browser_set_checked_many', { items: [{ ref: 'ref_1', checked: true }] }],
     ['browser_type', { ref: 'ref_1', text: 'hello', replace: true, submit: false }],
-    ['browser_network_list', { urlPattern: '/api/', limit: 25 }],
+    ['browser_network_list', { urlPattern: '/api/', limit: 25, mode: 'recent' }],
   ])('accepts task-bound %s without a model-provided tabId', (name, arguments_) => {
     expect(
       parseBrowserToolCall({
@@ -380,6 +456,17 @@ describe('parseBrowserToolCall', () => {
         tabId: 7,
         target: 'viewport',
         deltaX: 0,
+        deltaY: 1_201,
+        maxSegments: 8,
+        stopText: '',
+      },
+    ],
+    [
+      'browser_scroll_until',
+      {
+        tabId: 7,
+        target: 'viewport',
+        deltaX: 0,
         deltaY: -1_000,
         maxSegments: 25,
         stopText: '',
@@ -398,8 +485,32 @@ describe('parseBrowserToolCall', () => {
     ],
     ['browser_wait', { tabId: 7, condition: 'delay', timeoutMs: 249 }],
     ['browser_click_point', { tabId: 7, x: -1, y: 1, button: 'left', count: 1 }],
-    ['browser_network_list', { tabId: 7, urlPattern: '', limit: 101 }],
-    ['browser_network_get', { tabId: 7, requestId: '', includeBody: false }],
+    ['browser_network_list', { tabId: 7, urlPattern: '', limit: 101, mode: 'recent' }],
+    ['browser_network_get', { tabId: 7, requests: [] }],
+    [
+      'browser_network_get',
+      {
+        tabId: 7,
+        requests: Array.from({ length: 6 }, (_, index) => ({
+          requestId: `request_${String(index)}`,
+          includeRequestBody: false,
+          includeResponseBody: false,
+        })),
+      },
+    ],
+    [
+      'browser_network_get',
+      {
+        tabId: 7,
+        requests: [
+          {
+            requestId: ' request_1',
+            includeRequestBody: false,
+            includeResponseBody: false,
+          },
+        ],
+      },
+    ],
     ['browser_set_checked_many', { tabId: 7, items: [] }],
     [
       'browser_set_checked_many',

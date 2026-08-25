@@ -80,6 +80,7 @@ const MAX_SCROLL_OBSERVATION_CHARACTERS = 68 * 1_024;
 const RESERVED_SCROLL_OBSERVATION_CHARACTERS = 34 * 1_024;
 const MAX_SCROLL_UNTIL_OBSERVATION_CHARACTERS = 96 * 1_024;
 const RESERVED_SCROLL_UNTIL_OBSERVATION_CHARACTERS = 36 * 1_024;
+const SCROLL_UNTIL_TARGET_FRACTION = 0.8;
 
 interface ReloadRecoveryState {
   readonly operation: ParsedBrowserToolCall['operation'];
@@ -630,6 +631,14 @@ function continuationDelta(value: unknown): number | null {
   return measured === null ? null : Math.sign(measured) * Math.ceil(Math.abs(measured));
 }
 
+function adaptiveScrollUntilDelta(delta: number, targetSize: number | undefined): number {
+  if (delta === 0 || targetSize === undefined || !Number.isFinite(targetSize) || targetSize <= 0) {
+    return delta;
+  }
+  const targetLimit = Math.max(1, Math.floor(targetSize * SCROLL_UNTIL_TARGET_FRACTION));
+  return Math.sign(delta) * Math.min(Math.abs(delta), targetLimit);
+}
+
 function scrollCanContinue(data: Readonly<Record<string, unknown>>): boolean {
   const remainingDeltaX = finiteNumber(data.remainingDeltaX);
   const remainingDeltaY = finiteNumber(data.remainingDeltaY);
@@ -669,6 +678,7 @@ type ScrollUntilStopReason =
   | 'evidence_budget'
   | 'segment_limit'
   | 'observation_unavailable'
+  | 'page_unsettled'
   | 'action_failure';
 
 function normalizedVisibleText(value: string): string {
@@ -1291,12 +1301,14 @@ export class BrowserToolExecutor implements BrowserExecutionPort {
           const input = call.arguments as {
             readonly urlPattern: string;
             readonly limit: number;
+            readonly mode: 'recent' | 'endpoint_sample';
           };
           const targetTabId = requiredTaskTabId(taskTarget);
           const requests = await this.#dependencies.network.list(
             targetTabId,
             input.urlPattern,
             input.limit,
+            input.mode,
           );
           output = {
             ok: true,
@@ -1318,20 +1330,19 @@ export class BrowserToolExecutor implements BrowserExecutionPort {
             break;
           }
           const input = call.arguments as {
-            readonly requestId: string;
-            readonly includeBody: boolean;
+            readonly requests: readonly {
+              readonly requestId: string;
+              readonly includeRequestBody: boolean;
+              readonly includeResponseBody: boolean;
+            }[];
           };
           const targetTabId = requiredTaskTabId(taskTarget);
-          const request = await this.#dependencies.network.get(
-            targetTabId,
-            input.requestId,
-            input.includeBody,
-          );
+          const results = await this.#dependencies.network.get(targetTabId, input.requests);
           output = {
             ok: true,
             tabId: targetTabId,
             url: null,
-            data: { request },
+            data: { results },
             observation: null,
           };
           break;
@@ -1627,10 +1638,21 @@ export class BrowserToolExecutor implements BrowserExecutionPort {
       readonly maxSegments: number;
       readonly stopText: string;
     };
+    let scrollTargetSize: { readonly width: number; readonly height: number } | undefined;
+    if (actions.measureScrollTarget) {
+      try {
+        scrollTargetSize = await actions.measureScrollTarget(tabId_, input.target, signal);
+      } catch (error) {
+        if (signal.aborted || (error instanceof Error && error.name === 'AbortError')) throw error;
+        // Let the scroll action surface stale or unavailable targets through its established path.
+      }
+    }
+    const effectiveDeltaX = adaptiveScrollUntilDelta(input.deltaX, scrollTargetSize?.width);
+    const effectiveDeltaY = adaptiveScrollUntilDelta(input.deltaY, scrollTargetSize?.height);
     const marker = normalizedVisibleText(input.stopText);
     const observations: Readonly<Record<string, unknown>>[] = [];
-    let nextDeltaX = input.deltaX;
-    let nextDeltaY = input.deltaY;
+    let nextDeltaX = effectiveDeltaX;
+    let nextDeltaY = effectiveDeltaY;
     let latestAction: BrowserActionResult | null = null;
     let latestSnapshot: string | null = null;
     let stopReason: ScrollUntilStopReason | null = null;
@@ -1704,8 +1726,19 @@ export class BrowserToolExecutor implements BrowserExecutionPort {
         nextDeltaX = remainingDeltaX;
         nextDeltaY = remainingDeltaY;
       } else {
-        nextDeltaX = input.deltaX;
-        nextDeltaY = input.deltaY;
+        nextDeltaX = effectiveDeltaX;
+        nextDeltaY = effectiveDeltaY;
+      }
+
+      let pageSettled = true;
+      if (actions.settle) {
+        try {
+          await actions.settle(tabId_, signal, POST_ACTION_SETTLE_TIMEOUT_MS);
+        } catch (error) {
+          if (signal.aborted || (error instanceof Error && error.name === 'AbortError'))
+            throw error;
+          pageSettled = false;
+        }
       }
 
       const baseSnapshot = this.#interactiveSnapshotByTab.get(tabId_);
@@ -1725,6 +1758,11 @@ export class BrowserToolExecutor implements BrowserExecutionPort {
       if (latestSnapshot === null) {
         verificationUnavailable = true;
         stopReason = 'observation_unavailable';
+        break;
+      }
+      if (!pageSettled) {
+        boundaryVerified = false;
+        stopReason = 'page_unsettled';
         break;
       }
       if (interactiveObservationContainsText(observed, marker)) {
@@ -1775,12 +1813,10 @@ export class BrowserToolExecutor implements BrowserExecutionPort {
       growthSegments >= 3 &&
       growthSegments * 5 >= segments * 3;
     if (openEndedSample) stopReason = 'sample_limit';
-    const continuationRequired = ![
-      'text_seen',
-      'boundary_verified',
-      'cycle_detected',
-      'sample_limit',
-    ].includes(stopReason);
+    const continuationAvailable = ['evidence_budget', 'segment_limit'].includes(stopReason);
+    const continuationRequired =
+      !continuationAvailable &&
+      !['text_seen', 'boundary_verified', 'cycle_detected', 'sample_limit'].includes(stopReason);
     const coverageMode =
       stopReason === 'boundary_verified'
         ? 'finite'
@@ -1799,6 +1835,9 @@ export class BrowserToolExecutor implements BrowserExecutionPort {
         target: input.target,
         deltaX: input.deltaX,
         deltaY: input.deltaY,
+        effectiveDeltaX,
+        effectiveDeltaY,
+        ...(scrollTargetSize === undefined ? {} : { scrollTargetSize }),
         maxSegments: input.maxSegments,
         stopText: input.stopText,
         segments,
@@ -1812,6 +1851,7 @@ export class BrowserToolExecutor implements BrowserExecutionPort {
         matched: stopReason === 'text_seen',
         stopReason,
         continuationRequired,
+        ...(continuationAvailable ? { continuationAvailable: true } : {}),
         coverage: {
           mode: coverageMode,
           directionComplete: stopReason === 'boundary_verified',
@@ -1823,10 +1863,6 @@ export class BrowserToolExecutor implements BrowserExecutionPort {
         observations,
         ...(latestSnapshot === null ? {} : { latestSnapshot }),
         ...(latestPosition === undefined ? {} : { position: latestPosition }),
-        ...(continuationRequired &&
-        (stopReason === 'evidence_budget' || stopReason === 'segment_limit')
-          ? { nextDeltaX, nextDeltaY }
-          : {}),
         ...(verificationUnavailable ? { verificationUnavailable: true } : {}),
         ...(continuationFailure === undefined ? {} : { continuationFailure }),
       },

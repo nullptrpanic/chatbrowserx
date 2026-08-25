@@ -1342,6 +1342,9 @@ describe('BrowserToolExecutor', () => {
           observation: { targetPresent: true },
         };
       }),
+      settle: vi.fn(async () => {
+        order.push('settle');
+      }),
     };
     const executor = new BrowserToolExecutor({
       tabs: tabPort(),
@@ -1367,8 +1370,10 @@ describe('BrowserToolExecutor', () => {
     expect(order).toEqual([
       'inspect:initial',
       'scroll:-1200',
+      'settle',
       'inspect:snapshot_0',
       'scroll:-1200',
+      'settle',
       'inspect:snapshot_1',
     ]);
     expect(actions.execute).toHaveBeenCalledTimes(2);
@@ -1408,6 +1413,127 @@ describe('BrowserToolExecutor', () => {
       },
     });
   });
+
+  it.each([
+    [
+      'a compact viewport',
+      { width: 800, height: 600 },
+      { deltaX: 0, deltaY: 1_200 },
+      { deltaX: 0, deltaY: 480 },
+    ],
+    [
+      'a compact nested container on both axes',
+      { width: 320, height: 400 },
+      { deltaX: 1_200, deltaY: -1_200 },
+      { deltaX: 256, deltaY: -320 },
+    ],
+    [
+      'a large viewport without exceeding the safety ceiling',
+      { width: 1_800, height: 1_600 },
+      { deltaX: 0, deltaY: 1_200 },
+      { deltaX: 0, deltaY: 1_200 },
+    ],
+  ])(
+    'adapts the scroll-until stride to 80%% of %s',
+    async (_label, scrollTargetSize, requested, expected) => {
+      const observer = {
+        inspect: vi
+          .fn()
+          .mockResolvedValueOnce({
+            tabId: 7,
+            url: 'https://example.com/history',
+            data: {
+              mode: 'interactive',
+              snapshot: 'snapshot_before',
+              elements: [{ r: 'list', n: 'History', a: ['scroll'], ref: 'ref_history' }],
+            },
+            observation: null,
+            attachmentIds: [],
+            debuggerSession: 'ephemeral' as const,
+          })
+          .mockResolvedValueOnce({
+            tabId: 7,
+            url: 'https://example.com/history',
+            data: {
+              mode: 'interactive',
+              snapshot: 'snapshot_after',
+              base: 'snapshot_before',
+              unchanged: true,
+            },
+            observation: null,
+            attachmentIds: [],
+            debuggerSession: 'ephemeral' as const,
+          }),
+      };
+      const actions = {
+        measureScrollTarget: vi.fn(async () => scrollTargetSize),
+        execute: vi.fn(async (actionCall: ReturnType<typeof call>) => {
+          const delta = actionCall.arguments as {
+            readonly deltaX: number;
+            readonly deltaY: number;
+          };
+          return {
+            tabId: 7,
+            url: 'https://example.com/history',
+            data: {
+              action: 'scroll',
+              actualDeltaX: delta.deltaX,
+              actualDeltaY: delta.deltaY,
+              remainingDeltaX: 0,
+              remainingDeltaY: 0,
+              requestedDeltaApplied: true,
+              moved: true,
+              contentChanged: false,
+              extentChanged: false,
+              loadedMore: false,
+              boundaryVerified: true,
+              position: { x: 0, y: 480, maxX: 0, maxY: 480 },
+            },
+            observation: null,
+          };
+        }),
+      };
+      const executor = new BrowserToolExecutor({ tabs: tabPort(), observer, actions });
+      const signal = new AbortController().signal;
+      const context = { currentTabId: 7 };
+
+      await executor.execute(call('browser_inspect', { mode: 'interactive' }), signal, context);
+      const result = await executor.execute(
+        call('browser_scroll_until', {
+          target: 'ref_history',
+          ...requested,
+          maxSegments: 4,
+          stopText: '',
+        }),
+        signal,
+        context,
+      );
+
+      expect(actions.measureScrollTarget).toHaveBeenCalledWith(7, 'ref_history', signal);
+      expect(actions.execute).toHaveBeenCalledWith(
+        expect.objectContaining({
+          arguments: {
+            tabId: 7,
+            target: 'ref_history',
+            deltaX: expected.deltaX,
+            deltaY: expected.deltaY,
+          },
+        }),
+        signal,
+      );
+      expect(JSON.parse(result.output)).toMatchObject({
+        ok: true,
+        data: {
+          deltaX: requested.deltaX,
+          deltaY: requested.deltaY,
+          effectiveDeltaX: expected.deltaX,
+          effectiveDeltaY: expected.deltaY,
+          scrollTargetSize,
+          stopReason: 'boundary_verified',
+        },
+      });
+    },
+  );
 
   it.each([
     [
@@ -1516,6 +1642,91 @@ describe('BrowserToolExecutor', () => {
       });
     },
   );
+
+  it('does not certify a scroll-until boundary when the page fails to settle', async () => {
+    const observer = {
+      inspect: vi
+        .fn()
+        .mockResolvedValueOnce({
+          tabId: 7,
+          url: 'https://example.com/history',
+          data: {
+            mode: 'interactive',
+            snapshot: 'snapshot_before',
+            elements: [{ r: 'list', n: 'History', a: ['scroll'], ref: 'ref_history' }],
+          },
+          observation: null,
+          attachmentIds: [],
+          debuggerSession: 'ephemeral' as const,
+        })
+        .mockResolvedValueOnce({
+          tabId: 7,
+          url: 'https://example.com/history',
+          data: {
+            mode: 'interactive',
+            snapshot: 'snapshot_after',
+            base: 'snapshot_before',
+            unchanged: true,
+          },
+          observation: null,
+          attachmentIds: [],
+          debuggerSession: 'ephemeral' as const,
+        }),
+    };
+    const actions = {
+      execute: vi.fn(async () => ({
+        tabId: 7,
+        url: 'https://example.com/history',
+        data: {
+          action: 'scroll',
+          actualDeltaX: 0,
+          actualDeltaY: 0,
+          requestedDeltaApplied: false,
+          remainingDeltaX: 0,
+          remainingDeltaY: 600,
+          moved: false,
+          contentChanged: false,
+          extentChanged: false,
+          loadedMore: false,
+          boundaryVerified: true,
+        },
+        observation: null,
+      })),
+      settle: vi.fn(async () => {
+        throw new Error('page remained dynamic');
+      }),
+    };
+    const executor = new BrowserToolExecutor({ tabs: tabPort(), observer, actions });
+    const signal = new AbortController().signal;
+    const context = { currentTabId: 7 };
+
+    await executor.execute(call('browser_inspect', { mode: 'interactive' }), signal, context);
+    const result = await executor.execute(
+      call('browser_scroll_until', {
+        target: 'ref_history',
+        deltaX: 0,
+        deltaY: 600,
+        maxSegments: 4,
+        stopText: '',
+      }),
+      signal,
+      context,
+    );
+
+    expect(actions.settle).toHaveBeenCalledOnce();
+    expect(observer.inspect).toHaveBeenCalledTimes(2);
+    expect(JSON.parse(result.output)).toMatchObject({
+      ok: true,
+      data: {
+        segments: 1,
+        stopReason: 'page_unsettled',
+        continuationRequired: true,
+        boundaryVerified: false,
+        coverage: { directionComplete: false },
+        observations: [{ snapshot: 'snapshot_after', base: 'snapshot_before' }],
+      },
+    });
+  });
 
   it('retains three bounded scroll-until batches before stopping at a verified boundary', async () => {
     const observer = {
@@ -1792,9 +2003,8 @@ describe('BrowserToolExecutor', () => {
       data: {
         stopReason: 'segment_limit',
         segments: 2,
-        continuationRequired: true,
-        nextDeltaX: 0,
-        nextDeltaY: -600,
+        continuationRequired: false,
+        continuationAvailable: true,
         observations: [
           { snapshot: 'snapshot_1', base: 'snapshot_0' },
           { snapshot: 'snapshot_2', base: 'snapshot_1' },
@@ -1969,7 +2179,8 @@ describe('BrowserToolExecutor', () => {
       ok: true,
       data: {
         stopReason: 'segment_limit',
-        continuationRequired: true,
+        continuationRequired: false,
+        continuationAvailable: true,
         coverage: {
           mode: 'unknown',
           sampleComplete: false,
@@ -2852,21 +3063,38 @@ describe('BrowserToolExecutor', () => {
         message: 'Capture started. Earlier traffic is unavailable.',
       })),
       list: vi.fn(async () => [requestSummary]),
-      get: vi.fn(async () => ({
-        ...requestSummary,
-        requestHeaders: {},
-        responseHeaders: {},
-        protocol: 'h2',
-        statusText: 'OK',
-        requestBodyIncluded: false as const,
-        body: {
-          included: true,
-          available: true,
-          encoding: 'utf8' as const,
-          text: '{}',
-          truncated: false,
+      get: vi.fn(async () => [
+        {
+          ok: true as const,
+          requestId: 'request_1',
+          request: {
+            ...requestSummary,
+            requestHeaders: {},
+            responseHeaders: {},
+            protocol: 'h2',
+            statusText: 'OK',
+            requestBody: {
+              included: true,
+              available: true,
+              encoding: 'utf8' as const,
+              text: '{}',
+              truncated: false,
+            },
+            responseBody: {
+              included: false,
+              available: true,
+              encoding: null,
+              truncated: false,
+            },
+          },
         },
-      })),
+        {
+          ok: false as const,
+          requestId: 'missing_request',
+          code: 'NETWORK_REQUEST_NOT_FOUND' as const,
+          message: 'The captured network request is no longer available.',
+        },
+      ]),
       stop: vi.fn(async () => undefined),
     };
     const tabs = tabPort();
@@ -2879,22 +3107,34 @@ describe('BrowserToolExecutor', () => {
         tabId: 7,
         urlPattern: '/api/',
         limit: 25,
+        mode: 'endpoint_sample',
       }),
       signal,
     );
+    const getRequests = [
+      {
+        requestId: 'request_1',
+        includeRequestBody: true,
+        includeResponseBody: false,
+      },
+      {
+        requestId: 'missing_request',
+        includeRequestBody: false,
+        includeResponseBody: true,
+      },
+    ];
     const details = await executor.execute(
       call('browser_network_get', {
         tabId: 7,
-        requestId: 'request_1',
-        includeBody: true,
+        requests: getRequests,
       }),
       signal,
     );
     const stopped = await executor.execute(call('browser_network_stop', { tabId: 7 }), signal);
 
     expect(network.start).toHaveBeenCalledWith(7, signal);
-    expect(network.list).toHaveBeenCalledWith(7, '/api/', 25);
-    expect(network.get).toHaveBeenCalledWith(7, 'request_1', true);
+    expect(network.list).toHaveBeenCalledWith(7, '/api/', 25, 'endpoint_sample');
+    expect(network.get).toHaveBeenCalledWith(7, getRequests);
     expect(network.stop).toHaveBeenCalledWith(7);
     expect(tabs.reload).not.toHaveBeenCalled();
     expect(JSON.parse(started.output)).toMatchObject({
@@ -2907,7 +3147,12 @@ describe('BrowserToolExecutor', () => {
     });
     expect(JSON.parse(details.output)).toMatchObject({
       ok: true,
-      data: { request: { requestId: 'request_1' } },
+      data: {
+        results: [
+          { ok: true, requestId: 'request_1', request: { requestId: 'request_1' } },
+          { ok: false, requestId: 'missing_request', code: 'NETWORK_REQUEST_NOT_FOUND' },
+        ],
+      },
     });
     expect(JSON.parse(stopped.output)).toMatchObject({
       ok: true,
@@ -2970,7 +3215,12 @@ describe('BrowserToolExecutor', () => {
     });
 
     const output = await executor.execute(
-      call('browser_network_list', { tabId: 7, urlPattern: '', limit: 25 }),
+      call('browser_network_list', {
+        tabId: 7,
+        urlPattern: '',
+        limit: 25,
+        mode: 'recent',
+      }),
       new AbortController().signal,
     );
 

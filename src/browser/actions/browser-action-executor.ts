@@ -68,6 +68,8 @@ const SCROLL_ELEMENT_FUNCTION = `function(deltaX, deltaY) {
       y: candidate.scrollTop,
       maxX: Math.max(0, candidate.scrollWidth - candidate.clientWidth),
       maxY: Math.max(0, candidate.scrollHeight - candidate.clientHeight),
+      clientWidth: candidate.clientWidth,
+      clientHeight: candidate.clientHeight,
       contentKey: [candidate.childElementCount, candidate.scrollWidth, candidate.scrollHeight, hash >>> 0].join(':'),
     };
   };
@@ -123,6 +125,8 @@ const READ_SCROLL_STATE_FUNCTION = `function() {
     y: target.scrollTop,
     maxX: Math.max(0, target.scrollWidth - target.clientWidth),
     maxY: Math.max(0, target.scrollHeight - target.clientHeight),
+    clientWidth: target.clientWidth,
+    clientHeight: target.clientHeight,
     contentKey: [target.childElementCount, target.scrollWidth, target.scrollHeight, hash >>> 0].join(':'),
   };
 }`;
@@ -929,8 +933,18 @@ export interface BrowserActionResult {
   };
 }
 
+export interface BrowserScrollTargetSize {
+  readonly width: number;
+  readonly height: number;
+}
+
 export interface BrowserActionPort {
   execute(call: ParsedBrowserToolCall, signal: AbortSignal): Promise<BrowserActionResult>;
+  measureScrollTarget?(
+    tabId: number,
+    target: string,
+    signal: AbortSignal,
+  ): Promise<BrowserScrollTargetSize | undefined>;
   settle?(tabId: number, signal: AbortSignal, timeoutMs: number): Promise<void>;
 }
 
@@ -1066,6 +1080,8 @@ interface ElementScrollState {
   readonly y: number;
   readonly maxX: number;
   readonly maxY: number;
+  readonly clientWidth?: number;
+  readonly clientHeight?: number;
   readonly contentKey?: string;
 }
 
@@ -1325,6 +1341,29 @@ export class BrowserActionExecutor implements BrowserActionPort {
     throwIfAborted(signal);
     const snapshot = await this.#dependencies.sessions.ensure(tabId, signal);
     await this.#wait(snapshot, 'dom_stable', timeoutMs, signal);
+  }
+
+  async measureScrollTarget(
+    tabId: number,
+    target: string,
+    signal: AbortSignal,
+  ): Promise<BrowserScrollTargetSize | undefined> {
+    throwIfAborted(signal);
+    const snapshot = await this.#dependencies.sessions.ensure(tabId, signal);
+    if (target === 'viewport') {
+      const viewport = await this.#viewport(snapshot.root);
+      return viewport.width > 0 && viewport.height > 0
+        ? { width: viewport.width, height: viewport.height }
+        : undefined;
+    }
+    const prepared = await this.#prepareElementTarget(snapshot, target, tabId);
+    const state = await this.#readElementScrollState(prepared);
+    return state?.clientWidth !== undefined &&
+      state.clientWidth > 0 &&
+      state.clientHeight !== undefined &&
+      state.clientHeight > 0
+      ? { width: state.clientWidth, height: state.clientHeight }
+      : undefined;
   }
 
   async execute(call: ParsedBrowserToolCall, signal: AbortSignal): Promise<BrowserActionResult> {
@@ -2618,7 +2657,11 @@ export class BrowserActionExecutor implements BrowserActionPort {
       ]);
       const pageBounds = quadRect(model.model.border);
       if (!pageBounds) throw new Error('The element has no visible box.');
-      const viewport = metrics.cssVisualViewport ?? metrics.visualViewport;
+      const viewport =
+        metrics.cssVisualViewport ??
+        metrics.cssLayoutViewport ??
+        metrics.visualViewport ??
+        metrics.layoutViewport;
       const point = {
         x: pageBounds.x + pageBounds.width / 2,
         y: pageBounds.y + pageBounds.height / 2,
@@ -2881,6 +2924,8 @@ export class BrowserActionExecutor implements BrowserActionPort {
             readonly y?: unknown;
             readonly maxX?: unknown;
             readonly maxY?: unknown;
+            readonly clientWidth?: unknown;
+            readonly clientHeight?: unknown;
             readonly contentKey?: unknown;
           }
         | undefined;
@@ -2894,6 +2939,12 @@ export class BrowserActionExecutor implements BrowserActionPort {
         y: result.y as number,
         maxX: result.maxX as number,
         maxY: result.maxY as number,
+        ...(typeof result.clientWidth === 'number' && Number.isFinite(result.clientWidth)
+          ? { clientWidth: result.clientWidth }
+          : {}),
+        ...(typeof result.clientHeight === 'number' && Number.isFinite(result.clientHeight)
+          ? { clientHeight: result.clientHeight }
+          : {}),
         ...(typeof result.contentKey === 'string' ? { contentKey: result.contentKey } : {}),
       };
     } catch {
@@ -3385,8 +3436,12 @@ export class BrowserActionExecutor implements BrowserActionPort {
       session,
       'Page.getLayoutMetrics',
     );
-    const viewport = metrics.visualViewport ?? metrics.layoutViewport;
-    const content = metrics.contentSize;
+    const viewport =
+      metrics.cssVisualViewport ??
+      metrics.cssLayoutViewport ??
+      metrics.visualViewport ??
+      metrics.layoutViewport;
+    const content = metrics.cssContentSize ?? metrics.contentSize;
     const extentKnown =
       content !== undefined &&
       [content.width, content.height].every(

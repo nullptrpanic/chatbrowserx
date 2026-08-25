@@ -442,6 +442,16 @@ describe('browserToolDefinitionsForCheckpoint', () => {
     expect(names(checkpoint([...started, ...stopped]))).not.toContain('browser_network_get');
   });
 
+  it('keeps network lifecycle controls visible from the first model turn', () => {
+    const available = names(checkpoint());
+
+    expect(available).toEqual(
+      expect.arrayContaining(['browser_network_start', 'browser_network_stop']),
+    );
+    expect(available).not.toContain('browser_network_list');
+    expect(available).not.toContain('browser_network_get');
+  });
+
   it('enables image delivery from a durable task-owned attachment', () => {
     const completed: CompletedToolResult = {
       callId: 'capture',
@@ -638,7 +648,7 @@ describe('browserToolDefinitionsForCheckpoint', () => {
     });
   });
 
-  it('continues a bounded traversal after its evidence budget is exhausted', () => {
+  it('leaves an objective-level traversal optional after its evidence budget is exhausted', () => {
     const boundedTraversal = pair(
       'scroll_until_evidence_budget',
       'browser_scroll_until',
@@ -674,28 +684,10 @@ describe('browserToolDefinitionsForCheckpoint', () => {
 
     const contract = browserToolContractForCheckpoint(checkpoint(boundedTraversal));
 
-    expect(contract.toolChoice).toEqual({
-      type: 'function',
-      name: 'browser_scroll_until',
-    });
-    expect(contract.tools.map(({ name }) => name)).toEqual(['browser_scroll_until']);
-    expect(contract.tools[0]?.parameters).toMatchObject({
-      properties: {
-        tabId: { enum: [0] },
-        target: { enum: ['ref_history'] },
-        deltaX: { enum: [0] },
-        deltaY: { enum: [-800] },
-        maxSegments: { enum: [12] },
-        stopText: { enum: ['2026年7月'] },
-      },
-    });
-    expect(contract.scrollContinuation).toMatchObject({
-      next: 'scroll_until',
-      resumeOperation: 'scroll_until',
-      target: 'ref_history',
-      maxSegments: 12,
-      stopText: '2026年7月',
-    });
+    expect(contract.toolChoice).toBeUndefined();
+    expect(contract.scrollContinuation).toBeUndefined();
+    expect(contract.tools.map(({ name }) => name)).toContain('browser_scroll_until');
+    expect(contract.tools.map(({ name }) => name)).toContain('browser_inspect');
   });
 
   it('inspects and then resumes the same bounded traversal after observation loss', () => {

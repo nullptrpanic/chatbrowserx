@@ -55,7 +55,7 @@ Browser mutation 在 dispatch 前改为 `may_have_dispatched`；如果 worker �
 ## Provider 边界
 
 `ModelProvider`、`ModelToolDefinition`、function call/output 和工具流事件属于通用扩展接口。
-`CodexAgentPlanner` 始终注册 21 个严格、扁平的 browser tools；只有 Tavily Key 非空时才在
+`CodexAgentPlanner` 始终注册一组严格的 browser tools；只有 Tavily Key 非空时才在
 每次模型请求前动态加入 `tavily_search`、`tavily_extract`、`tavily_crawl`。Planner 只能获得
 “是否配置”的布尔值，不能读取 Key。并行工具调用关闭；一个模型回合只能产生一个工具调用
 或最终文字。未知、多工具、参数无效以及文字与工具混合响应都会失败。
@@ -82,8 +82,11 @@ pointer-events:none 的虚拟鼠标、涟漪或轨迹；视觉反馈失败不会
 得到有界 PNG 后存为 Blob，再恢复 overlay。
 
 `NetworkCaptureRegistry` 只在显式 start 后记录未来流量，每 tab 最多 500 条元数据。初始加载
-分析必须显式执行 start → reload → network_idle → list。响应正文只在 get(includeBody=true)
-时临时读取，不保留请求体，并在返回前脱敏敏感 header、query 和 JSON 字段。
+分析必须显式执行 start → reload → network_idle → list。list 可按时间返回，也可按 method、
+origin、path 和 query 参数名稳定采样重复端点。get 一次读取最多 5 个 opaque ID，请求体与
+响应体分别按项选择且只在需要时从 CDP 临时获取；默认不读取正文。返回前会脱敏敏感 header、
+query、JSON 和表单字段，并限制单体与整批大小。stop 可随时释放采集缓存；需要完整分析证据时
+建议先 list，并对相关 ID 执行 get。
 
 Content script 负责安装 ping、正文/DOM fallback、虚拟指针、overlay 显隐、截图选区、图片
 预览和选中文本气泡。所有页面返回都经过版本协议和 Zod/边界校验，页面内容始终作为不可信
