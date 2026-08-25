@@ -214,7 +214,7 @@ describe('ToolResult reviewed labels', () => {
     expect(screen.queryByText('commit_context')).not.toBeInTheDocument();
   });
 
-  it('pretty-prints and separately copies complete JSON invocation arguments and results', async () => {
+  it('shows the raw tool name while separately copying JSON arguments and results', async () => {
     let clipboardData: Record<string, ClipboardItemData> | undefined;
     function TestClipboardItem(data: Record<string, ClipboardItemData>) {
       clipboardData = data;
@@ -260,6 +260,7 @@ describe('ToolResult reviewed labels', () => {
     expect(screen.queryByRole('button', { name: '复制调用参数' })).not.toBeInTheDocument();
     await user.click(screen.getByRole('button', { name: /展开\s*检查页面\s*结果/ }));
 
+    expect(screen.getByText('browser_inspect')).toBeVisible();
     const invocation = '{\n  "tabId": 7,\n  "mode": "interactive"\n}';
     const output = '{\n  "ok": true,\n  "snapshot": "page_1"\n}';
     const payloads = document.querySelectorAll('.tool-result-content code');

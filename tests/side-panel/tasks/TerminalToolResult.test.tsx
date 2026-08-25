@@ -42,6 +42,7 @@ describe('TerminalToolResult', () => {
     );
 
     expect(screen.getByText('执行沙箱命令')).toBeVisible();
+    expect(screen.getByText('sandbox_exec')).toBeVisible();
     await user.click(screen.getByRole('button', { name: '展开终端输出' }));
     expect(screen.getByText('bash scripts/run.sh')).toBeVisible();
     expect(screen.getByText('/tmp/fixture')).toBeVisible();
@@ -130,5 +131,39 @@ describe('TerminalToolResult', () => {
 
     expect(writeText).toHaveBeenNthCalledWith(1, 'npm run test:run');
     expect(writeText).toHaveBeenNthCalledWith(2, '42 tests passed');
+  });
+
+  it('copies the displayed Sandbox streams instead of the transport wrapper', async () => {
+    const user = userEvent.setup();
+    const writeText = vi.fn(async () => undefined);
+    Object.defineProperty(navigator, 'clipboard', {
+      configurable: true,
+      value: { writeText },
+    });
+    render(
+      <TerminalToolResult
+        result={{
+          callId: 'call_sandbox_copy',
+          toolName: 'sandbox_exec',
+          argumentsJson: JSON.stringify({ command: 'run fixture' }),
+          output: JSON.stringify({
+            code: 1,
+            stdout: 'standard output',
+            stderr: 'standard error',
+            truncated: false,
+          }),
+          resultRef: 'result_sandbox_copy',
+        }}
+        t={t}
+      />,
+    );
+
+    await user.click(screen.getByRole('button', { name: '展开终端输出' }));
+    expect(screen.getByRole('button', { name: '复制命令' })).toBeVisible();
+    expect(screen.getByRole('button', { name: '复制输出' })).toBeVisible();
+    await user.click(screen.getByRole('button', { name: '复制输出' }));
+
+    expect(writeText).toHaveBeenCalledWith('standard output\nstandard error');
+    expect(writeText).not.toHaveBeenCalledWith(expect.stringContaining('"stdout"'));
   });
 });

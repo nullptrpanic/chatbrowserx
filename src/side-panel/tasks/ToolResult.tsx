@@ -90,7 +90,13 @@ export function ToolResult({ result, attachments, t, onOpenImagePreview }: ToolR
           {result.argumentsJson.length === 0 ? null : (
             <section className="tool-result-payload">
               <header className="tool-result-payload-header">
-                <span>{t('toolInvocation')}</span>
+                <span className="tool-result-payload-label">
+                  <span>{t('toolInvocation')}</span>
+                  <span aria-hidden="true">·</span>
+                  <span className="tool-result-tool-name" title={result.toolName}>
+                    {result.toolName}
+                  </span>
+                </span>
                 <ToolCopyButton
                   label={t('copyToolArguments')}
                   copiedLabel={t('toolArgumentsCopied')}

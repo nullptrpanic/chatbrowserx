@@ -52,4 +52,26 @@ describe('tool result copy actions', () => {
     expect(terminalAction.style.color).toBe('rgb(157, 169, 189)');
     expect(terminalAction.style.background).toBe('transparent');
   });
+
+  it('keeps terminal commands and output horizontally scrollable without wrapping or clipping', () => {
+    const sheet = installTaskCardStyles();
+    const content = styleRule(sheet, '.terminal-content');
+    const payload = styleRule(sheet, '.terminal-payload');
+    const stream = styleRule(sheet, '.terminal-stream');
+    const command = styleRule(sheet, '.terminal-command');
+    const commandCode = styleRule(sheet, '.terminal-command code');
+    const output = styleRule(sheet, '.terminal-output');
+
+    expect(content.style.minWidth).toBe('0px');
+    expect(payload.style.minWidth).toBe('0px');
+    expect(stream.style.minWidth).toBe('0px');
+    expect(command.style.maxWidth).toBe('100%');
+    expect(command.style.overflowX).toBe('auto');
+    expect(commandCode.style.whiteSpace).toBe('pre');
+    expect(commandCode.style.overflowWrap).toBe('normal');
+    expect(output.style.maxWidth).toBe('100%');
+    expect(output.style.overflowX).toBe('auto');
+    expect(output.style.whiteSpace).toBe('pre');
+    expect(output.style.overflowWrap).toBe('normal');
+  });
 });

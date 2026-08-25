@@ -337,6 +337,13 @@
   font-size: 9px;
 }
 
+.terminal-tool-name {
+  overflow: hidden;
+  color: #c7d0df;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  text-overflow: ellipsis;
+}
+
 .terminal-titlebar button {
   display: grid;
   width: 24px;
@@ -355,7 +362,16 @@
 
 .terminal-content {
   display: grid;
+  width: 100%;
+  max-width: 100%;
+  min-width: 0;
   gap: 1px;
+}
+
+.terminal-payload {
+  width: 100%;
+  max-width: 100%;
+  min-width: 0;
 }
 
 .terminal-payload + .terminal-payload {
@@ -380,9 +396,13 @@
 
 .terminal-command {
   display: flex;
+  width: 100%;
+  max-width: 100%;
   min-width: 0;
   gap: 7px;
   padding: 2px 10px 8px;
+  overflow-x: auto;
+  overflow-y: hidden;
   color: #78d7a5;
   font:
     10px/1.55 ui-monospace,
@@ -390,6 +410,7 @@
     Menlo,
     Consolas,
     monospace;
+  overscroll-behavior: contain;
 }
 
 .terminal-cwd {
@@ -422,6 +443,12 @@
   font-weight: 400;
 }
 
+.terminal-stream {
+  width: 100%;
+  max-width: 100%;
+  min-width: 0;
+}
+
 .terminal-stream + .terminal-stream {
   border-top: 1px dashed #293345;
 }
@@ -438,17 +465,22 @@
 }
 
 .terminal-command code {
-  min-width: 0;
-  overflow-wrap: anywhere;
+  min-width: max-content;
+  overflow-wrap: normal;
   color: #e6edf7;
-  white-space: pre-wrap;
+  white-space: pre;
 }
 
 .terminal-output {
+  width: 100%;
+  max-width: 100%;
+  min-width: 0;
   max-height: 220px;
   margin: 0;
   padding: 2px 10px 10px 24px;
-  overflow: auto;
+  overflow-x: auto;
+  overflow-y: auto;
+  overflow-wrap: normal;
   color: #aeb9ca;
   background: transparent;
   font:
@@ -457,7 +489,8 @@
     Menlo,
     Consolas,
     monospace;
-  white-space: pre-wrap;
+  overscroll-behavior: contain;
+  white-space: pre;
 }
 
 .tool-result {
@@ -525,6 +558,22 @@
   width: 100%;
   min-width: 0;
   color: var(--cbx-faint);
+}
+
+.tool-result-payload-label {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  gap: 4px;
+}
+
+.tool-result-tool-name {
+  min-width: 0;
+  overflow: hidden;
+  color: var(--cbx-muted);
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .tool-result-content pre {

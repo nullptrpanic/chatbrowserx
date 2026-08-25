@@ -75,6 +75,15 @@ function readTerminalOutput(result: PanelCompletedToolResult): TerminalOutput {
   }
 }
 
+/** Returns exactly the terminal streams shown to the user, separated when needed. */
+function terminalOutputClipboardText(output: TerminalOutput): string {
+  if (output.stderr.length === 0) return output.stdout;
+  if (output.stdout.length === 0 || output.stdout.endsWith('\n')) {
+    return `${output.stdout}${output.stderr}`;
+  }
+  return `${output.stdout}\n${output.stderr}`;
+}
+
 /** Renders persisted command execution as a compact, independently collapsible terminal. */
 export function TerminalToolResult({ result, t }: TerminalToolResultProps) {
   const [expanded, setExpanded] = useState(false);
@@ -90,6 +99,14 @@ export function TerminalToolResult({ result, t }: TerminalToolResultProps) {
         <span className="terminal-title">
           <Terminal size={12} />
           <span>{displayName}</span>
+          {displayName === result.toolName ? null : (
+            <>
+              <span className="terminal-tool-separator" aria-hidden="true">
+                ·
+              </span>
+              <span className="terminal-tool-name">{result.toolName}</span>
+            </>
+          )}
           <span className="terminal-state">{t('toolCompleted')}</span>
         </span>
         <button
@@ -137,7 +154,7 @@ export function TerminalToolResult({ result, t }: TerminalToolResultProps) {
                 <ToolCopyButton
                   label={t('copyTerminalOutput')}
                   copiedLabel={t('terminalOutputCopied')}
-                  onCopy={() => navigator.clipboard.writeText(result.output)}
+                  onCopy={() => navigator.clipboard.writeText(terminalOutputClipboardText(output))}
                 />
               </header>
               {output.stdout.length === 0 ? null : (
