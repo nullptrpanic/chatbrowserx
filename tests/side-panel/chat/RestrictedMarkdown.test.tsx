@@ -3,6 +3,15 @@ import { describe, expect, it } from 'vitest';
 import { RestrictedMarkdown } from '../../../src/side-panel/chat/RestrictedMarkdown';
 
 describe('RestrictedMarkdown', () => {
+  it('renders a standalone Markdown thematic break instead of literal dashes', () => {
+    const { container } = render(
+      <RestrictedMarkdown text={['上面的内容', '', '---', '', '下面的内容'].join('\n')} />,
+    );
+
+    expect(container.querySelector('hr')).not.toBeNull();
+    expect(screen.queryByText('---')).not.toBeInTheDocument();
+  });
+
   it('renders a GFM table as semantic rows inside a horizontal scroll container', () => {
     render(
       <RestrictedMarkdown

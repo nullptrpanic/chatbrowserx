@@ -5,6 +5,7 @@ const inlinePattern =
   /(`[^`\n]+`|\*\*[^*\n]+\*\*|__[^_\n]+__|\[[^\]\n]+\]\(https?:\/\/[^\s)]+\)|https?:\/\/[^\s<]+)/g;
 const unorderedItemPattern = /^\s*[-+*]\s+(.+)$/;
 const orderedItemPattern = /^\s*\d+[.)]\s+(.+)$/;
+const thematicBreakPattern = /^ {0,3}(?:(?:\*\s*){3,}|(?:-\s*){3,}|(?:_\s*){3,})$/;
 
 type TableAlignment = 'left' | 'center' | 'right' | undefined;
 
@@ -185,6 +186,7 @@ function renderTable(table: ParsedMarkdownTable, keyPrefix: string): ReactNode {
 function isBlockStart(line: string): boolean {
   return (
     /^#{1,6}\s+/.test(line) ||
+    thematicBreakPattern.test(line) ||
     unorderedItemPattern.test(line) ||
     orderedItemPattern.test(line) ||
     /^\s*>\s?/.test(line)
@@ -208,6 +210,12 @@ function renderProse(text: string, keyPrefix: string): ReactNode[] {
     if (table !== null) {
       nodes.push(renderTable(table, `${keyPrefix}:${String(index)}`));
       index = table.nextIndex;
+      continue;
+    }
+
+    if (thematicBreakPattern.test(line)) {
+      nodes.push(<hr key={`${keyPrefix}:${String(index)}:thematic-break`} />);
+      index += 1;
       continue;
     }
 
