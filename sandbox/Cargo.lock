@@ -5,7 +5,7 @@ version = 4
 [[package]]
 name = "agora-core"
 version = "0.1.0"
-source = "git+https://github.com/nullptrpanic/agora.git?rev=487e2695977902ae59147eab2a2559d53d08c8ff#487e2695977902ae59147eab2a2559d53d08c8ff"
+source = "git+https://github.com/nullptrpanic/agora.git?rev=6f2e5f38ee27bc64b952302340fafc86507bfcf4#6f2e5f38ee27bc64b952302340fafc86507bfcf4"
 dependencies = [
  "anyhow",
  "chrono",
@@ -19,7 +19,7 @@ dependencies = [
 [[package]]
 name = "agora-sandbox"
 version = "0.1.0"
-source = "git+https://github.com/nullptrpanic/agora.git?rev=487e2695977902ae59147eab2a2559d53d08c8ff#487e2695977902ae59147eab2a2559d53d08c8ff"
+source = "git+https://github.com/nullptrpanic/agora.git?rev=6f2e5f38ee27bc64b952302340fafc86507bfcf4#6f2e5f38ee27bc64b952302340fafc86507bfcf4"
 dependencies = [
  "agora-core",
  "anyhow",
