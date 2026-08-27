@@ -8,6 +8,7 @@ import type {
 import type { ParsedBrowserToolCall } from './tools/browser-tool-schema';
 import type { ParsedContextCommitToolCall } from './tools/context-commit-tool-schema';
 import type { ParsedSandboxToolCall } from './tools/sandbox-tool-schema';
+import type { ParsedTaskResultToolCall } from './tools/task-result-tool-schema';
 import type { ModelUsage } from '../providers/stream-events';
 import type { ModelOutputContinuationItem } from '../tasks/continuation-types';
 import type { ContinuationItem } from '../tasks/continuation-types';
@@ -48,6 +49,10 @@ export type AgentEvent =
   | (AgentOutcomeMetadata & {
       readonly type: 'sandbox.call';
       readonly call: ParsedSandboxToolCall;
+    })
+  | (AgentOutcomeMetadata & {
+      readonly type: 'task-result.call';
+      readonly call: ParsedTaskResultToolCall;
     })
   | (AgentOutcomeMetadata & {
       readonly type: 'tavily.call';

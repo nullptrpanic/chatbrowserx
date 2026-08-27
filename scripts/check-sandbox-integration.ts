@@ -169,6 +169,7 @@ async function checkSandbox(): Promise<void> {
         requestCount += 1;
         return client.execute(request, signal);
       },
+      getExecution: (executionId, signal) => client.getExecution(executionId, signal),
     };
     const clock = { now: () => Date.now() };
     const catalog = new SkillCatalog(countedClient, settings, new MemoryStorage(), clock);

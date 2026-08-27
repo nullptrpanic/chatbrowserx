@@ -339,6 +339,86 @@ describe('CodexAgentPlanner', () => {
     ]);
   });
 
+  it('omits historical result tools when the current conversation has no terminal evidence', async () => {
+    const model = provider(async function* () {
+      yield { type: 'response.started', responseId: 'resp_without_history_tools' };
+      yield { type: 'text.delta', delta: 'No historical evidence.' };
+      yield {
+        type: 'response.completed',
+        responseId: 'resp_without_history_tools',
+        usage: null,
+      };
+    });
+    const storage = repositories();
+    const historicalResults = { hasEvidence: vi.fn(async () => false) };
+    const planner = new CodexAgentPlanner({
+      provider: model.instance,
+      tavilyAvailability: { isConfigured: vi.fn(async () => false) },
+      historicalResults,
+      settings: settings(),
+      conversations: storage.conversations,
+      tasks: storage.tasks,
+      attachments: storage.attachments,
+      ids: { create: (prefix) => `${prefix}_without_history` },
+      clock: { now: () => 500 },
+    });
+
+    await collect(planner);
+
+    expect(historicalResults.hasEvidence).toHaveBeenCalledWith({
+      conversationId: 'conversation_1',
+      currentTaskId: 'task_1',
+    });
+    expect(model.requests[0]?.tools.some(({ name }) => name.startsWith('task_result_'))).toBe(
+      false,
+    );
+  });
+
+  it('registers and parses historical result tools only when terminal evidence exists', async () => {
+    const arguments_ = { evidenceId: 'toolResult_1', offset: 0, limit: 20_000 };
+    const model = provider(async function* () {
+      yield { type: 'response.started', responseId: 'resp_history_read' };
+      yield { type: 'tool.started', callId: 'call_history_read', name: 'task_result_read' };
+      yield {
+        type: 'tool.completed',
+        callId: 'call_history_read',
+        name: 'task_result_read',
+        argumentsJson: JSON.stringify(arguments_),
+      };
+      yield { type: 'response.completed', responseId: 'resp_history_read', usage: null };
+    });
+    const storage = repositories();
+    const planner = new CodexAgentPlanner({
+      provider: model.instance,
+      tavilyAvailability: { isConfigured: vi.fn(async () => false) },
+      historicalResults: { hasEvidence: vi.fn(async () => true) },
+      settings: settings(),
+      conversations: storage.conversations,
+      tasks: storage.tasks,
+      attachments: storage.attachments,
+      ids: { create: (prefix) => `${prefix}_history` },
+      clock: { now: () => 500 },
+    });
+
+    await expect(collect(planner)).resolves.toMatchObject([
+      {
+        type: 'task-result.call',
+        call: {
+          family: 'task_result',
+          operation: 'read',
+          replay: 'safe',
+          callId: 'call_history_read',
+          name: 'task_result_read',
+          arguments: arguments_,
+        },
+      },
+    ]);
+    expect(model.requests[0]?.tools.map(({ name }) => name).slice(-2)).toEqual([
+      'task_result_search',
+      'task_result_read',
+    ]);
+  });
+
   it('keeps the exact current prompt and tools when Sandbox is not configured', async () => {
     const model = provider(async function* () {
       yield { type: 'response.started', responseId: 'resp_without_sandbox' };

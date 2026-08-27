@@ -12,6 +12,7 @@ export interface SandboxExecRequest {
   readonly command: string;
   readonly cwd?: string;
   readonly env?: Readonly<Record<string, string>>;
+  readonly executionId?: string;
 }
 
 export interface SandboxExecResponse {
@@ -20,9 +21,24 @@ export interface SandboxExecResponse {
   readonly stderr: string;
 }
 
+export type SandboxExecutionReceipt =
+  | { readonly status: 'not_found'; readonly executionId: string }
+  | { readonly status: 'running'; readonly executionId: string }
+  | {
+      readonly status: 'finished';
+      readonly executionId: string;
+      readonly outcome: 'interrupted' | 'succeeded' | 'failed' | 'timed_out' | 'output_limit';
+      readonly exitCode: number | null;
+      readonly stdout: string;
+      readonly stderr: string;
+      readonly stdoutTruncated: boolean;
+      readonly stderrTruncated: boolean;
+    };
+
 export interface SandboxClientPort {
   isConfigured(): Promise<boolean>;
   execute(request: SandboxExecRequest, signal: AbortSignal): Promise<SandboxExecResponse>;
+  getExecution(executionId: string, signal: AbortSignal): Promise<SandboxExecutionReceipt>;
 }
 
 export interface SandboxConsoleClientPort {
@@ -36,6 +52,36 @@ const responseSchema = z
     stderr: z.string(),
   })
   .strict();
+
+const executionReceiptSchema = z.discriminatedUnion('status', [
+  z
+    .object({
+      code: z.literal(0),
+      execution_id: z.string().min(1).max(256),
+      status: z.literal('not_found'),
+    })
+    .strict(),
+  z
+    .object({
+      code: z.literal(0),
+      execution_id: z.string().min(1).max(256),
+      status: z.literal('running'),
+    })
+    .strict(),
+  z
+    .object({
+      code: z.literal(0),
+      execution_id: z.string().min(1).max(256),
+      status: z.literal('finished'),
+      outcome: z.enum(['interrupted', 'succeeded', 'failed', 'timed_out', 'output_limit']),
+      exit_code: z.number().int().nullable(),
+      stdout: z.string(),
+      stderr: z.string(),
+      stdout_truncated: z.boolean(),
+      stderr_truncated: z.boolean(),
+    })
+    .strict(),
+]);
 
 const consoleResponseSchema = z
   .object({
@@ -61,6 +107,7 @@ const ERROR_MESSAGES: Readonly<Record<SandboxClientErrorCode, string>> = {
   INVALID_RESPONSE: 'Sandbox returned an invalid response.',
   ABORTED: 'Sandbox request was aborted.',
 };
+const validExecutionIdPattern = /^[a-zA-Z0-9][a-zA-Z0-9._:-]{0,255}$/;
 
 export class SandboxClientError extends Error {
   readonly code: SandboxClientErrorCode;
@@ -220,6 +267,7 @@ export class SandboxClient implements SandboxClientPort, SandboxConsoleClientPor
           command: request.command,
           ...(request.cwd === undefined ? {} : { cwd: request.cwd }),
           ...(request.env === undefined ? {} : { env: request.env }),
+          ...(request.executionId === undefined ? {} : { execution_id: request.executionId }),
         }),
         signal,
       });
@@ -250,6 +298,66 @@ export class SandboxClient implements SandboxClientPort, SandboxConsoleClientPor
     );
     if (!parsed.success) throw clientError('INVALID_RESPONSE', 'may_have_dispatched');
     return parsed.data;
+  }
+
+  async getExecution(executionId: string, signal: AbortSignal): Promise<SandboxExecutionReceipt> {
+    if (signal.aborted) throw clientError('ABORTED', 'definitely_not_dispatched');
+    if (!validExecutionIdPattern.test(executionId)) {
+      throw clientError('INVALID_RESPONSE', 'definitely_not_dispatched');
+    }
+    const { server, token } = await this.#getConnection();
+
+    let response: Response;
+    try {
+      response = await this.#fetch(
+        `${server.replace(/\/+$/, '')}/exec/${encodeURIComponent(executionId)}`,
+        {
+          method: 'GET',
+          headers: {
+            Authorization: `Bearer ${token}`,
+            Accept: 'application/json',
+          },
+          cache: 'no-store',
+          signal,
+        },
+      );
+    } catch (error) {
+      if (signal.aborted || isAbortFailure(error)) {
+        throw clientError('ABORTED', 'definitely_not_dispatched');
+      }
+      throw clientError('UNAVAILABLE', 'definitely_not_dispatched');
+    }
+
+    if (!response.ok) {
+      await discardResponse(response);
+      if (response.status === 401 || response.status === 403) {
+        throw clientError('AUTH', 'definitely_not_dispatched');
+      }
+      if (response.status >= 400 && response.status < 429) {
+        throw clientError('INVALID_RESPONSE', 'definitely_not_dispatched');
+      }
+      throw clientError('UNAVAILABLE', 'definitely_not_dispatched');
+    }
+
+    const parsed = executionReceiptSchema.safeParse(
+      await readBoundedJson(response, signal, 'definitely_not_dispatched'),
+    );
+    if (!parsed.success || parsed.data.execution_id !== executionId) {
+      throw clientError('INVALID_RESPONSE', 'definitely_not_dispatched');
+    }
+    if (parsed.data.status !== 'finished') {
+      return { status: parsed.data.status, executionId: parsed.data.execution_id };
+    }
+    return {
+      status: 'finished',
+      executionId: parsed.data.execution_id,
+      outcome: parsed.data.outcome,
+      exitCode: parsed.data.exit_code,
+      stdout: parsed.data.stdout,
+      stderr: parsed.data.stderr,
+      stdoutTruncated: parsed.data.stdout_truncated,
+      stderrTruncated: parsed.data.stderr_truncated,
+    };
   }
 
   async #getConnection(): Promise<{ readonly server: string; readonly token: string }> {

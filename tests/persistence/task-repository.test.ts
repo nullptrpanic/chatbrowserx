@@ -179,6 +179,46 @@ describe('IndexedDbTaskRepository', () => {
     database.close();
   });
 
+  it('preserves a valid stable Sandbox execution ID on a pending command', async () => {
+    const database = await openChatBrowserDatabase(
+      createTestDatabaseName('sandbox-pending-execution-id'),
+    );
+    const repository = new IndexedDbTaskRepository(database);
+    await database.add('checkpoints', {
+      id: 'checkpoint_sandbox_pending',
+      taskId: 'task_sandbox_pending',
+      sequence: 2,
+      taskStatus: 'planning',
+      completedToolResults: [],
+      continuationItems: [
+        {
+          type: 'function_call',
+          callId: 'call_exec',
+          name: 'sandbox_exec',
+          argumentsJson: '{"command":"touch marker","cwd":null}',
+        },
+      ],
+      pendingToolCall: {
+        callId: 'call_exec',
+        name: 'sandbox_exec',
+        argumentsJson: '{"command":"touch marker","cwd":null}',
+        executionState: 'may_have_dispatched',
+        executionId: 'sandboxExecution_1234-abcd',
+      },
+      createdAt: 1_000,
+    });
+
+    await expect(repository.getCheckpoint('checkpoint_sandbox_pending')).resolves.toMatchObject({
+      pendingToolCall: {
+        callId: 'call_exec',
+        name: 'sandbox_exec',
+        executionState: 'may_have_dispatched',
+        executionId: 'sandboxExecution_1234-abcd',
+      },
+    });
+    database.close();
+  });
+
   it('preserves a compact continuation without reconstructing older audit results', async () => {
     const database = await openChatBrowserDatabase(
       createTestDatabaseName('compacted-context-continuation'),

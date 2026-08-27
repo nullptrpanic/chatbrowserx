@@ -18,8 +18,18 @@ fi
 LC_ALL=C awk -v start="$start" -v limit="$limit" 'NR >= start && NR < start + limit { print }' "$path"`;
 
 export interface SandboxExecutionPort {
-  execute(call: ParsedSandboxToolCall, signal: AbortSignal): Promise<string>;
+  execute(
+    call: ParsedSandboxToolCall,
+    signal: AbortSignal,
+    context?: { readonly executionId?: string },
+  ): Promise<string>;
+  recover(executionId: string, signal: AbortSignal): Promise<SandboxExecutionRecovery>;
 }
+
+export type SandboxExecutionRecovery =
+  | { readonly status: 'not_found' }
+  | { readonly status: 'running' }
+  | { readonly status: 'finished'; readonly output: string };
 
 interface BoundedText {
   readonly text: string;
@@ -45,9 +55,41 @@ export class SandboxToolExecutor implements SandboxExecutionPort {
     this.#client = client;
   }
 
-  async execute(call: ParsedSandboxToolCall, signal: AbortSignal): Promise<string> {
-    if (call.operation === 'exec') return this.#executeCommand(call, signal);
+  async execute(
+    call: ParsedSandboxToolCall,
+    signal: AbortSignal,
+    context: { readonly executionId?: string } = {},
+  ): Promise<string> {
+    if (call.operation === 'exec') {
+      return this.#executeCommand(call, signal, context.executionId);
+    }
     return this.#readFile(call, signal);
+  }
+
+  async recover(executionId: string, signal: AbortSignal): Promise<SandboxExecutionRecovery> {
+    const receipt = await this.#client.getExecution(executionId, signal);
+    if (receipt.status !== 'finished') return { status: receipt.status };
+
+    const stdout = boundUtf8(receipt.stdout);
+    const stderr = boundUtf8(receipt.stderr);
+    const executionStatus =
+      receipt.exitCode === null || !['succeeded', 'failed'].includes(receipt.outcome)
+        ? { executionStatus: receipt.outcome }
+        : {};
+    return {
+      status: 'finished',
+      output: JSON.stringify({
+        code: receipt.exitCode ?? 1,
+        stdout: stdout.text,
+        stderr: stderr.text,
+        truncated:
+          receipt.stdoutTruncated ||
+          receipt.stderrTruncated ||
+          stdout.truncated ||
+          stderr.truncated,
+        ...executionStatus,
+      }),
+    };
   }
 
   async #readFile(
@@ -98,11 +140,13 @@ export class SandboxToolExecutor implements SandboxExecutionPort {
   async #executeCommand(
     call: Extract<ParsedSandboxToolCall, { readonly operation: 'exec' }>,
     signal: AbortSignal,
+    executionId: string | undefined,
   ): Promise<string> {
     const result = await this.#client.execute(
       {
         command: call.arguments.command,
         ...(call.arguments.cwd === null ? {} : { cwd: call.arguments.cwd }),
+        ...(executionId === undefined ? {} : { executionId }),
       },
       signal,
     );

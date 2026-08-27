@@ -2,7 +2,7 @@
 use super::model::AuditEventData;
 use super::model::{
     AuditEvent, AuditSnapshot, AuditUpdate, ExecutionFinish, ExecutionId, ExecutionRecord,
-    ExecutionStatus, PersistedRecord,
+    ExecutionStart, ExecutionStatus, PersistedRecord,
 };
 use anyhow::{Context, Result, bail};
 use std::collections::{HashSet, VecDeque};
@@ -27,6 +27,7 @@ pub(crate) struct AuditLog {
 struct State {
     file: Option<File>,
     executions: VecDeque<ExecutionRecord>,
+    receipts: VecDeque<ExecutionRecord>,
     events: VecDeque<AuditEvent>,
     suppressed_execution_ids: HashSet<ExecutionId>,
     next_sequence: u64,
@@ -63,13 +64,38 @@ impl AuditLog {
         }
     }
 
+    #[cfg(test)]
     pub(crate) fn start_execution(
         &self,
         command: impl Into<String>,
         cwd: Option<PathBuf>,
     ) -> Result<ExecutionId> {
+        match self.start_execution_once(command, cwd, None)? {
+            ExecutionStart::Started(id) => Ok(id),
+            ExecutionStart::Existing(_) => {
+                unreachable!("an execution without a request ID is unique")
+            }
+        }
+    }
+
+    pub(crate) fn start_execution_once(
+        &self,
+        command: impl Into<String>,
+        cwd: Option<PathBuf>,
+        request_id: Option<String>,
+    ) -> Result<ExecutionStart> {
+        let mut state = self.lock()?;
+        if let Some(request_id) = request_id.as_deref()
+            && let Some(execution) = state
+                .receipts
+                .iter()
+                .find(|execution| execution.request_id.as_deref() == Some(request_id))
+        {
+            return Ok(ExecutionStart::Existing(Box::new(execution.clone())));
+        }
         let execution = ExecutionRecord {
             id: Uuid::new_v4(),
+            request_id,
             command: redact_command(&command.into()),
             cwd,
             pid: None,
@@ -89,16 +115,24 @@ impl AuditLog {
             network_events: 0,
         };
         let id = execution.id;
-        {
-            let mut state = self.lock()?;
-            state.append(&PersistedRecord::Execution(execution.clone()))?;
-            state.executions.push_back(execution.clone());
-            trim_front(&mut state.executions, MAX_EXECUTIONS_IN_MEMORY);
-            let _ = self.updates.send(AuditUpdate::Execution {
-                execution: execution.clone(),
-            });
-        }
-        Ok(id)
+        state.append(&PersistedRecord::Execution(execution.clone()))?;
+        state.executions.push_back(execution.clone());
+        trim_front(&mut state.executions, MAX_EXECUTIONS_IN_MEMORY);
+        upsert_receipt(&mut state.receipts, &execution);
+        let _ = self.updates.send(AuditUpdate::Execution { execution });
+        Ok(ExecutionStart::Started(id))
+    }
+
+    pub(crate) fn execution_by_request_id(&self, request_id: &str) -> Option<ExecutionRecord> {
+        let state = self
+            .inner
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        state
+            .receipts
+            .iter()
+            .find(|execution| execution.request_id.as_deref() == Some(request_id))
+            .cloned()
     }
 
     pub(crate) fn record_process_identity(
@@ -119,6 +153,7 @@ impl AuditLog {
         execution.ppid = ppid;
         state.append(&PersistedRecord::Execution(execution.clone()))?;
         state.executions[position] = execution.clone();
+        upsert_receipt(&mut state.receipts, &execution);
         let _ = self.updates.send(AuditUpdate::Execution { execution });
         Ok(())
     }
@@ -139,6 +174,7 @@ impl AuditLog {
         execution.user_command_started_at_ms = Some(timestamp_ms);
         state.append(&PersistedRecord::Execution(execution.clone()))?;
         state.executions[position] = execution.clone();
+        upsert_receipt(&mut state.receipts, &execution);
         let _ = self.updates.send(AuditUpdate::Execution { execution });
         Ok(())
     }
@@ -163,6 +199,7 @@ impl AuditLog {
             execution.stderr_truncated = finish.stderr_truncated;
             state.append(&PersistedRecord::Execution(execution.clone()))?;
             state.executions[position] = execution.clone();
+            upsert_receipt(&mut state.receipts, &execution);
             let _ = self.updates.send(AuditUpdate::Execution {
                 execution: execution.clone(),
             });
@@ -224,6 +261,11 @@ impl AuditLog {
             .filter(|execution| execution.status == ExecutionStatus::Running)
             .map(|execution| execution.id)
             .collect::<Vec<_>>();
+        for receipt in &mut state.receipts {
+            if running.contains(&receipt.id) {
+                receipt.status = ExecutionStatus::Interrupted;
+            }
+        }
         state.suppressed_execution_ids.extend(running);
         state.executions.clear();
         state.events.clear();
@@ -283,6 +325,7 @@ impl Default for State {
         Self {
             file: None,
             executions: VecDeque::new(),
+            receipts: VecDeque::new(),
             events: VecDeque::new(),
             suppressed_execution_ids: HashSet::new(),
             next_sequence: 1,
@@ -320,6 +363,7 @@ fn load(path: &Path) -> Result<State> {
                 if execution.status == ExecutionStatus::Running {
                     execution.status = ExecutionStatus::Interrupted;
                 }
+                upsert_receipt(&mut state.receipts, &execution);
                 if let Some(position) = state
                     .executions
                     .iter()
@@ -342,6 +386,11 @@ fn load(path: &Path) -> Result<State> {
                     .retain(|event| event.execution_id != execution_id);
             }
             PersistedRecord::ExecutionsCleared => {
+                for receipt in &mut state.receipts {
+                    if receipt.status == ExecutionStatus::Running {
+                        receipt.status = ExecutionStatus::Interrupted;
+                    }
+                }
                 state.executions.clear();
                 state.events.clear();
             }
@@ -367,6 +416,18 @@ fn load(path: &Path) -> Result<State> {
 fn trim_front<T>(items: &mut VecDeque<T>, limit: usize) {
     while items.len() > limit {
         items.pop_front();
+    }
+}
+
+fn upsert_receipt(receipts: &mut VecDeque<ExecutionRecord>, execution: &ExecutionRecord) {
+    if execution.request_id.is_none() {
+        return;
+    }
+    if let Some(position) = receipts.iter().position(|item| item.id == execution.id) {
+        receipts[position] = execution.clone();
+    } else {
+        receipts.push_back(execution.clone());
+        trim_front(receipts, MAX_EXECUTIONS_IN_MEMORY);
     }
 }
 

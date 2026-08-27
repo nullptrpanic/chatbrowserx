@@ -120,6 +120,92 @@ async fn executes_bash_with_cwd_and_environment() {
 }
 
 #[tokio::test]
+async fn deduplicates_execution_ids_and_returns_a_terminal_receipt() {
+    let directory = tempfile::tempdir().unwrap();
+    let marker = directory.path().join("marker");
+    let app = router(TEST_SECRET.to_string(), Duration::from_secs(2));
+    let body = serde_json::json!({
+        "command": format!("printf x >> '{}'", marker.display()),
+        "execution_id": "sandboxExecution_http-1"
+    });
+
+    for _ in 0..2 {
+        let request = Request::post("/exec")
+            .header("authorization", format!("Bearer {TEST_TOKEN}"))
+            .header("content-type", "application/json")
+            .body(Body::from(body.to_string()))
+            .unwrap();
+        let response = app.clone().oneshot(request).await.unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+    }
+    assert_eq!(std::fs::read_to_string(marker).unwrap(), "x");
+
+    let request = Request::get("/exec/sandboxExecution_http-1")
+        .header("authorization", format!("Bearer {TEST_TOKEN}"))
+        .body(Body::empty())
+        .unwrap();
+    let response = app.clone().oneshot(request).await.unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    assert_eq!(
+        serde_json::from_slice::<Value>(&body).unwrap(),
+        serde_json::json!({
+            "code": 0,
+            "execution_id": "sandboxExecution_http-1",
+            "status": "finished",
+            "outcome": "succeeded",
+            "exit_code": 0,
+            "stdout": "",
+            "stderr": "",
+            "stdout_truncated": false,
+            "stderr_truncated": false
+        })
+    );
+}
+
+#[tokio::test]
+async fn reports_unknown_execution_receipts_without_dispatching() {
+    let app = router(TEST_SECRET.to_string(), Duration::from_secs(1));
+    let request = Request::get("/exec/sandboxExecution_missing")
+        .header("authorization", format!("Bearer {TEST_TOKEN}"))
+        .body(Body::empty())
+        .unwrap();
+
+    let response = app.oneshot(request).await.unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    assert_eq!(
+        serde_json::from_slice::<Value>(&body).unwrap(),
+        serde_json::json!({
+            "code": 0,
+            "execution_id": "sandboxExecution_missing",
+            "status": "not_found"
+        })
+    );
+}
+
+#[tokio::test]
+async fn rejects_malformed_execution_ids() {
+    let app = router(TEST_SECRET.to_string(), Duration::from_secs(1));
+    let request = Request::post("/exec")
+        .header("authorization", format!("Bearer {TEST_TOKEN}"))
+        .header("content-type", "application/json")
+        .body(Body::from(
+            serde_json::json!({"command": "true", "execution_id": "bad/id"}).to_string(),
+        ))
+        .unwrap();
+
+    let response = app.oneshot(request).await.unwrap();
+
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+}
+
+#[tokio::test]
 async fn rejects_empty_commands() {
     let app = router(TEST_SECRET.to_string(), Duration::from_secs(1));
     let request = Request::post("/exec")

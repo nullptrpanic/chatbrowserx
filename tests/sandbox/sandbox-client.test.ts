@@ -146,6 +146,74 @@ describe('SandboxClient execution', () => {
     expect(JSON.parse(String(fetch.mock.calls[0]?.[1]?.body))).toEqual({ command: 'exit 7' });
   });
 
+  it('sends a stable internal execution ID only when the caller supplies one', async () => {
+    const fetch = vi.fn<SandboxFetchPort>(async () =>
+      jsonResponse({ code: 0, stdout: 'done', stderr: '' }),
+    );
+    const client = createClient(fetch);
+
+    await client.execute(
+      { command: 'printf done', executionId: 'sandboxExecution_stable-1' },
+      SIGNAL,
+    );
+
+    expect(JSON.parse(String(fetch.mock.calls[0]?.[1]?.body))).toEqual({
+      command: 'printf done',
+      execution_id: 'sandboxExecution_stable-1',
+    });
+  });
+
+  it.each([
+    [
+      { code: 0, execution_id: 'sandboxExecution_1', status: 'not_found' },
+      { status: 'not_found', executionId: 'sandboxExecution_1' },
+    ],
+    [
+      { code: 0, execution_id: 'sandboxExecution_1', status: 'running' },
+      { status: 'running', executionId: 'sandboxExecution_1' },
+    ],
+    [
+      {
+        code: 0,
+        execution_id: 'sandboxExecution_1',
+        status: 'finished',
+        outcome: 'succeeded',
+        exit_code: 0,
+        stdout: 'done',
+        stderr: '',
+        stdout_truncated: false,
+        stderr_truncated: false,
+      },
+      {
+        status: 'finished',
+        executionId: 'sandboxExecution_1',
+        outcome: 'succeeded',
+        exitCode: 0,
+        stdout: 'done',
+        stderr: '',
+        stdoutTruncated: false,
+        stderrTruncated: false,
+      },
+    ],
+  ] as const)('reads one authenticated execution receipt %#', async (body, expected) => {
+    const fetch = vi.fn<SandboxFetchPort>(async () => jsonResponse(body));
+    const client = createClient(fetch);
+
+    await expect(client.getExecution('sandboxExecution_1', SIGNAL)).resolves.toEqual(expected);
+    expect(fetch).toHaveBeenCalledWith(
+      'https://sandbox.example.com/root/exec/sandboxExecution_1',
+      expect.objectContaining({
+        method: 'GET',
+        headers: {
+          Authorization: 'Bearer sandbox-token',
+          Accept: 'application/json',
+        },
+        cache: 'no-store',
+        signal: SIGNAL,
+      }),
+    );
+  });
+
   it.each([
     [new Response('not json', { headers: { 'Content-Type': 'text/plain' } })],
     [new Response('{broken', { headers: { 'Content-Type': 'application/json' } })],

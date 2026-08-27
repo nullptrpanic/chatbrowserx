@@ -8,7 +8,7 @@ pub(crate) use agora::AgoraRuntime;
 pub(crate) use direct::DirectRuntime;
 pub(crate) use runtime::{BoxReader, RunningCommand, RuntimeContext, RuntimeExit, ShellRuntime};
 
-use crate::audit::{AuditLog, ExecutionFinish, ExecutionStatus};
+use crate::audit::{AuditLog, ExecutionFinish, ExecutionRecord, ExecutionStart, ExecutionStatus};
 use std::collections::BTreeMap;
 use std::fmt;
 use std::path::PathBuf;
@@ -54,6 +54,12 @@ pub(crate) struct ShellOutput {
     pub(crate) code: i32,
     pub(crate) stdout: String,
     pub(crate) stderr: String,
+}
+
+#[derive(Debug)]
+pub(crate) enum ExecutionAttempt {
+    Completed(ShellOutput),
+    Existing(Box<ExecutionRecord>),
 }
 
 #[derive(Debug)]
@@ -108,12 +114,38 @@ impl ExecutionService {
         }
     }
 
+    #[cfg(test)]
     pub(crate) async fn execute(&self, command: ShellCommand) -> Result<ShellOutput, ShellError> {
+        match self.execute_once(command, None).await? {
+            ExecutionAttempt::Completed(output) => Ok(output),
+            ExecutionAttempt::Existing(_) => {
+                unreachable!("an execution without a request ID cannot already exist")
+            }
+        }
+    }
+
+    pub(crate) fn execution_by_request_id(&self, request_id: &str) -> Option<ExecutionRecord> {
+        self.audit.execution_by_request_id(request_id)
+    }
+
+    pub(crate) async fn execute_once(
+        &self,
+        command: ShellCommand,
+        request_id: Option<&str>,
+    ) -> Result<ExecutionAttempt, ShellError> {
         let started = Instant::now();
-        let execution_id = self
+        let execution_id = match self
             .audit
-            .start_execution(command.command.clone(), command.cwd.clone())
-            .map_err(ShellError::Execute)?;
+            .start_execution_once(
+                command.command.clone(),
+                command.cwd.clone(),
+                request_id.map(str::to_owned),
+            )
+            .map_err(ShellError::Execute)?
+        {
+            ExecutionStart::Started(id) => id,
+            ExecutionStart::Existing(record) => return Ok(ExecutionAttempt::Existing(record)),
+        };
         let context = RuntimeContext::new(execution_id, self.audit.clone());
         let mut running = match self.runtime.spawn(command, context).await {
             Ok(running) => running,
@@ -253,11 +285,11 @@ impl ExecutionService {
             started.elapsed(),
             &output,
         )?;
-        Ok(ShellOutput {
+        Ok(ExecutionAttempt::Completed(ShellOutput {
             code: exit.code,
             stdout: output.stdout,
             stderr: output.stderr,
-        })
+        }))
     }
 
     fn finish(

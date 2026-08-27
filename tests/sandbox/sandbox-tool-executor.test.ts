@@ -4,6 +4,7 @@ import {
   SandboxClientError,
   type SandboxClientPort,
   type SandboxExecResponse,
+  type SandboxExecutionReceipt,
 } from '../../src/sandbox/sandbox-client';
 import { SandboxToolExecutor } from '../../src/sandbox/sandbox-tool-executor';
 
@@ -40,13 +41,21 @@ function execCall(cwd: string | null = '/home/test/.codex/skills/example') {
   } as const satisfies ParsedSandboxToolCall;
 }
 
-function fixture(response: SandboxExecResponse) {
+function fixture(
+  response: SandboxExecResponse,
+  receipt: SandboxExecutionReceipt = {
+    status: 'not_found',
+    executionId: 'sandboxExecution_1',
+  },
+) {
   const execute = vi.fn<SandboxClientPort['execute']>(async () => response);
+  const getExecution = vi.fn<SandboxClientPort['getExecution']>(async () => receipt);
   const client: SandboxClientPort = {
     isConfigured: vi.fn(async () => true),
     execute,
+    getExecution,
   };
-  return { execute, executor: new SandboxToolExecutor(client) };
+  return { execute, getExecution, executor: new SandboxToolExecutor(client) };
 }
 
 describe('SandboxToolExecutor sandbox_read', () => {
@@ -118,6 +127,7 @@ describe('SandboxToolExecutor sandbox_read', () => {
       execute: vi.fn(async () => {
         throw new SandboxClientError('AUTH', 'definitely_not_dispatched');
       }),
+      getExecution: vi.fn(),
     };
 
     await expect(new SandboxToolExecutor(client).execute(readCall(), SIGNAL)).rejects.toMatchObject(
@@ -127,6 +137,42 @@ describe('SandboxToolExecutor sandbox_read', () => {
 });
 
 describe('SandboxToolExecutor sandbox_exec', () => {
+  it('forwards the stable execution ID and maps an exact terminal receipt', async () => {
+    const current = fixture(
+      { code: 0, stdout: 'fresh', stderr: '' },
+      {
+        status: 'finished',
+        executionId: 'sandboxExecution_1',
+        outcome: 'succeeded',
+        exitCode: 0,
+        stdout: 'recovered',
+        stderr: '',
+        stdoutTruncated: false,
+        stderrTruncated: false,
+      },
+    );
+
+    await current.executor.execute(execCall(), SIGNAL, {
+      executionId: 'sandboxExecution_1',
+    });
+    const recovery = await current.executor.recover('sandboxExecution_1', SIGNAL);
+
+    expect(current.execute.mock.calls[0]?.[0]).toMatchObject({
+      command: 'bash scripts/run.sh',
+      executionId: 'sandboxExecution_1',
+    });
+    expect(current.getExecution).toHaveBeenCalledWith('sandboxExecution_1', SIGNAL);
+    expect(recovery).toEqual({
+      status: 'finished',
+      output: JSON.stringify({
+        code: 0,
+        stdout: 'recovered',
+        stderr: '',
+        truncated: false,
+      }),
+    });
+  });
+
   it('maps command and cwd directly without exposing an environment map', async () => {
     const current = fixture({ code: 7, stdout: 'partial', stderr: 'failed' });
 

@@ -104,6 +104,47 @@ describe('live E2E scenario registry', () => {
     expect(scenario.minFinalTextLength).toBeGreaterThan(0);
   });
 
+  it('registers one bounded exam selection regression without submitting the exam', () => {
+    const scenario = getLiveScenario('lark-exam-selection');
+
+    expect(scenario.allowRemoteMutation).toBe(true);
+    expect(scenario.startUrl).toBe(
+      'https://exam.larkoffice.com/examinee/7671265025146766853?hiddenModal=1&lang=zh',
+    );
+    expect(scenario.requiredTools).toEqual(
+      expect.arrayContaining(['browser_inspect', 'browser_set_checked']),
+    );
+    expect(scenario.expectedToolCounts).toMatchObject({ browser_set_checked: 1 });
+    expect(scenario.requiredVerifiedTools).toContain('browser_set_checked');
+    expect(scenario.forbidScreenshotInspect).toBe(true);
+    expect(scenario.forbiddenTools).toEqual(
+      expect.arrayContaining(['browser_click_point', 'browser_network_start']),
+    );
+    expect(scenario.taskText).toContain('不得提交试卷');
+    expect(scenario.taskText).toContain('只允许点击一次“重考”');
+    expect(scenario.taskText).toContain('单选或多选均可');
+  });
+
+  it('registers one exact LeetCode editor replacement regression without submission', () => {
+    const scenario = getLiveScenario('leetcode-editor-replace');
+
+    expect(scenario.allowRemoteMutation).toBe(true);
+    expect(scenario.startUrl).toBe(
+      'https://leetcode.com/problems/median-of-two-sorted-arrays/description/',
+    );
+    expect(scenario.requiredTools).toEqual(
+      expect.arrayContaining(['browser_inspect', 'browser_type']),
+    );
+    expect(scenario.expectedToolCounts).toMatchObject({ browser_type: 1 });
+    expect(scenario.requiredVerifiedTools).toContain('browser_type');
+    expect(scenario.requiredTypedTextIncludes).toContain(
+      '// ChatBrowserX editor self-check {{RUN_ID}}',
+    );
+    expect(scenario.forbidSubmittedType).toBe(true);
+    expect(scenario.taskText).toContain('replace=true');
+    expect(scenario.taskText).toContain('不得运行或提交代码');
+  });
+
   it('lists stable scenario names without exposing a mutable registry', () => {
     const scenarios = listLiveScenarios();
 
@@ -112,6 +153,8 @@ describe('live E2E scenario registry', () => {
       'lark-messenger-august-history',
       'lark-messenger-multi-group-scroll',
       'lark-doc-named-section',
+      'lark-exam-selection',
+      'leetcode-editor-replace',
       'lark-self-send',
       'lark-self-send-screenshot',
       'lark-five-groups-summary-screenshot-send',

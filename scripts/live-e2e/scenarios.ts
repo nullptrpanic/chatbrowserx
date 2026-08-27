@@ -168,6 +168,94 @@ const LARK_DOC_NAMED_SECTION = Object.freeze<LiveScenario>({
   allowRemoteMutation: false,
 });
 
+const LARK_EXAM_SELECTION = Object.freeze<LiveScenario>({
+  name: 'lark-exam-selection',
+  description:
+    'Selects and verifies one unanswered exam option through structured state without submitting the exam.',
+  startUrl: 'https://exam.larkoffice.com/examinee/7671265025146766853?hiddenModal=1&lang=zh',
+  expectedOrigin: 'https://exam.larkoffice.com',
+  taskText:
+    '只使用结构化浏览器工具，不要请求或使用截图、坐标操作、网络抓包、Tavily 或其他连接器。不得提交试卷，也不得点击任何提交、交卷、完成考试或确认交卷按钮。先用 interactive 检查当前考试页面。如果页面显示考试已经完成、只有答题记录且提供“重考”，允许且只允许点击一次“重考”来进入新的答题状态；若出现明确的重考确认弹窗，只确认这一次重考，不得触发其他操作，然后重新检查页面。找到第一道当前未作答且可操作的题目（单选或多选均可），记录题目和一个当前未选中的选项。选项必须来自最新检查中明确 advertises set_checked 的 ref，并且只能调用一次 browser_set_checked 将该选项设为 checked=true；不得用 browser_click、browser_set_checked_many 或坐标操作代替。该工具必须返回 ok=true 且 verified=true，随后再用一次 interactive 检查，确认同一题目下该选项状态仍包含 checked。若当前视窗没有未作答题，可用结构化 browser_scroll 查找，但不得猜测 ref。任何操作或回读不确定时立即停止并说明唯一阻塞点，不得重复选择。最终回复必须逐字包含“已验证选中状态”和“未提交试卷”，并写明题目与选项。',
+  readinessTimeoutMs: 30_000,
+  taskTimeoutMs: 180_000,
+  maxToolCalls: 30,
+  requiredTools: Object.freeze(['browser_inspect', 'browser_set_checked']),
+  forbiddenTools: Object.freeze([
+    'browser_capture_screenshot',
+    'browser_click_point',
+    'browser_drag_point',
+    'browser_network_start',
+    'browser_network_list',
+    'browser_network_get',
+    'browser_network_stop',
+    'tavily_search',
+    'tavily_extract',
+    'tavily_crawl',
+  ]),
+  forbidScreenshotInspect: true,
+  forbidSubmittedType: true,
+  expectedToolCounts: Object.freeze({ browser_set_checked: 1 }),
+  requiredVerifiedTools: Object.freeze(['browser_set_checked']),
+  finalTextIncludes: Object.freeze(['已验证选中状态', '未提交试卷']),
+  finalTextExcludes: Object.freeze([
+    '阻塞点',
+    '唯一阻塞点',
+    '无法验证',
+    '未能验证',
+    'blocked',
+    'could not verify',
+    'unable to verify',
+  ]),
+  minFinalTextLength: 60,
+  allowRemoteMutation: true,
+});
+
+const LEETCODE_EDITOR_REPLACE = Object.freeze<LiveScenario>({
+  name: 'leetcode-editor-replace',
+  description:
+    'Replaces the complete LeetCode editor value once and verifies the exact retained marker without submitting.',
+  startUrl: 'https://leetcode.com/problems/median-of-two-sorted-arrays/description/',
+  expectedOrigin: 'https://leetcode.com',
+  taskText:
+    '只使用结构化浏览器工具，不要请求或使用截图、坐标操作、网络抓包、Tavily 或其他连接器。不得运行或提交代码，也不得点击 Run、Submit 或提交相关按钮。先用 interactive 检查并找到当前代码编辑器的可编辑 ref；调用且只调用一次 browser_type，使用 replace=true、submit=false，将编辑器全文替换为且仅替换为以下一行（{{RUN_ID}} 会保留为本次已展开的唯一值）：\n// ChatBrowserX editor self-check {{RUN_ID}}\n该工具必须返回 ok=true 且 verified=true；随后再用一次 interactive 检查或使用工具返回的精确验证信息，确认编辑器保留的完整内容与该行完全一致。不得追加、不得另发按键、不得重复写入。任何写入或回读不确定时立即停止并说明唯一阻塞点。最终回复必须逐字包含完整的“// ChatBrowserX editor self-check {{RUN_ID}}”以及“未运行或提交代码”。',
+  readinessTimeoutMs: 30_000,
+  taskTimeoutMs: 180_000,
+  maxToolCalls: 20,
+  requiredTools: Object.freeze(['browser_inspect', 'browser_type']),
+  forbiddenTools: Object.freeze([
+    'browser_capture_screenshot',
+    'browser_keypress',
+    'browser_click_point',
+    'browser_drag_point',
+    'browser_network_start',
+    'browser_network_list',
+    'browser_network_get',
+    'browser_network_stop',
+    'tavily_search',
+    'tavily_extract',
+    'tavily_crawl',
+  ]),
+  forbidScreenshotInspect: true,
+  forbidSubmittedType: true,
+  expectedToolCounts: Object.freeze({ browser_type: 1 }),
+  requiredVerifiedTools: Object.freeze(['browser_type']),
+  requiredTypedTextIncludes: Object.freeze(['// ChatBrowserX editor self-check {{RUN_ID}}']),
+  finalTextIncludes: Object.freeze([
+    '// ChatBrowserX editor self-check {{RUN_ID}}',
+    '未运行或提交代码',
+  ]),
+  finalTextExcludes: Object.freeze([
+    '唯一阻塞点',
+    '无法验证',
+    '未能验证',
+    'blocked',
+    'could not verify',
+    'unable to verify',
+  ]),
+  minFinalTextLength: 80,
+  allowRemoteMutation: true,
+});
+
 const LARK_SELF_SEND = Object.freeze<LiveScenario>({
   name: 'lark-self-send',
   description: 'Searches the authenticated user and sends one uniquely identifiable self-message.',
@@ -482,6 +570,8 @@ const LIVE_SCENARIOS = Object.freeze([
   LARK_MESSENGER_AUGUST_HISTORY,
   LARK_MESSENGER_MULTI_GROUP_SCROLL,
   LARK_DOC_NAMED_SECTION,
+  LARK_EXAM_SELECTION,
+  LEETCODE_EDITOR_REPLACE,
   LARK_SELF_SEND,
   LARK_SELF_SEND_SCREENSHOT,
   LARK_FIVE_GROUPS_SUMMARY_SCREENSHOT_SEND,

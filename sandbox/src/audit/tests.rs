@@ -1,4 +1,4 @@
-use super::{AuditEventData, AuditLog, ExecutionFinish, ExecutionStatus};
+use super::{AuditEventData, AuditLog, ExecutionFinish, ExecutionStart, ExecutionStatus};
 
 #[test]
 fn persists_and_reloads_command_lifecycle() {
@@ -31,6 +31,110 @@ fn persists_and_reloads_command_lifecycle() {
     assert_eq!(snapshot.executions[0].exit_code, Some(0));
     assert_eq!(snapshot.executions[0].duration_ms, Some(12));
     assert_eq!(snapshot.executions[0].stdout, "hello");
+}
+
+#[test]
+fn reserves_a_client_execution_id_once_and_recovers_it_after_reload() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("audit.jsonl");
+    let log = AuditLog::open(&path).unwrap();
+    let id = match log
+        .start_execution_once(
+            "printf hello",
+            None,
+            Some("sandboxExecution_stable-1".to_owned()),
+        )
+        .unwrap()
+    {
+        ExecutionStart::Started(id) => id,
+        ExecutionStart::Existing(_) => panic!("first reservation must start an execution"),
+    };
+    match log
+        .start_execution_once(
+            "printf ignored",
+            None,
+            Some("sandboxExecution_stable-1".to_owned()),
+        )
+        .unwrap()
+    {
+        ExecutionStart::Existing(record) => assert_eq!(record.id, id),
+        ExecutionStart::Started(_) => panic!("duplicate reservation must not start an execution"),
+    }
+    log.finish_execution(
+        id,
+        ExecutionFinish {
+            status: ExecutionStatus::Succeeded,
+            exit_code: Some(0),
+            duration_ms: 12,
+            stdout: "hello".to_owned(),
+            stderr: String::new(),
+            stdout_truncated: false,
+            stderr_truncated: false,
+        },
+    )
+    .unwrap();
+    drop(log);
+
+    let reloaded = AuditLog::open(&path).unwrap();
+    let record = reloaded
+        .execution_by_request_id("sandboxExecution_stable-1")
+        .expect("stable execution receipt should survive restart");
+    assert_eq!(record.id, id);
+    assert_eq!(record.status, ExecutionStatus::Succeeded);
+    assert_eq!(record.stdout, "hello");
+}
+
+#[test]
+fn clearing_the_visible_audit_keeps_hidden_idempotency_receipts() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("audit.jsonl");
+    let log = AuditLog::open(&path).unwrap();
+    let id = match log
+        .start_execution_once(
+            "touch marker",
+            None,
+            Some("sandboxExecution_cleared".to_owned()),
+        )
+        .unwrap()
+    {
+        ExecutionStart::Started(id) => id,
+        ExecutionStart::Existing(_) => panic!("first reservation must start an execution"),
+    };
+    log.finish_execution(
+        id,
+        ExecutionFinish {
+            status: ExecutionStatus::Succeeded,
+            exit_code: Some(0),
+            duration_ms: 1,
+            stdout: String::new(),
+            stderr: String::new(),
+            stdout_truncated: false,
+            stderr_truncated: false,
+        },
+    )
+    .unwrap();
+    log.clear_executions().unwrap();
+    assert!(log.snapshot().executions.is_empty());
+    assert_eq!(
+        log.execution_by_request_id("sandboxExecution_cleared")
+            .unwrap()
+            .status,
+        ExecutionStatus::Succeeded
+    );
+    drop(log);
+
+    let reloaded = AuditLog::open(&path).unwrap();
+    assert!(reloaded.snapshot().executions.is_empty());
+    assert!(matches!(
+        reloaded
+            .start_execution_once(
+                "touch marker again",
+                None,
+                Some("sandboxExecution_cleared".to_owned()),
+            )
+            .unwrap(),
+        ExecutionStart::Existing(_)
+    ));
 }
 
 #[test]

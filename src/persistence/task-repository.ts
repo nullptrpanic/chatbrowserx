@@ -121,6 +121,7 @@ function normalizeTask(task: TaskRun): TaskRun {
 }
 
 const validToolNamePattern = /^[a-zA-Z0-9_-]+$/;
+const validSandboxExecutionIdPattern = /^[a-zA-Z0-9][a-zA-Z0-9._:-]{0,255}$/;
 const MAX_MODEL_OUTPUT_ITEMS_PER_CALL = 8;
 const MAX_ENCRYPTED_REASONING_CHARACTERS = 8 * 1024 * 1024;
 const MAX_REASONING_SUMMARIES_PER_ITEM = 8;
@@ -392,6 +393,11 @@ function normalizeStoredContinuation(
       argumentsJson: unresolvedCall.argumentsJson,
       executionState:
         pending.executionState === 'may_have_dispatched' ? 'may_have_dispatched' : 'recorded',
+      ...(unresolvedCall.name === 'sandbox_exec' &&
+      typeof pending.executionId === 'string' &&
+      validSandboxExecutionIdPattern.test(pending.executionId)
+        ? { executionId: pending.executionId }
+        : {}),
     },
   };
 }

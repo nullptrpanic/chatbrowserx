@@ -6,7 +6,8 @@ mod store;
 #[cfg(any(target_os = "macos", test))]
 pub(crate) use model::{AuditEvent, AuditEventData};
 pub(crate) use model::{
-    AuditSnapshot, AuditUpdate, ExecutionFinish, ExecutionId, ExecutionRecord, ExecutionStatus,
+    AuditSnapshot, AuditUpdate, ExecutionFinish, ExecutionId, ExecutionRecord, ExecutionStart,
+    ExecutionStatus,
 };
 pub(crate) use store::AuditLog;
 

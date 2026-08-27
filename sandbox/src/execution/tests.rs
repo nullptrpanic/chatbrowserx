@@ -1,4 +1,4 @@
-use super::{DirectRuntime, ExecutionService, ShellCommand, ShellError};
+use super::{DirectRuntime, ExecutionAttempt, ExecutionService, ShellCommand, ShellError};
 use crate::audit::{AuditLog, ExecutionStatus};
 use std::collections::BTreeMap;
 use std::sync::Arc;
@@ -54,6 +54,34 @@ async fn direct_execution_preserves_shell_behavior_and_records_completion() {
     let record = serde_json::to_value(&snapshot.executions[0]).unwrap();
     assert!(record["pid"].as_u64().is_some());
     assert_eq!(record["ppid"], serde_json::json!(std::process::id()));
+}
+
+#[tokio::test]
+async fn concurrent_duplicate_execution_ids_dispatch_only_once() {
+    let directory = tempfile::tempdir().unwrap();
+    let marker = directory.path().join("marker");
+    let audit = AuditLog::in_memory();
+    let executor = service(audit.clone(), Duration::from_secs(2), 4096, 4096);
+    let command = ShellCommand::new(format!("printf x >> '{}'; sleep 0.1", marker.display()));
+    let first_executor = executor.clone();
+    let first_command = command.clone();
+    let first = tokio::spawn(async move {
+        first_executor
+            .execute_once(first_command, Some("sandboxExecution_concurrent"))
+            .await
+    });
+    tokio::time::sleep(Duration::from_millis(20)).await;
+
+    let duplicate = executor
+        .execute_once(command, Some("sandboxExecution_concurrent"))
+        .await
+        .unwrap();
+    let original = first.await.unwrap().unwrap();
+
+    assert!(matches!(duplicate, ExecutionAttempt::Existing(_)));
+    assert!(matches!(original, ExecutionAttempt::Completed(_)));
+    assert_eq!(std::fs::read_to_string(marker).unwrap(), "x");
+    assert_eq!(audit.snapshot().executions.len(), 1);
 }
 
 #[tokio::test]

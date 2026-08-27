@@ -17,6 +17,7 @@ import type {
 } from '../tasks/continuation-types';
 import type { TaskSnapshot } from '../tasks/task-command-service';
 import type { TaskError } from '../tasks/task-errors';
+import type { HistoricalToolResultPort } from '../tasks/historical-tool-results';
 import { TaskLeaseManager } from '../tasks/task-lease';
 import { retainTaskReply } from '../tasks/task-reply-retention';
 import { transitionTask } from '../tasks/task-transition';
@@ -33,6 +34,7 @@ import { parseBrowserToolCall } from './tools/browser-tool-schema';
 import { browserScrollContinuationForCheckpoint } from './tools/browser-tool-availability';
 import { CONTEXT_COMMIT_TOOL_NAME } from './tools/context-commit-tool-schema';
 import { parseSandboxToolCall } from './tools/sandbox-tool-schema';
+import { parseTaskResultToolCall } from './tools/task-result-tool-schema';
 import { parseTavilyToolCall } from './tools/tavily-tool-schema';
 
 export type TaskExecutorErrorCode =
@@ -62,6 +64,7 @@ export interface TaskExecutorDependencies {
   readonly tavily: TavilyExecutionPort;
   readonly browser: BrowserExecutionPort;
   readonly sandbox?: SandboxExecutionPort;
+  readonly historicalResults?: HistoricalToolResultPort;
   readonly attachments?: Pick<AttachmentRepository, 'addReference' | 'removeReference'>;
   readonly clock: Clock;
   readonly ids: IdGenerator;
@@ -938,7 +941,8 @@ export class TaskExecutor {
         const call =
           result.type === 'browser.call' ||
           result.type === 'context.commit' ||
-          result.type === 'sandbox.call'
+          result.type === 'sandbox.call' ||
+          result.type === 'task-result.call'
             ? result.call
             : result;
         if (
@@ -952,7 +956,7 @@ export class TaskExecutor {
             error: invalidPlannerResultError(),
           });
         }
-        if (result.type !== 'context.commit') {
+        if (result.type !== 'context.commit' && result.type !== 'task-result.call') {
           const isBrowserCall = result.type === 'browser.call';
           const isSandboxCall = result.type === 'sandbox.call';
           const completedFamilyCalls = isBrowserCall
@@ -980,7 +984,8 @@ export class TaskExecutor {
         const toolName =
           result.type === 'browser.call' ||
           result.type === 'context.commit' ||
-          result.type === 'sandbox.call'
+          result.type === 'sandbox.call' ||
+          result.type === 'task-result.call'
             ? result.call.name
             : `tavily_${result.operation}`;
 
@@ -1004,6 +1009,9 @@ export class TaskExecutor {
             name: toolName,
             argumentsJson: call.argumentsJson,
             executionState: 'recorded',
+            ...(toolName === 'sandbox_exec'
+              ? { executionId: this.#createId('sandboxExecution') }
+              : {}),
           },
           ...(result.modelTurn === undefined
             ? {}
@@ -1037,6 +1045,9 @@ export class TaskExecutor {
     if (pending.name.startsWith('sandbox_')) {
       return this.#executePendingSandboxTool(snapshot, ownerId, signal, pending);
     }
+    if (pending.name.startsWith('task_result_')) {
+      return this.#executePendingTaskResultTool(snapshot, ownerId, signal, pending);
+    }
 
     let call: Extract<AgentEvent, { readonly type: 'tavily.call' }>;
     let toolResult: TavilyResultSet;
@@ -1061,6 +1072,39 @@ export class TaskExecutor {
     );
   }
 
+  async #executePendingTaskResultTool(
+    snapshot: TaskSnapshot,
+    ownerId: string,
+    signal: AbortSignal,
+    pending: PendingToolCall,
+  ): Promise<TaskSnapshot> {
+    const historicalResults = this.#dependencies.historicalResults;
+    if (!historicalResults) {
+      return this.#handleFailure(
+        snapshot,
+        ownerId,
+        signal,
+        new Error('Historical task-result retrieval is unavailable.'),
+        'model',
+      );
+    }
+
+    try {
+      const call = parseTaskResultToolCall(pending);
+      const context = {
+        conversationId: snapshot.task.conversationId,
+        currentTaskId: snapshot.task.id,
+      };
+      const result =
+        call.operation === 'search'
+          ? await historicalResults.search(context, call.arguments)
+          : await historicalResults.read(context, call.arguments);
+      return this.#recordToolResult(snapshot, ownerId, signal, pending, JSON.stringify(result));
+    } catch (error) {
+      return this.#handleFailure(snapshot, ownerId, signal, error, 'model');
+    }
+  }
+
   async #executePendingSandboxTool(
     snapshot: TaskSnapshot,
     ownerId: string,
@@ -1074,30 +1118,6 @@ export class TaskExecutor {
       return this.#handleFailure(snapshot, ownerId, signal, error, 'sandbox');
     }
 
-    if (call.operation === 'exec' && pending.executionState === 'may_have_dispatched') {
-      return this.#recordToolResult(
-        snapshot,
-        ownerId,
-        signal,
-        pending,
-        JSON.stringify({
-          ok: false,
-          code: 'AMBIGUOUS_EXECUTION',
-          message:
-            'The previous Sandbox command may already have run. Inspect its effects before choosing the next action.',
-          retryable: false,
-        }),
-      );
-    }
-
-    if (call.replay === 'mutation') {
-      snapshot = await this.#saveBoundary(snapshot, ownerId, signal, {
-        type: 'tool.execution-started',
-        reason: `${call.name}_execution_started`,
-        pendingToolCall: { ...pending, executionState: 'may_have_dispatched' },
-      });
-    }
-
     const sandbox = this.#dependencies.sandbox;
     if (!sandbox) {
       return this.#handleFailure(
@@ -1108,12 +1128,88 @@ export class TaskExecutor {
         'sandbox',
       );
     }
+
+    if (call.operation === 'exec' && pending.executionState === 'may_have_dispatched') {
+      if (pending.executionId === undefined) {
+        return this.#recordToolResult(
+          snapshot,
+          ownerId,
+          signal,
+          pending,
+          JSON.stringify({
+            ok: false,
+            code: 'AMBIGUOUS_EXECUTION',
+            message:
+              'The previous Sandbox command may already have run. Inspect its effects before choosing the next action.',
+            retryable: false,
+          }),
+        );
+      }
+      try {
+        const recovery = await sandbox.recover(pending.executionId, signal);
+        if (recovery.status === 'finished') {
+          return this.#recordToolResult(snapshot, ownerId, signal, pending, recovery.output);
+        }
+        if (recovery.status === 'running') {
+          return this.#pauseSandboxRecovery(snapshot, ownerId, signal, pending);
+        }
+      } catch (error) {
+        if (signal.aborted || isAbortError(error)) throw error;
+        if (error instanceof SandboxClientError && error.code === 'AUTH') {
+          return this.#saveBoundary(snapshot, ownerId, signal, {
+            type: 'task.auth-required',
+            reason: 'sandbox_authentication_required',
+            error: {
+              code: 'AuthError',
+              retryable: false,
+              recoveryAction: 'update_credentials',
+              userMessage:
+                'Sandbox authentication is required. Update the Sandbox Token in Settings.',
+              evidenceRef: null,
+            },
+            pendingToolCall: pending,
+          });
+        }
+        return this.#pauseSandboxRecovery(snapshot, ownerId, signal, pending);
+      }
+    }
+
+    if (call.replay === 'mutation' && pending.executionState === 'recorded') {
+      snapshot = await this.#saveBoundary(snapshot, ownerId, signal, {
+        type: 'tool.execution-started',
+        reason: `${call.name}_execution_started`,
+        pendingToolCall: { ...pending, executionState: 'may_have_dispatched' },
+      });
+    }
     try {
-      const output = await sandbox.execute(call, signal);
+      const output = await sandbox.execute(call, signal, {
+        ...(pending.executionId === undefined ? {} : { executionId: pending.executionId }),
+      });
       return this.#recordToolResult(snapshot, ownerId, signal, pending, output);
     } catch (error) {
       return this.#handleSandboxFailure(snapshot, ownerId, signal, pending, call, error);
     }
+  }
+
+  #pauseSandboxRecovery(
+    snapshot: TaskSnapshot,
+    ownerId: string,
+    signal: AbortSignal,
+    pending: PendingToolCall,
+  ): Promise<TaskSnapshot> {
+    return this.#saveBoundary(snapshot, ownerId, signal, {
+      type: 'task.paused',
+      reason: 'sandbox_execution_recovery_pending',
+      error: {
+        code: 'TransientProviderError',
+        retryable: true,
+        recoveryAction: 'retry',
+        userMessage:
+          'The Sandbox command is still running or its status is temporarily unavailable.',
+        evidenceRef: null,
+      },
+      pendingToolCall: { ...pending, executionState: 'may_have_dispatched' },
+    });
   }
 
   /** Resolves the internal commit without dispatching an external side effect. */
@@ -1485,19 +1581,10 @@ export class TaskExecutor {
     }
 
     if (call.replay === 'mutation' && error.dispatchState === 'may_have_dispatched') {
-      return this.#recordToolResult(
-        snapshot,
-        ownerId,
-        signal,
-        pending,
-        JSON.stringify({
-          ok: false,
-          code: 'AMBIGUOUS_EXECUTION',
-          message:
-            'The Sandbox command may already have run. Inspect its effects before choosing the next action.',
-          retryable: false,
-        }),
-      );
+      return this.#pauseSandboxRecovery(snapshot, ownerId, signal, {
+        ...pending,
+        executionState: 'may_have_dispatched',
+      });
     }
 
     return this.#recordToolResult(

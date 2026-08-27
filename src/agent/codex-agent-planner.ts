@@ -18,6 +18,7 @@ import {
   type SkillCatalogPort,
 } from '../sandbox/skill-catalog';
 import type { MessageRecord } from '../tasks/message-types';
+import type { HistoricalToolResultPort } from '../tasks/historical-tool-results';
 import type { ModelOutputContinuationItem } from '../tasks/continuation-types';
 import { buildAgentContext } from './context/agent-context';
 import { estimateUnmeasuredContextTokens } from './context/context-headroom';
@@ -30,6 +31,10 @@ import { StreamPersistenceBuffer } from './stream-persistence-buffer';
 import { browserToolContractForCheckpoint } from './tools/browser-tool-availability';
 import { parseBrowserToolCall } from './tools/browser-tool-schema';
 import { SANDBOX_TOOL_DEFINITIONS, parseSandboxToolCall } from './tools/sandbox-tool-schema';
+import {
+  parseTaskResultToolCall,
+  TASK_RESULT_TOOL_DEFINITIONS,
+} from './tools/task-result-tool-schema';
 import { TAVILY_TOOL_DEFINITIONS, parseTavilyToolCall } from './tools/tavily-tool-schema';
 import { loadWorkSessionView, type WorkSessionView } from './work-session-view';
 
@@ -41,6 +46,7 @@ export interface CodexAgentPlannerDependencies {
   readonly provider: ModelProvider;
   readonly tavilyAvailability: TavilyAvailabilityPort;
   readonly skillCatalog?: SkillCatalogPort;
+  readonly historicalResults?: Pick<HistoricalToolResultPort, 'hasEvidence'>;
   readonly settings: Pick<SettingsStore, 'get'>;
   readonly conversations: Pick<
     ConversationRepository,
@@ -134,20 +140,31 @@ export class CodexAgentPlanner implements AgentPlanner {
   async *plan(input: AgentPlanInput, signal: AbortSignal): AsyncGenerator<AgentEvent> {
     const browserContract = browserToolContractForCheckpoint(input.checkpoint);
     const optionalToolsAvailable = browserContract.toolChoice === undefined;
-    const [settings, workSession, tavilyConfigured, skillCatalog] = await Promise.all([
-      this.#dependencies.settings.get(),
-      loadWorkSessionView(input.task.conversationId, this.#dependencies),
-      optionalToolsAvailable
-        ? this.#dependencies.tavilyAvailability.isConfigured().catch(() => false)
-        : Promise.resolve(false),
-      optionalToolsAvailable
-        ? (this.#dependencies.skillCatalog?.get(signal).catch(() => null) ?? Promise.resolve(null))
-        : Promise.resolve(null),
-    ]);
+    const [settings, workSession, tavilyConfigured, skillCatalog, historicalEvidenceAvailable] =
+      await Promise.all([
+        this.#dependencies.settings.get(),
+        loadWorkSessionView(input.task.conversationId, this.#dependencies),
+        optionalToolsAvailable
+          ? this.#dependencies.tavilyAvailability.isConfigured().catch(() => false)
+          : Promise.resolve(false),
+        optionalToolsAvailable
+          ? (this.#dependencies.skillCatalog?.get(signal).catch(() => null) ??
+            Promise.resolve(null))
+          : Promise.resolve(null),
+        optionalToolsAvailable && this.#dependencies.historicalResults !== undefined
+          ? this.#dependencies.historicalResults
+              .hasEvidence({
+                conversationId: input.task.conversationId,
+                currentTaskId: input.task.id,
+              })
+              .catch(() => false)
+          : Promise.resolve(false),
+      ]);
     const tools = [
       ...browserContract.tools,
       ...(tavilyConfigured ? TAVILY_TOOL_DEFINITIONS : []),
       ...(skillCatalog === null ? [] : SANDBOX_TOOL_DEFINITIONS),
+      ...(historicalEvidenceAvailable ? TASK_RESULT_TOOL_DEFINITIONS : []),
     ];
     const availableToolNames = new Set(tools.map(({ name }) => name));
     if (availableToolNames.size !== tools.length) {
@@ -363,6 +380,16 @@ export class CodexAgentPlanner implements AgentPlanner {
             throwWithInvalidResponseStage(error, 'tool_call');
           }
           yield { type: 'sandbox.call', call, modelTurn, modelOutputItems };
+          return;
+        }
+        if (state.tool.name.startsWith('task_result_')) {
+          let call: ReturnType<typeof parseTaskResultToolCall>;
+          try {
+            call = parseTaskResultToolCall(source);
+          } catch (error) {
+            throwWithInvalidResponseStage(error, 'tool_call');
+          }
+          yield { type: 'task-result.call', call, modelTurn, modelOutputItems };
           return;
         }
         let call: ReturnType<typeof parseTavilyToolCall>;

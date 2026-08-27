@@ -7,6 +7,7 @@ import type { AgentEvent, AgentPlanInput } from '../../src/agent/execution-types
 import { parseBrowserToolCall } from '../../src/agent/tools/browser-tool-schema';
 import { parseContextCommitToolCall } from '../../src/agent/tools/context-commit-tool-schema';
 import { parseSandboxToolCall } from '../../src/agent/tools/sandbox-tool-schema';
+import { parseTaskResultToolCall } from '../../src/agent/tools/task-result-tool-schema';
 import type { BrowserExecutionPort } from '../../src/browser/browser-execution-types';
 import { openChatBrowserDatabase } from '../../src/persistence/open-database';
 import { IndexedDbConversationRepository } from '../../src/persistence/conversation-repository';
@@ -114,6 +115,17 @@ function sandboxCall(callId: string, name: string, arguments_: unknown): AgentEv
   };
 }
 
+function taskResultCall(callId: string, name: string, arguments_: unknown): AgentEvent {
+  return {
+    type: 'task-result.call',
+    call: parseTaskResultToolCall({
+      callId,
+      name,
+      argumentsJson: JSON.stringify(arguments_),
+    }),
+  };
+}
+
 async function runBrowserProgressScenario(
   databaseName: string,
   calls: readonly AgentEvent[],
@@ -177,6 +189,124 @@ async function runBrowserProgressScenario(
 }
 
 describe('TaskExecutor', () => {
+  it('records historical result search and read calls without external dispatch', async () => {
+    const database = await openChatBrowserDatabase(
+      createTestDatabaseName('historical-tool-result-dispatch'),
+    );
+    const repository = new IndexedDbTaskRepository(database);
+    const dependencies = sources();
+    const commands = new TaskCommandService(
+      repository,
+      dependencies.clock,
+      dependencies.ids,
+      dependencies.conversations,
+    );
+    const created = await commands.create({
+      conversationId: 'conversation_1',
+      tabId: 7,
+      goal: 'Use exact evidence from a previous task',
+    });
+    let turn = 0;
+    const planner = {
+      plan: () =>
+        (async function* () {
+          turn += 1;
+          if (turn === 1) {
+            yield taskResultCall('call_search_history', 'task_result_search', {
+              scope: 'previous_task',
+              taskId: null,
+              query: 'response body',
+              toolName: 'browser_network_get',
+              limit: 5,
+            });
+          } else if (turn === 2) {
+            yield taskResultCall('call_read_history', 'task_result_read', {
+              evidenceId: 'toolResult_previous',
+              offset: 0,
+              limit: 2_000,
+            });
+          } else {
+            yield {
+              type: 'task.completed',
+              reason: 'model_response_completed',
+              messageId: 'message_answer',
+            } as const;
+          }
+        })(),
+    };
+    const search = vi.fn(async () => ({
+      ok: true as const,
+      results: [
+        {
+          evidenceId: 'toolResult_previous',
+          taskId: 'task_previous',
+          taskStatus: 'completed' as const,
+          toolName: 'browser_network_get',
+          summary: 'HTTP 200',
+          summaryKind: 'derived' as const,
+          outputLength: 8,
+          contentState: 'complete' as const,
+          recordedAt: 900,
+        },
+      ],
+    }));
+    const read = vi.fn(async () => ({
+      ok: true as const,
+      evidenceId: 'toolResult_previous',
+      taskId: 'task_previous',
+      taskStatus: 'completed' as const,
+      toolName: 'browser_network_get',
+      content: 'HTTP 200',
+      offset: 0,
+      returnedLength: 8,
+      totalLength: 8,
+      hasMore: false,
+      contentState: 'complete' as const,
+      contentSource: 'stored_tool_output' as const,
+    }));
+    const tavily = tavilyPort();
+    const browser = browserPort();
+    const sandboxExecute = vi.fn<SandboxExecutionPort['execute']>();
+    const executor = new TaskExecutor({
+      repository,
+      conversations: dependencies.conversations,
+      planner,
+      tavily,
+      browser,
+      sandbox: { execute: sandboxExecute, recover: vi.fn() },
+      historicalResults: { hasEvidence: vi.fn(async () => true), search, read },
+      clock: dependencies.clock,
+      ids: dependencies.ids,
+    });
+
+    const result = await executor.run(created.task.id, new AbortController().signal);
+
+    expect(search).toHaveBeenCalledWith(
+      { conversationId: 'conversation_1', currentTaskId: created.task.id },
+      {
+        scope: 'previous_task',
+        taskId: null,
+        query: 'response body',
+        toolName: 'browser_network_get',
+        limit: 5,
+      },
+    );
+    expect(read).toHaveBeenCalledWith(
+      { conversationId: 'conversation_1', currentTaskId: created.task.id },
+      { evidenceId: 'toolResult_previous', offset: 0, limit: 2_000 },
+    );
+    expect(tavily.search).not.toHaveBeenCalled();
+    expect(browser.execute).not.toHaveBeenCalled();
+    expect(sandboxExecute).not.toHaveBeenCalled();
+    expect(
+      result.checkpoint.completedToolResults.map(({ toolName, output }) => [toolName, output]),
+    ).toEqual([
+      ['task_result_search', JSON.stringify(await search.mock.results[0]?.value)],
+      ['task_result_read', JSON.stringify(await read.mock.results[0]?.value)],
+    ]);
+    database.close();
+  });
+
   it('persists model telemetry and resumes a pending tool from the local checkpoint', async () => {
     const database = await openChatBrowserDatabase(
       createTestDatabaseName('local-pending-tool-resume'),
@@ -1658,6 +1788,7 @@ describe('TaskExecutor', () => {
         expect(dispatchBoundary.checkpoint.pendingToolCall).toMatchObject({
           callId: 'call_exec',
           executionState: 'may_have_dispatched',
+          executionId: expect.stringMatching(/^sandboxExecution_/),
         });
         return '{"code":0,"stdout":"done","stderr":"","truncated":false}';
       }
@@ -1669,7 +1800,7 @@ describe('TaskExecutor', () => {
       planner,
       tavily: tavilyPort(),
       browser: browserPort(),
-      sandbox: { execute },
+      sandbox: { execute, recover: vi.fn() },
       clock: dependencies.clock,
       ids: dependencies.ids,
     });
@@ -1701,7 +1832,7 @@ describe('TaskExecutor', () => {
     database.close();
   });
 
-  it('never redispatches a Sandbox exec that may already have run', async () => {
+  it('recovers an exact Sandbox exec result without redispatching after interruption', async () => {
     const database = await openChatBrowserDatabase(createTestDatabaseName('sandbox-ambiguous'));
     const repository = new IndexedDbTaskRepository(database);
     const dependencies = sources();
@@ -1735,13 +1866,17 @@ describe('TaskExecutor', () => {
     const execute = vi.fn<SandboxExecutionPort['execute']>(async () => {
       throw new DOMException('Stopped after dispatch.', 'AbortError');
     });
+    const recover = vi.fn<SandboxExecutionPort['recover']>(async () => ({
+      status: 'finished',
+      output: JSON.stringify({ code: 0, stdout: 'done', stderr: '', truncated: false }),
+    }));
     const executor = new TaskExecutor({
       repository,
       conversations: dependencies.conversations,
       planner,
       tavily: tavilyPort(),
       browser: browserPort(),
-      sandbox: { execute },
+      sandbox: { execute, recover },
       clock: dependencies.clock,
       ids: dependencies.ids,
     });
@@ -1754,6 +1889,7 @@ describe('TaskExecutor', () => {
         pendingToolCall: {
           callId: 'call_exec',
           executionState: 'may_have_dispatched',
+          executionId: expect.stringMatching(/^sandboxExecution_/),
         },
       },
     });
@@ -1761,13 +1897,150 @@ describe('TaskExecutor', () => {
     const recovered = await executor.run(created.task.id, new AbortController().signal);
 
     expect(execute).toHaveBeenCalledOnce();
+    expect(recover).toHaveBeenCalledWith(
+      expect.stringMatching(/^sandboxExecution_/),
+      expect.any(AbortSignal),
+    );
     expect(recovered.task.status).toBe('completed');
     expect(
       JSON.parse(
         recovered.checkpoint.completedToolResults.find(({ callId }) => callId === 'call_exec')
           ?.output ?? '{}',
       ),
-    ).toMatchObject({ code: 'AMBIGUOUS_EXECUTION', retryable: false });
+    ).toEqual({ code: 0, stdout: 'done', stderr: '', truncated: false });
+    database.close();
+  });
+
+  it('redispatches a Sandbox exec with the same ID only after a not-found receipt', async () => {
+    const database = await openChatBrowserDatabase(createTestDatabaseName('sandbox-not-found'));
+    const repository = new IndexedDbTaskRepository(database);
+    const dependencies = sources();
+    const commands = new TaskCommandService(
+      repository,
+      dependencies.clock,
+      dependencies.ids,
+      dependencies.conversations,
+    );
+    const created = await commands.create({
+      conversationId: 'conversation_1',
+      tabId: 7,
+      goal: 'Safely recover one undispatched command',
+    });
+    let turn = 0;
+    const executionIds: string[] = [];
+    const execute = vi.fn<SandboxExecutionPort['execute']>(async (_call, _signal, context) => {
+      executionIds.push(context?.executionId ?? '');
+      if (executionIds.length === 1) {
+        throw new DOMException('Stopped after dispatch.', 'AbortError');
+      }
+      return JSON.stringify({ code: 0, stdout: 'done', stderr: '', truncated: false });
+    });
+    const recover = vi.fn<SandboxExecutionPort['recover']>(async () => ({
+      status: 'not_found',
+    }));
+    const executor = new TaskExecutor({
+      repository,
+      conversations: dependencies.conversations,
+      planner: {
+        plan: () =>
+          (async function* () {
+            turn += 1;
+            if (turn === 1) {
+              yield sandboxCall('call_exec', 'sandbox_exec', {
+                command: 'touch marker',
+                cwd: null,
+              });
+            } else {
+              yield {
+                type: 'task.completed',
+                reason: 'model_response_completed',
+                messageId: 'message_answer',
+              } as const;
+            }
+          })(),
+      },
+      tavily: tavilyPort(),
+      browser: browserPort(),
+      sandbox: { execute, recover },
+      clock: dependencies.clock,
+      ids: dependencies.ids,
+    });
+
+    await expect(executor.run(created.task.id, new AbortController().signal)).rejects.toMatchObject(
+      { name: 'AbortError' },
+    );
+    const recovered = await executor.run(created.task.id, new AbortController().signal);
+
+    expect(recover).toHaveBeenCalledOnce();
+    expect(execute).toHaveBeenCalledTimes(2);
+    expect(executionIds[0]).toMatch(/^sandboxExecution_/);
+    expect(executionIds[1]).toBe(executionIds[0]);
+    expect(recovered.task.status).toBe('completed');
+    database.close();
+  });
+
+  it('keeps a running Sandbox exec pending instead of redispatching it', async () => {
+    const database = await openChatBrowserDatabase(createTestDatabaseName('sandbox-running'));
+    const repository = new IndexedDbTaskRepository(database);
+    const dependencies = sources();
+    const commands = new TaskCommandService(
+      repository,
+      dependencies.clock,
+      dependencies.ids,
+      dependencies.conversations,
+    );
+    const created = await commands.create({
+      conversationId: 'conversation_1',
+      tabId: 7,
+      goal: 'Wait for one running command without repeating it',
+    });
+    let turn = 0;
+    const execute = vi.fn<SandboxExecutionPort['execute']>(async () => {
+      throw new DOMException('Stopped after dispatch.', 'AbortError');
+    });
+    const recover = vi.fn<SandboxExecutionPort['recover']>(async () => ({ status: 'running' }));
+    const executor = new TaskExecutor({
+      repository,
+      conversations: dependencies.conversations,
+      planner: {
+        plan: () =>
+          (async function* () {
+            turn += 1;
+            if (turn === 1) {
+              yield sandboxCall('call_exec', 'sandbox_exec', {
+                command: 'long-running-command',
+                cwd: null,
+              });
+            } else {
+              yield {
+                type: 'task.completed',
+                reason: 'model_response_completed',
+                messageId: 'message_answer',
+              } as const;
+            }
+          })(),
+      },
+      tavily: tavilyPort(),
+      browser: browserPort(),
+      sandbox: { execute, recover },
+      clock: dependencies.clock,
+      ids: dependencies.ids,
+    });
+
+    await expect(executor.run(created.task.id, new AbortController().signal)).rejects.toMatchObject(
+      { name: 'AbortError' },
+    );
+    const paused = await executor.run(created.task.id, new AbortController().signal);
+
+    expect(execute).toHaveBeenCalledOnce();
+    expect(recover).toHaveBeenCalledOnce();
+    expect(paused.task.status).toBe('paused');
+    expect(paused.checkpoint.completedToolResults).toEqual([]);
+    expect(paused.checkpoint.pendingToolCall).toMatchObject({
+      callId: 'call_exec',
+      executionState: 'may_have_dispatched',
+      executionId: expect.stringMatching(/^sandboxExecution_/),
+    });
     database.close();
   });
 
@@ -1801,6 +2074,7 @@ describe('TaskExecutor', () => {
         execute: vi.fn(async () => {
           throw new SandboxClientError('AUTH', 'definitely_not_dispatched');
         }),
+        recover: vi.fn(),
       },
       clock: dependencies.clock,
       ids: dependencies.ids,
@@ -1866,6 +2140,7 @@ describe('TaskExecutor', () => {
         execute: vi.fn(async () => {
           throw new SandboxClientError('UNAVAILABLE', 'definitely_not_dispatched');
         }),
+        recover: vi.fn(),
       },
       clock: dependencies.clock,
       ids: dependencies.ids,
@@ -1884,7 +2159,7 @@ describe('TaskExecutor', () => {
     database.close();
   });
 
-  it('records an ambiguous Sandbox exec result when transport fails after dispatch', async () => {
+  it('pauses with the pending Sandbox exec intact when transport fails after dispatch', async () => {
     const database = await openChatBrowserDatabase(
       createTestDatabaseName('sandbox-transient-exec'),
     );
@@ -1928,7 +2203,7 @@ describe('TaskExecutor', () => {
       },
       tavily: tavilyPort(),
       browser: browserPort(),
-      sandbox: { execute },
+      sandbox: { execute, recover: vi.fn() },
       clock: dependencies.clock,
       ids: dependencies.ids,
     });
@@ -1936,13 +2211,16 @@ describe('TaskExecutor', () => {
     const result = await executor.run(created.task.id, new AbortController().signal);
 
     expect(execute).toHaveBeenCalledOnce();
-    expect(result.task.status).toBe('completed');
-    expect(JSON.parse(result.checkpoint.completedToolResults[0]?.output ?? '{}')).toEqual({
-      ok: false,
-      code: 'AMBIGUOUS_EXECUTION',
-      message:
-        'The Sandbox command may already have run. Inspect its effects before choosing the next action.',
-      retryable: false,
+    expect(result.task.status).toBe('paused');
+    expect(result.task.lastError).toMatchObject({
+      code: 'TransientProviderError',
+      retryable: true,
+    });
+    expect(result.checkpoint.completedToolResults).toEqual([]);
+    expect(result.checkpoint.pendingToolCall).toMatchObject({
+      callId: 'call_exec',
+      executionState: 'may_have_dispatched',
+      executionId: expect.stringMatching(/^sandboxExecution_/),
     });
     database.close();
   });
@@ -1982,7 +2260,7 @@ describe('TaskExecutor', () => {
       },
       tavily: tavilyPort(),
       browser: browserPort(),
-      sandbox: { execute },
+      sandbox: { execute, recover: vi.fn() },
       clock: dependencies.clock,
       ids: dependencies.ids,
     });

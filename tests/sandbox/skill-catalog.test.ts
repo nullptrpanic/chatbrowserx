@@ -42,6 +42,7 @@ function fixture(
   const client: SandboxClientPort = {
     isConfigured: vi.fn(async () => options.configured ?? true),
     execute,
+    getExecution: vi.fn(),
   };
   const settings = {
     get: vi.fn(async () => ({ ...DEFAULT_APP_SETTINGS, sandboxServer: server })),

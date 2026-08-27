@@ -56,4 +56,6 @@ export interface PendingToolCall {
   readonly name: string;
   readonly argumentsJson: string;
   readonly executionState: 'recorded' | 'may_have_dispatched';
+  /** Stable trusted identifier used only to recover an idempotent Sandbox command dispatch. */
+  readonly executionId?: string;
 }

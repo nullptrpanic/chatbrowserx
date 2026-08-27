@@ -19,6 +19,8 @@ pub(crate) enum ExecutionStatus {
 #[serde(deny_unknown_fields)]
 pub(crate) struct ExecutionRecord {
     pub(crate) id: ExecutionId,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) request_id: Option<String>,
     pub(crate) command: String,
     pub(crate) cwd: Option<PathBuf>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -43,6 +45,12 @@ pub(crate) struct ExecutionRecord {
     pub(crate) process_events: u64,
     pub(crate) file_events: u64,
     pub(crate) network_events: u64,
+}
+
+#[derive(Clone, Debug)]
+pub(crate) enum ExecutionStart {
+    Started(ExecutionId),
+    Existing(Box<ExecutionRecord>),
 }
 
 #[derive(Clone, Debug)]
