@@ -123,6 +123,7 @@ describe('parseExtensionMessage', () => {
 
   it.each([
     ['system.ping', {}],
+    ['sandbox.getConsole', {}],
     ['task.pause', { taskId: 'task_1' }],
     ['task.resume', { taskId: 'task_1' }],
     ['task.cancel', { taskId: 'task_1' }],

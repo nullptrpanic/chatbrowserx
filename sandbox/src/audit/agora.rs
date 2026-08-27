@@ -6,6 +6,39 @@ use agora_sandbox::callback::{
 };
 use anyhow::{Context, Result};
 
+pub(crate) struct UserCommandBoundary {
+    pub(crate) timestamp_ms: u64,
+    pub(crate) marker_pid: u32,
+}
+
+pub(crate) fn user_command_boundary(
+    event: &Event,
+    marker: &str,
+) -> Result<Option<UserCommandBoundary>> {
+    let Event::Process(event) = event else {
+        return Ok(None);
+    };
+    if event.event_type != EventType::ProcessExecAttempt
+        || event.command.executable != "/usr/bin/true"
+        || event.command.arguments.len() != 2
+        || event.command.arguments[1] != marker
+    {
+        return Ok(None);
+    }
+    Ok(Some(UserCommandBoundary {
+        timestamp_ms: timestamp_ms(&event.occurred_at)?,
+        marker_pid: event.process.pid,
+    }))
+}
+
+pub(crate) fn event_pid(event: &Event) -> u32 {
+    match event {
+        Event::Process(event) => event.process.pid,
+        Event::File(event) => event.process.pid,
+        Event::Network(event) => event.process.pid,
+    }
+}
+
 pub(crate) fn record(
     execution_id: ExecutionId,
     event: Event,
@@ -16,12 +49,15 @@ pub(crate) fn record(
         Event::File(event) => file(event),
         Event::Network(event) => network(event),
     };
-    let timestamp_ms = chrono::DateTime::parse_from_rfc3339(&occurred_at)
+    audit.record_event(execution_id, timestamp_ms(&occurred_at)?, data)
+}
+
+fn timestamp_ms(occurred_at: &str) -> Result<u64> {
+    chrono::DateTime::parse_from_rfc3339(occurred_at)
         .with_context(|| format!("invalid Agora event timestamp {occurred_at}"))?
         .timestamp_millis()
         .try_into()
-        .context("Agora event timestamp is before the Unix epoch")?;
-    audit.record_event(execution_id, timestamp_ms, data)
+        .context("Agora event timestamp is before the Unix epoch")
 }
 
 fn process(event: ProcessEvent) -> (String, AuditEventData) {
@@ -54,6 +90,8 @@ fn file(event: FileEvent) -> (String, AuditEventData) {
         AuditEventData::File {
             event: event_type(event.event_type),
             pid: event.process.pid,
+            ppid: nonzero(event.process.ppid),
+            executable: event.process.executable,
             path: event.file.path,
             access: Some(
                 match event.file.mode.access {
@@ -68,6 +106,7 @@ fn file(event: FileEvent) -> (String, AuditEventData) {
 }
 
 fn network(event: NetworkEvent) -> (String, AuditEventData) {
+    let process = event.process;
     let (host, ip, port) = match event.network {
         Some(network) => {
             let host = network
@@ -87,7 +126,9 @@ fn network(event: NetworkEvent) -> (String, AuditEventData) {
         event.occurred_at,
         AuditEventData::Network {
             event: event_type(event.event_type),
-            pid: event.process.pid,
+            pid: process.pid,
+            ppid: nonzero(process.ppid),
+            executable: process.executable,
             host,
             ip,
             port,
@@ -141,6 +182,39 @@ mod tests {
     use super::*;
     use agora_sandbox::callback::{FileEvent, NetworkEvent, ProcessEvent};
     use serde_json::json;
+
+    #[test]
+    fn recognizes_only_the_exact_internal_user_command_marker() {
+        let marker = "chatbrowserx-user-command-run-123";
+        let process = json!({
+            "schema_version": 9,
+            "event_id": "event",
+            "occurred_at": "2026-08-25T08:00:00.123Z",
+            "subsystem": "process",
+            "event_type": "process.exec.attempt",
+            "sandbox_id": "sandbox",
+            "run_id": "run",
+            "trace_id": "trace",
+            "process": {"pid": 42, "ppid": 10, "executable": "/bin/bash"},
+            "command": {
+                "executable": "/usr/bin/true",
+                "arguments": ["true", marker],
+                "current_dir": "/workspace",
+                "operation": "execve"
+            },
+            "result": {"status": "started", "error_code": null, "error_message": null}
+        });
+        let event = Event::Process(serde_json::from_value::<ProcessEvent>(process).unwrap());
+
+        let boundary = user_command_boundary(&event, marker).unwrap().unwrap();
+        assert_eq!(boundary.timestamp_ms, 1_787_644_800_123);
+        assert_eq!(boundary.marker_pid, 42);
+        assert!(
+            user_command_boundary(&event, "different-marker")
+                .unwrap()
+                .is_none()
+        );
+    }
 
     #[test]
     fn normalizes_process_file_and_network_events() {
@@ -220,6 +294,14 @@ mod tests {
 
         let snapshot = audit.snapshot();
         assert_eq!(snapshot.events.len(), 3);
+        let file = serde_json::to_value(&snapshot.events[1]).unwrap();
+        let network = serde_json::to_value(&snapshot.events[2]).unwrap();
+        assert_eq!(file["pid"], 42);
+        assert_eq!(file["ppid"], 10);
+        assert_eq!(file["executable"], "/bin/bash");
+        assert_eq!(network["pid"], 42);
+        assert_eq!(network["ppid"], 10);
+        assert_eq!(network["executable"], "/bin/bash");
         assert!(matches!(
             &snapshot.events[0].data,
             AuditEventData::Process {

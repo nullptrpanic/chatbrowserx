@@ -141,9 +141,7 @@ async fn serve_socket(mut socket: WebSocket, state: WebState) {
                     }
                     #[cfg(any(target_os = "macos", test))]
                     Ok(AuditUpdate::Event { event }) => ServerMessage::Event { event },
-                    Ok(AuditUpdate::EventsCleared { execution_id }) => {
-                        ServerMessage::EventsCleared { execution_id }
-                    }
+                    Ok(AuditUpdate::ExecutionsCleared) => ServerMessage::ExecutionsCleared,
                     Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {
                         ServerMessage::Snapshot { snapshot: state.audit.snapshot() }
                     }
@@ -161,13 +159,13 @@ async fn serve_socket(mut socket: WebSocket, state: WebState) {
                         }
                     }
                     Some(Ok(Message::Text(message))) => {
-                        if let Ok(ClientMessage::ClearEvents { execution_id }) =
+                        if let Ok(ClientMessage::ClearExecutions) =
                             serde_json::from_str::<ClientMessage>(&message)
-                            && state.audit.clear_events(execution_id).is_err()
+                            && state.audit.clear_executions().is_err()
                             && send_json(
                                 &mut socket,
                                 &ServerMessage::Error {
-                                    message: "Unable to clear events for this execution.".to_owned(),
+                                    message: "Unable to clear execution history.".to_owned(),
                                 },
                             )
                             .await

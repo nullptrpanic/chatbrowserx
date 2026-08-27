@@ -7,6 +7,8 @@ use anyhow::{Context, Result};
 use async_trait::async_trait;
 use std::path::Path;
 use std::process::Stdio;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicU32, Ordering};
 
 pub(crate) struct AgoraRuntime {
     config: SandboxConfig,
@@ -50,8 +52,10 @@ impl ShellRuntime for AgoraRuntime {
         request: ShellCommand,
         context: RuntimeContext,
     ) -> Result<Box<dyn RunningCommand>> {
+        let marker = format!("chatbrowserx-user-command-{}", context.execution_id);
+        let shell_command = format!("/usr/bin/true {marker}; {}", request.command);
         let mut command = SandboxCommand::new("/bin/bash")
-            .args(["-lc", request.command.as_str()])
+            .args(["-lc", shell_command.as_str()])
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
         for (name, value) in request.env {
@@ -60,9 +64,50 @@ impl ShellRuntime for AgoraRuntime {
         if let Some(cwd) = request.cwd {
             command = command.current_dir(cwd);
         }
+        let marker_pid = Arc::new(AtomicU32::new(0));
         let callback = move |event: Event| {
             let context = context.clone();
+            let marker = marker.clone();
+            let marker_pid = Arc::clone(&marker_pid);
             async move {
+                match crate::audit::agora::user_command_boundary(&event, &marker) {
+                    Ok(Some(boundary)) => {
+                        if marker_pid
+                            .compare_exchange(
+                                0,
+                                boundary.marker_pid,
+                                Ordering::AcqRel,
+                                Ordering::Acquire,
+                            )
+                            .is_ok()
+                        {
+                            if let Err(error) = context.audit.record_user_command_started(
+                                context.execution_id,
+                                boundary.timestamp_ms,
+                            ) {
+                                let _ = marker_pid.compare_exchange(
+                                    boundary.marker_pid,
+                                    0,
+                                    Ordering::AcqRel,
+                                    Ordering::Acquire,
+                                );
+                                crate::logger::error!(
+                                    "failed to record user command boundary: {error}"
+                                );
+                            } else {
+                                return Decision::Allow;
+                            }
+                        }
+                    }
+                    Ok(None) => {}
+                    Err(error) => {
+                        crate::logger::error!("failed to inspect Agora audit marker: {error}");
+                    }
+                }
+                let internal_pid = marker_pid.load(Ordering::Acquire);
+                if internal_pid != 0 && crate::audit::agora::event_pid(&event) == internal_pid {
+                    return Decision::Allow;
+                }
                 if let Err(error) =
                     crate::audit::agora::record(context.execution_id, event, &context.audit)
                 {
@@ -85,6 +130,10 @@ struct AgoraCommand {
 
 #[async_trait]
 impl RunningCommand for AgoraCommand {
+    fn pid(&self) -> Option<u32> {
+        self.child.id()
+    }
+
     fn take_stdout(&mut self) -> Option<BoxReader> {
         self.child
             .stdout

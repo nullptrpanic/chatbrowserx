@@ -4,6 +4,7 @@ import {
   type ExtensionResponse,
 } from '../../shared/protocol/message-types';
 import { parseExtensionMessage } from '../../shared/protocol/parse-message';
+import type { SandboxConsoleClientPort } from '../../sandbox/sandbox-client';
 import { TaskCommandError, type TaskCommandPort } from '../../tasks/task-command-service';
 import type { PanelService } from '../../tasks/panel-service';
 
@@ -36,6 +37,7 @@ export interface MessageRouterDependencies {
   };
   readonly requestRecoveryScan: () => Promise<void>;
   readonly scheduleTask: (taskId: string) => Promise<void>;
+  readonly sandboxConsole?: SandboxConsoleClientPort;
   readonly pageFeatures?: {
     ensure(tabId: number): Promise<unknown>;
   };
@@ -117,6 +119,16 @@ async function routeMessage(
         message.requestId,
         await dependencies.panel.clearConversation(message.payload.conversationId),
       );
+    case 'sandbox.getConsole':
+      if (context.senderTabId !== null) {
+        return errorResponse(message.requestId, 'INVALID_CONTEXT', 'Sandbox context is invalid.');
+      }
+      if (dependencies.sandboxConsole === undefined) {
+        throw new Error('Sandbox console unavailable.');
+      }
+      return successResponse(message.requestId, {
+        url: await dependencies.sandboxConsole.getConsoleUrl(AbortSignal.timeout(5_000)),
+      });
     case 'settings.get':
       if (context.senderTabId !== null) {
         return errorResponse(message.requestId, 'INVALID_CONTEXT', 'Settings context is invalid.');

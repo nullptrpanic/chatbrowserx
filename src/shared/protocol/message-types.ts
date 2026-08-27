@@ -23,6 +23,7 @@ export type ExtensionMessage =
     >
   | Message<'chat.supplement', { taskId: string; text: string; attachmentIds: readonly string[] }>
   | Message<'conversation.clear', { conversationId: string }>
+  | Message<'sandbox.getConsole', Record<string, never>>
   | Message<'settings.get', Record<string, never>>
   | Message<
       'settings.save',

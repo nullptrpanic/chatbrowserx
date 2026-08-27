@@ -15,17 +15,21 @@ import {
 } from './panel-state';
 
 export type PanelConnectionStatus = 'idle' | 'loading' | 'ready' | 'error';
+export type SandboxConsoleConnectionStatus = 'checking' | 'connected' | 'unavailable';
 
 export interface PanelClientState {
   readonly status: PanelConnectionStatus;
   readonly snapshot: PanelSnapshot | null;
   readonly error: string | null;
   readonly activeConversationId: string | null | undefined;
+  readonly sandboxConsoleUrl: string | null;
+  readonly sandboxConsoleStatus: SandboxConsoleConnectionStatus;
 }
 
 export interface PanelEnvironment {
   getActiveTab(): Promise<{ readonly id: number } | null>;
   openSourcePage?(source: PanelMessageSourcePage): Promise<void>;
+  openSandboxConsole?(url: string): Promise<void>;
 }
 
 export interface PanelClientOptions {
@@ -66,6 +70,25 @@ function readPushedStateVersion(value: unknown): number | null {
   return readStateVersion(value);
 }
 
+function readSandboxConsoleUrl(value: unknown): string | null {
+  if (
+    typeof value !== 'object' ||
+    value === null ||
+    !('url' in value) ||
+    typeof value.url !== 'string' ||
+    value.url.length === 0 ||
+    value.url.length > 2_048
+  ) {
+    return null;
+  }
+  try {
+    const protocol = new URL(value.url).protocol;
+    return protocol === 'http:' || protocol === 'https:' ? value.url : null;
+  } catch {
+    return null;
+  }
+}
+
 /** Creates one cryptographically unique runtime request identifier. */
 function requestId(): string {
   return `panel_${crypto.randomUUID()}`;
@@ -81,6 +104,9 @@ export function createChromePanelEnvironment(): PanelEnvironment {
     async openSourcePage(source) {
       await chrome.tabs.create({ url: source.url, active: true });
     },
+    async openSandboxConsole(url) {
+      await chrome.tabs.create({ url, active: true });
+    },
   };
 }
 
@@ -94,12 +120,15 @@ export class PanelClient {
     snapshot: null,
     error: null,
     activeConversationId: undefined,
+    sandboxConsoleUrl: null,
+    sandboxConsoleStatus: 'checking',
   };
   #tabId: number | null = null;
   #generation = 0;
   #timer: ReturnType<typeof setTimeout> | null = null;
   #unsubscribeRuntime: (() => void) | null = null;
   #notificationRefresh: Promise<void> | null = null;
+  #sandboxConsoleRefresh: Promise<void> | null = null;
   #requestedStateVersion = -1;
   #disposed = false;
   #featuresEnsuredKey: string | null = null;
@@ -139,6 +168,7 @@ export class PanelClient {
       payload: {},
     }).catch(() => undefined);
     await this.refresh();
+    this.#queueSandboxConsoleRefresh();
     this.#schedulePoll();
   }
 
@@ -179,6 +209,8 @@ export class PanelClient {
         status: 'ready',
         snapshot,
         error: null,
+        sandboxConsoleUrl: this.#state.sandboxConsoleUrl,
+        sandboxConsoleStatus: this.#state.sandboxConsoleStatus,
         activeConversationId:
           activeConversationId === undefined
             ? undefined
@@ -332,6 +364,13 @@ export class PanelClient {
     await this.#environment.openSourcePage(source);
   }
 
+  /** Opens the current ephemeral Sandbox console link without persisting it in panel data. */
+  async openSandboxConsole(): Promise<void> {
+    const url = this.#state.sandboxConsoleUrl;
+    if (url === null || this.#environment.openSandboxConsole === undefined) return;
+    await this.#environment.openSandboxConsole(url);
+  }
+
   /** Ensures page commands are installed on one already-authorized tab. */
   async #ensurePageFeatures(tabId: number): Promise<void> {
     await this.#send({
@@ -457,6 +496,36 @@ export class PanelClient {
       });
   }
 
+  /** Coalesces non-blocking probes so a slow Sandbox never delays chat state or stacks requests. */
+  #queueSandboxConsoleRefresh(): void {
+    if (this.#sandboxConsoleRefresh !== null || this.#disposed) return;
+    const refresh = this.#refreshSandboxConsole().finally(() => {
+      if (this.#sandboxConsoleRefresh === refresh) this.#sandboxConsoleRefresh = null;
+    });
+    this.#sandboxConsoleRefresh = refresh;
+  }
+
+  /** Publishes the validated console link and the completed non-blocking probe status. */
+  async #refreshSandboxConsole(): Promise<void> {
+    const url = await this.#send({
+      version: PROTOCOL_VERSION,
+      requestId: requestId(),
+      type: 'sandbox.getConsole',
+      payload: {},
+    })
+      .then((data) => readSandboxConsoleUrl(data))
+      .catch(() => null);
+    const sandboxConsoleStatus = url === null ? 'unavailable' : 'connected';
+    if (
+      this.#disposed ||
+      (url === this.#state.sandboxConsoleUrl &&
+        sandboxConsoleStatus === this.#state.sandboxConsoleStatus)
+    ) {
+      return;
+    }
+    this.#setState({ ...this.#state, sandboxConsoleUrl: url, sandboxConsoleStatus });
+  }
+
   /** Repeats a local detail read when an in-flight response predates a newer requested boundary. */
   async #loadTaskDetailsThroughTarget(taskId: string): Promise<void> {
     while (!this.#disposed) {
@@ -579,6 +648,7 @@ export class PanelClient {
     if (this.#disposed || this.#timer !== null) return;
     this.#timer = setTimeout(() => {
       this.#timer = null;
+      this.#queueSandboxConsoleRefresh();
       void this.#recoverIfChanged()
         .catch(() => undefined)
         .finally(() => this.#schedulePoll());

@@ -323,6 +323,95 @@ describe('App background connection', () => {
     );
   });
 
+  it('shows the connected Sandbox console action before trash only in the conversation view', async () => {
+    const current = buildSnapshot();
+    const snapshot: PanelSnapshot = {
+      ...current,
+      settings: {
+        ...current.settings,
+        sandboxServer: 'http://127.0.0.1:8787',
+        hasSandboxToken: true,
+      },
+      conversation: {
+        id: 'conversation_1',
+        title: 'Existing conversation',
+        tabId: 7,
+        createdAt: 900,
+        updatedAt: 1_000,
+        taskStatus: null,
+      },
+    };
+    const send = vi.fn<RuntimePort['send']>(async (message) => ({
+      version: 1,
+      requestId: message.requestId,
+      ok: true,
+      data:
+        message.type === 'panel.getSnapshot'
+          ? snapshot
+          : message.type === 'sandbox.getConsole'
+            ? { url: 'http://127.0.0.1:43130/#token=viewer-token' }
+            : { connected: true },
+    }));
+    const openSandboxConsole = vi.fn(async () => undefined);
+    const user = userEvent.setup();
+
+    render(
+      <App
+        runtimePort={{ send }}
+        environment={{ ...environment, openSandboxConsole }}
+        attachmentClient={attachments}
+      />,
+    );
+
+    const consoleButton = await screen.findByRole('button', { name: '沙箱控制台' });
+    expect(consoleButton).toBeEnabled();
+    const clearButton = screen.getByRole('button', { name: '清空当前对话' });
+    expect(consoleButton).toHaveClass('sandbox-console-button');
+    expect(
+      consoleButton.compareDocumentPosition(clearButton) & Node.DOCUMENT_POSITION_FOLLOWING,
+    ).not.toBe(0);
+
+    await user.click(consoleButton);
+    expect(openSandboxConsole).toHaveBeenCalledWith('http://127.0.0.1:43130/#token=viewer-token');
+
+    await user.click(screen.getByRole('button', { name: '设置' }));
+    expect(screen.queryByRole('button', { name: '沙箱控制台' })).not.toBeInTheDocument();
+  });
+
+  it('shows a disabled red Sandbox action with an x after a configured console probe fails', async () => {
+    const current = buildSnapshot();
+    const snapshot: PanelSnapshot = {
+      ...current,
+      settings: {
+        ...current.settings,
+        sandboxServer: 'http://127.0.0.1:8787',
+        hasSandboxToken: true,
+      },
+    };
+    const send = vi.fn<RuntimePort['send']>(async (message) =>
+      message.type === 'sandbox.getConsole'
+        ? {
+            version: 1,
+            requestId: message.requestId,
+            ok: false,
+            error: { code: 'SANDBOX_UNAVAILABLE', message: 'Sandbox is unavailable.' },
+          }
+        : {
+            version: 1,
+            requestId: message.requestId,
+            ok: true,
+            data: message.type === 'panel.getSnapshot' ? snapshot : { connected: true },
+          },
+    );
+
+    render(<App runtimePort={{ send }} environment={environment} attachmentClient={attachments} />);
+
+    const consoleButton = await screen.findByRole('button', { name: '沙箱控制台' });
+    expect(consoleButton).toBeDisabled();
+    expect(consoleButton).toHaveClass('is-unavailable');
+    expect(consoleButton.querySelectorAll('svg')).toHaveLength(2);
+  });
+
   it('submits directly without requesting current-site access', async () => {
     const events: string[] = [];
     const snapshot = buildSnapshot();

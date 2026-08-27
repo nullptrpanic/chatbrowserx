@@ -179,6 +179,47 @@ describe('createMessageRouter', () => {
     expect(requestRecoveryScan).toHaveBeenCalledTimes(1);
   });
 
+  it('returns the Sandbox console URL only to a trusted extension context', async () => {
+    const sandboxConsole = {
+      getConsoleUrl: vi.fn(async () => 'http://127.0.0.1:43130/#token=viewer-token'),
+    };
+    const router = createMessageRouter({
+      commands: buildCommands(buildSnapshot()),
+      panel: buildPanel(),
+      screenshots: buildScreenshots(),
+      requestRecoveryScan: vi.fn(async () => undefined),
+      scheduleTask: vi.fn(async () => undefined),
+      sandboxConsole,
+    });
+
+    await expect(
+      router({
+        version: PROTOCOL_VERSION,
+        requestId: 'req_console',
+        type: 'sandbox.getConsole',
+        payload: {},
+      }),
+    ).resolves.toEqual({
+      version: PROTOCOL_VERSION,
+      requestId: 'req_console',
+      ok: true,
+      data: { url: 'http://127.0.0.1:43130/#token=viewer-token' },
+    });
+
+    await expect(
+      router(
+        {
+          version: PROTOCOL_VERSION,
+          requestId: 'req_page_console',
+          type: 'sandbox.getConsole',
+          payload: {},
+        },
+        { senderTabId: 7 },
+      ),
+    ).resolves.toMatchObject({ ok: false, error: { code: 'INVALID_CONTEXT' } });
+    expect(sandboxConsole.getConsoleUrl).toHaveBeenCalledTimes(1);
+  });
+
   it('installs page features through the trusted background service', async () => {
     const pageFeatures = { ensure: vi.fn(async () => ({ status: 'installed' })) };
     const router = createMessageRouter({

@@ -12,6 +12,7 @@
     detailPayload: '',
     detailInput: '',
     detailOutput: '',
+    collapsedNodes: new Set(),
     socket: null,
   };
 
@@ -21,6 +22,7 @@
     search: document.querySelector('#search'),
     eventTotal: document.querySelector('#event-total'),
     executionList: document.querySelector('#execution-list'),
+    clearExecutions: document.querySelector('#clear-executions'),
     selectedCommand: document.querySelector('#selected-command'),
     selectedStatus: document.querySelector('#selected-status'),
     selectedCwd: document.querySelector('#selected-cwd'),
@@ -30,7 +32,6 @@
     fileCount: document.querySelector('#file-count'),
     hostCount: document.querySelector('#host-count'),
     duration: document.querySelector('#duration'),
-    clearEvents: document.querySelector('#clear-events'),
     workspace: document.querySelector('.workspace'),
     sidebar: document.querySelector('.sidebar'),
     inspector: document.querySelector('.inspector'),
@@ -49,14 +50,15 @@
     detailPid: document.querySelector('#detail-pid'),
     detailPpid: document.querySelector('#detail-ppid'),
     detailRunId: document.querySelector('#detail-run-id'),
+    detailOwnershipBlock: document.querySelector('#detail-ownership-block'),
+    detailOwnership: document.querySelector('#detail-ownership'),
+    detailWorkingDirectoryBlock: document.querySelector('#detail-working-directory-block'),
+    detailWorkingDirectory: document.querySelector('#detail-working-directory'),
     detailInputBlock: document.querySelector('#detail-input-block'),
     detailInput: document.querySelector('#detail-input'),
     detailOutputBlock: document.querySelector('#detail-output-block'),
     detailOutput: document.querySelector('#detail-output'),
     detailPayload: document.querySelector('#detail-payload'),
-    relatedProcesses: document.querySelector('#related-processes'),
-    relatedFiles: document.querySelector('#related-files'),
-    relatedNetwork: document.querySelector('#related-network'),
     copyEvent: document.querySelector('#copy-event'),
     copyInput: document.querySelector('#copy-input'),
     copyOutput: document.querySelector('#copy-output'),
@@ -111,7 +113,7 @@
       if (update.type === 'snapshot') applySnapshot(update.snapshot);
       if (update.type === 'execution') applyExecution(update.execution);
       if (update.type === 'event') applyEvent(update.event);
-      if (update.type === 'events_cleared') applyEventsCleared(update.execution_id);
+      if (update.type === 'executions_cleared') applyExecutionsCleared();
       if (update.type === 'error') {
         setConnection('error', update.message || 'REQUEST FAILED');
         return;
@@ -147,14 +149,13 @@
     render();
   }
 
-  function applyEventsCleared(executionId) {
-    for (const [sequence, event] of state.events) {
-      if (event.execution_id === executionId) state.events.delete(sequence);
-    }
-    if (state.selectedExecutionId === executionId) {
-      state.selectedEventSequence = null;
-      state.selectedCommand = true;
-    }
+  function applyExecutionsCleared() {
+    state.executions.clear();
+    state.events.clear();
+    state.collapsedNodes.clear();
+    state.selectedExecutionId = null;
+    state.selectedEventSequence = null;
+    state.selectedCommand = false;
     render();
   }
 
@@ -195,6 +196,50 @@
       );
   }
 
+  function visibleEvents(execution, events) {
+    const boundary = execution?.user_command_started_at_ms;
+    if (!Number.isFinite(boundary)) return events;
+    const rootPid = inferRootIdentity(execution, events).pid;
+    const hiddenProcessIds = new Set(
+      events
+        .filter(
+          (event) =>
+            event.kind === 'process' &&
+            Number.isFinite(event.pid) &&
+            event.pid !== rootPid &&
+            event.timestamp_ms < boundary,
+        )
+        .map((event) => event.pid),
+    );
+    let changed = true;
+    while (changed) {
+      changed = false;
+      for (const event of events) {
+        if (
+          event.kind !== 'process' ||
+          !Number.isFinite(event.pid) ||
+          event.pid === rootPid ||
+          !hiddenProcessIds.has(event.ppid) ||
+          hiddenProcessIds.has(event.pid)
+        ) {
+          continue;
+        }
+        hiddenProcessIds.add(event.pid);
+        changed = true;
+      }
+    }
+    return events.filter(
+      (event) =>
+        event.timestamp_ms >= boundary &&
+        (!Number.isFinite(event.pid) || !hiddenProcessIds.has(event.pid)),
+    );
+  }
+
+  function activeVisibleEvents() {
+    const execution = activeExecution();
+    return execution ? visibleEvents(execution, activeEvents()) : [];
+  }
+
   function queryMatches(value) {
     const query = elements.search.value.trim().toLocaleLowerCase();
     return !query || JSON.stringify(value).toLocaleLowerCase().includes(query);
@@ -203,13 +248,6 @@
   function isSystemFile(event) {
     if (event.kind !== 'file') return false;
     return /^\/(System|Library|usr\/lib|private\/var\/db)(\/|$)/.test(event.path || '');
-  }
-
-  function visibleEvents(kind) {
-    return activeEvents()
-      .filter((event) => !kind || event.kind === kind)
-      .filter((event) => state.showSystemFiles || !isSystemFile(event))
-      .filter(queryMatches);
   }
 
   function render() {
@@ -254,8 +292,13 @@
       );
       const duration = execution.duration_ms ?? Math.max(0, Date.now() - execution.started_at_ms);
       const firstMeta = create('div', 'execution-meta');
+      const timing = create('span', 'execution-timing');
+      timing.append(
+        timestampElement(execution.started_at_ms, 'execution-start-time'),
+        document.createTextNode('· ' + formatDuration(duration)),
+      );
       firstMeta.append(
-        create('span', '', '◷ ' + formatDuration(duration)),
+        timing,
         create(
           'span',
           '',
@@ -270,6 +313,7 @@
       button.append(title, firstMeta, secondMeta);
       rows.push(button);
     }
+    elements.clearExecutions.disabled = state.executions.size === 0;
     elements.executionList.replaceChildren(...(rows.length ? rows : [empty()]));
   }
 
@@ -296,10 +340,9 @@
       elements.fileCount.textContent = '0';
       elements.hostCount.textContent = '0';
       elements.duration.textContent = '0 ms';
-      elements.clearEvents.disabled = true;
       return;
     }
-    const events = activeEvents();
+    const events = activeVisibleEvents();
     const processIds = new Set(events.map((event) => event.pid).filter(Number.isFinite));
     const hosts = new Set(
       events
@@ -321,7 +364,6 @@
     elements.duration.textContent = formatDuration(
       execution.duration_ms ?? Math.max(0, Date.now() - execution.started_at_ms),
     );
-    elements.clearEvents.disabled = events.length === 0;
   }
 
   function setMonitoringMode(label, commandOnly) {
@@ -335,55 +377,211 @@
       elements.timeline.replaceChildren(empty());
       return;
     }
-    elements.timeline.replaceChildren(commandRow(execution), ...renderEventRows(visibleEvents('')));
+    const events = activeVisibleEvents();
+    const root = pruneTimelineTree(buildTimelineTree(execution, events), true);
+    const rows = [];
+    if (root) renderTimelineNode(root, 1, rows, processIndex(events));
+    elements.timeline.replaceChildren(...(rows.length ? rows : [empty()]));
   }
 
-  function renderEventRows(events) {
-    const processes = processIndex(activeEvents());
-    return events.map((event) => eventRow(event, processes));
+  function inferRootIdentity(execution, events) {
+    const pids = new Set(events.map((event) => event.pid).filter(Number.isFinite));
+    const parent = events
+      .filter((event) => event.kind === 'process' && Number.isFinite(event.ppid))
+      .map((event) => event.ppid)
+      .find((pid) => pids.has(pid));
+    const pid = execution.pid ?? parent ?? events[0]?.pid ?? null;
+    const process = events.find((event) => event.kind === 'process' && event.pid === pid);
+    return { pid, ppid: execution.ppid ?? process?.ppid ?? null };
   }
 
-  function commandRow(execution) {
+  function buildTimelineTree(execution, events) {
+    const ordered = [...events].sort(
+      (left, right) => left.timestamp_ms - right.timestamp_ms || left.sequence - right.sequence,
+    );
+    const identity = inferRootIdentity(execution, ordered);
+    const root = {
+      id: 'command:' + execution.id,
+      type: 'command',
+      execution,
+      primaryEvent: null,
+      pid: identity.pid,
+      ppid: identity.ppid,
+      executable: execution.command,
+      timestamp: execution.started_at_ms,
+      sequence: 0,
+      children: [],
+      root: true,
+    };
+    const processes = new Map();
+    const eventNodes = new Map();
+
+    for (const event of ordered.filter((candidate) => candidate.kind === 'process')) {
+      if (event.pid === root.pid) {
+        eventNodes.set(eventKey(event), root);
+        continue;
+      }
+      let node = processes.get(event.pid);
+      const executable = event.executable || 'Process ' + event.pid;
+      if (!node) {
+        node = {
+          id: 'process:' + execution.id + ':' + event.sequence,
+          type: 'command',
+          execution,
+          primaryEvent: event,
+          pid: event.pid,
+          ppid: event.ppid ?? null,
+          executable,
+          timestamp: event.timestamp_ms,
+          sequence: event.sequence,
+          processEvents: [],
+          children: [],
+        };
+        processes.set(event.pid, node);
+      }
+      node.processEvents.push(event);
+      if (event.event === 'exec') {
+        node.primaryEvent = event;
+        node.executable = executable;
+        node.ppid = event.ppid ?? node.ppid;
+      }
+      eventNodes.set(eventKey(event), node);
+    }
+
+    for (const node of processes.values()) {
+      const parent = node.ppid === root.pid ? root : (processes.get(node.ppid) ?? root);
+      (parent === node ? root : parent).children.push(node);
+    }
+
+    for (const event of ordered) {
+      if (event.kind === 'process') {
+        const node = eventNodes.get(eventKey(event));
+        if (node === root) {
+          node.children.push(eventLeaf(event));
+          continue;
+        }
+        if (node?.primaryEvent === event) continue;
+        node?.children.push(eventLeaf(event));
+      } else {
+        const unmatched = hasUnmatchedPid(event, root.pid, processes);
+        const owner = unmatched || event.pid === root.pid ? root : processes.get(event.pid);
+        owner.children.push(eventLeaf(event, unmatched));
+      }
+    }
+    sortTreeChildren(root);
+    return root;
+  }
+
+  function eventLeaf(event, unmatched = false) {
+    return {
+      id: 'event:' + eventKey(event),
+      type: 'event',
+      event,
+      unmatched,
+      timestamp: event.timestamp_ms,
+      sequence: event.sequence,
+      children: [],
+    };
+  }
+
+  function hasUnmatchedPid(event, rootPid, processes) {
+    return event.kind !== 'process' && event.pid !== rootPid && !processes.has(event.pid);
+  }
+
+  function sortTreeChildren(node) {
+    node.children.sort(
+      (left, right) => left.timestamp - right.timestamp || left.sequence - right.sequence,
+    );
+    for (const child of node.children) sortTreeChildren(child);
+  }
+
+  function pruneTimelineTree(node, isRoot) {
+    if (node.type === 'event') {
+      if (!state.showSystemFiles && isSystemFile(node.event)) return null;
+      return queryMatches(node.event) ? node : null;
+    }
+    const children = node.children.map((child) => pruneTimelineTree(child, false)).filter(Boolean);
+    if (!isRoot && elements.search.value.trim() && !queryMatches(node) && children.length === 0) {
+      return null;
+    }
+    return { ...node, children };
+  }
+
+  function renderTimelineNode(node, level, rows, processes) {
+    if (node.type === 'command') {
+      rows.push(commandRow(node, level));
+      if (state.collapsedNodes.has(node.id)) return;
+    } else {
+      rows.push(eventRow(node, processes, level));
+    }
+    for (const child of node.children) renderTimelineNode(child, level + 1, rows, processes);
+  }
+
+  function commandRow(node, level) {
+    const execution = node.execution;
+    const root = node.root === true;
+    const selected = root
+      ? state.selectedCommand
+      : node.primaryEvent?.sequence === state.selectedEventSequence;
     const row = create(
       'button',
-      'event-row command-row' + (state.selectedCommand ? ' selected' : ''),
+      'event-row command-row' + (root ? ' root-command' : '') + (selected ? ' selected' : ''),
     );
     row.type = 'button';
+    row.setAttribute('role', 'treeitem');
+    row.setAttribute('aria-level', String(level));
+    row.dataset.treeId = node.id;
+    row.style.setProperty('--depth', String(level - 1));
+    row.setAttribute('aria-expanded', String(!state.collapsedNodes.has(node.id)));
     row.addEventListener('click', () => {
-      state.selectedCommand = true;
-      state.selectedEventSequence = null;
+      if (root || node.primaryEvent) {
+        state.selectedCommand = root;
+        state.selectedEventSequence = root ? null : node.primaryEvent.sequence;
+      }
+      if (state.collapsedNodes.has(node.id)) state.collapsedNodes.delete(node.id);
+      else state.collapsedNodes.add(node.id);
       render();
     });
     const main = create('span', 'event-main');
-    const label = create('span', 'event-label', execution.command);
-    label.title = execution.command;
-    main.append(create('span', 'badge command', 'COMMAND'), label);
+    const label = create('span', 'event-label', node.executable);
+    label.title = node.executable;
+    main.append(
+      create('span', 'tree-chevron', state.collapsedNodes.has(node.id) ? '▶' : '▼'),
+      create('span', 'badge ' + (root ? 'command' : 'process'), root ? 'COMMAND' : 'EXEC'),
+      label,
+    );
+    const identity = 'PID ' + (node.pid ?? '—') + ' · PPID ' + (node.ppid ?? '—');
     row.append(
       main,
-      create(
-        'span',
-        'event-detail',
-        statusText(execution.status) + ' · ' + (execution.cwd || 'default working directory'),
-      ),
-      eventTime(execution.started_at_ms),
+      create('span', 'event-detail', identity + (root ? ' · ' + statusText(execution.status) : '')),
+      eventTime(node.timestamp),
     );
     return row;
   }
 
   function eventTime(timestamp) {
-    const time = create('time', 'event-time', formatTime(timestamp));
+    return timestampElement(timestamp, 'event-time');
+  }
+
+  function timestampElement(timestamp, className) {
+    const time = create('time', className, formatTime(timestamp));
     time.dateTime = new Date(timestamp).toISOString();
     return time;
   }
 
-  function eventRow(event, processes) {
+  function eventRow(node, processes, level) {
+    const event = node.event;
     const description = eventDescription(event, processes);
     const row = create(
       'button',
-      'event-row' + (event.sequence === state.selectedEventSequence ? ' selected' : ''),
+      'event-row' +
+        (node.unmatched ? ' unmatched' : '') +
+        (event.sequence === state.selectedEventSequence ? ' selected' : ''),
     );
     row.type = 'button';
-    row.style.setProperty('--depth', String(eventDepth(event, processes)));
+    row.setAttribute('role', 'treeitem');
+    row.setAttribute('aria-level', String(level));
+    row.style.setProperty('--depth', String(level - 1));
     row.addEventListener('click', () => {
       state.selectedEventSequence = event.sequence;
       state.selectedCommand = false;
@@ -391,12 +589,17 @@
     });
     const main = create('span', 'event-main');
     main.append(
+      create('span', 'tree-chevron spacer', '▶'),
       create('span', 'badge ' + event.kind, description.badge),
       create('span', 'event-label', description.primary),
     );
     row.append(
       main,
-      create('span', 'event-detail', description.secondary),
+      create(
+        'span',
+        'event-detail',
+        description.secondary + (node.unmatched ? ' · UNMATCHED PID' : ''),
+      ),
       eventTime(event.timestamp_ms),
     );
     return row;
@@ -405,35 +608,12 @@
   function processIndex(events) {
     const processes = new Map();
     for (const event of events) {
-      if (event.kind === 'process') processes.set(event.pid, event);
+      if (event.executable && !processes.has(event.pid)) processes.set(event.pid, event);
     }
     for (const event of events) {
-      if (!processes.has(event.pid)) {
-        processes.set(event.pid, {
-          kind: 'process',
-          event: 'observed',
-          pid: event.pid,
-          ppid: null,
-          executable: 'Observed process ' + event.pid,
-          execution_id: event.execution_id,
-          timestamp_ms: event.timestamp_ms,
-          sequence: null,
-        });
-      }
+      if (event.kind === 'process' && event.executable) processes.set(event.pid, event);
     }
     return processes;
-  }
-
-  function eventDepth(event, processes) {
-    let depth = 0;
-    let process = processes.get(event.pid);
-    const visited = new Set();
-    while (process && process.ppid && processes.has(process.ppid) && !visited.has(process.pid)) {
-      visited.add(process.pid);
-      depth += 1;
-      process = processes.get(process.ppid);
-    }
-    return Math.min(depth + (event.kind === 'process' ? 0 : 1), 6);
   }
 
   function eventDescription(event, processes) {
@@ -459,7 +639,11 @@
     return {
       badge: 'NETWORK',
       primary: destination,
-      secondary: (endpoint || event.event || 'network') + ' · PID ' + event.pid,
+      secondary:
+        (endpoint || event.event || 'network') +
+        ' · PID ' +
+        event.pid +
+        ownerSuffix(processes.get(event.pid)),
     };
   }
 
@@ -471,7 +655,7 @@
 
   function renderInspector() {
     const execution = activeExecution();
-    const events = activeEvents();
+    const events = activeVisibleEvents();
     if (state.selectedCommand && execution) {
       renderCommandInspector(execution, events);
       return;
@@ -481,6 +665,8 @@
       elements.detailEmpty.hidden = false;
       elements.detailContent.hidden = true;
       state.detailPayload = '';
+      elements.detailOwnershipBlock.hidden = true;
+      elements.detailWorkingDirectoryBlock.hidden = true;
       setInspectorIo('', '');
       return;
     }
@@ -500,6 +686,14 @@
       event.kind === 'process' ? (event.ppid ?? '—') : (owner?.ppid ?? '—'),
     );
     elements.detailRunId.textContent = shortId(event.execution_id);
+    const processPids = new Set(
+      events.filter((candidate) => candidate.kind === 'process').map((candidate) => candidate.pid),
+    );
+    const unmatched =
+      execution && hasUnmatchedPid(event, inferRootIdentity(execution, events).pid, processPids);
+    elements.detailOwnershipBlock.hidden = !unmatched;
+    elements.detailOwnership.textContent = unmatched ? 'UNMATCHED PID' : '';
+    elements.detailWorkingDirectoryBlock.hidden = true;
     if (event.kind === 'process' && (event.event === 'exec' || event.operation)) {
       setInspectorIo(
         JSON.stringify(
@@ -527,16 +721,6 @@
     }
     state.detailPayload = JSON.stringify(event, null, 2);
     elements.detailPayload.textContent = state.detailPayload;
-    elements.relatedProcesses.textContent = String(
-      [...processes.values()].filter((process) => process.ppid === event.pid).length,
-    );
-    elements.relatedFiles.textContent = String(
-      events.filter((candidate) => candidate.kind === 'file' && candidate.pid === event.pid).length,
-    );
-    elements.relatedNetwork.textContent = String(
-      events.filter((candidate) => candidate.kind === 'network' && candidate.pid === event.pid)
-        .length,
-    );
   }
 
   function renderCommandInspector(execution, events) {
@@ -547,11 +731,16 @@
     elements.detailTitle.textContent = statusText(execution.status);
     elements.detailPrimaryLabel.textContent = 'Command';
     elements.detailPrimary.textContent = execution.command;
-    elements.detailPid.textContent = '—';
-    elements.detailPpid.textContent = '—';
+    const identity = inferRootIdentity(execution, events);
+    elements.detailPid.textContent = String(identity.pid ?? '—');
+    elements.detailPpid.textContent = String(identity.ppid ?? '—');
     elements.detailRunId.textContent = shortId(execution.id);
+    elements.detailOwnershipBlock.hidden = true;
+    elements.detailOwnership.textContent = '';
+    elements.detailWorkingDirectoryBlock.hidden = !execution.cwd;
+    elements.detailWorkingDirectory.textContent = execution.cwd || 'default working directory';
     setInspectorIo(
-      execution.command + (execution.cwd ? '\n\nWorking directory: ' + execution.cwd : ''),
+      execution.command,
       JSON.stringify(
         {
           status: execution.status,
@@ -567,15 +756,6 @@
     );
     state.detailPayload = JSON.stringify(execution, null, 2);
     elements.detailPayload.textContent = state.detailPayload;
-    elements.relatedProcesses.textContent = String(
-      new Set(events.map((event) => event.pid).filter(Number.isFinite)).size,
-    );
-    elements.relatedFiles.textContent = String(
-      events.filter((event) => event.kind === 'file').length,
-    );
-    elements.relatedNetwork.textContent = String(
-      events.filter((event) => event.kind === 'network').length,
-    );
   }
 
   function setInspectorIo(input, output) {
@@ -668,13 +848,14 @@
       elements.follow.classList.remove('active');
     }
   });
-  elements.clearEvents.addEventListener('click', () => {
-    const execution = activeExecution();
-    if (!execution || activeEvents().length === 0 || !state.socket) return;
-    if (!window.confirm('Clear detailed events for this execution? The command record is kept.')) {
+  elements.clearExecutions.addEventListener('click', () => {
+    if (state.executions.size === 0 || !state.socket) return;
+    if (
+      !window.confirm('Clear all execution tasks and events? Running commands are not stopped.')
+    ) {
       return;
     }
-    state.socket.send(JSON.stringify({ type: 'clear_events', execution_id: execution.id }));
+    state.socket.send(JSON.stringify({ type: 'clear_executions' }));
   });
 
   async function copyDetail(text, button, idleLabel) {

@@ -47,6 +47,7 @@ pub(crate) trait ShellRuntime: Send + Sync {
 
 #[async_trait]
 pub(crate) trait RunningCommand: Send {
+    fn pid(&self) -> Option<u32>;
     fn take_stdout(&mut self) -> Option<BoxReader>;
     fn take_stderr(&mut self) -> Option<BoxReader>;
     async fn wait(&mut self) -> anyhow::Result<RuntimeExit>;

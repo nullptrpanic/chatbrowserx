@@ -39,6 +39,45 @@ describe('SandboxClient configuration', () => {
   });
 });
 
+describe('SandboxClient console discovery', () => {
+  it('loads the authenticated console URL from the configured Sandbox', async () => {
+    const fetch = vi.fn<SandboxFetchPort>(async () =>
+      jsonResponse({
+        code: 0,
+        url: 'http://127.0.0.1:43130/#token=viewer-token',
+      }),
+    );
+    const client = createClient(fetch);
+
+    await expect(client.getConsoleUrl(SIGNAL)).resolves.toBe(
+      'http://127.0.0.1:43130/#token=viewer-token',
+    );
+
+    expect(fetch).toHaveBeenCalledWith('https://sandbox.example.com/root/console', {
+      method: 'GET',
+      headers: {
+        Authorization: 'Bearer sandbox-token',
+        Accept: 'application/json',
+      },
+      cache: 'no-store',
+      signal: SIGNAL,
+    });
+  });
+
+  it.each([
+    [{ code: 1, url: 'http://127.0.0.1:43130/#token=viewer-token' }],
+    [{ code: 0, url: 'javascript:alert(1)' }],
+    [{ code: 0, url: '' }],
+  ])('rejects an unsafe or malformed console response %#', async (body) => {
+    const client = createClient(vi.fn(async () => jsonResponse(body)));
+
+    await expect(client.getConsoleUrl(SIGNAL)).rejects.toMatchObject({
+      code: 'INVALID_RESPONSE',
+      dispatchState: 'definitely_not_dispatched',
+    });
+  });
+});
+
 describe('SandboxClient execution', () => {
   it('reads fresh configuration and posts the generic exec contract', async () => {
     const settings = {

@@ -29,7 +29,10 @@
       <div class="workspace">
         <aside class="sidebar">
           <div class="section-heading">
-            <span>Executions</span><span aria-hidden="true">▽</span>
+            <span>Executions</span>
+            <button id="clear-executions" class="section-action" type="button" disabled>
+              Clear tasks
+            </button>
           </div>
           <div id="execution-list" class="execution-list"></div>
         </aside>
@@ -56,9 +59,6 @@
               <div class="summary-meta">
                 <span>Run ID <code id="selected-run-id">—</code></span>
                 <span id="monitoring-mode" class="monitoring-mode command-only">Command only</span>
-                <button id="clear-events" class="summary-action" type="button" disabled>
-                  Clear events
-                </button>
               </div>
             </div>
             <div class="summary-stats">
@@ -84,7 +84,7 @@
           <div id="content" class="content" tabindex="0">
             <section id="timeline" class="panel" aria-label="Timeline">
               <div class="table-head"><span>Event</span><span>Details</span><span>Time</span></div>
-              <div id="timeline-rows" class="event-list"></div>
+              <div id="timeline-rows" class="event-list" role="tree"></div>
             </section>
           </div>
 
@@ -138,6 +138,14 @@
                 <label>Run ID</label>
                 <div><code id="detail-run-id">—</code></div>
               </div>
+              <div id="detail-ownership-block" class="detail-block detail-alert" hidden>
+                <label>Error</label>
+                <div id="detail-ownership"></div>
+              </div>
+              <div id="detail-working-directory-block" class="detail-block" hidden>
+                <label>Working directory</label>
+                <div id="detail-working-directory" class="path">—</div>
+              </div>
               <div id="detail-input-block" class="detail-block" hidden>
                 <label>Input</label>
                 <pre id="detail-input" class="code"></pre>
@@ -152,18 +160,6 @@
                 <label>Payload</label>
                 <pre id="detail-payload" class="code"></pre>
                 <button id="copy-event" class="copy-button" type="button">▣ Copy JSON</button>
-              </div>
-              <div class="related">
-                <h3>Related activity</h3>
-                <div class="related-row">
-                  <span>Child processes</span><strong id="related-processes">0</strong>
-                </div>
-                <div class="related-row">
-                  <span>File events</span><strong id="related-files">0</strong>
-                </div>
-                <div class="related-row">
-                  <span>Network events</span><strong id="related-network">0</strong>
-                </div>
               </div>
             </div>
           </div>

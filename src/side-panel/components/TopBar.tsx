@@ -1,4 +1,4 @@
-import { ArrowLeft, History, Settings, Sparkles, SquarePen } from 'lucide-react';
+import { ArrowLeft, History, Settings, Sparkles, SquarePen, Wrench, X } from 'lucide-react';
 import type { Translator } from '../../shared/i18n/i18n';
 import type { PanelTabContext } from '../../shared/protocol/panel-types';
 import { IconButton } from './IconButton';
@@ -6,6 +6,7 @@ import { ClearConversationButton } from './ClearConversationButton';
 import { PageContext } from './PageContext';
 
 export type PanelView = 'conversation' | 'history' | 'settings';
+export type SandboxConsoleStatus = 'hidden' | 'checking' | 'connected' | 'unavailable';
 
 export interface TopBarProps {
   readonly view: PanelView;
@@ -13,6 +14,8 @@ export interface TopBarProps {
   readonly tab: PanelTabContext | null;
   readonly t: Translator;
   readonly onNewTask: () => void;
+  readonly sandboxConsoleStatus: SandboxConsoleStatus;
+  readonly onOpenSandboxConsole: () => Promise<void>;
   readonly canClearConversation: boolean;
   readonly onClearConversation: () => Promise<void>;
   readonly onViewChange: (view: PanelView) => void;
@@ -25,6 +28,8 @@ export function TopBar({
   tab,
   t,
   onNewTask,
+  sandboxConsoleStatus,
+  onOpenSandboxConsole,
   canClearConversation,
   onClearConversation,
   onViewChange,
@@ -39,6 +44,22 @@ export function TopBar({
         <PageContext tab={tab} t={t} />
       )}
       <div className="top-bar-actions">
+        {view === 'conversation' &&
+        (sandboxConsoleStatus === 'connected' || sandboxConsoleStatus === 'unavailable') ? (
+          <IconButton
+            className={`sandbox-console-button is-${sandboxConsoleStatus}`}
+            label={t('sandboxConsole')}
+            disabled={sandboxConsoleStatus === 'unavailable'}
+            onClick={() => void onOpenSandboxConsole()}
+          >
+            <span className="sandbox-console-icon" aria-hidden="true">
+              <Wrench size={17} />
+              {sandboxConsoleStatus === 'unavailable' ? (
+                <X className="sandbox-console-error-mark" size={9} strokeWidth={3} />
+              ) : null}
+            </span>
+          </IconButton>
+        ) : null}
         {view === 'conversation' ? (
           <>
             {canClearConversation ? (

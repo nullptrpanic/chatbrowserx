@@ -25,11 +25,33 @@ export interface SandboxClientPort {
   execute(request: SandboxExecRequest, signal: AbortSignal): Promise<SandboxExecResponse>;
 }
 
+export interface SandboxConsoleClientPort {
+  getConsoleUrl(signal: AbortSignal): Promise<string>;
+}
+
 const responseSchema = z
   .object({
     code: z.number().int(),
     stdout: z.string(),
     stderr: z.string(),
+  })
+  .strict();
+
+const consoleResponseSchema = z
+  .object({
+    code: z.literal(0),
+    url: z
+      .string()
+      .min(1)
+      .max(2_048)
+      .refine((value) => {
+        try {
+          const protocol = new URL(value).protocol;
+          return protocol === 'http:' || protocol === 'https:';
+        } catch {
+          return false;
+        }
+      }),
   })
   .strict();
 
@@ -67,11 +89,15 @@ async function discardResponse(response: Response): Promise<void> {
   await response.body?.cancel().catch(() => undefined);
 }
 
-async function readBoundedJson(response: Response, signal: AbortSignal): Promise<unknown> {
+async function readBoundedJson(
+  response: Response,
+  signal: AbortSignal,
+  dispatchState: SandboxDispatchState,
+): Promise<unknown> {
   const contentType = response.headers.get('Content-Type')?.toLowerCase() ?? '';
   if (!contentType.includes('application/json') || response.body === null) {
     await discardResponse(response);
-    throw clientError('INVALID_RESPONSE', 'may_have_dispatched');
+    throw clientError('INVALID_RESPONSE', dispatchState);
   }
 
   const reader = response.body.getReader();
@@ -80,13 +106,13 @@ async function readBoundedJson(response: Response, signal: AbortSignal): Promise
   let text = '';
   try {
     while (true) {
-      if (signal.aborted) throw clientError('ABORTED', 'may_have_dispatched');
+      if (signal.aborted) throw clientError('ABORTED', dispatchState);
       const next = await reader.read();
       if (next.done) break;
       bytes += next.value.byteLength;
       if (bytes > MAX_RESPONSE_BYTES) {
         await reader.cancel().catch(() => undefined);
-        throw clientError('INVALID_RESPONSE', 'may_have_dispatched');
+        throw clientError('INVALID_RESPONSE', dispatchState);
       }
       text += decoder.decode(next.value, { stream: true });
     }
@@ -94,9 +120,9 @@ async function readBoundedJson(response: Response, signal: AbortSignal): Promise
   } catch (error) {
     if (error instanceof SandboxClientError) throw error;
     if (signal.aborted || isAbortFailure(error)) {
-      throw clientError('ABORTED', 'may_have_dispatched');
+      throw clientError('ABORTED', dispatchState);
     }
-    throw clientError('UNAVAILABLE', 'may_have_dispatched');
+    throw clientError('UNAVAILABLE', dispatchState);
   } finally {
     reader.releaseLock();
   }
@@ -104,11 +130,11 @@ async function readBoundedJson(response: Response, signal: AbortSignal): Promise
   try {
     return JSON.parse(text);
   } catch {
-    throw clientError('INVALID_RESPONSE', 'may_have_dispatched');
+    throw clientError('INVALID_RESPONSE', dispatchState);
   }
 }
 
-export class SandboxClient implements SandboxClientPort {
+export class SandboxClient implements SandboxClientPort, SandboxConsoleClientPort {
   readonly #settings: Pick<SettingsStore, 'get'>;
   readonly #credentials: Pick<CredentialStore, 'getSandboxToken'>;
   readonly #fetch: SandboxFetchPort;
@@ -135,32 +161,58 @@ export class SandboxClient implements SandboxClientPort {
     }
   }
 
-  async execute(request: SandboxExecRequest, signal: AbortSignal): Promise<SandboxExecResponse> {
+  async getConsoleUrl(signal: AbortSignal): Promise<string> {
     if (signal.aborted) throw clientError('ABORTED', 'definitely_not_dispatched');
+    const { server, token } = await this.#getConnection();
 
-    let server: string;
+    let response: Response;
     try {
-      server = (await this.#settings.get()).sandboxServer ?? '';
-    } catch {
+      response = await this.#fetch(`${server.replace(/\/+$/, '')}/console`, {
+        method: 'GET',
+        headers: {
+          Authorization: `Bearer ${token}`,
+          Accept: 'application/json',
+        },
+        cache: 'no-store',
+        signal,
+      });
+    } catch (error) {
+      if (signal.aborted || isAbortFailure(error)) {
+        throw clientError('ABORTED', 'definitely_not_dispatched');
+      }
       throw clientError('UNAVAILABLE', 'definitely_not_dispatched');
     }
-    if (server.length === 0) throw clientError('UNAVAILABLE', 'definitely_not_dispatched');
 
-    let token: string | undefined;
-    try {
-      token = await this.#credentials.getSandboxToken();
-    } catch {
-      throw clientError('AUTH', 'definitely_not_dispatched');
+    if (!response.ok) {
+      await discardResponse(response);
+      if (response.status === 401 || response.status === 403) {
+        throw clientError('AUTH', 'definitely_not_dispatched');
+      }
+      if (response.status >= 400 && response.status < 429) {
+        throw clientError('INVALID_RESPONSE', 'definitely_not_dispatched');
+      }
+      throw clientError('UNAVAILABLE', 'definitely_not_dispatched');
     }
-    const normalizedToken = token?.trim();
-    if (!normalizedToken) throw clientError('AUTH', 'definitely_not_dispatched');
+
+    const parsed = consoleResponseSchema.safeParse(
+      await readBoundedJson(response, signal, 'definitely_not_dispatched'),
+    );
+    if (!parsed.success) {
+      throw clientError('INVALID_RESPONSE', 'definitely_not_dispatched');
+    }
+    return parsed.data.url;
+  }
+
+  async execute(request: SandboxExecRequest, signal: AbortSignal): Promise<SandboxExecResponse> {
+    if (signal.aborted) throw clientError('ABORTED', 'definitely_not_dispatched');
+    const { server, token } = await this.#getConnection();
 
     let response: Response;
     try {
       response = await this.#fetch(`${server.replace(/\/+$/, '')}/exec`, {
         method: 'POST',
         headers: {
-          Authorization: `Bearer ${normalizedToken}`,
+          Authorization: `Bearer ${token}`,
           Accept: 'application/json',
           'Content-Type': 'application/json',
         },
@@ -193,8 +245,30 @@ export class SandboxClient implements SandboxClientPort {
       throw clientError('ABORTED', 'may_have_dispatched');
     }
 
-    const parsed = responseSchema.safeParse(await readBoundedJson(response, signal));
+    const parsed = responseSchema.safeParse(
+      await readBoundedJson(response, signal, 'may_have_dispatched'),
+    );
     if (!parsed.success) throw clientError('INVALID_RESPONSE', 'may_have_dispatched');
     return parsed.data;
+  }
+
+  async #getConnection(): Promise<{ readonly server: string; readonly token: string }> {
+    let server: string;
+    try {
+      server = (await this.#settings.get()).sandboxServer ?? '';
+    } catch {
+      throw clientError('UNAVAILABLE', 'definitely_not_dispatched');
+    }
+    if (server.length === 0) throw clientError('UNAVAILABLE', 'definitely_not_dispatched');
+
+    let token: string | undefined;
+    try {
+      token = await this.#credentials.getSandboxToken();
+    } catch {
+      throw clientError('AUTH', 'definitely_not_dispatched');
+    }
+    const normalizedToken = token?.trim();
+    if (!normalizedToken) throw clientError('AUTH', 'definitely_not_dispatched');
+    return { server, token: normalizedToken };
   }
 }

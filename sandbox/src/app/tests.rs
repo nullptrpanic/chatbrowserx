@@ -8,8 +8,47 @@ use super::{router, router_with_limits};
 
 const TEST_SECRET: &str = "0123456789abcdef0123456789abcdef";
 const TEST_TOKEN: &str = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiJ0ZXN0LXBsdWdpbiIsImlhdCI6MTcyNDMyODAwMCwiZXhwIjo0MTAyNDQ0ODAwfQ.J2vAPeluNLAT2qx8vVNLuhXY7JZ5uhMaHi64Nkmwuj0";
+const TEST_CONSOLE_URL: &str = "http://127.0.0.1:43130/#token=test-viewer-token";
 const EXPIRED_AUTHORIZATION: &str = "Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiJ0ZXN0LXBsdWdpbiIsImlhdCI6MTcyNDMyODAwMCwiZXhwIjoxNzI0MzI4MDAxfQ.xkAv72l71CwyBlXfpCKSbYb-5k_nj2uGsAx685MEbl8";
 const LEGACY_AUTHORIZATION_WITHOUT_EXPIRATION: &str = "Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiJ0ZXN0LXBsdWdpbiIsImlhdCI6MTcyNDMyODAwMH0.gzXZPhR9NajLbPblME61DooewJjRB5CLrtBjtu1PgAw";
+
+#[tokio::test]
+async fn returns_the_authenticated_console_url() {
+    let app = router(TEST_SECRET.to_string(), Duration::from_secs(1));
+    let request = Request::get("/console")
+        .header("authorization", format!("Bearer {TEST_TOKEN}"))
+        .body(Body::empty())
+        .unwrap();
+
+    let response = app.oneshot(request).await.unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(response.headers().get("cache-control").unwrap(), "no-store");
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    assert_eq!(
+        serde_json::from_slice::<Value>(&body).unwrap(),
+        serde_json::json!({"code": 0, "url": TEST_CONSOLE_URL})
+    );
+}
+
+#[tokio::test]
+async fn rejects_unauthenticated_console_requests() {
+    let app = router(TEST_SECRET.to_string(), Duration::from_secs(1));
+    let request = Request::get("/console").body(Body::empty()).unwrap();
+
+    let response = app.oneshot(request).await.unwrap();
+
+    assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    assert_eq!(
+        serde_json::from_slice::<Value>(&body).unwrap(),
+        serde_json::json!({"code": 1, "message": "unauthorized"})
+    );
+}
 
 #[tokio::test]
 async fn rejects_missing_or_incorrect_bearer_token() {

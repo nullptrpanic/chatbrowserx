@@ -128,6 +128,9 @@ impl ExecutionService {
                 return Err(ShellError::Execute(error));
             }
         };
+        self.audit
+            .record_process_identity(execution_id, running.pid(), Some(std::process::id()))
+            .map_err(ShellError::Execute)?;
         let Some(stdout) = running.take_stdout() else {
             let _ = running.terminate().await;
             self.finish(

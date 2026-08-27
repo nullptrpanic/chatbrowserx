@@ -74,8 +74,7 @@ button {
 .event-main,
 .footer-tools,
 .toggle,
-.detail-heading,
-.related-row {
+.detail-heading {
   display: flex;
   align-items: center;
 }
@@ -237,6 +236,23 @@ body.is-resizing {
   font-size: 14px;
   font-weight: 700;
 }
+.section-action {
+  padding: 5px 8px;
+  border: 1px solid rgba(255, 111, 112, 0.3);
+  border-radius: 5px;
+  color: #ff9a9b;
+  background: transparent;
+  cursor: pointer;
+  font-size: 11px;
+}
+.section-action:hover:not(:disabled) {
+  border-color: rgba(255, 111, 112, 0.65);
+  color: #fff;
+}
+.section-action:disabled {
+  opacity: 0.35;
+  cursor: default;
+}
 .execution-list {
   padding: 10px;
 }
@@ -295,6 +311,11 @@ body.is-resizing {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+.execution-timing {
+  display: inline-flex;
+  min-width: 0;
+  gap: 5px;
 }
 .state-dot {
   width: 8px;
@@ -397,23 +418,6 @@ body.is-resizing {
   color: var(--amber);
   background: rgba(230, 183, 95, 0.07);
 }
-.summary-action {
-  padding: 3px 7px;
-  border: 1px solid rgba(255, 111, 112, 0.32);
-  border-radius: 5px;
-  color: #ff9a9b;
-  background: rgba(255, 111, 112, 0.06);
-  cursor: pointer;
-  font-size: 11px;
-}
-.summary-action:hover:not(:disabled) {
-  border-color: rgba(255, 111, 112, 0.65);
-  color: #fff;
-}
-.summary-action:disabled {
-  opacity: 0.4;
-  cursor: default;
-}
 .summary-stats {
   align-self: stretch;
 }
@@ -514,6 +518,13 @@ body.is-resizing {
 .event-row.selected {
   background: var(--selection);
 }
+.event-row.unmatched {
+  box-shadow: inset 3px 0 0 #e34b5f;
+  background: rgba(119, 31, 43, 0.2);
+}
+.event-row.unmatched .event-detail {
+  color: #ff8091;
+}
 .command-row {
   background: rgba(18, 97, 74, 0.12);
 }
@@ -522,6 +533,16 @@ body.is-resizing {
   gap: 9px;
   padding-left: calc(var(--depth, 0) * 18px);
   font-size: 12px;
+}
+.tree-chevron {
+  width: 11px;
+  flex: 0 0 11px;
+  color: #8ea0aa;
+  font-size: 10px;
+  text-align: center;
+}
+.tree-chevron.spacer {
+  visibility: hidden;
 }
 .event-label {
   min-width: 0;
@@ -655,6 +676,10 @@ body.is-resizing {
   overflow-wrap: anywhere;
   font-size: 12px;
 }
+.detail-alert,
+.detail-alert label {
+  color: var(--red);
+}
 .detail-columns {
   display: grid;
   grid-template-columns: 1fr 1fr;
@@ -692,22 +717,6 @@ body.is-resizing {
 .copy-button:hover {
   border-color: #41606f;
   color: #fff;
-}
-.related {
-  margin-top: 16px;
-  padding-top: 16px;
-  border-top: 1px solid var(--line);
-}
-.related h3 {
-  margin: 0 0 10px;
-  font-size: 12px;
-}
-.related-row {
-  justify-content: space-between;
-  gap: 12px;
-  padding: 7px 0;
-  color: #a5b3ba;
-  font-size: 11px;
 }
 .empty {
   min-height: 260px;

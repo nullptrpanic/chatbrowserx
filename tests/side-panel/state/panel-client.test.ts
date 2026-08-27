@@ -120,9 +120,11 @@ describe('PanelClient', () => {
       data:
         message.type === 'panel.getSnapshot'
           ? current
-          : message.type === 'panel.getStateVersion'
-            ? { stateVersion: 7 }
-            : { connected: true },
+          : message.type === 'sandbox.getConsole'
+            ? { url: 'http://127.0.0.1:43130/#token=viewer-token' }
+            : message.type === 'panel.getStateVersion'
+              ? { stateVersion: 7 }
+              : { connected: true },
     }));
     const client = new PanelClient(
       { send },
@@ -139,6 +141,87 @@ describe('PanelClient', () => {
     expect(
       send.mock.calls.filter(([message]) => message.type === 'panel.getStateVersion'),
     ).toHaveLength(1);
+    expect(
+      send.mock.calls.filter(([message]) => message.type === 'sandbox.getConsole'),
+    ).toHaveLength(2);
+    client.dispose();
+  });
+
+  it('renders the panel before a non-blocking Sandbox console probe completes', async () => {
+    let resolveConsole: ((value: string) => void) | undefined;
+    const consoleUrl = new Promise<string>((resolve) => {
+      resolveConsole = resolve;
+    });
+    const send = vi.fn<RuntimePort['send']>(async (message) => ({
+      version: 1,
+      requestId: message.requestId,
+      ok: true,
+      data:
+        message.type === 'panel.getSnapshot'
+          ? snapshot()
+          : message.type === 'sandbox.getConsole'
+            ? { url: await consoleUrl }
+            : { connected: true },
+    }));
+    const openSandboxConsole = vi.fn(async () => undefined);
+    const client = new PanelClient(
+      { send },
+      { getActiveTab: vi.fn(async () => ({ id: 7 })), openSandboxConsole },
+      { pollIntervalMs: 60_000 },
+    );
+
+    await client.connect();
+
+    expect(client.getSnapshot()).toMatchObject({
+      status: 'ready',
+      sandboxConsoleUrl: null,
+      sandboxConsoleStatus: 'checking',
+      snapshot: { tab: { id: 7 } },
+    });
+
+    resolveConsole?.('http://127.0.0.1:43130/#token=viewer-token');
+    await vi.waitFor(() => {
+      expect(client.getSnapshot().sandboxConsoleUrl).toBe(
+        'http://127.0.0.1:43130/#token=viewer-token',
+      );
+      expect(client.getSnapshot()).toMatchObject({ sandboxConsoleStatus: 'connected' });
+    });
+    await client.openSandboxConsole();
+
+    expect(openSandboxConsole).toHaveBeenCalledWith('http://127.0.0.1:43130/#token=viewer-token');
+    client.dispose();
+  });
+
+  it('records an unavailable Sandbox console only after its non-blocking probe fails', async () => {
+    const send = vi.fn<RuntimePort['send']>(async (message) =>
+      message.type === 'sandbox.getConsole'
+        ? {
+            version: 1,
+            requestId: message.requestId,
+            ok: false,
+            error: { code: 'SANDBOX_UNAVAILABLE', message: 'Sandbox is unavailable.' },
+          }
+        : {
+            version: 1,
+            requestId: message.requestId,
+            ok: true,
+            data: message.type === 'panel.getSnapshot' ? snapshot() : { connected: true },
+          },
+    );
+    const client = new PanelClient(
+      { send },
+      { getActiveTab: vi.fn(async () => ({ id: 7 })) },
+      { pollIntervalMs: 60_000 },
+    );
+
+    await client.connect();
+
+    await vi.waitFor(() => {
+      expect(client.getSnapshot()).toMatchObject({
+        sandboxConsoleUrl: null,
+        sandboxConsoleStatus: 'unavailable',
+      });
+    });
     client.dispose();
   });
 
@@ -192,6 +275,21 @@ describe('PanelClient', () => {
     expect(get).not.toHaveBeenCalled();
     expect(update).not.toHaveBeenCalled();
     expect(focusWindow).not.toHaveBeenCalled();
+  });
+
+  it('opens the Sandbox console URL in an active browser tab', async () => {
+    const create = vi.fn(async () => ({ id: 18 }));
+    vi.stubGlobal('chrome', {
+      tabs: { query: vi.fn(), create },
+    });
+    const environment = createChromePanelEnvironment();
+
+    await environment.openSandboxConsole?.('http://127.0.0.1:43130/#token=viewer-token');
+
+    expect(create).toHaveBeenCalledWith({
+      url: 'http://127.0.0.1:43130/#token=viewer-token',
+      active: true,
+    });
   });
 
   it('accepts a bounded source page snapshot on a user message', () => {

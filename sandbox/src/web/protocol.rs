@@ -1,13 +1,13 @@
 #[cfg(any(target_os = "macos", test))]
 use crate::audit::AuditEvent;
-use crate::audit::{AuditSnapshot, ExecutionId, ExecutionRecord};
+use crate::audit::{AuditSnapshot, ExecutionRecord};
 use serde::{Deserialize, Serialize};
 
 #[derive(Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub(super) enum ClientMessage {
     Auth { token: String },
-    ClearEvents { execution_id: ExecutionId },
+    ClearExecutions,
 }
 
 #[derive(Serialize)]
@@ -23,9 +23,7 @@ pub(super) enum ServerMessage {
     Event {
         event: AuditEvent,
     },
-    EventsCleared {
-        execution_id: ExecutionId,
-    },
+    ExecutionsCleared,
     Error {
         message: String,
     },

@@ -64,6 +64,7 @@ export function App({ runtimePort, environment, panelClient, attachmentClient }:
     ) ??
       false);
   const loadSettings = useCallback(() => client.getSettings(), [client]);
+  const sandboxConfigured = (snapshot?.settings.sandboxServer?.trim().length ?? 0) > 0;
 
   /** Starts a clean local conversation draft and returns to the main conversation view. */
   function newTask(): void {
@@ -81,6 +82,8 @@ export function App({ runtimePort, environment, panelClient, attachmentClient }:
       tab={snapshot?.tab ?? null}
       t={t}
       onNewTask={newTask}
+      sandboxConsoleStatus={sandboxConfigured ? state.sandboxConsoleStatus : 'hidden'}
+      onOpenSandboxConsole={() => client.openSandboxConsole()}
       canClearConversation={snapshot?.conversation !== null && snapshot?.conversation !== undefined}
       onClearConversation={() => client.clearActiveConversation()}
       onViewChange={setView}

@@ -226,6 +226,7 @@ async function createBackgroundServices(
     },
     panel,
     screenshots,
+    sandboxConsole: sandboxClient,
     requestRecoveryScan: () => recovery.requestRecoveryScan(),
     scheduleTask,
     pageFeatures: {

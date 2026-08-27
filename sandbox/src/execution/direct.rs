@@ -36,6 +36,10 @@ struct DirectCommand {
 
 #[async_trait]
 impl RunningCommand for DirectCommand {
+    fn pid(&self) -> Option<u32> {
+        self.child.id()
+    }
+
     fn take_stdout(&mut self) -> Option<BoxReader> {
         self.child
             .stdout

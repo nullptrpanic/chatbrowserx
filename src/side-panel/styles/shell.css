@@ -130,6 +130,36 @@
   background: var(--cbx-hover);
 }
 
+.sandbox-console-button {
+  color: var(--cbx-success);
+}
+
+.sandbox-console-button:hover {
+  color: var(--cbx-success);
+}
+
+.sandbox-console-button.is-unavailable {
+  color: var(--cbx-danger);
+  opacity: 1;
+  cursor: default;
+}
+
+.sandbox-console-button.is-unavailable:hover {
+  color: var(--cbx-danger);
+}
+
+.sandbox-console-icon {
+  position: relative;
+  display: grid;
+  place-items: center;
+}
+
+.sandbox-console-error-mark {
+  position: absolute;
+  right: -5px;
+  bottom: -4px;
+}
+
 .connection-dot {
   width: 8px;
   height: 8px;

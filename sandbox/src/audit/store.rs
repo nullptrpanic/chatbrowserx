@@ -5,7 +5,7 @@ use super::model::{
     ExecutionStatus, PersistedRecord,
 };
 use anyhow::{Context, Result, bail};
-use std::collections::VecDeque;
+use std::collections::{HashSet, VecDeque};
 use std::fs::{File, OpenOptions};
 use std::io::{BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
@@ -28,6 +28,7 @@ struct State {
     file: Option<File>,
     executions: VecDeque<ExecutionRecord>,
     events: VecDeque<AuditEvent>,
+    suppressed_execution_ids: HashSet<ExecutionId>,
     next_sequence: u64,
 }
 
@@ -71,6 +72,9 @@ impl AuditLog {
             id: Uuid::new_v4(),
             command: redact_command(&command.into()),
             cwd,
+            pid: None,
+            ppid: None,
+            user_command_started_at_ms: None,
             started_at_ms: unix_time_ms()?,
             finished_at_ms: None,
             duration_ms: None,
@@ -97,10 +101,55 @@ impl AuditLog {
         Ok(id)
     }
 
+    pub(crate) fn record_process_identity(
+        &self,
+        id: ExecutionId,
+        pid: Option<u32>,
+        ppid: Option<u32>,
+    ) -> Result<()> {
+        let mut state = self.lock()?;
+        let Some(position) = state.executions.iter().position(|item| item.id == id) else {
+            if state.suppressed_execution_ids.contains(&id) {
+                return Ok(());
+            }
+            bail!("unknown audit execution {id}");
+        };
+        let mut execution = state.executions[position].clone();
+        execution.pid = pid;
+        execution.ppid = ppid;
+        state.append(&PersistedRecord::Execution(execution.clone()))?;
+        state.executions[position] = execution.clone();
+        let _ = self.updates.send(AuditUpdate::Execution { execution });
+        Ok(())
+    }
+
+    pub(crate) fn record_user_command_started(
+        &self,
+        id: ExecutionId,
+        timestamp_ms: u64,
+    ) -> Result<()> {
+        let mut state = self.lock()?;
+        let Some(position) = state.executions.iter().position(|item| item.id == id) else {
+            if state.suppressed_execution_ids.contains(&id) {
+                return Ok(());
+            }
+            bail!("unknown audit execution {id}");
+        };
+        let mut execution = state.executions[position].clone();
+        execution.user_command_started_at_ms = Some(timestamp_ms);
+        state.append(&PersistedRecord::Execution(execution.clone()))?;
+        state.executions[position] = execution.clone();
+        let _ = self.updates.send(AuditUpdate::Execution { execution });
+        Ok(())
+    }
+
     pub(crate) fn finish_execution(&self, id: ExecutionId, finish: ExecutionFinish) -> Result<()> {
         {
             let mut state = self.lock()?;
             let Some(position) = state.executions.iter().position(|item| item.id == id) else {
+                if state.suppressed_execution_ids.remove(&id) {
+                    return Ok(());
+                }
                 bail!("unknown audit execution {id}");
             };
             let mut execution = state.executions[position].clone();
@@ -135,6 +184,16 @@ impl AuditLog {
                 .iter()
                 .position(|item| item.id == execution_id)
             else {
+                if state.suppressed_execution_ids.contains(&execution_id) {
+                    let event = AuditEvent {
+                        sequence: state.next_sequence,
+                        execution_id,
+                        timestamp_ms,
+                        data,
+                    };
+                    state.next_sequence += 1;
+                    return Ok(event);
+                }
                 bail!("unknown audit execution {execution_id}");
             };
             let event = AuditEvent {
@@ -156,26 +215,19 @@ impl AuditLog {
         Ok(event)
     }
 
-    pub(crate) fn clear_events(&self, execution_id: ExecutionId) -> Result<()> {
+    pub(crate) fn clear_executions(&self) -> Result<()> {
         let mut state = self.lock()?;
-        let Some(position) = state
+        state.append(&PersistedRecord::ExecutionsCleared)?;
+        let running = state
             .executions
             .iter()
-            .position(|execution| execution.id == execution_id)
-        else {
-            bail!("unknown audit execution {execution_id}");
-        };
-        state.append(&PersistedRecord::EventsCleared { execution_id })?;
-        state
-            .events
-            .retain(|event| event.execution_id != execution_id);
-        let execution = &mut state.executions[position];
-        execution.process_events = 0;
-        execution.file_events = 0;
-        execution.network_events = 0;
-        let _ = self
-            .updates
-            .send(AuditUpdate::EventsCleared { execution_id });
+            .filter(|execution| execution.status == ExecutionStatus::Running)
+            .map(|execution| execution.id)
+            .collect::<Vec<_>>();
+        state.suppressed_execution_ids.extend(running);
+        state.executions.clear();
+        state.events.clear();
+        let _ = self.updates.send(AuditUpdate::ExecutionsCleared);
         Ok(())
     }
 
@@ -232,6 +284,7 @@ impl Default for State {
             file: None,
             executions: VecDeque::new(),
             events: VecDeque::new(),
+            suppressed_execution_ids: HashSet::new(),
             next_sequence: 1,
         }
     }
@@ -287,6 +340,10 @@ fn load(path: &Path) -> Result<State> {
                 state
                     .events
                     .retain(|event| event.execution_id != execution_id);
+            }
+            PersistedRecord::ExecutionsCleared => {
+                state.executions.clear();
+                state.events.clear();
             }
         }
     }

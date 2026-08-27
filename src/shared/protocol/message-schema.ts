@@ -87,6 +87,15 @@ const conversationClearSchema = z
   })
   .strict();
 
+const sandboxGetConsoleSchema = z
+  .object({
+    version: z.literal(PROTOCOL_VERSION),
+    requestId: requestIdSchema,
+    type: z.literal('sandbox.getConsole'),
+    payload: z.object({}).strict(),
+  })
+  .strict();
+
 const settingsGetSchema = z
   .object({
     version: z.literal(PROTOCOL_VERSION),
@@ -215,6 +224,7 @@ export const extensionMessageSchema: z.ZodType<ExtensionMessage> = z.discriminat
   chatSubmitSchema,
   chatSupplementSchema,
   conversationClearSchema,
+  sandboxGetConsoleSchema,
   settingsGetSchema,
   settingsSaveSchema,
   taskSnapshotSchema,

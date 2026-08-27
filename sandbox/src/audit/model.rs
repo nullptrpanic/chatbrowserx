@@ -21,6 +21,12 @@ pub(crate) struct ExecutionRecord {
     pub(crate) id: ExecutionId,
     pub(crate) command: String,
     pub(crate) cwd: Option<PathBuf>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) pid: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) ppid: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) user_command_started_at_ms: Option<u64>,
     pub(crate) started_at_ms: u64,
     pub(crate) finished_at_ms: Option<u64>,
     pub(crate) duration_ms: Option<u64>,
@@ -74,12 +80,20 @@ pub(crate) enum AuditEventData {
     File {
         event: String,
         pid: u32,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        ppid: Option<u32>,
+        #[serde(default, skip_serializing_if = "String::is_empty")]
+        executable: String,
         path: String,
         access: Option<String>,
     },
     Network {
         event: String,
         pid: u32,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        ppid: Option<u32>,
+        #[serde(default, skip_serializing_if = "String::is_empty")]
+        executable: String,
         host: Option<String>,
         ip: Option<String>,
         port: Option<u16>,
@@ -123,9 +137,7 @@ pub(crate) enum AuditUpdate {
     Event {
         event: AuditEvent,
     },
-    EventsCleared {
-        execution_id: ExecutionId,
-    },
+    ExecutionsCleared,
 }
 
 #[derive(Deserialize, Serialize)]
@@ -134,6 +146,7 @@ pub(super) enum PersistedRecord {
     Execution(ExecutionRecord),
     Event(AuditEvent),
     EventsCleared { execution_id: ExecutionId },
+    ExecutionsCleared,
 }
 
 fn is_false(value: &bool) -> bool {

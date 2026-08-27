@@ -51,6 +51,9 @@ async fn direct_execution_preserves_shell_behavior_and_records_completion() {
     assert_eq!(snapshot.executions[0].exit_code, Some(0));
     assert_eq!(snapshot.executions[0].stdout, output.stdout);
     assert_eq!(snapshot.executions[0].stderr, output.stderr);
+    let record = serde_json::to_value(&snapshot.executions[0]).unwrap();
+    assert!(record["pid"].as_u64().is_some());
+    assert_eq!(record["ppid"], serde_json::json!(std::process::id()));
 }
 
 #[tokio::test]
@@ -114,7 +117,7 @@ async fn agora_runtime_executes_and_records_detailed_events() {
     );
 
     let output = executor
-        .execute(ShellCommand::new("printf sandbox-ready"))
+        .execute(ShellCommand::new("/usr/bin/printf sandbox-ready"))
         .await
         .unwrap();
 
@@ -122,5 +125,21 @@ async fn agora_runtime_executes_and_records_detailed_events() {
     assert_eq!(output.stdout, "sandbox-ready");
     let snapshot = audit.snapshot();
     assert_eq!(snapshot.executions[0].status, ExecutionStatus::Succeeded);
+    let boundary = snapshot.executions[0]
+        .user_command_started_at_ms
+        .expect("Agora should record the user-command boundary");
+    assert!(snapshot.events.iter().any(|event| {
+        event.timestamp_ms >= boundary
+            && matches!(
+                &event.data,
+                crate::audit::AuditEventData::Process { executable, .. }
+                    if executable == "/usr/bin/printf"
+            )
+    }));
+    assert!(
+        !serde_json::to_string(&snapshot.events)
+            .unwrap()
+            .contains("chatbrowserx-user-command-")
+    );
     assert!(snapshot.executions[0].process_events > 0);
 }

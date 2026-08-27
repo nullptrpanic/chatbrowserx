@@ -1,7 +1,7 @@
 import type { ReactNode } from 'react';
 import type { Translator } from '../../shared/i18n/i18n';
 import type { PanelTabContext } from '../../shared/protocol/panel-types';
-import { TopBar, type PanelView } from './TopBar';
+import { TopBar, type PanelView, type SandboxConsoleStatus } from './TopBar';
 
 export interface AppShellProps {
   readonly view: PanelView;
@@ -9,6 +9,8 @@ export interface AppShellProps {
   readonly tab: PanelTabContext | null;
   readonly t: Translator;
   readonly onNewTask: () => void;
+  readonly sandboxConsoleStatus: SandboxConsoleStatus;
+  readonly onOpenSandboxConsole: () => Promise<void>;
   readonly canClearConversation: boolean;
   readonly onClearConversation: () => Promise<void>;
   readonly onViewChange: (view: PanelView) => void;
@@ -22,6 +24,8 @@ export function AppShell({
   tab,
   t,
   onNewTask,
+  sandboxConsoleStatus,
+  onOpenSandboxConsole,
   canClearConversation,
   onClearConversation,
   onViewChange,
@@ -35,6 +39,8 @@ export function AppShell({
         tab={tab}
         t={t}
         onNewTask={onNewTask}
+        sandboxConsoleStatus={sandboxConsoleStatus}
+        onOpenSandboxConsole={onOpenSandboxConsole}
         canClearConversation={canClearConversation}
         onClearConversation={onClearConversation}
         onViewChange={onViewChange}

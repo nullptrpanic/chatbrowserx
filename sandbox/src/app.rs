@@ -9,9 +9,9 @@ use axum::Router;
 use axum::body::Bytes;
 use axum::extract::DefaultBodyLimit;
 use axum::extract::State;
-use axum::http::{HeaderMap, StatusCode};
+use axum::http::{HeaderMap, StatusCode, header};
 use axum::response::{IntoResponse, Response};
-use axum::routing::post;
+use axum::routing::{get, post};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::path::PathBuf;
@@ -32,6 +32,7 @@ const MAX_STDERR_BYTES: usize = 1024 * 1024;
 #[derive(Clone)]
 struct AppState {
     secret: String,
+    console_url: String,
     executor: ExecutionService,
     commands: Arc<Semaphore>,
 }
@@ -62,30 +63,34 @@ pub(crate) fn router_with_limits(
         stdout_limit,
         stderr_limit,
     );
-    router_with_service(secret, executor, max_concurrency)
+    router_with_service(
+        secret,
+        executor,
+        max_concurrency,
+        "http://127.0.0.1:43130/#token=test-viewer-token".to_owned(),
+    )
 }
 
 pub(crate) fn router_with_service(
     secret: String,
     executor: ExecutionService,
     max_concurrency: usize,
+    console_url: String,
 ) -> Router {
     Router::new()
         .route("/exec", post(run_exec))
+        .route("/console", get(get_console))
         .layer(DefaultBodyLimit::max(MAX_REQUEST_BODY_BYTES))
         .with_state(AppState {
             secret,
+            console_url,
             executor,
             commands: Arc::new(Semaphore::new(max_concurrency.max(1))),
         })
 }
 
 async fn run_exec(State(state): State<AppState>, headers: HeaderMap, body: Bytes) -> Response {
-    let token = headers
-        .get("authorization")
-        .and_then(|value| value.to_str().ok())
-        .and_then(|value| value.strip_prefix("Bearer "));
-    if !matches!(token, Some(token) if crate::auth::verify(&state.secret, token)) {
+    if !is_authorized(&headers, &state.secret) {
         return error(StatusCode::UNAUTHORIZED, "unauthorized");
     }
     let request: BashRequest = match serde_json::from_slice(&body) {
@@ -152,6 +157,28 @@ async fn run_exec(State(state): State<AppState>, headers: HeaderMap, body: Bytes
     .into_response()
 }
 
+async fn get_console(State(state): State<AppState>, headers: HeaderMap) -> Response {
+    if !is_authorized(&headers, &state.secret) {
+        return error(StatusCode::UNAUTHORIZED, "unauthorized");
+    }
+    (
+        [(header::CACHE_CONTROL, "no-store")],
+        Json(ConsoleResponse {
+            code: 0,
+            url: state.console_url,
+        }),
+    )
+        .into_response()
+}
+
+fn is_authorized(headers: &HeaderMap, secret: &str) -> bool {
+    let token = headers
+        .get("authorization")
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.strip_prefix("Bearer "));
+    matches!(token, Some(token) if crate::auth::verify(secret, token))
+}
+
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct BashRequest {
@@ -177,6 +204,12 @@ struct BashResponse {
     code: i32,
     stdout: String,
     stderr: String,
+}
+
+#[derive(Serialize)]
+struct ConsoleResponse {
+    code: i32,
+    url: String,
 }
 
 #[derive(Serialize)]

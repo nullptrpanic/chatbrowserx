@@ -152,11 +152,14 @@ async fn websocket_rejects_invalid_auth_and_sends_a_snapshot_after_valid_auth() 
 }
 
 #[tokio::test]
-async fn authenticated_viewer_can_clear_the_selected_execution_events() {
+async fn authenticated_viewer_can_durably_clear_all_executions_without_stopping_new_work() {
+    let directory = tempfile::tempdir().unwrap();
+    let audit_path = directory.path().join("audit.jsonl");
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let address = listener.local_addr().unwrap();
-    let audit = AuditLog::in_memory();
+    let audit = AuditLog::open(&audit_path).unwrap();
     let execution = audit.start_execution("printf live", None).unwrap();
+    let second = audit.start_execution("printf second", None).unwrap();
     audit
         .record_event(
             execution,
@@ -164,6 +167,8 @@ async fn authenticated_viewer_can_clear_the_selected_execution_events() {
             AuditEventData::File {
                 event: "open".to_owned(),
                 pid: 42,
+                ppid: Some(1),
+                executable: "/bin/cat".to_owned(),
                 path: "/tmp/example".to_owned(),
                 access: Some("read".to_owned()),
             },
@@ -185,19 +190,49 @@ async fn authenticated_viewer_can_clear_the_selected_execution_events() {
 
     socket
         .send(tokio_tungstenite::tungstenite::Message::Text(
-            format!(r#"{{"type":"clear_events","execution_id":"{execution}"}}"#).into(),
+            r#"{"type":"clear_executions"}"#.into(),
         ))
         .await
         .unwrap();
-    let message = socket.next().await.unwrap().unwrap().into_text().unwrap();
+    let message = tokio::time::timeout(std::time::Duration::from_secs(1), socket.next())
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap()
+        .into_text()
+        .unwrap();
     let message: serde_json::Value = serde_json::from_str(&message).unwrap();
 
-    assert_eq!(message["type"], "events_cleared");
-    assert_eq!(message["execution_id"], execution.to_string());
+    assert_eq!(message["type"], "executions_cleared");
     assert!(audit.snapshot().events.is_empty());
-    assert_eq!(audit.snapshot().executions[0].file_events, 0);
+    assert!(audit.snapshot().executions.is_empty());
+
+    audit
+        .finish_execution(
+            execution,
+            crate::audit::ExecutionFinish {
+                status: crate::audit::ExecutionStatus::Succeeded,
+                exit_code: Some(0),
+                duration_ms: 1,
+                stdout: String::new(),
+                stderr: String::new(),
+                stdout_truncated: false,
+                stderr_truncated: false,
+            },
+        )
+        .unwrap();
+    assert!(audit.snapshot().executions.is_empty());
+
+    let retained = audit.start_execution("printf later", None).unwrap();
+    assert_eq!(audit.snapshot().executions[0].id, retained);
 
     server.abort();
+    let _ = server.await;
+    drop(audit);
+    let reloaded = AuditLog::open(&audit_path).unwrap();
+    assert_eq!(reloaded.snapshot().executions.len(), 1);
+    assert_eq!(reloaded.snapshot().executions[0].id, retained);
+    assert_ne!(retained, second);
 }
 
 fn websocket_request(address: SocketAddr) -> axum::http::Request<()> {

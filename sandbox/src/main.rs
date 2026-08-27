@@ -86,13 +86,11 @@ async fn run_sandbox(config_path: &Path) -> Result<()> {
         1024 * 1024,
     );
     let viewer = web::ViewerGuard::new(config.web_address());
-    println!(
-        "Sandbox audit: {}",
-        web::launch_url(config.web_address(), viewer.token())
-    );
+    let console_url = web::launch_url(config.web_address(), viewer.token());
+    println!("Sandbox audit: {console_url}");
     let execution_server = axum::serve(
         execution_listener,
-        app::router_with_service(config.secret().to_owned(), executor, 4),
+        app::router_with_service(config.secret().to_owned(), executor, 4, console_url),
     );
     let web_server = axum::serve(web_listener, web::router(audit, viewer));
     tokio::try_join!(execution_server, web_server).context("sandbox server failed")?;
