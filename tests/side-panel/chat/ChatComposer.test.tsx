@@ -1,4 +1,4 @@
-import { render, screen, waitFor } from '@testing-library/react';
+import { fireEvent, render, screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { describe, expect, it, vi } from 'vitest';
 import { createTranslator } from '../../../src/shared/i18n/i18n';
@@ -6,6 +6,36 @@ import { ChatComposer } from '../../../src/side-panel/chat/ChatComposer';
 import type { PanelClient } from '../../../src/side-panel/state/panel-client';
 
 describe('ChatComposer', () => {
+  it('shrinks the textarea when a controlled draft is cleared after expanding', () => {
+    const client = {
+      submit: vi.fn(async () => undefined),
+      captureScreenshot: vi.fn(async () => null),
+      cancelTask: vi.fn(async () => undefined),
+    } as unknown as PanelClient;
+    const props = {
+      client,
+      attachments: { addFiles: vi.fn(async () => []), get: vi.fn(async () => undefined) },
+      running: false,
+      taskLocked: false,
+      hasToken: true,
+      t: createTranslator('zh-CN'),
+      onTextChange: vi.fn(),
+      onOpenSettings: vi.fn(),
+    } as const;
+    const { rerender } = render(<ChatComposer {...props} text={'long draft\n'.repeat(40)} />);
+    const textarea = screen.getByRole('textbox') as HTMLTextAreaElement;
+    Object.defineProperty(textarea, 'scrollHeight', {
+      configurable: true,
+      get: () => (textarea.value.length === 0 ? 40 : 400),
+    });
+
+    fireEvent.input(textarea);
+    expect(textarea.style.height).toBe('220px');
+
+    rerender(<ChatComposer {...props} text="" />);
+    expect(textarea.style.height).toBe('40px');
+  });
+
   it('renders pending image thumbnails inside the same input surface as the textarea', async () => {
     vi.spyOn(URL, 'createObjectURL').mockReturnValue('blob:draft-image');
     vi.spyOn(URL, 'revokeObjectURL').mockImplementation(() => undefined);

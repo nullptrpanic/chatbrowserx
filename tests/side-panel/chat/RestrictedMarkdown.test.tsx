@@ -81,6 +81,32 @@ describe('RestrictedMarkdown', () => {
     expect(within(fencedCode as HTMLElement).getByText('"Hello"')).toHaveClass('syntax-string');
   });
 
+  it('preserves ordered markers when explanatory paragraphs separate list items', () => {
+    render(
+      <RestrictedMarkdown
+        text={[
+          '1. **第一项**',
+          '',
+          '   第一项说明',
+          '',
+          '2. **第二项**',
+          '',
+          '   第二项说明',
+          '',
+          '3. **第三项**',
+        ].join('\n')}
+      />,
+    );
+
+    const lists = screen.getAllByRole('list') as HTMLOListElement[];
+    expect(lists.map(({ start }) => start)).toEqual([1, 2, 3]);
+    expect(screen.getAllByRole('listitem').map((item) => item.textContent)).toEqual([
+      '第一项',
+      '第二项',
+      '第三项',
+    ]);
+  });
+
   it('highlights lightweight Rust syntax in a rust fence', () => {
     const { container } = render(
       <RestrictedMarkdown

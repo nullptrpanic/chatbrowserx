@@ -1,5 +1,5 @@
 import { Camera, ChevronDown, ImagePlus, Send, Square } from 'lucide-react';
-import { useRef, useState } from 'react';
+import { useLayoutEffect, useRef, useState } from 'react';
 import type { Translator } from '../../shared/i18n/i18n';
 import type { PanelClient } from '../state/panel-client';
 import { ImageAttachmentStrip } from './ImageAttachmentStrip';
@@ -17,6 +17,11 @@ export interface ChatComposerProps {
   readonly onOpenSettings: () => void;
 }
 
+function resizeComposerInput(element: HTMLTextAreaElement): void {
+  element.style.height = 'auto';
+  element.style.height = `${String(Math.min(element.scrollHeight, 220))}px`;
+}
+
 /** Renders the image/screenshot-aware task composer with send and stop consistency. */
 export function ChatComposer({
   client,
@@ -31,6 +36,7 @@ export function ChatComposer({
 }: ChatComposerProps) {
   const draft = useImageDraft({ client: attachments });
   const fileInput = useRef<HTMLInputElement>(null);
+  const textInput = useRef<HTMLTextAreaElement>(null);
   const [screenshotMenu, setScreenshotMenu] = useState(false);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<'send' | 'supplement' | 'screenshot' | 'task-running' | null>(
@@ -38,6 +44,11 @@ export function ChatComposer({
   );
   const canSend = text.trim().length > 0 || draft.items.length > 0;
   const inputLocked = taskLocked && !running;
+
+  useLayoutEffect(() => {
+    const element = textInput.current;
+    if (element !== null) resizeComposerInput(element);
+  }, [text]);
 
   /** Sends the current draft only after authentication and preserves it after any failure. */
   async function submit(): Promise<void> {
@@ -96,6 +107,7 @@ export function ChatComposer({
           t={t}
         />
         <textarea
+          ref={textInput}
           value={text}
           rows={1}
           maxLength={20_000}
@@ -104,11 +116,7 @@ export function ChatComposer({
           disabled={inputLocked}
           onChange={(event) => onTextChange(event.target.value)}
           onPaste={draft.handlePaste}
-          onInput={(event) => {
-            const element = event.currentTarget;
-            element.style.height = 'auto';
-            element.style.height = `${String(Math.min(element.scrollHeight, 220))}px`;
-          }}
+          onInput={(event) => resizeComposerInput(event.currentTarget)}
           onKeyDown={(event) => {
             if ((event.metaKey || event.ctrlKey) && event.key === 'Enter' && !inputLocked) {
               event.preventDefault();

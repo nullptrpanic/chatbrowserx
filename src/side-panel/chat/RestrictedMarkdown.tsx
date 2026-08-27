@@ -4,7 +4,7 @@ import { highlightCode } from './highlight-code';
 const inlinePattern =
   /(`[^`\n]+`|\*\*[^*\n]+\*\*|__[^_\n]+__|\[[^\]\n]+\]\(https?:\/\/[^\s)]+\)|https?:\/\/[^\s<]+)/g;
 const unorderedItemPattern = /^\s*[-+*]\s+(.+)$/;
-const orderedItemPattern = /^\s*\d+[.)]\s+(.+)$/;
+const orderedItemPattern = /^\s*(\d+)[.)]\s+(.+)$/;
 const thematicBreakPattern = /^ {0,3}(?:(?:\*\s*){3,}|(?:-\s*){3,}|(?:_\s*){3,})$/;
 
 type TableAlignment = 'left' | 'center' | 'right' | undefined;
@@ -252,18 +252,23 @@ function renderProse(text: string, keyPrefix: string): ReactNode[] {
 
     const orderedItem = orderedItemPattern.exec(line);
     if (orderedItem !== null) {
+      const start = Number.parseInt(orderedItem[1] ?? '1', 10);
       const items: ReactNode[] = [];
       while (index < lines.length) {
         const match = orderedItemPattern.exec(lines[index] ?? '');
         if (match === null) break;
         items.push(
           <li key={`${keyPrefix}:${String(index)}:item`}>
-            {renderInline(match[1] ?? '', `${keyPrefix}:${String(index)}:item`)}
+            {renderInline(match[2] ?? '', `${keyPrefix}:${String(index)}:item`)}
           </li>,
         );
         index += 1;
       }
-      nodes.push(<ol key={`${keyPrefix}:${String(index)}:list`}>{items}</ol>);
+      nodes.push(
+        <ol key={`${keyPrefix}:${String(index)}:list`} start={start}>
+          {items}
+        </ol>,
+      );
       continue;
     }
 
