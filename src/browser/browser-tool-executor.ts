@@ -41,7 +41,6 @@ const TASK_SCOPED_OPERATIONS = new Set<ParsedBrowserToolCall['operation']>([
   'type',
   'keypress',
   'scroll',
-  'scroll_until',
   'hover',
   'select',
   'drag',
@@ -78,9 +77,11 @@ const POST_TYPE_FOLLOW_UP_SETTLE_TIMEOUT_MS = 1_000;
 const MAX_SCROLL_SEGMENTS_PER_CALL = 8;
 const MAX_SCROLL_OBSERVATION_CHARACTERS = 68 * 1_024;
 const RESERVED_SCROLL_OBSERVATION_CHARACTERS = 34 * 1_024;
-const MAX_SCROLL_UNTIL_OBSERVATION_CHARACTERS = 96 * 1_024;
-const RESERVED_SCROLL_UNTIL_OBSERVATION_CHARACTERS = 36 * 1_024;
-const SCROLL_UNTIL_TARGET_FRACTION = 0.8;
+const MAX_SCROLL_TRAVERSAL_OBSERVATION_CHARACTERS = 96 * 1_024;
+const RESERVED_SCROLL_TRAVERSAL_OBSERVATION_CHARACTERS = 36 * 1_024;
+const SCROLL_TRAVERSAL_TARGET_FRACTION = 0.8;
+const NETWORK_REQUEST_NOT_FOUND_MESSAGE =
+  'One or more request IDs are not in the current capture snapshot. Call browser_network_list again with cursor="" and copy requestId values exactly before retrying browser_network_get.';
 
 interface ReloadRecoveryState {
   readonly operation: ParsedBrowserToolCall['operation'];
@@ -226,13 +227,15 @@ function failureFor(error: unknown): BrowserToolFailure {
         true,
         false,
       );
-    case 'NETWORK_REQUEST_NOT_FOUND':
+    case 'NETWORK_LIST_CURSOR_INVALID':
       return failure(
-        'NETWORK_REQUEST_NOT_FOUND',
-        'The captured network request is no longer available.',
-        false,
+        'NETWORK_LIST_CURSOR_INVALID',
+        'The network list cursor expired or does not match this query. List again with cursor="".',
+        true,
         false,
       );
+    case 'NETWORK_REQUEST_NOT_FOUND':
+      return failure('NETWORK_REQUEST_NOT_FOUND', NETWORK_REQUEST_NOT_FOUND_MESSAGE, true, false);
     case 'REF_NOT_FOUND':
     case 'REF_SCOPE_MISMATCH':
     case 'STALE_REF':
@@ -350,7 +353,9 @@ function result(
   const serialized = JSON.stringify(output);
   if (serialized.length <= MAX_OUTPUT_CHARACTERS) {
     const compact =
-      operation === 'scroll_until' ? compactBrowserModelOutput(serialized) : serialized;
+      operation === 'scroll' && isTraversalScrollOutput(output)
+        ? compactBrowserModelOutput(serialized)
+        : serialized;
     return {
       output: serialized,
       ...(serialized.length - compact.length >= MIN_MODEL_OUTPUT_SAVINGS_CHARACTERS
@@ -612,6 +617,8 @@ function bindScrollDelta(
     target,
     deltaX,
     deltaY,
+    maxSegments: 1,
+    stopText: '',
   } as ParsedBrowserToolCall['arguments'];
   return {
     ...call,
@@ -631,11 +638,11 @@ function continuationDelta(value: unknown): number | null {
   return measured === null ? null : Math.sign(measured) * Math.ceil(Math.abs(measured));
 }
 
-function adaptiveScrollUntilDelta(delta: number, targetSize: number | undefined): number {
+function adaptiveScrollTraversalDelta(delta: number, targetSize: number | undefined): number {
   if (delta === 0 || targetSize === undefined || !Number.isFinite(targetSize) || targetSize <= 0) {
     return delta;
   }
-  const targetLimit = Math.max(1, Math.floor(targetSize * SCROLL_UNTIL_TARGET_FRACTION));
+  const targetLimit = Math.max(1, Math.floor(targetSize * SCROLL_TRAVERSAL_TARGET_FRACTION));
   return Math.sign(delta) * Math.min(Math.abs(delta), targetLimit);
 }
 
@@ -669,7 +676,7 @@ interface ScrollSegmentAggregate {
   readonly verificationUnavailable: boolean;
 }
 
-type ScrollUntilStopReason =
+type ScrollTraversalStopReason =
   | 'text_seen'
   | 'boundary_verified'
   | 'cycle_detected'
@@ -680,6 +687,27 @@ type ScrollUntilStopReason =
   | 'observation_unavailable'
   | 'page_unsettled'
   | 'action_failure';
+
+function isTraversalScroll(call: ParsedBrowserToolCall): boolean {
+  if (call.operation !== 'scroll') return false;
+  const input = call.arguments as {
+    readonly maxSegments: number;
+    readonly stopText: string;
+  };
+  return input.maxSegments > 1 || input.stopText.trim().length > 0;
+}
+
+function isTraversalScrollOutput(output: unknown): boolean {
+  if (typeof output !== 'object' || output === null || Array.isArray(output)) return false;
+  const data = (output as Readonly<Record<string, unknown>>).data;
+  return (
+    typeof data === 'object' &&
+    data !== null &&
+    !Array.isArray(data) &&
+    (data as Readonly<Record<string, unknown>>).action === 'scroll' &&
+    (data as Readonly<Record<string, unknown>>).mode === 'traverse'
+  );
+}
 
 function normalizedVisibleText(value: string): string {
   return value.normalize('NFKC').replace(/\s+/gu, ' ').trim().toLocaleLowerCase();
@@ -1044,36 +1072,6 @@ export class BrowserToolExecutor implements BrowserExecutionPort {
           modelAttachmentIds = [];
           break;
         }
-        case 'scroll_until': {
-          if (!this.#dependencies.actions || !this.#dependencies.observer) {
-            output = failure(
-              'OPERATION_UNAVAILABLE',
-              'This browser operation is not connected yet.',
-              false,
-              false,
-            );
-            break;
-          }
-          const targetTabId = requiredTaskTabId(taskTarget);
-          if (this.#interactiveSnapshotByTab.get(targetTabId) === undefined) {
-            output = failure(
-              'INTERACTIVE_INSPECTION_REQUIRED',
-              'Inspect the page with mode interactive before starting bounded scrolling.',
-              true,
-              true,
-            );
-            break;
-          }
-          this.#screenshotScales.delete(targetTabId);
-          await this.#retainRunner(targetTabId, context?.sessionOwnerId);
-          output = await this.#executeScrollUntil(
-            call,
-            targetTabId,
-            signal,
-            context?.sessionOwnerId,
-          );
-          break;
-        }
         case 'click':
         case 'set_checked':
         case 'set_checked_many':
@@ -1093,6 +1091,36 @@ export class BrowserToolExecutor implements BrowserExecutionPort {
               'This browser operation is not connected yet.',
               false,
               false,
+            );
+            break;
+          }
+          if (isTraversalScroll(call)) {
+            if (!this.#dependencies.observer) {
+              output = failure(
+                'OPERATION_UNAVAILABLE',
+                'This browser operation is not connected yet.',
+                false,
+                false,
+              );
+              break;
+            }
+            const targetTabId = requiredTaskTabId(taskTarget);
+            if (this.#interactiveSnapshotByTab.get(targetTabId) === undefined) {
+              output = failure(
+                'INTERACTIVE_INSPECTION_REQUIRED',
+                'Inspect the page with mode interactive before starting bounded scrolling.',
+                true,
+                true,
+              );
+              break;
+            }
+            this.#screenshotScales.delete(targetTabId);
+            await this.#retainRunner(targetTabId, context?.sessionOwnerId);
+            output = await this.#executeScrollTraversal(
+              call,
+              targetTabId,
+              signal,
+              context?.sessionOwnerId,
             );
             break;
           }
@@ -1302,19 +1330,21 @@ export class BrowserToolExecutor implements BrowserExecutionPort {
             readonly urlPattern: string;
             readonly limit: number;
             readonly mode: 'recent' | 'endpoint_sample';
+            readonly cursor: string;
           };
           const targetTabId = requiredTaskTabId(taskTarget);
-          const requests = await this.#dependencies.network.list(
+          const page = await this.#dependencies.network.list(
             targetTabId,
             input.urlPattern,
             input.limit,
             input.mode,
+            input.cursor,
           );
           output = {
             ok: true,
             tabId: targetTabId,
             url: null,
-            data: { requests },
+            data: page,
             observation: null,
           };
           break;
@@ -1338,6 +1368,15 @@ export class BrowserToolExecutor implements BrowserExecutionPort {
           };
           const targetTabId = requiredTaskTabId(taskTarget);
           const results = await this.#dependencies.network.get(targetTabId, input.requests);
+          if (results.some((entry) => !entry.ok)) {
+            output = failure(
+              'NETWORK_REQUEST_NOT_FOUND',
+              NETWORK_REQUEST_NOT_FOUND_MESSAGE,
+              true,
+              false,
+            );
+            break;
+          }
           output = {
             ok: true,
             tabId: targetTabId,
@@ -1358,12 +1397,12 @@ export class BrowserToolExecutor implements BrowserExecutionPort {
             break;
           }
           const targetTabId = requiredTaskTabId(taskTarget);
-          await this.#dependencies.network.stop(targetTabId);
+          const stopped = await this.#dependencies.network.stop(targetTabId);
           output = {
             ok: true,
             tabId: targetTabId,
             url: null,
-            data: { stopped: true },
+            data: stopped,
             observation: null,
           };
           break;
@@ -1623,7 +1662,7 @@ export class BrowserToolExecutor implements BrowserExecutionPort {
     };
   }
 
-  async #executeScrollUntil(
+  async #executeScrollTraversal(
     call: ParsedBrowserToolCall,
     tabId_: number,
     signal: AbortSignal,
@@ -1647,15 +1686,15 @@ export class BrowserToolExecutor implements BrowserExecutionPort {
         // Let the scroll action surface stale or unavailable targets through its established path.
       }
     }
-    const effectiveDeltaX = adaptiveScrollUntilDelta(input.deltaX, scrollTargetSize?.width);
-    const effectiveDeltaY = adaptiveScrollUntilDelta(input.deltaY, scrollTargetSize?.height);
+    const effectiveDeltaX = adaptiveScrollTraversalDelta(input.deltaX, scrollTargetSize?.width);
+    const effectiveDeltaY = adaptiveScrollTraversalDelta(input.deltaY, scrollTargetSize?.height);
     const marker = normalizedVisibleText(input.stopText);
     const observations: Readonly<Record<string, unknown>>[] = [];
     let nextDeltaX = effectiveDeltaX;
     let nextDeltaY = effectiveDeltaY;
     let latestAction: BrowserActionResult | null = null;
     let latestSnapshot: string | null = null;
-    let stopReason: ScrollUntilStopReason | null = null;
+    let stopReason: ScrollTraversalStopReason | null = null;
     let continuationFailure: BrowserToolFailure | undefined;
     let segments = 0;
     let actualDeltaX = 0;
@@ -1794,7 +1833,8 @@ export class BrowserToolExecutor implements BrowserExecutionPort {
       }
       if (
         JSON.stringify(observations).length >
-        MAX_SCROLL_UNTIL_OBSERVATION_CHARACTERS - RESERVED_SCROLL_UNTIL_OBSERVATION_CHARACTERS
+        MAX_SCROLL_TRAVERSAL_OBSERVATION_CHARACTERS -
+          RESERVED_SCROLL_TRAVERSAL_OBSERVATION_CHARACTERS
       ) {
         stopReason = 'evidence_budget';
         break;
@@ -1831,7 +1871,8 @@ export class BrowserToolExecutor implements BrowserExecutionPort {
       tabId: latestAction?.tabId ?? tabId_,
       url: latestAction?.url ?? null,
       data: {
-        action: 'scroll_until',
+        action: 'scroll',
+        mode: 'traverse',
         target: input.target,
         deltaX: input.deltaX,
         deltaY: input.deltaY,

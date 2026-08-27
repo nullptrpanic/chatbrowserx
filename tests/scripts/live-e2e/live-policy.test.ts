@@ -54,6 +54,124 @@ describe('live E2E acceptance policy', () => {
     expect(result.checks.every((check) => check.passed)).toBe(true);
   });
 
+  it('rejects a section traversal that can run through many segments before reassessment', () => {
+    const boundedScenario: LiveScenario = {
+      ...scenario,
+      requiredTools: ['browser_inspect', 'browser_scroll'],
+      maxScrollSegmentsPerCall: 1,
+    };
+    const accepted = evaluateLiveRun(boundedScenario, {
+      ...completedInput(),
+      toolResults: [
+        ...completedInput().toolResults,
+        tool('browser_scroll', {
+          tabId: 0,
+          target: 'ref_document',
+          deltaX: 0,
+          deltaY: 600,
+          maxSegments: 1,
+          stopText: '',
+        }),
+      ],
+    });
+    expect(accepted.checks).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ name: 'scroll-segment-limit', passed: true }),
+      ]),
+    );
+    expect(accepted.passed).toBe(true);
+
+    const oversizedTraversal = evaluateLiveRun(boundedScenario, {
+      ...completedInput(),
+      toolResults: [
+        ...completedInput().toolResults,
+        tool('browser_scroll', {
+          tabId: 0,
+          target: 'ref_document',
+          deltaX: 0,
+          deltaY: 600,
+          maxSegments: 8,
+          stopText: 'Distant section',
+        }),
+      ],
+    });
+    expect(oversizedTraversal.checks).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          name: 'scroll-segment-limit',
+          passed: false,
+        }),
+      ]),
+    );
+    expect(oversizedTraversal.passed).toBe(false);
+  });
+
+  it('rejects section traversal after a forbidden later section becomes active', () => {
+    const boundedScenario: LiveScenario = {
+      ...scenario,
+      requiredTools: ['browser_inspect', 'browser_scroll'],
+      forbiddenActiveElementNamesAfterScroll: ['Bad Case', 'References'],
+    };
+    const scrollAt = (activeName: string): LiveToolResult =>
+      tool(
+        'browser_scroll',
+        {
+          tabId: 0,
+          target: 'ref_document',
+          deltaX: 0,
+          deltaY: 600,
+          maxSegments: 1,
+          stopText: '',
+        },
+        {
+          output: JSON.stringify({
+            ok: true,
+            data: {
+              verification: {
+                mode: 'interactive',
+                snapshot: 'snapshot_after_scroll',
+                upsert: [
+                  {
+                    k: 'toc-active',
+                    e: { d: 4, n: activeName, s: ['active'] },
+                  },
+                ],
+                remove: [],
+              },
+            },
+          }),
+        },
+      );
+
+    const accepted = evaluateLiveRun(boundedScenario, {
+      ...completedInput(),
+      toolResults: [...completedInput().toolResults, scrollAt('Adjacent section')],
+    });
+    expect(accepted.checks).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          name: 'scroll-active-boundary',
+          passed: true,
+        }),
+      ]),
+    );
+    expect(accepted.passed).toBe(true);
+
+    const overscrolled = evaluateLiveRun(boundedScenario, {
+      ...completedInput(),
+      toolResults: [...completedInput().toolResults, scrollAt('Bad Case')],
+    });
+    expect(overscrolled.checks).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          name: 'scroll-active-boundary',
+          passed: false,
+        }),
+      ]),
+    );
+    expect(overscrolled.passed).toBe(false);
+  });
+
   it('rejects screenshot inspection and submitted typing', () => {
     const input: LiveRunInput = {
       ...completedInput(),
@@ -234,6 +352,24 @@ describe('live E2E acceptance policy', () => {
     );
   });
 
+  it('matches required final evidence across harmless case and whitespace differences', () => {
+    const normalizedScenario: LiveScenario = {
+      ...scenario,
+      finalTextIncludes: ['31 个租户', 'AuthZ', 'Local Cache', 'LogID'],
+    };
+    const result = evaluateLiveRun(normalizedScenario, {
+      ...completedInput(),
+      finalText: 'Example chat: 31个租户的 authz 判断使用 local\ncache，并以 logid 关联结果。',
+    });
+
+    expect(result.checks).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ name: 'final-text-content', passed: true }),
+      ]),
+    );
+    expect(result.passed).toBe(true);
+  });
+
   it('does not treat a blocker word embedded in a code identifier as an unresolved blocker', () => {
     const guardedScenario: LiveScenario = {
       ...scenario,
@@ -247,7 +383,10 @@ describe('live E2E acceptance policy', () => {
 
     expect(result.checks).toEqual(
       expect.arrayContaining([
-        expect.objectContaining({ name: 'final-text-exclusions', passed: true }),
+        expect.objectContaining({
+          name: 'final-text-exclusions',
+          passed: true,
+        }),
       ]),
     );
   });
@@ -264,7 +403,10 @@ describe('live E2E acceptance policy', () => {
 
     expect(result.checks).toEqual(
       expect.arrayContaining([
-        expect.objectContaining({ name: 'final-text-exclusions', passed: false }),
+        expect.objectContaining({
+          name: 'final-text-exclusions',
+          passed: false,
+        }),
       ]),
     );
   });
@@ -384,6 +526,55 @@ describe('live E2E acceptance policy', () => {
     );
   });
 
+  it('accepts structural readback produced by the submitting action itself', () => {
+    const marker = 'ChatBrowserX live self-check live_123';
+    const mutationScenario: LiveScenario = {
+      ...scenario,
+      allowRemoteMutation: true,
+      forbidSubmittedType: false,
+      requiredTools: ['browser_type'],
+      expectedSubmittedTypeCount: 1,
+      requiredTypedTextIncludes: [marker],
+      requiredToolOutputIncludes: [marker],
+      finalTextIncludes: [marker],
+    };
+
+    const result = evaluateLiveRun(mutationScenario, {
+      terminalStatus: 'completed',
+      finalText: `Sent and verified ${marker}`,
+      toolResults: [
+        tool(
+          'browser_type',
+          {
+            tabId: 0,
+            ref: 'message-editor',
+            text: marker,
+            replace: true,
+            submit: true,
+          },
+          {
+            output: JSON.stringify({
+              ok: true,
+              data: {
+                submitted: true,
+                submissionVerified: true,
+                pageVerification: {
+                  mode: 'full',
+                  elements: [
+                    { r: 'statictext', n: `${marker}: result 2` },
+                    { r: 'textbox', n: '' },
+                  ],
+                },
+              },
+            }),
+          },
+        ),
+      ],
+    });
+
+    expect(result.passed).toBe(true);
+  });
+
   it('accepts a required typed marker contained inside a longer submitted message', () => {
     const marker = 'ChatBrowserX summary live_123';
     const mutationScenario: LiveScenario = {
@@ -475,7 +666,16 @@ describe('live E2E acceptance policy', () => {
       toolNames: ['browser_inspect'],
       toolDefinitionCharacters: 256,
       toolChoice: 'auto',
-      inputItems: [],
+      inputItems: [
+        {
+          position: 0,
+          type: 'message',
+          role: 'user',
+          contentTypes: ['input_text'],
+          textCharacters: 64,
+          matchesActiveUserRequest: true,
+        },
+      ],
       activeUserRequestOccurrences: 1,
       runtimeSupplementOccurrences: 0,
       functionCallCount: 0,
@@ -543,6 +743,59 @@ describe('live E2E acceptance policy', () => {
         }),
       ]),
     );
+
+    const freshScenario: LiveScenario = {
+      ...scenario,
+      requireFreshProviderContext: true,
+    };
+    const fresh = evaluateLiveRun(freshScenario, input);
+    expect(fresh.checks).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          name: 'fresh-provider-context',
+          passed: true,
+        }),
+      ]),
+    );
+
+    const providerTrace = input.providerTrace;
+    const secondRequest = providerTrace?.requests[1];
+    if (providerTrace === undefined || secondRequest === undefined) {
+      throw new Error('Expected the provider trace fixture to contain two requests.');
+    }
+
+    const contaminated = evaluateLiveRun(freshScenario, {
+      ...input,
+      providerTrace: {
+        ...providerTrace,
+        requests: [
+          {
+            ...request,
+            inputItems: [
+              ...request.inputItems,
+              {
+                position: 1,
+                type: 'message',
+                role: 'assistant',
+                contentTypes: ['output_text'],
+                textCharacters: 20,
+                matchesActiveUserRequest: false,
+              },
+            ],
+          },
+          secondRequest,
+        ],
+      },
+    });
+    expect(contaminated.checks).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          name: 'fresh-provider-context',
+          passed: false,
+        }),
+      ]),
+    );
+    expect(contaminated.passed).toBe(false);
   });
 });
 

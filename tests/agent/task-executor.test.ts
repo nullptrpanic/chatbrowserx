@@ -750,6 +750,8 @@ describe('TaskExecutor', () => {
         target: 'viewport',
         deltaX: 0,
         deltaY: 600,
+        maxSegments: 1,
+        stopText: '',
       }),
       browserCall('call_inspect_after_immobile_scroll', 'browser_inspect', {
         mode: 'interactive',
@@ -759,6 +761,8 @@ describe('TaskExecutor', () => {
         target: 'viewport',
         deltaX: 0,
         deltaY: 600,
+        maxSegments: 1,
+        stopText: '',
       }),
     ];
     const execute = vi.fn<BrowserExecutionPort['execute']>(async (call) => ({
@@ -816,8 +820,8 @@ describe('TaskExecutor', () => {
       stopText: '',
     };
     const calls = [
-      browserCall('call_scroll_until_1', 'browser_scroll_until', arguments_),
-      browserCall('call_scroll_until_2', 'browser_scroll_until', arguments_),
+      browserCall('call_scroll_traverse_1', 'browser_scroll', arguments_),
+      browserCall('call_scroll_traverse_2', 'browser_scroll', arguments_),
     ];
     const execute = vi.fn<BrowserExecutionPort['execute']>(async () => ({
       output: JSON.stringify({
@@ -825,7 +829,8 @@ describe('TaskExecutor', () => {
         tabId: 7,
         url: 'https://example.test/history',
         data: {
-          action: 'scroll_until',
+          action: 'scroll',
+          mode: 'traverse',
           moved: false,
           stopReason: 'no_progress',
           position: { x: 0, y: 0, maxX: 0, maxY: 1_200 },
@@ -865,6 +870,8 @@ describe('TaskExecutor', () => {
         target: 'ref_history',
         deltaX: 0,
         deltaY: -10_000,
+        maxSegments: 1,
+        stopText: '',
       }),
       {
         type: 'task.completed',
@@ -881,6 +888,8 @@ describe('TaskExecutor', () => {
         target: 'ref_history',
         deltaX: 0,
         deltaY: -9_035,
+        maxSegments: 1,
+        stopText: '',
       }),
       browserCall('call_inspect_completed_scroll', 'browser_inspect', {
         tabId: 0,
@@ -1807,6 +1816,133 @@ describe('TaskExecutor', () => {
     expect(result.checkpoint.pendingToolCall).toMatchObject({
       callId: 'call_exec',
       executionState: 'recorded',
+    });
+    database.close();
+  });
+
+  it('returns one transient Sandbox read failure to the model instead of pausing the task', async () => {
+    const database = await openChatBrowserDatabase(
+      createTestDatabaseName('sandbox-transient-read'),
+    );
+    const repository = new IndexedDbTaskRepository(database);
+    const dependencies = sources();
+    const commands = new TaskCommandService(
+      repository,
+      dependencies.clock,
+      dependencies.ids,
+      dependencies.conversations,
+    );
+    const created = await commands.create({
+      conversationId: 'conversation_1',
+      tabId: 7,
+      goal: 'Recover from one Sandbox read failure',
+    });
+    let turn = 0;
+    const executor = new TaskExecutor({
+      repository,
+      conversations: dependencies.conversations,
+      planner: {
+        plan: () =>
+          (async function* () {
+            turn += 1;
+            if (turn === 1) {
+              yield sandboxCall('call_read', 'sandbox_read', {
+                path: '/skills/example/SKILL.md',
+                startLine: 1,
+                maxLines: 50,
+              });
+            } else {
+              yield {
+                type: 'task.completed',
+                reason: 'model_response_completed',
+                messageId: 'message_answer',
+              } as const;
+            }
+          })(),
+      },
+      tavily: tavilyPort(),
+      browser: browserPort(),
+      sandbox: {
+        execute: vi.fn(async () => {
+          throw new SandboxClientError('UNAVAILABLE', 'definitely_not_dispatched');
+        }),
+      },
+      clock: dependencies.clock,
+      ids: dependencies.ids,
+    });
+
+    const result = await executor.run(created.task.id, new AbortController().signal);
+
+    expect(result.task.status).toBe('completed');
+    expect(result.events.map(({ type }) => type)).not.toContain('task.paused');
+    expect(JSON.parse(result.checkpoint.completedToolResults[0]?.output ?? '{}')).toEqual({
+      ok: false,
+      code: 'SANDBOX_UNAVAILABLE',
+      message: 'The Sandbox is temporarily unavailable.',
+      retryable: true,
+    });
+    database.close();
+  });
+
+  it('records an ambiguous Sandbox exec result when transport fails after dispatch', async () => {
+    const database = await openChatBrowserDatabase(
+      createTestDatabaseName('sandbox-transient-exec'),
+    );
+    const repository = new IndexedDbTaskRepository(database);
+    const dependencies = sources();
+    const commands = new TaskCommandService(
+      repository,
+      dependencies.clock,
+      dependencies.ids,
+      dependencies.conversations,
+    );
+    const created = await commands.create({
+      conversationId: 'conversation_1',
+      tabId: 7,
+      goal: 'Do not repeat an ambiguous Sandbox command',
+    });
+    let turn = 0;
+    const execute = vi.fn(async () => {
+      throw new SandboxClientError('UNAVAILABLE', 'may_have_dispatched');
+    });
+    const executor = new TaskExecutor({
+      repository,
+      conversations: dependencies.conversations,
+      planner: {
+        plan: () =>
+          (async function* () {
+            turn += 1;
+            if (turn === 1) {
+              yield sandboxCall('call_exec', 'sandbox_exec', {
+                command: 'touch marker',
+                cwd: null,
+              });
+            } else {
+              yield {
+                type: 'task.completed',
+                reason: 'model_response_completed',
+                messageId: 'message_answer',
+              } as const;
+            }
+          })(),
+      },
+      tavily: tavilyPort(),
+      browser: browserPort(),
+      sandbox: { execute },
+      clock: dependencies.clock,
+      ids: dependencies.ids,
+    });
+
+    const result = await executor.run(created.task.id, new AbortController().signal);
+
+    expect(execute).toHaveBeenCalledOnce();
+    expect(result.task.status).toBe('completed');
+    expect(JSON.parse(result.checkpoint.completedToolResults[0]?.output ?? '{}')).toEqual({
+      ok: false,
+      code: 'AMBIGUOUS_EXECUTION',
+      message:
+        'The Sandbox command may already have run. Inspect its effects before choosing the next action.',
+      retryable: false,
     });
     database.close();
   });

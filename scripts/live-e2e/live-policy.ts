@@ -51,6 +51,34 @@ function structuralElements(
   );
 }
 
+function postActionVerificationElements(
+  value: Readonly<Record<string, unknown>> | null,
+): readonly Readonly<Record<string, unknown>>[] {
+  const data = value?.data;
+  if (typeof data !== 'object' || data === null || Array.isArray(data)) return [];
+  const dataRecord = data as Readonly<Record<string, unknown>>;
+  const verification = dataRecord.pageVerification ?? dataRecord.verification;
+  if (typeof verification !== 'object' || verification === null || Array.isArray(verification)) {
+    return [];
+  }
+  const record = verification as Readonly<Record<string, unknown>>;
+  if (Array.isArray(record.elements)) {
+    return record.elements.flatMap((candidate) =>
+      typeof candidate === 'object' && candidate !== null && !Array.isArray(candidate)
+        ? [candidate as Readonly<Record<string, unknown>>]
+        : [],
+    );
+  }
+  if (!Array.isArray(record.upsert)) return [];
+  return record.upsert.flatMap((candidate) => {
+    if (typeof candidate !== 'object' || candidate === null || Array.isArray(candidate)) return [];
+    const element = (candidate as Readonly<Record<string, unknown>>).e;
+    return typeof element === 'object' && element !== null && !Array.isArray(element)
+      ? [element as Readonly<Record<string, unknown>>]
+      : [];
+  });
+}
+
 function check(name: string, passed: boolean, detail: string): LiveAcceptanceCheck {
   return { name, passed, detail };
 }
@@ -206,14 +234,24 @@ export function evaluateLiveRun(scenario: LiveScenario, input: LiveRunInput): Li
   const lastSubmittedIndex = parsedCalls.findLastIndex(
     ({ result, arguments_ }) => result.toolName === 'browser_type' && arguments_?.submit === true,
   );
-  const postSubmitElements = parsedCalls
-    .slice(lastSubmittedIndex + 1)
-    .filter(({ result }) => result.toolName === 'browser_inspect')
-    .flatMap(({ output }) => structuralElements(output));
+  const submittedVerificationElements =
+    lastSubmittedIndex < 0
+      ? []
+      : postActionVerificationElements(parsedCalls[lastSubmittedIndex]?.output ?? null);
+  const postSubmitElements = [
+    ...submittedVerificationElements,
+    ...parsedCalls
+      .slice(lastSubmittedIndex + 1)
+      .filter(({ result }) => result.toolName === 'browser_inspect')
+      .flatMap(({ output }) => structuralElements(output)),
+  ];
   const requiredReadback = scenario.requiredToolOutputIncludes ?? [];
   const missingToolOutput = requiredReadback.filter(
     (value) =>
-      !postSubmitElements.some((element) => element.r === 'statictext' && element.n === value),
+      !postSubmitElements.some(
+        (element) =>
+          element.r === 'statictext' && typeof element.n === 'string' && element.n.includes(value),
+      ),
   );
   const retainedSubmittedText = requiredReadback.filter((value) =>
     postSubmitElements.some(
@@ -241,6 +279,36 @@ export function evaluateLiveRun(scenario: LiveScenario, input: LiveRunInput): Li
   const mismatchedToolCounts = expectedToolCounts.filter(
     ([name, expected]) => toolNames.filter((candidate) => candidate === name).length !== expected,
   );
+  const scrollCalls = parsedCalls
+    .map((call, index) => ({ ...call, index }))
+    .filter(({ result }) => result.toolName === 'browser_scroll');
+  const maxScrollSegmentsPerCall = scenario.maxScrollSegmentsPerCall;
+  const oversizedScrollCalls =
+    maxScrollSegmentsPerCall === undefined
+      ? []
+      : scrollCalls.filter(
+          ({ arguments_ }) =>
+            typeof arguments_?.maxSegments !== 'number' ||
+            !Number.isInteger(arguments_.maxSegments) ||
+            arguments_.maxSegments < 1 ||
+            arguments_.maxSegments > maxScrollSegmentsPerCall,
+        );
+  const activeNamesAfterScroll = new Set(
+    scrollCalls.flatMap(({ output }) =>
+      postActionVerificationElements(output).flatMap((element) => {
+        const state = element.s;
+        return typeof element.n === 'string' &&
+          Array.isArray(state) &&
+          state.some((value) => value === 'active')
+          ? [element.n]
+          : [];
+      }),
+    ),
+  );
+  const forbiddenActiveNames = scenario.forbiddenActiveElementNamesAfterScroll ?? [];
+  const observedForbiddenActiveNames = forbiddenActiveNames.filter((name) =>
+    activeNamesAfterScroll.has(name),
+  );
   const unverifiedRequiredTools = (scenario.requiredVerifiedTools ?? []).filter((name) => {
     const calls = parsedCalls.filter(({ result }) => result.toolName === name);
     return (
@@ -258,8 +326,11 @@ export function evaluateLiveRun(scenario: LiveScenario, input: LiveRunInput): Li
     );
   });
   const maxAttachmentCount = scenario.maxAttachmentCount ?? 0;
+  const normalizeRequiredText = (value: string): string =>
+    value.toLocaleLowerCase().replace(/\s+/gu, '');
+  const normalizedRequiredFinalText = normalizeRequiredText(input.finalText);
   const missingFinalText = scenario.finalTextIncludes.filter(
-    (value) => !input.finalText.includes(value),
+    (value) => !normalizedRequiredFinalText.includes(normalizeRequiredText(value)),
   );
   const normalizedFinalText = input.finalText.toLocaleLowerCase();
   const presentExcludedFinalText = (scenario.finalTextExcludes ?? []).filter((value) =>
@@ -269,6 +340,20 @@ export function evaluateLiveRun(scenario: LiveScenario, input: LiveRunInput): Li
   const minimumTableRows = scenario.minimumMarkdownTableRows;
   const providerTrace = input.providerTrace;
   const providerRequests = providerTrace?.requests ?? [];
+  const firstProviderRequest = providerRequests[0];
+  const firstProviderInput = firstProviderRequest?.inputItems[0];
+  const freshProviderContextPassed =
+    scenario.requireFreshProviderContext !== true ||
+    (firstProviderRequest !== undefined &&
+      firstProviderRequest.activeUserRequestOccurrences === 1 &&
+      firstProviderRequest.runtimeSupplementOccurrences === 0 &&
+      firstProviderRequest.functionCallCount === 0 &&
+      firstProviderRequest.functionOutputCount === 0 &&
+      firstProviderRequest.encryptedReasoningInputCount === 0 &&
+      firstProviderRequest.inputItems.length === 1 &&
+      firstProviderInput?.type === 'message' &&
+      firstProviderInput.role === 'user' &&
+      firstProviderInput.matchesActiveUserRequest === true);
   const malformedProviderRequests = providerRequests.filter(
     (request) =>
       !request.bodyValid ||
@@ -350,6 +435,24 @@ export function evaluateLiveRun(scenario: LiveScenario, input: LiveRunInput): Li
             .join(', ')}.`,
     ),
     check(
+      'scroll-segment-limit',
+      oversizedScrollCalls.length === 0,
+      maxScrollSegmentsPerCall === undefined
+        ? 'No per-call scroll segment limit declared.'
+        : oversizedScrollCalls.length === 0
+          ? `${String(scrollCalls.length)} scroll calls stayed within ${String(maxScrollSegmentsPerCall)} segment(s) per call.`
+          : `${String(oversizedScrollCalls.length)} of ${String(scrollCalls.length)} scroll calls exceeded ${String(maxScrollSegmentsPerCall)} segment(s) before model reassessment.`,
+    ),
+    check(
+      'scroll-active-boundary',
+      observedForbiddenActiveNames.length === 0,
+      forbiddenActiveNames.length === 0
+        ? 'No forbidden active section names declared.'
+        : observedForbiddenActiveNames.length === 0
+          ? `No forbidden later section became active across ${String(scrollCalls.length)} scroll calls.`
+          : `Forbidden later sections became active: ${observedForbiddenActiveNames.join(', ')}.`,
+    ),
+    check(
       'required-tool-verification',
       unverifiedRequiredTools.length === 0,
       unverifiedRequiredTools.length === 0
@@ -426,6 +529,15 @@ export function evaluateLiveRun(scenario: LiveScenario, input: LiveRunInput): Li
       providerTrace === undefined
         ? 'No Provider trace supplied.'
         : `${String(providerTrace.requestCount)} Provider requests for ${String(input.toolResults.length)} completed tools.`,
+    ),
+    check(
+      'fresh-provider-context',
+      freshProviderContextPassed,
+      scenario.requireFreshProviderContext !== true
+        ? 'Fresh provider context not required.'
+        : freshProviderContextPassed
+          ? 'First provider request contains only the active user message.'
+          : 'First provider request contains prior or unexpected context.',
     ),
     check(
       'provider-request-contract',

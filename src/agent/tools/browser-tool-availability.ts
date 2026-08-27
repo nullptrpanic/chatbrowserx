@@ -19,6 +19,8 @@ const DISCOVERY_TOOL_NAMES = new Set<BrowserToolName>([
   'browser_capture_screenshot',
   'browser_wait',
   'browser_network_start',
+  'browser_network_list',
+  'browser_network_get',
   'browser_network_stop',
 ]);
 
@@ -28,7 +30,6 @@ const INTERACTIVE_TOOL_NAMES = new Set<BrowserToolName>([
   'browser_type',
   'browser_keypress',
   'browser_scroll',
-  'browser_scroll_until',
   'browser_hover',
   'browser_select',
   'browser_drag',
@@ -47,7 +48,6 @@ const VISUAL_INVALIDATING_TOOLS = new Set<BrowserToolName>([
   'browser_type',
   'browser_keypress',
   'browser_scroll',
-  'browser_scroll_until',
   'browser_hover',
   'browser_select',
   'browser_drag',
@@ -59,7 +59,7 @@ const VISUAL_INVALIDATING_TOOLS = new Set<BrowserToolName>([
 interface CapabilityState {
   semanticSnapshotCurrent: boolean;
   visualSnapshotCurrent: boolean;
-  networkActive: boolean;
+  networkReadable: boolean;
   selectableRefs: Set<string>;
   scrollableRefs: Set<string>;
   readonly usedTools: Set<BrowserToolName>;
@@ -76,8 +76,8 @@ interface BrowserToolHistory {
 }
 
 export interface BrowserScrollContinuation {
-  readonly next: 'inspect' | 'scroll' | 'scroll_until';
-  readonly resumeOperation?: 'scroll_until';
+  readonly next: 'inspect' | 'scroll';
+  readonly mode: 'distance' | 'traverse';
   readonly tabId: number;
   readonly target: string;
   readonly targetOptions?: readonly string[];
@@ -85,8 +85,8 @@ export interface BrowserScrollContinuation {
   readonly remainingDeltaY: number;
   readonly boundaryProbeDeltaX?: number;
   readonly boundaryProbeDeltaY?: number;
-  readonly maxSegments?: number;
-  readonly stopText?: string;
+  readonly maxSegments: number;
+  readonly stopText: string;
 }
 
 export interface BrowserToolContract {
@@ -135,7 +135,7 @@ function bindScrollableTargets(
   refs: ReadonlySet<string>,
 ): ModelToolDefinition {
   if (
-    definition.name !== 'browser_scroll_until' ||
+    definition.name !== 'browser_scroll' ||
     refs.size === 0 ||
     refs.size > MAX_BOUND_SCROLL_REFS
   ) {
@@ -292,16 +292,12 @@ function browserScrollContinuation(history: BrowserToolHistory): BrowserScrollCo
             : refs.length === 1
               ? refs[0]
               : undefined;
-          if (
-            target === undefined &&
-            state.continuation.resumeOperation === 'scroll_until' &&
-            refs.length > 1
-          ) {
+          if (target === undefined && state.continuation.mode === 'traverse' && refs.length > 1) {
             state.continuation = {
               ...state.continuation,
               target: refs[0] as string,
               targetOptions: refs,
-              next: 'scroll_until',
+              next: 'scroll',
             };
           } else if (target === undefined) {
             state.continuation = null;
@@ -310,13 +306,13 @@ function browserScrollContinuation(history: BrowserToolHistory): BrowserScrollCo
             state.continuation = {
               ...state.continuation,
               target,
-              next: state.continuation.resumeOperation ?? 'scroll',
+              next: 'scroll',
             };
           }
         } else {
           state.continuation = {
             ...state.continuation,
-            next: state.continuation.resumeOperation ?? 'scroll',
+            next: 'scroll',
           };
         }
       } else {
@@ -325,7 +321,7 @@ function browserScrollContinuation(history: BrowserToolHistory): BrowserScrollCo
       }
       continue;
     }
-    if (call.name !== 'browser_scroll' && call.name !== 'browser_scroll_until') continue;
+    if (call.name !== 'browser_scroll') continue;
     if (output === null) {
       if (state.continuation !== null) {
         state.continuationFailures += 1;
@@ -333,8 +329,8 @@ function browserScrollContinuation(history: BrowserToolHistory): BrowserScrollCo
       }
       continue;
     }
-    if (call.name === 'browser_scroll_until') {
-      const data = childRecord(output, 'data');
+    const data = childRecord(output, 'data');
+    if (data?.action === 'scroll' && data.mode === 'traverse') {
       const arguments_ = jsonRecord(call.argumentsJson);
       if (data?.stopReason === 'evidence_budget' || data?.stopReason === 'segment_limit') {
         state.continuation = null;
@@ -342,7 +338,8 @@ function browserScrollContinuation(history: BrowserToolHistory): BrowserScrollCo
         continue;
       }
       if (
-        data?.action !== 'scroll_until' ||
+        data?.action !== 'scroll' ||
+        data.mode !== 'traverse' ||
         data.continuationRequired !== true ||
         typeof arguments_?.target !== 'string' ||
         typeof arguments_.maxSegments !== 'number' ||
@@ -369,10 +366,10 @@ function browserScrollContinuation(history: BrowserToolHistory): BrowserScrollCo
         continue;
       }
       state.continuationFailures =
-        state.continuation?.resumeOperation === 'scroll_until' ? state.continuationFailures + 1 : 1;
+        state.continuation?.mode === 'traverse' ? state.continuationFailures + 1 : 1;
       state.continuation = {
         next: 'inspect',
-        resumeOperation: 'scroll_until',
+        mode: 'traverse',
         tabId:
           typeof arguments_.tabId === 'number' && Number.isInteger(arguments_.tabId)
             ? arguments_.tabId
@@ -386,7 +383,6 @@ function browserScrollContinuation(history: BrowserToolHistory): BrowserScrollCo
       continue;
     }
     state.continuationFailures = 0;
-    const data = childRecord(output, 'data');
     const arguments_ = jsonRecord(call.argumentsJson);
     const remainingDeltaX = integerContinuationDelta(data?.remainingDeltaX);
     const remainingDeltaY = integerContinuationDelta(data?.remainingDeltaY);
@@ -411,11 +407,14 @@ function browserScrollContinuation(history: BrowserToolHistory): BrowserScrollCo
     }
     state.continuation = {
       next: hasInteractiveEvidence ? 'scroll' : 'inspect',
+      mode: 'distance',
       tabId:
         typeof arguments_?.tabId === 'number' && Number.isInteger(arguments_.tabId)
           ? arguments_.tabId
           : 0,
       target: arguments_.target as string,
+      maxSegments: 1,
+      stopText: '',
       remainingDeltaX: incomplete ? (remainingDeltaX ?? 0) : 0,
       remainingDeltaY: incomplete ? (remainingDeltaY ?? 0) : 0,
       ...(needsBoundaryProbe &&
@@ -563,8 +562,7 @@ function applySuccessfulBrowserResult(
     state.selectableRefs.clear();
     state.scrollableRefs.clear();
   }
-  if (name === 'browser_network_start') state.networkActive = true;
-  else if (name === 'browser_network_stop') state.networkActive = false;
+  if (name === 'browser_network_start') state.networkReadable = true;
   for (const observation of embeddedInteractiveObservations(data)) {
     state.semanticSnapshotCurrent = true;
     applySemanticRefState(observation, state.selectableRefs, selectableRefFromEntry);
@@ -597,7 +595,7 @@ function availableBrowserToolDefinitions(
   const state: CapabilityState = {
     semanticSnapshotCurrent: false,
     visualSnapshotCurrent: false,
-    networkActive: false,
+    networkReadable: false,
     selectableRefs: new Set(),
     scrollableRefs: new Set(),
     usedTools: new Set(),
@@ -610,7 +608,7 @@ function availableBrowserToolDefinitions(
     if (item.type === 'compaction') {
       state.semanticSnapshotCurrent = false;
       state.visualSnapshotCurrent = false;
-      state.networkActive = false;
+      state.networkReadable = false;
       state.selectableRefs.clear();
       state.scrollableRefs.clear();
       state.usedTools.clear();
@@ -628,7 +626,7 @@ function availableBrowserToolDefinitions(
     if (successfulCommit(call, item, history)) {
       state.semanticSnapshotCurrent = false;
       state.visualSnapshotCurrent = false;
-      state.networkActive = false;
+      state.networkReadable = false;
       state.selectableRefs.clear();
       state.scrollableRefs.clear();
       state.usedTools.clear();
@@ -669,7 +667,7 @@ function availableBrowserToolDefinitions(
     enabled.add('browser_click_point');
     enabled.add('browser_drag_point');
   }
-  if (state.networkActive) {
+  if (state.networkReadable) {
     enabled.add('browser_network_list');
     enabled.add('browser_network_get');
     enabled.add('browser_network_stop');
@@ -687,12 +685,7 @@ function availableBrowserToolDefinitions(
 function constrainedContinuationDefinition(
   continuation: BrowserScrollContinuation,
 ): ModelToolDefinition {
-  const name =
-    continuation.next === 'inspect'
-      ? 'browser_inspect'
-      : continuation.next === 'scroll_until'
-        ? 'browser_scroll_until'
-        : 'browser_scroll';
+  const name = continuation.next === 'inspect' ? 'browser_inspect' : 'browser_scroll';
   const definition = BROWSER_TOOL_DEFINITION_BY_NAME[name];
   const properties = definition.parameters.properties as Readonly<Record<string, unknown>>;
   const hasRemainingDistance =
@@ -710,14 +703,14 @@ function constrainedContinuationDefinition(
     ...definition,
     description:
       continuation.next === 'inspect'
-        ? continuation.resumeOperation === 'scroll_until'
+        ? continuation.mode === 'traverse'
           ? 'A bounded traversal still requires more evidence, but its latest page state was unavailable or made no reliable progress. Inspect one fresh full interactive state, then resume the same traversal before any final answer.'
           : hasRemainingDistance
             ? 'A virtualized scroll still has unconsumed distance. Inspect the newly exposed interactive batch before any further scrolling or final answer.'
             : requiresBoundaryProbe
               ? 'The scroll only just reached an apparent boundary. Inspect the exposed batch, then verify the boundary with one same-direction probe before any final answer.'
               : 'The page was scrolled. Inspect the resulting interactive state before any further action or final answer.'
-        : continuation.next === 'scroll_until'
+        : continuation.mode === 'traverse'
           ? continuation.targetOptions !== undefined
             ? 'Continue the same unfinished bounded traversal. Choose the semantically matching target from the fresh schema-constrained refs, preserve its direction, stop marker, and segment bound, and do not finish while continuation is required.'
             : 'Continue the same unfinished bounded traversal. Preserve its direction, stop marker, and segment bound; do not switch strategy or finish while continuation is required.'
@@ -756,18 +749,14 @@ function constrainedContinuationDefinition(
                 ...(properties.deltaY as Readonly<Record<string, unknown>>),
                 enum: [nextDeltaY],
               },
-              ...(continuation.next === 'scroll_until'
-                ? {
-                    maxSegments: {
-                      ...(properties.maxSegments as Readonly<Record<string, unknown>>),
-                      enum: [continuation.maxSegments],
-                    },
-                    stopText: {
-                      ...(properties.stopText as Readonly<Record<string, unknown>>),
-                      enum: [continuation.stopText],
-                    },
-                  }
-                : {}),
+              maxSegments: {
+                ...(properties.maxSegments as Readonly<Record<string, unknown>>),
+                enum: [continuation.maxSegments],
+              },
+              stopText: {
+                ...(properties.stopText as Readonly<Record<string, unknown>>),
+                enum: [continuation.stopText],
+              },
             }),
       },
     },
@@ -781,12 +770,7 @@ export function browserToolContractForCheckpoint(
   const history = browserToolHistory(checkpoint);
   const scrollContinuation = browserScrollContinuation(history);
   if (scrollContinuation !== null) {
-    const name =
-      scrollContinuation.next === 'inspect'
-        ? 'browser_inspect'
-        : scrollContinuation.next === 'scroll_until'
-          ? 'browser_scroll_until'
-          : 'browser_scroll';
+    const name = scrollContinuation.next === 'inspect' ? 'browser_inspect' : 'browser_scroll';
     return {
       tools: [constrainedContinuationDefinition(scrollContinuation)],
       toolChoice: { type: 'function', name },

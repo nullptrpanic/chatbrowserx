@@ -53,13 +53,14 @@ describe('compactBrowserModelOutput', () => {
     expect(compactBrowserModelOutput(full)).toBe(full);
   });
 
-  it('drops only passive node tombstones from scroll-until model evidence', () => {
+  it('drops only passive node tombstones from traversal model evidence', () => {
     const full = JSON.stringify({
       ok: true,
       tabId: 7,
       url: 'https://example.com/document',
       data: {
-        action: 'scroll_until',
+        action: 'scroll',
+        mode: 'traverse',
         stopReason: 'boundary_verified',
         continuationRequired: false,
         latestSnapshot: 'snapshot_2',
@@ -102,13 +103,14 @@ describe('compactBrowserModelOutput', () => {
     });
   });
 
-  it('compacts scroll-until evidence while preserving a non-null action observation', () => {
+  it('compacts traversal evidence while preserving a non-null action observation', () => {
     const full = JSON.stringify({
       ok: true,
       tabId: 7,
       url: 'https://example.com/document',
       data: {
-        action: 'scroll_until',
+        action: 'scroll',
+        mode: 'traverse',
         observations: [
           {
             mode: 'interactive',
@@ -146,7 +148,8 @@ describe('compactBrowserModelOutput', () => {
       tabId: 7,
       url: 'https://example.com/document',
       data: {
-        action: 'scroll_until',
+        action: 'scroll',
+        mode: 'traverse',
         observations: [
           {
             mode: 'interactive',
@@ -195,7 +198,8 @@ describe('compactBrowserModelOutput', () => {
       tabId: 7,
       url: 'https://example.com/document',
       data: {
-        action: 'scroll_until',
+        action: 'scroll',
+        mode: 'traverse',
         observations: [
           {
             mode: 'interactive',

@@ -81,12 +81,16 @@ pointer-events:none 的虚拟鼠标、涟漪或轨迹；视觉反馈失败不会
 当前 viewport，并要求模型先获取截图。截图会先隐藏扩展 overlay，经 `Page.captureScreenshot`
 得到有界 PNG 后存为 Blob，再恢复 overlay。
 
-`NetworkCaptureRegistry` 只在显式 start 后记录未来流量，每 tab 最多 500 条元数据。初始加载
-分析必须显式执行 start → reload → network_idle → list。list 可按时间返回，也可按 method、
-origin、path 和 query 参数名稳定采样重复端点。get 一次读取最多 5 个 opaque ID，请求体与
-响应体分别按项选择且只在需要时从 CDP 临时获取；默认不读取正文。返回前会脱敏敏感 header、
-query、JSON 和表单字段，并限制单体与整批大小。stop 可随时释放采集缓存；需要完整分析证据时
-建议先 list，并对相关 ID 执行 get。
+`NetworkCaptureRegistry` 只在显式 start 后记录未来流量，每 tab 最多保留 500 条元数据。异步
+业务必须先验证用户可见的完成状态；`network_idle` 只表示 500 ms 的传输安静期，不能单独证明
+业务完成。初始加载分析使用 start → reload，业务完成后再等待最终 network_idle。list 会建立
+稳定快照：`recent` 可通过 opaque cursor 分页读完保留的全部请求，`endpoint_sample` 可按
+method、origin、path 和 query 参数名采样重复端点。每页同时返回捕获时间窗、总捕获数、保留
+数、淘汰数和进行中请求数；发生淘汰或仍有请求进行时不得宣称证据完整。get 一次读取最多 5 个
+opaque ID，请求体与响应体分别按项选择且只在需要时从 CDP 临时获取；默认不读取正文。返回前
+会脱敏敏感 header、query、JSON 和表单字段，并限制单体与整批大小。stop 可随时停止接收新事件，
+但会冻结并保留已有元数据、正文读取能力和 request ID；即使模型提前 stop，仍可继续 list/get。
+下一次 start 或 debugger 丢失才会替换该冻结快照。
 
 Content script 负责安装 ping、正文/DOM fallback、虚拟指针、overlay 显隐、截图选区、图片
 预览和选中文本气泡。所有页面返回都经过版本协议和 Zod/边界校验，页面内容始终作为不可信

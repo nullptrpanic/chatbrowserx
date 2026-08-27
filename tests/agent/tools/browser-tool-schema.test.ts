@@ -50,19 +50,13 @@ const CASES = [
     'browser_scroll',
     'scroll',
     'mutation',
-    { tabId: 7, target: 'viewport', deltaX: 0, deltaY: 100 },
-  ],
-  [
-    'browser_scroll_until',
-    'scroll_until',
-    'mutation',
     {
       tabId: 7,
       target: 'viewport',
       deltaX: 0,
-      deltaY: -1_200,
-      maxSegments: 16,
-      stopText: '7月',
+      deltaY: 100,
+      maxSegments: 1,
+      stopText: '',
     },
   ],
   ['browser_hover', 'hover', 'mutation', { tabId: 7, ref: 'ref_1' }],
@@ -86,7 +80,7 @@ const CASES = [
     'browser_network_list',
     'network_list',
     'safe',
-    { tabId: 7, urlPattern: '/api/', limit: 50, mode: 'endpoint_sample' },
+    { tabId: 7, urlPattern: '/api/', limit: 50, mode: 'endpoint_sample', cursor: '' },
   ],
   [
     'browser_network_get',
@@ -114,6 +108,37 @@ const CASES = [
 const NAMES = CASES.map(([name]) => name);
 
 describe('BROWSER_TOOL_DEFINITIONS', () => {
+  it('exposes one unified scroll tool for distance and bounded traversal', () => {
+    const scroll = BROWSER_TOOL_DEFINITIONS.find(({ name }) => name === 'browser_scroll');
+    const parameters = scroll?.parameters as {
+      readonly properties: Readonly<Record<string, Readonly<Record<string, unknown>>>>;
+      readonly required: readonly string[];
+    };
+
+    expect(BROWSER_TOOL_DEFINITIONS.map(({ name }) => name)).not.toContain('browser_scroll_until');
+    expect(parameters.properties.maxSegments).toEqual({
+      type: 'integer',
+      minimum: 1,
+      maximum: 24,
+    });
+    expect(parameters.properties.stopText).toEqual({ type: 'string', maxLength: 500 });
+    expect(parameters.required).toEqual(expect.arrayContaining(['maxSegments', 'stopText']));
+    expect(
+      parseBrowserToolCall({
+        callId: 'call_traverse',
+        name: 'browser_scroll',
+        argumentsJson: JSON.stringify({
+          tabId: 7,
+          target: 'viewport',
+          deltaX: 0,
+          deltaY: -1_200,
+          maxSegments: 16,
+          stopText: '7月',
+        }),
+      }),
+    ).toMatchObject({ name: 'browser_scroll', operation: 'scroll' });
+  });
+
   it('exposes the exact ordered set of small browser tools', () => {
     expect(BROWSER_TOOL_DEFINITIONS.map(({ name }) => name)).toEqual(NAMES);
   });
@@ -192,6 +217,24 @@ describe('BROWSER_TOOL_DEFINITIONS', () => {
     expect(JSON.stringify(parameters.properties.requests)).not.toContain('uniqueItems');
   });
 
+  it('requires an explicit bounded cursor for stable network-list pagination', () => {
+    const definition = BROWSER_TOOL_DEFINITIONS.find(({ name }) => name === 'browser_network_list');
+    const parameters = definition?.parameters as {
+      readonly properties: Readonly<Record<string, Readonly<Record<string, unknown>>>>;
+      readonly required: readonly string[];
+    };
+
+    expect(parameters.properties.cursor).toEqual({ type: 'string', maxLength: 512 });
+    expect(parameters.required).toContain('cursor');
+  });
+
+  it('documents that stop freezes request IDs for post-stop recovery', () => {
+    const definition = BROWSER_TOOL_DEFINITIONS.find(({ name }) => name === 'browser_network_stop');
+
+    expect(definition?.description).toContain('remain readable');
+    expect(definition?.description).toContain('next browser_network_start');
+  });
+
   it('advertises bounded and explicit deep native interactive modes', () => {
     const inspect = BROWSER_TOOL_DEFINITIONS.find(
       (definition) => definition.name === 'browser_inspect',
@@ -231,8 +274,9 @@ describe('BROWSER_TOOL_DEFINITIONS', () => {
       'inspect the destination heading and requested content, then answer without traversing unrelated content below it',
     );
     expect(definitions.get('browser_inspect')?.description).toContain(
-      'Treat a terse named-section command such as Chinese “看下/看看/打开/定位/跳到/选择 + 章节名” as locate/view only',
+      'For scoped navigation requests, stop once the requested target and enough relevant context are visible',
     );
+    expect(definitions.get('browser_inspect')?.description).not.toContain('看下/看看');
     expect(definitions.get('browser_inspect')?.description).not.toContain(
       'When interactive coverage.complete=false, the returned tree is not complete page evidence and the relevant coverage target must be traversed before answering.',
     );
@@ -240,16 +284,15 @@ describe('BROWSER_TOOL_DEFINITIONS', () => {
       'do not click same-page navigation or table-of-contents links before or after traversal',
     );
     expect(definitions.get('browser_scroll')?.description).toContain(
-      'Do not click passive content to reveal more items',
+      'do not click passive content',
+    );
+    expect(definitions.get('browser_scroll')?.description).toContain('maxSegments=1');
+    expect(definitions.get('browser_scroll')?.description).toContain('maxSegments>1');
+    expect(definitions.get('browser_scroll')?.description).toContain(
+      'observations in chronological order',
     );
     expect(definitions.get('browser_scroll')?.description).toContain(
-      'One call may consume the distance in multiple virtualized segments',
-    );
-    expect(definitions.get('browser_scroll')?.description).toContain(
-      'observations is the chronological sequence',
-    );
-    expect(definitions.get('browser_scroll')?.description).toContain(
-      'instead of immediately inspecting it again',
+      'instead of immediately inspecting again',
     );
     expect(definitions.get('browser_scroll')?.description).toContain('virtualized content changed');
     expect(definitions.get('browser_scroll')?.description).toContain('loadedMore=true');
@@ -258,26 +301,50 @@ describe('BROWSER_TOOL_DEFINITIONS', () => {
     expect(definitions.get('browser_scroll')?.description).toContain('requestedDeltaApplied=false');
     expect(definitions.get('browser_scroll')?.description).toContain('remainingDelta');
     expect(definitions.get('browser_scroll')?.description).toContain(
-      'outside the requested interval',
+      'outside it or a verified boundary',
     );
-    expect(definitions.get('browser_scroll_until')?.description).toContain(
-      'Only when the user explicitly requests reading, analyzing, or summarizing an entire named section, stop at the next same-level or higher-level heading',
+    expect(definitions.get('browser_scroll')?.description).toContain('complete named section');
+    expect(definitions.get('browser_scroll')?.description).toContain(
+      'do not use an empty stopText to continue to the document boundary',
     );
-    expect(definitions.get('browser_scroll_until')?.description).toContain(
-      'Do not use an empty stopText merely to continue to the document boundary for a named section',
+    expect(definitions.get('browser_scroll')?.description).toContain(
+      'do not choose a distant marker',
     );
-    expect(definitions.get('browser_scroll_until')?.description).toContain(
-      'do not click anchors, headings, or table-of-contents items before or after traversal',
+    expect(definitions.get('browser_scroll')?.description).toContain(
+      'Limited adjacent-section overlap is acceptable',
     );
-    expect(definitions.get('browser_scroll_until')?.description).toContain(
-      'For whole-document reading or page-summary objectives, regardless of the current viewport, first traverse upward with negative deltaY until the upper boundary is verified; only then traverse downward from that boundary',
+    expect(definitions.get('browser_scroll')?.description).toContain(
+      'Only explicit heading levels or parent relationships make the hierarchy reliable',
     );
-    expect(definitions.get('browser_scroll_until')?.description).toContain(
-      'Treat a terse request to look at, open, locate, or jump to a named section as locate/view, not complete-section reading',
+    expect(definitions.get('browser_scroll')?.description).toContain(
+      'Table-of-contents order alone is not reliable',
     );
-    expect(definitions.get('browser_scroll_until')?.description).not.toContain(
-      'For a complete named-section reading or summary',
+    expect(definitions.get('browser_scroll')?.description).toContain(
+      'maxSegments MUST be 1 with stopText=""',
     );
+    expect(definitions.get('browser_scroll')?.description).toContain(
+      'stop at the first plausible following section',
+    );
+    expect(definitions.get('browser_scroll')?.description).toContain(
+      'Never traverse through a second plausible following section',
+    );
+    expect(definitions.get('browser_scroll')?.description).toContain(
+      'do not summarize adjacent overlap as part of the requested section',
+    );
+    expect(definitions.get('browser_scroll')?.description).toContain(
+      'headings, anchors, or table-of-contents items as a substitute for traversal',
+    );
+    expect(definitions.get('browser_scroll')?.description).toContain(
+      'first traverse upward until boundaryVerified=true, then downward',
+    );
+    expect(definitions.get('browser_scroll')?.description).toContain(
+      'For scoped navigation requests, stop once the requested target and enough relevant context are visible',
+    );
+    expect(definitions.get('browser_scroll')?.description).toContain(
+      'Traverse further only when the user explicitly requests a broader read or analysis',
+    );
+    expect(definitions.get('browser_scroll')?.description).not.toContain('看下/看看');
+    expect(definitions.has('browser_scroll_until')).toBe(false);
     expect(definitions.get('browser_select')?.description).toContain('advertises select');
     expect(definitions.get('browser_select')?.description).toContain('custom dropdown');
   });
@@ -314,7 +381,6 @@ describe('BROWSER_TOOL_DEFINITIONS', () => {
       'browser_type',
       'browser_keypress',
       'browser_scroll',
-      'browser_scroll_until',
       'browser_hover',
       'browser_select',
       'browser_drag',
@@ -358,7 +424,7 @@ describe('parseBrowserToolCall', () => {
     ['browser_set_checked', { ref: 'ref_1', checked: true }],
     ['browser_set_checked_many', { items: [{ ref: 'ref_1', checked: true }] }],
     ['browser_type', { ref: 'ref_1', text: 'hello', replace: true, submit: false }],
-    ['browser_network_list', { urlPattern: '/api/', limit: 25, mode: 'recent' }],
+    ['browser_network_list', { urlPattern: '/api/', limit: 25, mode: 'recent', cursor: '' }],
   ])('accepts task-bound %s without a model-provided tabId', (name, arguments_) => {
     expect(
       parseBrowserToolCall({
@@ -437,10 +503,30 @@ describe('parseBrowserToolCall', () => {
       },
     ],
     ['browser_keypress', { tabId: 7, keys: 'x'.repeat(101) }],
-    ['browser_scroll', { tabId: 7, target: 'viewport', deltaX: 0, deltaY: 0 }],
-    ['browser_scroll', { tabId: 7, target: 'viewport', deltaX: 0, deltaY: 10_001 }],
     [
-      'browser_scroll_until',
+      'browser_scroll',
+      {
+        tabId: 7,
+        target: 'viewport',
+        deltaX: 0,
+        deltaY: 0,
+        maxSegments: 1,
+        stopText: '',
+      },
+    ],
+    [
+      'browser_scroll',
+      {
+        tabId: 7,
+        target: 'viewport',
+        deltaX: 0,
+        deltaY: 10_001,
+        maxSegments: 1,
+        stopText: '',
+      },
+    ],
+    [
+      'browser_scroll',
       {
         tabId: 7,
         target: 'viewport',
@@ -451,18 +537,7 @@ describe('parseBrowserToolCall', () => {
       },
     ],
     [
-      'browser_scroll_until',
-      {
-        tabId: 7,
-        target: 'viewport',
-        deltaX: 0,
-        deltaY: 1_201,
-        maxSegments: 8,
-        stopText: '',
-      },
-    ],
-    [
-      'browser_scroll_until',
+      'browser_scroll',
       {
         tabId: 7,
         target: 'viewport',
@@ -473,7 +548,7 @@ describe('parseBrowserToolCall', () => {
       },
     ],
     [
-      'browser_scroll_until',
+      'browser_scroll',
       {
         tabId: 7,
         target: 'viewport',
@@ -485,7 +560,11 @@ describe('parseBrowserToolCall', () => {
     ],
     ['browser_wait', { tabId: 7, condition: 'delay', timeoutMs: 249 }],
     ['browser_click_point', { tabId: 7, x: -1, y: 1, button: 'left', count: 1 }],
-    ['browser_network_list', { tabId: 7, urlPattern: '', limit: 101, mode: 'recent' }],
+    ['browser_network_list', { tabId: 7, urlPattern: '', limit: 101, mode: 'recent', cursor: '' }],
+    [
+      'browser_network_list',
+      { tabId: 7, urlPattern: '', limit: 100, mode: 'recent', cursor: 'x'.repeat(513) },
+    ],
     ['browser_network_get', { tabId: 7, requests: [] }],
     [
       'browser_network_get',

@@ -9,6 +9,7 @@ import type {
 
 const MAX_CAPTURED_REQUESTS = 500;
 const MAX_LIST_RESULTS = 100;
+const MAX_LIST_CURSORS = 16;
 const MAX_GET_REQUESTS = 5;
 const MAX_BODY_BYTES = 64 * 1024;
 const MAX_GET_RESULTS_CHARACTERS = 80 * 1024;
@@ -23,11 +24,12 @@ const NETWORK_ENABLE_PARAMETERS = {
   maxPostDataSize: 0,
 } as const;
 const CAPTURE_STARTED_MESSAGE =
-  'Capture started. Earlier traffic is unavailable. For initial page traffic, reload this tab, wait for network_idle, then list requests.';
+  'Capture started. Earlier traffic is unavailable, and any prior frozen snapshot was replaced. Keep capture active until the requested user-visible workflow is complete; network_idle alone does not prove asynchronous business completion. For initial page traffic, reload after starting. After completion, wait for final network quiet, list every recent cursor page, and read needed bodies. If stop happens first, the frozen snapshot remains readable until the next start.';
 const SENSITIVE_NAME =
   /(?:^|[-_])(?:authorization|proxy[-_]?authorization|cookie|set[-_]?cookie|token|secret|password|passwd|api[-_]?key|credential|session)(?:$|[-_])/i;
 
-export type NetworkCaptureErrorCode = 'NETWORK_CAPTURE_LOST' | 'NETWORK_REQUEST_NOT_FOUND';
+export type NetworkCaptureErrorCode =
+  'NETWORK_CAPTURE_LOST' | 'NETWORK_LIST_CURSOR_INVALID' | 'NETWORK_REQUEST_NOT_FOUND';
 
 export class NetworkCaptureError extends Error {
   readonly code: NetworkCaptureErrorCode;
@@ -45,7 +47,43 @@ export interface NetworkCaptureStarted {
   readonly tabId: number;
   readonly generation: number;
   readonly alreadyActive: boolean;
+  readonly startedAt: number;
+  readonly capacity: number;
   readonly message: string;
+}
+
+export interface NetworkCaptureCoverage {
+  readonly startedAt: number;
+  readonly snapshotAt: number;
+  readonly lastActivityAt: number | null;
+  readonly totalCaptured: number;
+  readonly retainedCount: number;
+  readonly droppedCount: number;
+  readonly inFlightCount: number;
+  readonly bufferLossless: boolean;
+}
+
+export interface NetworkRequestPage {
+  readonly requests: readonly NetworkRequestSummary[];
+  readonly mode: NetworkListMode;
+  readonly matchedRequestCount: number;
+  readonly resultCount: number;
+  readonly hasMore: boolean;
+  readonly nextCursor: string | null;
+  readonly coverage: NetworkCaptureCoverage;
+}
+
+export interface NetworkCaptureStopped {
+  readonly stopped: true;
+  readonly alreadyStopped: boolean;
+  readonly startedAt: number | null;
+  readonly stoppedAt: number;
+  readonly lastActivityAt: number | null;
+  readonly totalCaptured: number;
+  readonly retainedCount: number;
+  readonly droppedCount: number;
+  readonly inFlightCount: number;
+  readonly bufferLossless: boolean;
 }
 
 export interface NetworkRequestSummary {
@@ -112,9 +150,10 @@ export interface NetworkCapturePort {
     urlPattern: string,
     limit: number,
     mode: NetworkListMode,
-  ): Promise<readonly NetworkRequestSummary[]>;
+    cursor: string,
+  ): Promise<NetworkRequestPage>;
   get(tabId: number, requests: readonly NetworkGetRequest[]): Promise<readonly NetworkGetResult[]>;
-  stop(tabId: number): Promise<void>;
+  stop(tabId: number): Promise<NetworkCaptureStopped>;
 }
 
 export interface NetworkCaptureDependencies {
@@ -152,10 +191,26 @@ interface CapturedRequest {
 interface CaptureState {
   readonly tabId: number;
   readonly generation: number;
+  readonly startedAt: number;
   readonly records: CapturedRequest[];
   readonly byOpaqueId: Map<string, CapturedRequest>;
   readonly activeByCdpId: Map<string, CapturedRequest>;
+  readonly inFlightByCdpId: Set<string>;
   readonly sessions: Map<string, DebuggerSession>;
+  readonly listCursors: Map<string, NetworkListCursor>;
+  stoppedAt: number | null;
+  lastActivityAt: number | null;
+  totalCaptured: number;
+  droppedCount: number;
+}
+
+interface NetworkListCursor {
+  readonly urlPattern: string;
+  readonly mode: NetworkListMode;
+  readonly results: readonly NetworkRequestSummary[];
+  readonly matchedRequestCount: number;
+  readonly coverage: NetworkCaptureCoverage;
+  readonly offset: number;
 }
 
 function throwIfAborted(signal: AbortSignal): void {
@@ -399,11 +454,13 @@ export class NetworkCaptureRegistry implements NetworkCapturePort {
   async start(tabId: number, signal: AbortSignal): Promise<NetworkCaptureStarted> {
     throwIfAborted(signal);
     const existing = this.#captures.get(tabId);
-    if (existing) {
+    if (existing && existing.stoppedAt === null) {
       return {
         tabId,
         generation: existing.generation,
         alreadyActive: true,
+        startedAt: existing.startedAt,
+        capacity: MAX_CAPTURED_REQUESTS,
         message: CAPTURE_STARTED_MESSAGE,
       };
     }
@@ -421,7 +478,11 @@ export class NetworkCaptureRegistry implements NetworkCapturePort {
         );
       }
     } catch {
-      this.#captures.delete(tabId);
+      if (existing !== undefined && existing.stoppedAt !== null) {
+        this.#captures.set(tabId, existing);
+      } else {
+        this.#captures.delete(tabId);
+      }
       if (signal.aborted) throw new DOMException('Network capture was aborted.', 'AbortError');
       throw new NetworkCaptureError(
         'NETWORK_CAPTURE_LOST',
@@ -433,6 +494,8 @@ export class NetworkCaptureRegistry implements NetworkCapturePort {
       tabId,
       generation: snapshot.generation,
       alreadyActive: false,
+      startedAt: state.startedAt,
+      capacity: MAX_CAPTURED_REQUESTS,
       message: CAPTURE_STARTED_MESSAGE,
     };
   }
@@ -442,10 +505,23 @@ export class NetworkCaptureRegistry implements NetworkCapturePort {
     urlPattern: string,
     limit: number,
     mode: NetworkListMode,
-  ): Promise<readonly NetworkRequestSummary[]> {
+    cursor: string,
+  ): Promise<NetworkRequestPage> {
     const state = this.#requiredState(tabId);
     const pattern = urlPattern.slice(0, 500).toLowerCase();
     const boundedLimit = Math.max(1, Math.min(MAX_LIST_RESULTS, Math.floor(limit)));
+    if (cursor.length > 0) {
+      const saved = state.listCursors.get(cursor);
+      if (!saved || saved.urlPattern !== pattern || saved.mode !== mode) {
+        throw new NetworkCaptureError(
+          'NETWORK_LIST_CURSOR_INVALID',
+          'The network list cursor is unavailable. Start listing again with an empty cursor.',
+          true,
+        );
+      }
+      state.listCursors.delete(cursor);
+      return this.#page(state, saved, boundedLimit);
+    }
     const matched = state.records.filter(
       (record) => pattern.length === 0 || record.url.toLowerCase().includes(pattern),
     );
@@ -458,14 +534,20 @@ export class NetworkCaptureRegistry implements NetworkCapturePort {
         if (existing) existing.occurrenceCount += 1;
         else samples.set(key, { record, occurrenceCount: 1 });
       }
-      results = [...samples.values()].slice(0, boundedLimit).map(({ record, occurrenceCount }) => ({
+      results = [...samples.values()].map(({ record, occurrenceCount }) => ({
         ...summary(record),
         occurrenceCount,
       }));
-    } else {
-      results = matched.slice(-boundedLimit).reverse().map(summary);
-    }
-    return results;
+    } else results = [...matched].reverse().map(summary);
+    const snapshot: NetworkListCursor = {
+      urlPattern: pattern,
+      mode,
+      results,
+      matchedRequestCount: matched.length,
+      coverage: this.#coverage(state, this.#dependencies.clock.now()),
+      offset: 0,
+    };
+    return this.#page(state, snapshot, boundedLimit);
   }
 
   async get(
@@ -511,15 +593,37 @@ export class NetworkCaptureRegistry implements NetworkCapturePort {
     return boundedGetResults(results);
   }
 
-  async stop(tabId: number): Promise<void> {
+  async stop(tabId: number): Promise<NetworkCaptureStopped> {
     const state = this.#captures.get(tabId);
-    if (!state) return;
-    this.#captures.delete(tabId);
-    await Promise.all(
-      [...state.sessions.values()].map((session) =>
-        this.#dependencies.transport.send(session, 'Network.disable').catch(() => undefined),
-      ),
-    );
+    const stoppedAt = this.#dependencies.clock.now();
+    if (!state) {
+      return {
+        stopped: true,
+        alreadyStopped: true,
+        startedAt: null,
+        stoppedAt,
+        lastActivityAt: null,
+        totalCaptured: 0,
+        retainedCount: 0,
+        droppedCount: 0,
+        inFlightCount: 0,
+        bufferLossless: true,
+      };
+    }
+    const alreadyStopped = state.stoppedAt !== null;
+    state.stoppedAt ??= stoppedAt;
+    return {
+      stopped: true,
+      alreadyStopped,
+      startedAt: state.startedAt,
+      stoppedAt: state.stoppedAt,
+      lastActivityAt: state.lastActivityAt,
+      totalCaptured: state.totalCaptured,
+      retainedCount: state.records.length,
+      droppedCount: state.droppedCount,
+      inFlightCount: state.inFlightByCdpId.size,
+      bufferLossless: state.droppedCount === 0,
+    };
   }
 
   #createState(snapshot: BrowserSessionSnapshot): CaptureState {
@@ -531,10 +635,17 @@ export class NetworkCaptureRegistry implements NetworkCapturePort {
     return {
       tabId: snapshot.tabId,
       generation: snapshot.generation,
+      startedAt: this.#dependencies.clock.now(),
       records: [],
       byOpaqueId: new Map(),
       activeByCdpId: new Map(),
+      inFlightByCdpId: new Set(),
       sessions,
+      listCursors: new Map(),
+      stoppedAt: null,
+      lastActivityAt: null,
+      totalCaptured: 0,
+      droppedCount: 0,
     };
   }
 
@@ -550,13 +661,50 @@ export class NetworkCaptureRegistry implements NetworkCapturePort {
     return state;
   }
 
+  #coverage(state: CaptureState, snapshotAt: number): NetworkCaptureCoverage {
+    return {
+      startedAt: state.startedAt,
+      snapshotAt: state.stoppedAt ?? snapshotAt,
+      lastActivityAt: state.lastActivityAt,
+      totalCaptured: state.totalCaptured,
+      retainedCount: state.records.length,
+      droppedCount: state.droppedCount,
+      inFlightCount: state.inFlightByCdpId.size,
+      bufferLossless: state.droppedCount === 0,
+    };
+  }
+
+  #page(state: CaptureState, snapshot: NetworkListCursor, limit: number): NetworkRequestPage {
+    const end = Math.min(snapshot.results.length, snapshot.offset + limit);
+    const hasMore = end < snapshot.results.length;
+    let nextCursor: string | null = null;
+    if (hasMore) {
+      nextCursor = this.#cursorId(state);
+      state.listCursors.set(nextCursor, { ...snapshot, offset: end });
+      while (state.listCursors.size > MAX_LIST_CURSORS) {
+        const oldest = state.listCursors.keys().next().value;
+        if (typeof oldest !== 'string') break;
+        state.listCursors.delete(oldest);
+      }
+    }
+    return {
+      requests: snapshot.results.slice(snapshot.offset, end),
+      mode: snapshot.mode,
+      matchedRequestCount: snapshot.matchedRequestCount,
+      resultCount: snapshot.results.length,
+      hasMore,
+      nextCursor,
+      coverage: snapshot.coverage,
+    };
+  }
+
   #handleEvent(
     session: DebuggerSession,
     method: string,
     params: Readonly<Record<string, unknown>>,
   ): void {
     const state = this.#captures.get(session.tabId);
-    if (!state) return;
+    if (!state || state.stoppedAt !== null) return;
     if (method === 'Target.attachedToTarget') {
       const sessionId = boundedString(params.sessionId, 512);
       const targetInfo = plainRecord(params.targetInfo);
@@ -580,11 +728,14 @@ export class NetworkCaptureRegistry implements NetworkCapturePort {
     }
     const cdpRequestId = boundedString(params.requestId, 512);
     if (!cdpRequestId) return;
-    const record = state.activeByCdpId.get(requestKey(session, cdpRequestId));
-    if (!record) return;
-    if (method === 'Network.responseReceived') this.#recordResponse(record, params);
-    else if (method === 'Network.loadingFinished') this.#finishRequest(record, params, false);
-    else if (method === 'Network.loadingFailed') this.#finishRequest(record, params, true);
+    const key = requestKey(session, cdpRequestId);
+    const record = state.activeByCdpId.get(key);
+    if (method === 'Network.responseReceived') {
+      if (record) this.#recordResponse(state, record, params);
+    } else if (method === 'Network.loadingFinished' || method === 'Network.loadingFailed') {
+      state.inFlightByCdpId.delete(key);
+      if (record) this.#finishRequest(state, record, params, method === 'Network.loadingFailed');
+    }
   }
 
   #recordRequest(
@@ -617,7 +768,10 @@ export class NetworkCaptureRegistry implements NetworkCapturePort {
       }
     }
     const current = this.#appendRecord(state, session, cdpRequestId, url, request, params);
-    if (current) state.activeByCdpId.set(key, current);
+    if (current) {
+      state.activeByCdpId.set(key, current);
+      state.inFlightByCdpId.add(key);
+    }
   }
 
   #appendRecord(
@@ -629,8 +783,14 @@ export class NetworkCaptureRegistry implements NetworkCapturePort {
     params: Readonly<Record<string, unknown>>,
   ): CapturedRequest | null {
     if (!url) return null;
+    const startedAt = this.#dependencies.clock.now();
+    state.lastActivityAt = startedAt;
+    state.totalCaptured += 1;
     const opaqueId = this.#opaqueId(state);
-    if (!opaqueId) return null;
+    if (!opaqueId) {
+      state.droppedCount += 1;
+      return null;
+    }
     const record: CapturedRequest = {
       opaqueId,
       cdpRequestId,
@@ -638,7 +798,7 @@ export class NetworkCaptureRegistry implements NetworkCapturePort {
       url,
       method: (boundedString(request.method, 20) ?? 'GET').toUpperCase(),
       resourceType: boundedString(params.type, 100) ?? 'Other',
-      startedAt: this.#dependencies.clock.now(),
+      startedAt,
       startTimestamp: finiteNumber(params.timestamp),
       durationMs: null,
       status: null,
@@ -660,6 +820,7 @@ export class NetworkCaptureRegistry implements NetworkCapturePort {
     while (state.records.length > MAX_CAPTURED_REQUESTS) {
       const removed = state.records.shift();
       if (!removed) break;
+      state.droppedCount += 1;
       state.byOpaqueId.delete(removed.opaqueId);
       const key = requestKey(removed.session, removed.cdpRequestId);
       if (state.activeByCdpId.get(key) === removed) state.activeByCdpId.delete(key);
@@ -667,11 +828,16 @@ export class NetworkCaptureRegistry implements NetworkCapturePort {
     return record;
   }
 
-  #recordResponse(record: CapturedRequest, params: Readonly<Record<string, unknown>>): void {
+  #recordResponse(
+    state: CaptureState,
+    record: CapturedRequest,
+    params: Readonly<Record<string, unknown>>,
+  ): void {
     const response = plainRecord(params.response);
     if (!response) return;
     this.#applyResponse(record, response);
     record.resourceType = boundedString(params.type, 100) ?? record.resourceType;
+    state.lastActivityAt = this.#dependencies.clock.now();
   }
 
   #applyResponse(record: CapturedRequest, response: Readonly<Record<string, unknown>>): void {
@@ -685,6 +851,7 @@ export class NetworkCaptureRegistry implements NetworkCapturePort {
   }
 
   #finishRequest(
+    state: CaptureState,
     record: CapturedRequest,
     params: Readonly<Record<string, unknown>>,
     failed: boolean,
@@ -693,6 +860,7 @@ export class NetworkCaptureRegistry implements NetworkCapturePort {
     record.failed = failed;
     record.durationMs = this.#duration(record, finiteNumber(params.timestamp));
     record.encodedDataLength = failed ? null : finiteNumber(params.encodedDataLength);
+    state.lastActivityAt = this.#dependencies.clock.now();
   }
 
   #duration(record: CapturedRequest, endTimestamp: number | null): number | null {
@@ -867,5 +1035,17 @@ export class NetworkCaptureRegistry implements NetworkCapturePort {
       if (id.length > 0 && id.length <= 512 && !state.byOpaqueId.has(id)) return id;
     }
     return null;
+  }
+
+  #cursorId(state: CaptureState): string {
+    for (let attempt = 0; attempt < 3; attempt += 1) {
+      const id = this.#dependencies.ids.create('networkCursor').trim();
+      if (id.length > 0 && id.length <= 512 && !state.listCursors.has(id)) return id;
+    }
+    throw new NetworkCaptureError(
+      'NETWORK_CAPTURE_LOST',
+      'A network list cursor could not be created. Start listing again with an empty cursor.',
+      true,
+    );
   }
 }

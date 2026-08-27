@@ -38,17 +38,18 @@ describe('live E2E scenario registry', () => {
 
     expect(scenario.allowRemoteMutation).toBe(false);
     expect(scenario.requiredTools).toEqual(
-      expect.arrayContaining(['browser_inspect', 'browser_scroll_until']),
+      expect.arrayContaining(['browser_inspect', 'browser_scroll']),
     );
     expect(scenario.forbidScreenshotInspect).toBe(true);
     expect(scenario.forbidSubmittedType).toBe(true);
     expect(scenario.forbiddenTools).toEqual(
-      expect.arrayContaining(['browser_click_point', 'browser_drag_point', 'browser_scroll']),
+      expect.arrayContaining(['browser_click_point', 'browser_drag_point']),
     );
     expect(scenario.taskText).toContain('豆包*飞书C360管');
     expect(scenario.taskText).toContain('2026 年 8 月');
     expect(scenario.taskText).toContain('boundaryVerified=true');
-    expect(scenario.taskText).toContain('browser_scroll_until');
+    expect(scenario.taskText).toContain('browser_scroll');
+    expect(scenario.taskText).toContain('maxSegments>1');
     expect(scenario.finalTextIncludes).toEqual(
       expect.arrayContaining(['豆包*飞书C360管', '8 月', '覆盖边界']),
     );
@@ -68,7 +69,7 @@ describe('live E2E scenario registry', () => {
     expect(scenario.minimumMarkdownTableRows).toBe(3);
   });
 
-  it('registers one read-only named-section document regression without page-wide scrolling', () => {
+  it('registers one read-only named-section document regression with bounded scrolling', () => {
     const scenario = getLiveScenario('lark-doc-named-section');
 
     expect(scenario.allowRemoteMutation).toBe(false);
@@ -76,20 +77,31 @@ describe('live E2E scenario registry', () => {
       'https://bytedance.larkoffice.com/docx/XQmodBxg9oqiQKxq31OcuRMGnBg',
     );
     expect(scenario.requiredTools).toEqual(
-      expect.arrayContaining(['browser_inspect', 'browser_click']),
+      expect.arrayContaining(['browser_inspect', 'browser_click', 'browser_scroll']),
     );
     expect(scenario.forbiddenTools).toEqual(
+      expect.arrayContaining(['browser_capture_screenshot', 'browser_network_start']),
+    );
+    expect(scenario.forbiddenTools).not.toContain('browser_scroll');
+    expect(scenario.taskText).toBe('完整阅读并总结“关键问题”章节。');
+    expect(scenario.maxScrollSegmentsPerCall).toBe(1);
+    expect(scenario.finalTextIncludes).toEqual(
       expect.arrayContaining([
-        'browser_scroll',
-        'browser_scroll_until',
-        'browser_capture_screenshot',
-        'browser_network_start',
+        '关键问题',
+        '切点过于下沉',
+        '31 个租户',
+        '消费端',
+        'AuthZ',
+        '渲染类接口',
+        'Local Cache',
+        'LogID',
+        '拦截有效性',
+        '预热',
       ]),
     );
-    expect(scenario.taskText).toBe('看下关键问题');
-    expect(scenario.taskText).not.toContain('不要求阅读全文');
-    expect(scenario.taskText).not.toContain('不要使用');
-    expect(scenario.finalTextIncludes).toContain('关键问题');
+    expect(scenario.forbiddenActiveElementNamesAfterScroll).toEqual(['Bad Case', 'Ref（进行中）']);
+    expect(scenario.requireFreshProviderContext).toBe(true);
+    expect(scenario.minFinalTextLength).toBeGreaterThan(0);
   });
 
   it('lists stable scenario names without exposing a mutable registry', () => {

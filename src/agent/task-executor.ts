@@ -330,7 +330,6 @@ const browserSemanticMutationToolNames = new Set([
   'browser_type',
   'browser_keypress',
   'browser_scroll',
-  'browser_scroll_until',
   'browser_select',
   'browser_drag',
   'browser_click_point',
@@ -458,7 +457,7 @@ function outputImmobileScroll(
   const data = childRecord(record, 'data');
   const immobile =
     (data?.action === 'scroll' && data.moved === false) ||
-    (data?.action === 'scroll_until' && data.stopReason === 'no_progress');
+    (data?.action === 'scroll' && data.mode === 'traverse' && data.stopReason === 'no_progress');
   if (!immobile) return null;
   return data.position === undefined ? {} : { position: data.position };
 }
@@ -552,10 +551,7 @@ function recentBrowserProgress(
       continue;
     }
 
-    const immobile =
-      call.name === 'browser_scroll' || call.name === 'browser_scroll_until'
-        ? outputImmobileScroll(output)
-        : null;
+    const immobile = call.name === 'browser_scroll' ? outputImmobileScroll(output) : null;
     if (browserSemanticMutationToolNames.has(call.name) && immobile === null) {
       mutationVersion += 1;
       verifiedSelection = undefined;
@@ -673,7 +669,7 @@ function immobileScrollOutput(
 ): string | null {
   const evidence = progress.immobileScroll;
   if (
-    (pending.name !== 'browser_scroll' && pending.name !== 'browser_scroll_until') ||
+    pending.name !== 'browser_scroll' ||
     evidence === undefined ||
     evidence.callFingerprint !== browserCallFingerprint(pending.name, pending.argumentsJson) ||
     evidence.pageEpoch !== progress.pageEpoch ||
@@ -1473,52 +1469,58 @@ export class TaskExecutor {
     }
     if (error.code === 'ABORTED') throw error;
 
-    const definitelyRetryable =
-      call.replay === 'safe' || error.dispatchState === 'definitely_not_dispatched';
-    const pendingToolCall = definitelyRetryable
-      ? { ...pending, executionState: 'recorded' as const }
-      : snapshot.checkpoint.pendingToolCall;
-    const taskError: TaskError =
-      error.code === 'AUTH'
-        ? {
-            code: 'AuthError',
-            retryable: false,
-            recoveryAction: 'update_credentials',
-            userMessage:
-              'Sandbox authentication is required. Update the Sandbox Token in Settings.',
-            evidenceRef: null,
-          }
-        : error.code === 'INVALID_RESPONSE'
+    if (error.code === 'AUTH') {
+      return this.#saveBoundary(snapshot, ownerId, signal, {
+        type: 'task.auth-required',
+        reason: 'sandbox_authentication_required',
+        error: {
+          code: 'AuthError',
+          retryable: false,
+          recoveryAction: 'update_credentials',
+          userMessage: 'Sandbox authentication is required. Update the Sandbox Token in Settings.',
+          evidenceRef: null,
+        },
+        pendingToolCall: { ...pending, executionState: 'recorded' },
+      });
+    }
+
+    if (call.replay === 'mutation' && error.dispatchState === 'may_have_dispatched') {
+      return this.#recordToolResult(
+        snapshot,
+        ownerId,
+        signal,
+        pending,
+        JSON.stringify({
+          ok: false,
+          code: 'AMBIGUOUS_EXECUTION',
+          message:
+            'The Sandbox command may already have run. Inspect its effects before choosing the next action.',
+          retryable: false,
+        }),
+      );
+    }
+
+    return this.#recordToolResult(
+      snapshot,
+      ownerId,
+      signal,
+      pending,
+      JSON.stringify(
+        error.code === 'INVALID_RESPONSE'
           ? {
-              code: 'InvalidProviderResponse',
+              ok: false,
+              code: 'SANDBOX_INVALID_RESPONSE',
+              message: 'The Sandbox returned an invalid response.',
               retryable: false,
-              recoveryAction: 'review_provider_status',
-              userMessage: 'The Sandbox returned an invalid response.',
-              evidenceRef: null,
             }
           : {
-              code: 'TransientProviderError',
+              ok: false,
+              code: 'SANDBOX_UNAVAILABLE',
+              message: 'The Sandbox is temporarily unavailable.',
               retryable: true,
-              recoveryAction: 'resume_task',
-              userMessage: 'The Sandbox is temporarily unavailable.',
-              evidenceRef: null,
-            };
-    return this.#saveBoundary(snapshot, ownerId, signal, {
-      type:
-        error.code === 'AUTH'
-          ? 'task.auth-required'
-          : error.code === 'INVALID_RESPONSE'
-            ? 'task.failed'
-            : 'task.paused',
-      reason:
-        error.code === 'AUTH'
-          ? 'sandbox_authentication_required'
-          : error.code === 'INVALID_RESPONSE'
-            ? 'invalid_sandbox_response'
-            : 'sandbox_retry_required',
-      error: taskError,
-      pendingToolCall,
-    });
+            },
+      ),
+    );
   }
 
   /** Converts one safe model or Tavily failure into its durable task boundary. */

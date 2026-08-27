@@ -218,12 +218,13 @@ const BROWSER_TOOL_NAMES = [
   'browser_type',
   'browser_keypress',
   'browser_scroll',
-  'browser_scroll_until',
   'browser_hover',
   'browser_select',
   'browser_drag',
   'browser_wait',
   'browser_network_start',
+  'browser_network_list',
+  'browser_network_get',
   'browser_network_stop',
 ] as const;
 

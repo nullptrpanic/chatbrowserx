@@ -516,7 +516,14 @@ extensionTest(
               'item_scroll',
               'call_scroll',
               'browser_scroll',
-              { tabId: 0, target: ref, deltaX: 0, deltaY: 200 },
+              {
+                tabId: 0,
+                target: ref,
+                deltaX: 0,
+                deltaY: 200,
+                maxSegments: 1,
+                stopText: '',
+              },
             );
             break;
           }

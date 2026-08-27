@@ -962,7 +962,10 @@ describe('BrowserToolExecutor', () => {
 
   it.each([
     ['browser_click', { ref: 'ref_action', button: 'left', count: 1 }],
-    ['browser_scroll', { target: 'ref_action', deltaX: 0, deltaY: 600 }],
+    [
+      'browser_scroll',
+      { target: 'ref_action', deltaX: 0, deltaY: 600, maxSegments: 1, stopText: '' },
+    ],
   ])('returns a fresh semantic observation in the same result after %s', async (name, input) => {
     const observer = {
       inspect: vi.fn(
@@ -1140,6 +1143,8 @@ describe('BrowserToolExecutor', () => {
         target: 'ref_history',
         deltaX: 0,
         deltaY: -3_000,
+        maxSegments: 1,
+        stopText: '',
       }),
       signal,
       context,
@@ -1247,6 +1252,8 @@ describe('BrowserToolExecutor', () => {
         target: 'ref_history',
         deltaX: 0,
         deltaY: -3_000,
+        maxSegments: 1,
+        stopText: '',
       }),
       signal,
       context,
@@ -1356,7 +1363,7 @@ describe('BrowserToolExecutor', () => {
 
     await executor.execute(call('browser_inspect', { mode: 'interactive' }), signal, context);
     const result = await executor.execute(
-      call('browser_scroll_until', {
+      call('browser_scroll', {
         target: 'ref_history',
         deltaX: 0,
         deltaY: -1_200,
@@ -1386,6 +1393,8 @@ describe('BrowserToolExecutor', () => {
           target: 'ref_history',
           deltaX: 0,
           deltaY: -1_200,
+          maxSegments: 1,
+          stopText: '',
         },
       }),
       signal,
@@ -1394,7 +1403,8 @@ describe('BrowserToolExecutor', () => {
       ok: true,
       tabId: 7,
       data: {
-        action: 'scroll_until',
+        action: 'scroll',
+        mode: 'traverse',
         target: 'ref_history',
         deltaX: 0,
         deltaY: -1_200,
@@ -1434,7 +1444,7 @@ describe('BrowserToolExecutor', () => {
       { deltaX: 0, deltaY: 1_200 },
     ],
   ])(
-    'adapts the scroll-until stride to 80%% of %s',
+    'adapts the traversal stride to 80%% of %s',
     async (_label, scrollTargetSize, requested, expected) => {
       const observer = {
         inspect: vi
@@ -1499,7 +1509,7 @@ describe('BrowserToolExecutor', () => {
 
       await executor.execute(call('browser_inspect', { mode: 'interactive' }), signal, context);
       const result = await executor.execute(
-        call('browser_scroll_until', {
+        call('browser_scroll', {
           target: 'ref_history',
           ...requested,
           maxSegments: 4,
@@ -1517,6 +1527,8 @@ describe('BrowserToolExecutor', () => {
             target: 'ref_history',
             deltaX: expected.deltaX,
             deltaY: expected.deltaY,
+            maxSegments: 1,
+            stopText: '',
           },
         }),
         signal,
@@ -1561,7 +1573,7 @@ describe('BrowserToolExecutor', () => {
       true,
     ],
   ])(
-    'returns a bounded %s scroll-until receipt after observing the dispatched segment',
+    'returns a bounded %s traversal receipt after observing the dispatched segment',
     async (_label, measured, stopReason, continuationRequired) => {
       const observer = {
         inspect: vi
@@ -1618,7 +1630,7 @@ describe('BrowserToolExecutor', () => {
 
       await executor.execute(call('browser_inspect', { mode: 'interactive' }), signal, context);
       const result = await executor.execute(
-        call('browser_scroll_until', {
+        call('browser_scroll', {
           target: 'ref_history',
           deltaX: 0,
           deltaY: -600,
@@ -1643,7 +1655,7 @@ describe('BrowserToolExecutor', () => {
     },
   );
 
-  it('does not certify a scroll-until boundary when the page fails to settle', async () => {
+  it('does not certify a traversal boundary when the page fails to settle', async () => {
     const observer = {
       inspect: vi
         .fn()
@@ -1702,7 +1714,7 @@ describe('BrowserToolExecutor', () => {
 
     await executor.execute(call('browser_inspect', { mode: 'interactive' }), signal, context);
     const result = await executor.execute(
-      call('browser_scroll_until', {
+      call('browser_scroll', {
         target: 'ref_history',
         deltaX: 0,
         deltaY: 600,
@@ -1728,7 +1740,7 @@ describe('BrowserToolExecutor', () => {
     });
   });
 
-  it('retains three bounded scroll-until batches before stopping at a verified boundary', async () => {
+  it('retains three bounded traversal batches before stopping at a verified boundary', async () => {
     const observer = {
       inspect: vi.fn(async () => {
         const sequence = observer.inspect.mock.calls.length - 1;
@@ -1792,7 +1804,7 @@ describe('BrowserToolExecutor', () => {
 
     await executor.execute(call('browser_inspect', { mode: 'interactive' }), signal, context);
     const result = await executor.execute(
-      call('browser_scroll_until', {
+      call('browser_scroll', {
         target: 'ref_history',
         deltaX: 0,
         deltaY: -600,
@@ -1822,7 +1834,7 @@ describe('BrowserToolExecutor', () => {
     expect(result.modelOutput?.length).toBeLessThan(result.output.length);
   });
 
-  it('preserves partial scroll-until evidence when a later action fails', async () => {
+  it('preserves partial traversal evidence when a later action fails', async () => {
     const observer = {
       inspect: vi
         .fn()
@@ -1891,7 +1903,7 @@ describe('BrowserToolExecutor', () => {
 
     await executor.execute(call('browser_inspect', { mode: 'interactive' }), signal, context);
     const result = await executor.execute(
-      call('browser_scroll_until', {
+      call('browser_scroll', {
         target: 'ref_history',
         deltaX: 0,
         deltaY: -600,
@@ -1915,7 +1927,7 @@ describe('BrowserToolExecutor', () => {
     });
   });
 
-  it('stops scroll-until at its hard segment limit without dropping an observation', async () => {
+  it('stops traversal at its hard segment limit without dropping an observation', async () => {
     const observer = {
       inspect: vi.fn(
         async (
@@ -1986,7 +1998,7 @@ describe('BrowserToolExecutor', () => {
 
     await executor.execute(call('browser_inspect', { mode: 'interactive' }), signal, context);
     const result = await executor.execute(
-      call('browser_scroll_until', {
+      call('browser_scroll', {
         target: 'ref_history',
         deltaX: 0,
         deltaY: -600,
@@ -2063,7 +2075,7 @@ describe('BrowserToolExecutor', () => {
 
     await executor.execute(call('browser_inspect', { mode: 'interactive' }), signal, context);
     const result = await executor.execute(
-      call('browser_scroll_until', {
+      call('browser_scroll', {
         target: 'ref_carousel',
         deltaX: 0,
         deltaY: 600,
@@ -2137,7 +2149,7 @@ describe('BrowserToolExecutor', () => {
 
     await executor.execute(call('browser_inspect', { mode: 'interactive' }), signal, context);
     const result = await executor.execute(
-      call('browser_scroll_until', {
+      call('browser_scroll', {
         target: 'viewport',
         deltaX: 0,
         deltaY: 600,
@@ -2165,7 +2177,7 @@ describe('BrowserToolExecutor', () => {
     });
 
     const requiredRange = await executor.execute(
-      call('browser_scroll_until', {
+      call('browser_scroll', {
         target: 'viewport',
         deltaX: 0,
         deltaY: 600,
@@ -2190,7 +2202,7 @@ describe('BrowserToolExecutor', () => {
     });
   });
 
-  it('preserves the dispatched segment when scroll-until observation becomes unavailable', async () => {
+  it('preserves the dispatched segment when traversal observation becomes unavailable', async () => {
     const observer = {
       inspect: vi
         .fn()
@@ -2234,7 +2246,7 @@ describe('BrowserToolExecutor', () => {
 
     await executor.execute(call('browser_inspect', { mode: 'interactive' }), signal, context);
     const result = await executor.execute(
-      call('browser_scroll_until', {
+      call('browser_scroll', {
         target: 'ref_history',
         deltaX: 0,
         deltaY: -600,
@@ -2259,7 +2271,7 @@ describe('BrowserToolExecutor', () => {
     });
   });
 
-  it('does not dispatch scroll-until without a current interactive baseline', async () => {
+  it('does not dispatch traversal without a current interactive baseline', async () => {
     const actions = { execute: vi.fn() };
     const observer = { inspect: vi.fn() };
     const executor = new BrowserToolExecutor({
@@ -2269,7 +2281,7 @@ describe('BrowserToolExecutor', () => {
     });
 
     const result = await executor.execute(
-      call('browser_scroll_until', {
+      call('browser_scroll', {
         target: 'ref_history',
         deltaX: 0,
         deltaY: -600,
@@ -3039,7 +3051,7 @@ describe('BrowserToolExecutor', () => {
     });
   });
 
-  it('dispatches the four bounded network operations without implicitly reloading', async () => {
+  it('dispatches the four bounded network operations and rejects an incomplete get batch', async () => {
     const requestSummary = {
       requestId: 'request_1',
       url: 'https://api.test/',
@@ -3060,9 +3072,28 @@ describe('BrowserToolExecutor', () => {
         tabId: 7,
         generation: 2,
         alreadyActive: false,
+        startedAt: 900,
+        capacity: 500,
         message: 'Capture started. Earlier traffic is unavailable.',
       })),
-      list: vi.fn(async () => [requestSummary]),
+      list: vi.fn(async () => ({
+        requests: [requestSummary],
+        mode: 'endpoint_sample' as const,
+        matchedRequestCount: 1,
+        resultCount: 1,
+        hasMore: false,
+        nextCursor: null,
+        coverage: {
+          startedAt: 900,
+          snapshotAt: 1_100,
+          lastActivityAt: 1_020,
+          totalCaptured: 1,
+          retainedCount: 1,
+          droppedCount: 0,
+          inFlightCount: 0,
+          bufferLossless: true,
+        },
+      })),
       get: vi.fn(async () => [
         {
           ok: true as const,
@@ -3095,7 +3126,18 @@ describe('BrowserToolExecutor', () => {
           message: 'The captured network request is no longer available.',
         },
       ]),
-      stop: vi.fn(async () => undefined),
+      stop: vi.fn(async () => ({
+        stopped: true as const,
+        alreadyStopped: false,
+        startedAt: 900,
+        stoppedAt: 1_200,
+        lastActivityAt: 1_020,
+        totalCaptured: 1,
+        retainedCount: 1,
+        droppedCount: 0,
+        inFlightCount: 0,
+        bufferLossless: true,
+      })),
     };
     const tabs = tabPort();
     const executor = new BrowserToolExecutor({ tabs, network });
@@ -3108,6 +3150,7 @@ describe('BrowserToolExecutor', () => {
         urlPattern: '/api/',
         limit: 25,
         mode: 'endpoint_sample',
+        cursor: '',
       }),
       signal,
     );
@@ -3133,7 +3176,7 @@ describe('BrowserToolExecutor', () => {
     const stopped = await executor.execute(call('browser_network_stop', { tabId: 7 }), signal);
 
     expect(network.start).toHaveBeenCalledWith(7, signal);
-    expect(network.list).toHaveBeenCalledWith(7, '/api/', 25, 'endpoint_sample');
+    expect(network.list).toHaveBeenCalledWith(7, '/api/', 25, 'endpoint_sample', '');
     expect(network.get).toHaveBeenCalledWith(7, getRequests);
     expect(network.stop).toHaveBeenCalledWith(7);
     expect(tabs.reload).not.toHaveBeenCalled();
@@ -3143,20 +3186,29 @@ describe('BrowserToolExecutor', () => {
     });
     expect(JSON.parse(listed.output)).toMatchObject({
       ok: true,
-      data: { requests: [{ requestId: 'request_1' }] },
-    });
-    expect(JSON.parse(details.output)).toMatchObject({
-      ok: true,
       data: {
-        results: [
-          { ok: true, requestId: 'request_1', request: { requestId: 'request_1' } },
-          { ok: false, requestId: 'missing_request', code: 'NETWORK_REQUEST_NOT_FOUND' },
-        ],
+        requests: [{ requestId: 'request_1' }],
+        hasMore: false,
+        nextCursor: null,
+        coverage: { bufferLossless: true, inFlightCount: 0 },
       },
+    });
+    expect(JSON.parse(details.output)).toEqual({
+      ok: false,
+      code: 'NETWORK_REQUEST_NOT_FOUND',
+      message:
+        'One or more request IDs are not in the current capture snapshot. Call browser_network_list again with cursor="" and copy requestId values exactly before retrying browser_network_get.',
+      retryable: true,
+      needsInspect: false,
     });
     expect(JSON.parse(stopped.output)).toMatchObject({
       ok: true,
-      data: { stopped: true },
+      data: {
+        stopped: true,
+        alreadyStopped: false,
+        totalCaptured: 1,
+        bufferLossless: true,
+      },
     });
   });
 
@@ -3166,11 +3218,24 @@ describe('BrowserToolExecutor', () => {
         tabId: 7,
         generation: 2,
         alreadyActive: false,
+        startedAt: 900,
+        capacity: 500,
         message: 'Capture started.',
       })),
       list: vi.fn(),
       get: vi.fn(),
-      stop: vi.fn(async () => undefined),
+      stop: vi.fn(async () => ({
+        stopped: true as const,
+        alreadyStopped: false,
+        startedAt: 900,
+        stoppedAt: 1_200,
+        lastActivityAt: null,
+        totalCaptured: 0,
+        retainedCount: 0,
+        droppedCount: 0,
+        inFlightCount: 0,
+        bufferLossless: true,
+      })),
     };
     const sessions = {
       retain: vi.fn(async () => undefined),
@@ -3220,6 +3285,7 @@ describe('BrowserToolExecutor', () => {
         urlPattern: '',
         limit: 25,
         mode: 'recent',
+        cursor: '',
       }),
       new AbortController().signal,
     );
@@ -3232,6 +3298,45 @@ describe('BrowserToolExecutor', () => {
       needsInspect: false,
     });
     expect(output.output).not.toContain('private capture state');
+  });
+
+  it('normalizes an invalid network-list cursor without restarting capture', async () => {
+    const executor = new BrowserToolExecutor({
+      tabs: tabPort(),
+      network: {
+        start: vi.fn(),
+        list: vi.fn(async () => {
+          throw new NetworkCaptureError(
+            'NETWORK_LIST_CURSOR_INVALID',
+            'private cursor state',
+            true,
+          );
+        }),
+        get: vi.fn(),
+        stop: vi.fn(),
+      },
+    });
+
+    const output = await executor.execute(
+      call('browser_network_list', {
+        tabId: 7,
+        urlPattern: '',
+        limit: 25,
+        mode: 'recent',
+        cursor: 'networkCursor_1',
+      }),
+      new AbortController().signal,
+    );
+
+    expect(JSON.parse(output.output)).toEqual({
+      ok: false,
+      code: 'NETWORK_LIST_CURSOR_INVALID',
+      message:
+        'The network list cursor expired or does not match this query. List again with cursor="".',
+      retryable: true,
+      needsInspect: false,
+    });
+    expect(output.output).not.toContain('private cursor state');
   });
 
   it.each([
@@ -3328,6 +3433,8 @@ describe('BrowserToolExecutor', () => {
         target: 'viewport',
         deltaX: 0,
         deltaY: 20,
+        maxSegments: 1,
+        stopText: '',
       });
     })();
 

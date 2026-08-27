@@ -4029,6 +4029,8 @@ describe('BrowserActionExecutor', () => {
         target: 'viewport',
         deltaX: 0,
         deltaY: 200,
+        maxSegments: 1,
+        stopText: '',
       }),
       new AbortController().signal,
     );
@@ -4137,6 +4139,8 @@ describe('BrowserActionExecutor', () => {
         target: 'viewport',
         deltaX: 0,
         deltaY: 600,
+        maxSegments: 1,
+        stopText: '',
       }),
       new AbortController().signal,
     );
@@ -4146,6 +4150,8 @@ describe('BrowserActionExecutor', () => {
         target: 'viewport',
         deltaX: 0,
         deltaY: 600,
+        maxSegments: 1,
+        stopText: '',
       }),
       new AbortController().signal,
     );
@@ -4195,6 +4201,8 @@ describe('BrowserActionExecutor', () => {
         target: 'viewport',
         deltaX: 0,
         deltaY: 600,
+        maxSegments: 1,
+        stopText: '',
       }),
       new AbortController().signal,
     );
@@ -4253,6 +4261,8 @@ describe('BrowserActionExecutor', () => {
         target: 'ref_1',
         deltaX: 0,
         deltaY: 200,
+        maxSegments: 1,
+        stopText: '',
       }),
       new AbortController().signal,
     );
@@ -4346,6 +4356,8 @@ describe('BrowserActionExecutor', () => {
         target: 'ref_1',
         deltaX: 0,
         deltaY: -600,
+        maxSegments: 1,
+        stopText: '',
       }),
       new AbortController().signal,
     );
@@ -4456,6 +4468,8 @@ describe('BrowserActionExecutor', () => {
         target: 'ref_1',
         deltaX: 0,
         deltaY: -1_000,
+        maxSegments: 1,
+        stopText: '',
       }),
       new AbortController().signal,
     );
@@ -4579,6 +4593,8 @@ describe('BrowserActionExecutor', () => {
         target: 'ref_1',
         deltaX: 0,
         deltaY: -9_000,
+        maxSegments: 1,
+        stopText: '',
       }),
       new AbortController().signal,
     );
@@ -4674,6 +4690,8 @@ describe('BrowserActionExecutor', () => {
         target: 'ref_1',
         deltaX: 0,
         deltaY: -1_000,
+        maxSegments: 1,
+        stopText: '',
       }),
       new AbortController().signal,
     );

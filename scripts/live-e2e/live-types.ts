@@ -15,11 +15,17 @@ export interface LiveScenario {
   readonly expectedToolCounts?: Readonly<Record<string, number>>;
   /** Tools whose every recorded result must report ok=true and data.verified=true. */
   readonly requiredVerifiedTools?: readonly string[];
+  /** Rejects scroll calls that can traverse more segments than this before model reassessment. */
+  readonly maxScrollSegmentsPerCall?: number;
+  /** Rejects scroll evidence that marks any declared later section as active. */
+  readonly forbiddenActiveElementNamesAfterScroll?: readonly string[];
   /** Maximum durable image references expected across tool results; defaults to zero. */
   readonly maxAttachmentCount?: number;
   readonly requiredTypedTextIncludes?: readonly string[];
   readonly requiredToolOutputIncludes?: readonly string[];
   readonly finalTextIncludes: readonly string[];
+  /** Requires the first provider request to contain only the active user message. */
+  readonly requireFreshProviderContext?: boolean;
   /** Any occurrence indicates the model reported an unresolved blocker instead of success. */
   readonly finalTextExcludes?: readonly string[];
   readonly minFinalTextLength: number;

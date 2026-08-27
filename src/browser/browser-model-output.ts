@@ -47,8 +47,10 @@ function compactScrollObservation(
   return compact;
 }
 
-function compactScrollUntilData(data: Record<string, unknown>): Record<string, unknown> {
-  if (data.action !== 'scroll_until' || !Array.isArray(data.observations)) return data;
+function compactScrollTraversalData(data: Record<string, unknown>): Record<string, unknown> {
+  if (data.action !== 'scroll' || data.mode !== 'traverse' || !Array.isArray(data.observations)) {
+    return data;
+  }
   const currentEntries = new Map<string, string>();
   const lastObservationIndex = data.observations.length - 1;
   return {
@@ -73,14 +75,15 @@ export function compactBrowserModelOutput(fullOutput: string): string {
 
   const envelope = record(parsed);
   const data = record(envelope?.data);
-  const scrollUntil = data?.action === 'scroll_until' && Array.isArray(data.observations);
+  const scrollTraversal =
+    data?.action === 'scroll' && data.mode === 'traverse' && Array.isArray(data.observations);
   if (
     envelope === null ||
     envelope.ok !== true ||
     (typeof envelope.tabId !== 'number' && envelope.tabId !== null) ||
     (typeof envelope.url !== 'string' && envelope.url !== null) ||
     data === null ||
-    (!scrollUntil && envelope.observation !== null) ||
+    (!scrollTraversal && envelope.observation !== null) ||
     Object.keys(envelope).length !== SUCCESS_ENVELOPE_KEYS.size ||
     Object.keys(envelope).some((key) => !SUCCESS_ENVELOPE_KEYS.has(key))
   ) {
@@ -89,7 +92,7 @@ export function compactBrowserModelOutput(fullOutput: string): string {
 
   const compact: Record<string, unknown> = {
     ...envelope,
-    data: compactScrollUntilData(data),
+    data: compactScrollTraversalData(data),
   };
   if (envelope.observation === null) delete compact.observation;
   return JSON.stringify(compact);
