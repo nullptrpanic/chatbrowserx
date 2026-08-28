@@ -1,0 +1,131 @@
+# ChatBrowserX Reproducible E2E
+
+This directory is the single home for the reproducible ChatBrowserX evaluation framework.
+
+## What Lives Here
+
+```text
+e2e/
+├── AGENTS.md
+├── RUNBOOK.md
+├── EVALUATION_STANDARD.md
+├── SAMPLE_SPEC.md
+├── playwright.config.ts
+├── runner/                    # Environment, live-run, result, and comparison code
+├── tests/
+│   ├── runner/                # Deterministic framework tests
+│   └── browser/               # Playwright product tests
+├── samples/                   # Ignored; transported outside Git
+│   └── <sample-id>/
+│       ├── sample.json
+│       └── results/
+└── .runtime/                  # Ignored machine-local state
+    ├── profile/
+    ├── live-results/
+    └── playwright/
+```
+
+The repository tracks the method, not samples or runtime state. Never force-add `e2e/samples` or
+`e2e/.runtime`. See `SAMPLE_SPEC.md` for their transport and formats.
+
+## Requirements
+
+- Node.js 24 or 26 in the range declared by package.json; Node.js 25 is unsupported.
+- Dependencies installed from package-lock.json with npm ci.
+- Chrome available to Playwright.
+- One complete `e2e/samples/<sample-id>/sample.json`.
+- Legitimate access to the Codex Provider and any account required by the target sample.
+
+## Rebuild on a New Machine
+
+1. Check out the repository and install the locked dependency tree.
+2. Run the environment doctor.
+3. Receive or create the sample directory through a controlled non-Git channel.
+4. Validate the complete local catalog.
+5. Create a fresh dedicated Profile and complete interactive authentication.
+6. Verify the Profile and target independently.
+7. Run the declared traffic and retain its result.
+
+```bash
+npm ci
+npm run e2e:env:doctor
+
+# Receive or create:
+# e2e/samples/<sample-id>/sample.json
+# e2e/samples/<sample-id>/results/
+
+npm run e2e:catalog:validate
+npm run e2e:live:setup -- <sample-id>
+npm run e2e:live:verify -- <sample-id>
+npm run e2e:live:run -- <sample-id>
+```
+
+The doctor checks the toolchain and starts the built extension in a disposable Profile. Setup opens
+`e2e/.runtime/profile` for supported UI authentication and the sample's setup instructions. The
+Profile is machine-local and must not be copied. Verification checks Provider configuration,
+extension access, target origin, and all readiness conditions without submitting a task; execution
+checks the same boundary again. `CHATBROWSERX_LIVE_E2E_PROFILE` may select another absolute,
+dedicated Profile path.
+
+## Evaluation Commands
+
+```bash
+npm run e2e:live:run -- <sample-id>
+```
+
+```bash
+CHATBROWSERX_LIVE_ALLOW_MUTATION=1 npm run e2e:live:run -- <sample-id>
+```
+
+```bash
+npm run e2e:live:benchmark -- <sample-id> <required-runs>
+```
+
+```bash
+npm run --silent e2e:results:compare -- <sample-id> <left-revision> <right-revision> [runs]
+```
+
+```bash
+npm run e2e:live:provider-diagnose -- <sample-id>
+```
+
+The benchmark stops on its first failure. Every attempt writes one standard result and one raw
+machine-local report. Comparison and benchmark summaries are printed, not persisted.
+
+## Reproducible Baselines
+
+Use a full commit SHA and an isolated worktree. Keep the extension path stable so Chrome keeps a
+stable extension identity.
+
+```bash
+BASELINE_DIR=/private/tmp/chatbrowserx-baseline
+BASELINE_REVISION=<full-commit-sha>
+git worktree add --detach "$BASELINE_DIR" "$BASELINE_REVISION"
+npm --prefix "$BASELINE_DIR" ci
+npm --prefix "$BASELINE_DIR" run build
+
+CHATBROWSERX_LIVE_EXTENSION_PATH="$BASELINE_DIR/dist" \
+CHATBROWSERX_LIVE_PRODUCT_REVISION="$BASELINE_REVISION+baseline" \
+npm run e2e:live:seed-product
+
+CHATBROWSERX_LIVE_EXTENSION_PATH="$BASELINE_DIR/dist" \
+CHATBROWSERX_LIVE_PRODUCT_REVISION="$BASELINE_REVISION+baseline" \
+npm run e2e:live:run -- <sample-id>
+```
+
+Run the same frozen contract and count for the candidate, then compare the labels under
+`EVALUATION_STANDARD.md`.
+
+## Framework Checks
+
+For a narrow harness change:
+
+```bash
+npx vitest run e2e/tests/runner
+npm run e2e:catalog:validate
+npx playwright test --config e2e/playwright.config.ts --list
+```
+
+Before completing a framework or product change, run the repository gates listed once in
+EVALUATION_STANDARD.md. Browser tests are deterministic product checks; they are not a substitute
+for an authenticated live sample run.

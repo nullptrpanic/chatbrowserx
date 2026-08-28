@@ -8,6 +8,7 @@ export default tseslint.config(
       'artifacts/**',
       'coverage/**',
       'dist/**',
+      'e2e/.runtime/**',
       'node_modules/**',
       'playwright-report/**',
       'test-results/**',

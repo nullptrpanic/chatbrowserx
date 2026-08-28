@@ -4,7 +4,7 @@
   "private": true,
   "type": "module",
   "engines": {
-    "node": ">=24.18.0 <25"
+    "node": ">=24.18.0 <25 || >=26.0.0 <27"
   },
   "scripts": {
     "dev": "vite",
@@ -15,9 +15,16 @@
     "typecheck": "tsc --noEmit",
     "test": "vitest",
     "test:run": "vitest run",
-    "test:e2e": "npm run build && playwright test",
-    "e2e:live:setup": "npm run build && tsx scripts/live-e2e/setup.ts",
-    "e2e:live:run": "npm run build && tsx scripts/live-e2e/run.ts",
+    "test:e2e": "npm run build && playwright test --config e2e/playwright.config.ts",
+    "e2e:catalog:validate": "tsx e2e/runner/validate.ts",
+    "e2e:env:doctor": "npm run build && tsx e2e/runner/doctor.ts",
+    "e2e:results:compare": "tsx e2e/runner/compare.ts",
+    "e2e:live:setup": "npm run build && tsx e2e/runner/setup.ts",
+    "e2e:live:verify": "npm run build && tsx e2e/runner/verify.ts",
+    "e2e:live:seed-product": "npm run build && tsx e2e/runner/seed-product-settings.ts",
+    "e2e:live:run": "npm run build && tsx e2e/runner/run.ts",
+    "e2e:live:benchmark": "npm run build && tsx e2e/runner/benchmark.ts",
+    "e2e:live:provider-diagnose": "npm run build && tsx e2e/runner/provider-diagnose.ts",
     "audit:bundle": "tsx scripts/audit-production-bundle.ts",
     "check:codex": "tsx scripts/check-codex-contract.ts",
     "check:sandbox": "tsx scripts/check-sandbox-integration.ts"

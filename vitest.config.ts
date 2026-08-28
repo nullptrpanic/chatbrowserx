@@ -7,6 +7,6 @@ export default defineConfig({
     restoreMocks: true,
     maxWorkers: 4,
     testTimeout: 10_000,
-    exclude: ['tests/e2e/**', 'node_modules/**', 'dist/**'],
+    exclude: ['e2e/tests/browser/**', 'node_modules/**', 'dist/**'],
   },
 });
