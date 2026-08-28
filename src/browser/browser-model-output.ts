@@ -47,18 +47,20 @@ function compactScrollObservation(
   return compact;
 }
 
-function compactScrollTraversalData(data: Record<string, unknown>): Record<string, unknown> {
-  if (data.action !== 'scroll' || data.mode !== 'traverse' || !Array.isArray(data.observations)) {
-    return data;
-  }
+function compactScrollData(data: Record<string, unknown>): Record<string, unknown> {
+  if (data.action !== 'scroll') return data;
   const currentEntries = new Map<string, string>();
-  const lastObservationIndex = data.observations.length - 1;
-  return {
-    ...data,
-    observations: data.observations.map((observation, index) =>
+  const compact = { ...data };
+  if (Array.isArray(data.observations)) {
+    const lastObservationIndex = data.observations.length - 1;
+    compact.observations = data.observations.map((observation, index) =>
       compactScrollObservation(observation, currentEntries, index === lastObservationIndex),
-    ),
-  };
+    );
+  }
+  for (const key of ['verification', 'pageVerification'] as const) {
+    if (key in data) compact[key] = compactScrollObservation(data[key], currentEntries, true);
+  }
+  return compact;
 }
 
 /**
@@ -75,15 +77,14 @@ export function compactBrowserModelOutput(fullOutput: string): string {
 
   const envelope = record(parsed);
   const data = record(envelope?.data);
-  const scrollTraversal =
-    data?.action === 'scroll' && data.mode === 'traverse' && Array.isArray(data.observations);
+  const scrollOutput = data?.action === 'scroll';
   if (
     envelope === null ||
     envelope.ok !== true ||
     (typeof envelope.tabId !== 'number' && envelope.tabId !== null) ||
     (typeof envelope.url !== 'string' && envelope.url !== null) ||
     data === null ||
-    (!scrollTraversal && envelope.observation !== null) ||
+    (!scrollOutput && envelope.observation !== null) ||
     Object.keys(envelope).length !== SUCCESS_ENVELOPE_KEYS.size ||
     Object.keys(envelope).some((key) => !SUCCESS_ENVELOPE_KEYS.has(key))
   ) {
@@ -92,7 +93,7 @@ export function compactBrowserModelOutput(fullOutput: string): string {
 
   const compact: Record<string, unknown> = {
     ...envelope,
-    data: compactScrollTraversalData(data),
+    data: compactScrollData(data),
   };
   if (envelope.observation === null) delete compact.observation;
   return JSON.stringify(compact);

@@ -103,6 +103,45 @@ describe('compactBrowserModelOutput', () => {
     });
   });
 
+  it('drops passive tombstones from a single scroll verification without losing coverage', () => {
+    const full = JSON.stringify({
+      ok: true,
+      tabId: 7,
+      url: 'https://example.com/document',
+      data: {
+        action: 'scroll',
+        requestedDeltaApplied: true,
+        verification: {
+          mode: 'interactive',
+          snapshot: 'snapshot_2',
+          base: 'snapshot_1',
+          remove: ['node:old-paragraph', 'ref:stale-action'],
+          upsert: [{ k: 'node:new-paragraph', e: { d: 4, r: 'statictext', n: 'New text' } }],
+          coverage: { targets: ['ref_document'], primaryTarget: 'ref_document' },
+        },
+      },
+      observation: null,
+    });
+
+    expect(JSON.parse(compactBrowserModelOutput(full))).toEqual({
+      ok: true,
+      tabId: 7,
+      url: 'https://example.com/document',
+      data: {
+        action: 'scroll',
+        requestedDeltaApplied: true,
+        verification: {
+          mode: 'interactive',
+          snapshot: 'snapshot_2',
+          base: 'snapshot_1',
+          remove: ['ref:stale-action'],
+          upsert: [{ k: 'node:new-paragraph', e: { d: 4, r: 'statictext', n: 'New text' } }],
+          coverage: { targets: ['ref_document'], primaryTarget: 'ref_document' },
+        },
+      },
+    });
+  });
+
   it('compacts traversal evidence while preserving a non-null action observation', () => {
     const full = JSON.stringify({
       ok: true,

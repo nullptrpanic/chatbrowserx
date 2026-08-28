@@ -351,11 +351,11 @@ function result(
   modelAttachmentIds?: readonly string[],
 ): BrowserToolExecutionResult {
   const serialized = JSON.stringify(output);
-  if (serialized.length <= MAX_OUTPUT_CHARACTERS) {
-    const compact =
-      operation === 'scroll' && isTraversalScrollOutput(output)
-        ? compactBrowserModelOutput(serialized)
-        : serialized;
+  const compact = operation === 'scroll' ? compactBrowserModelOutput(serialized) : serialized;
+  if (
+    serialized.length <= MAX_OUTPUT_CHARACTERS ||
+    (compact.length < serialized.length && compact.length <= MAX_OUTPUT_CHARACTERS)
+  ) {
     return {
       output: serialized,
       ...(serialized.length - compact.length >= MIN_MODEL_OUTPUT_SAVINGS_CHARACTERS
@@ -695,18 +695,6 @@ function isTraversalScroll(call: ParsedBrowserToolCall): boolean {
     readonly stopText: string;
   };
   return input.maxSegments > 1 || input.stopText.trim().length > 0;
-}
-
-function isTraversalScrollOutput(output: unknown): boolean {
-  if (typeof output !== 'object' || output === null || Array.isArray(output)) return false;
-  const data = (output as Readonly<Record<string, unknown>>).data;
-  return (
-    typeof data === 'object' &&
-    data !== null &&
-    !Array.isArray(data) &&
-    (data as Readonly<Record<string, unknown>>).action === 'scroll' &&
-    (data as Readonly<Record<string, unknown>>).mode === 'traverse'
-  );
 }
 
 function normalizedVisibleText(value: string): string {

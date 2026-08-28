@@ -1834,6 +1834,88 @@ describe('BrowserToolExecutor', () => {
     expect(result.modelOutput?.length).toBeLessThan(result.output.length);
   });
 
+  it('retains an oversized exact scroll audit when its compact model output fits', async () => {
+    const passiveTombstones = Array.from(
+      { length: 5_000 },
+      (_, index) => `node:offscreen-paragraph-${index.toString().padStart(4, '0')}`,
+    );
+    const observer = {
+      inspect: vi
+        .fn()
+        .mockResolvedValueOnce({
+          tabId: 7,
+          url: 'https://example.com/document',
+          data: {
+            mode: 'interactive',
+            snapshot: 'snapshot_before',
+            elements: [{ r: 'region', n: 'Document', a: ['scroll'], ref: 'ref_document' }],
+          },
+          observation: null,
+          attachmentIds: [],
+          debuggerSession: 'ephemeral' as const,
+        })
+        .mockResolvedValueOnce({
+          tabId: 7,
+          url: 'https://example.com/document',
+          data: {
+            mode: 'interactive',
+            snapshot: 'snapshot_after',
+            base: 'snapshot_before',
+            remove: passiveTombstones,
+            upsert: [{ k: 'node:new', e: { d: 4, r: 'statictext', n: 'New text' } }],
+            coverage: { targets: ['ref_document'], primaryTarget: 'ref_document' },
+          },
+          observation: null,
+          attachmentIds: [],
+          debuggerSession: 'ephemeral' as const,
+        }),
+    };
+    const actions = {
+      execute: vi.fn(async () => ({
+        tabId: 7,
+        url: 'https://example.com/document',
+        data: {
+          action: 'scroll',
+          actualDeltaX: 0,
+          actualDeltaY: 600,
+          remainingDeltaX: 0,
+          remainingDeltaY: 0,
+          requestedDeltaApplied: true,
+          moved: true,
+          contentChanged: true,
+          extentChanged: false,
+          loadedMore: false,
+          boundaryVerified: false,
+        },
+        observation: null,
+      })),
+    };
+    const executor = new BrowserToolExecutor({ tabs: tabPort(), observer, actions });
+    const signal = new AbortController().signal;
+    const context = { currentTabId: 7 };
+
+    await executor.execute(call('browser_inspect', { mode: 'interactive' }), signal, context);
+    const result = await executor.execute(
+      call('browser_scroll', {
+        target: 'ref_document',
+        deltaX: 0,
+        deltaY: 600,
+        maxSegments: 1,
+        stopText: '',
+      }),
+      signal,
+      context,
+    );
+
+    expect(result.output.length).toBeGreaterThan(100 * 1_024);
+    expect(JSON.parse(result.output)).toMatchObject({ ok: true, data: { action: 'scroll' } });
+    expect(result.modelOutput?.length).toBeLessThanOrEqual(100 * 1_024);
+    expect(JSON.parse(result.modelOutput ?? '{}')).toMatchObject({
+      ok: true,
+      data: { verification: { snapshot: 'snapshot_after' } },
+    });
+  });
+
   it('preserves partial traversal evidence when a later action fails', async () => {
     const observer = {
       inspect: vi
