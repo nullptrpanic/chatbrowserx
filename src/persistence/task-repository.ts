@@ -66,6 +66,18 @@ export interface PersistedTaskArchive {
   readonly toolResults: readonly MaterializedToolResult[];
 }
 
+/** Permanent task ordering facts without any potentially large tool-result payloads. */
+export interface PersistedTaskTimeline {
+  readonly task: Task;
+  readonly runs: readonly TaskRun[];
+  readonly events: readonly TaskEvent[];
+}
+
+/** A full timeline plus only the tool-result payloads needed by one bounded detail window. */
+export interface PersistedTaskDetailWindow extends PersistedTaskTimeline {
+  readonly toolResults: readonly MaterializedToolResult[];
+}
+
 export class TaskRepositoryConflictError extends Error {
   readonly code = 'UNAPPLIED_SUPPLEMENTS' as const;
 
@@ -95,6 +107,11 @@ export interface TaskRepository {
   ): Promise<ActiveTaskRuntimeDelta | undefined>;
   readTaskArchive(taskId: TaskId): Promise<PersistedTaskArchive | undefined>;
   readTaskArchives(taskIds: readonly TaskId[]): Promise<PersistedTaskArchive[]>;
+  readTaskTimelines(taskIds: readonly TaskId[]): Promise<PersistedTaskTimeline[]>;
+  readTaskDetailWindow(
+    taskId: TaskId,
+    maxDetailEvents: number,
+  ): Promise<PersistedTaskDetailWindow | undefined>;
   listByConversation(conversationId: ConversationId): Promise<Task[]>;
   listAll(): Promise<Task[]>;
   listRuns(taskId: TaskId): Promise<TaskRun[]>;
@@ -241,6 +258,7 @@ function validateEventRuns(events: readonly TaskEvent[], runs: readonly TaskRun[
 function materializedResults(
   events: readonly TaskEvent[],
   storedResults: readonly ToolResult[],
+  selectedResultIds?: ReadonlySet<ToolResultId>,
 ): MaterializedToolResult[] {
   const calls = new Map<string, Extract<TaskEvent, { readonly type: 'tool.call' }>>();
   const resultEvents = new Map<
@@ -261,11 +279,22 @@ function materializedResults(
       resultEvents.set(event.resultId, event);
     }
   }
+  const selectedEvents =
+    selectedResultIds === undefined
+      ? [...resultEvents.values()]
+      : [...resultEvents.values()].filter(({ resultId }) => selectedResultIds.has(resultId));
   const storedById = new Map(storedResults.map((result) => [result.id, result]));
-  if (storedById.size !== storedResults.length || resultEvents.size !== storedResults.length) {
+  if (
+    storedById.size !== storedResults.length ||
+    selectedEvents.length !== storedResults.length ||
+    (selectedResultIds === undefined && resultEvents.size !== storedResults.length) ||
+    (selectedResultIds !== undefined &&
+      (selectedResultIds.size !== storedResults.length ||
+        storedResults.some(({ id }) => !selectedResultIds.has(id))))
+  ) {
     throw new Error('Task tool-result records are inconsistent.');
   }
-  return [...resultEvents.values()]
+  return selectedEvents
     .map((resultEvent): MaterializedToolResult => {
       const result = storedById.get(resultEvent.resultId);
       const call = calls.get(resultEvent.callId);
@@ -790,6 +819,93 @@ export class IndexedDbTaskRepository implements TaskRepository {
     );
     await transaction.done;
     return archives.flatMap((archive) => (archive === undefined ? [] : [archive]));
+  }
+
+  /** Batch-loads task timelines without reading any tool-result output bodies. */
+  async readTaskTimelines(taskIds: readonly TaskId[]): Promise<PersistedTaskTimeline[]> {
+    const uniqueTaskIds = [...new Set(taskIds)];
+    if (uniqueTaskIds.length === 0) return [];
+    const transaction = this.#database.transaction(
+      ['tasks', 'task-runs', 'task-events'],
+      'readonly',
+    );
+    const timelines = await Promise.all(
+      uniqueTaskIds.map(async (taskId): Promise<PersistedTaskTimeline | undefined> => {
+        const task = await transaction.objectStore('tasks').get(taskId);
+        if (task === undefined) return undefined;
+        const [storedRuns, storedEvents] = await Promise.all([
+          transaction
+            .objectStore('task-runs')
+            .index('by-task-attempt')
+            .getAll(taskRunRange(taskId)),
+          transaction
+            .objectStore('task-events')
+            .index('by-task-sequence')
+            .getAll(taskSequenceRange(taskId)),
+        ]);
+        const runs = validatedRuns(task, storedRuns);
+        const events = orderedTaskEvents(task, storedEvents);
+        validateEventRuns(events, runs);
+        return { task, runs, events };
+      }),
+    );
+    await transaction.done;
+    return timelines.flatMap((timeline) => (timeline === undefined ? [] : [timeline]));
+  }
+
+  /** Loads only result bodies referenced by the newest visible task-detail events. */
+  async readTaskDetailWindow(
+    taskId: TaskId,
+    maxDetailEvents: number,
+  ): Promise<PersistedTaskDetailWindow | undefined> {
+    if (!Number.isSafeInteger(maxDetailEvents) || maxDetailEvents < 1) {
+      throw new Error('Task detail window limit is invalid.');
+    }
+    const transaction = this.#database.transaction(
+      ['tasks', 'task-runs', 'task-events', 'tool-results'],
+      'readonly',
+    );
+    const task = await transaction.objectStore('tasks').get(taskId);
+    if (task === undefined) {
+      await transaction.done;
+      return undefined;
+    }
+    const [storedRuns, storedEvents] = await Promise.all([
+      transaction.objectStore('task-runs').index('by-task-attempt').getAll(taskRunRange(taskId)),
+      transaction
+        .objectStore('task-events')
+        .index('by-task-sequence')
+        .getAll(taskSequenceRange(taskId)),
+    ]);
+    const runs = validatedRuns(task, storedRuns);
+    const events = orderedTaskEvents(task, storedEvents);
+    validateEventRuns(events, runs);
+    const selectedResultIds = new Set(
+      events
+        .filter((event) => event.type === 'tool.result' || event.type === 'supplement.queued')
+        .slice(-maxDetailEvents)
+        .flatMap((event) => (event.type === 'tool.result' ? [event.resultId] : [])),
+    );
+    const results = await Promise.all(
+      [...selectedResultIds].map((resultId) =>
+        transaction.objectStore('tool-results').get(resultId),
+      ),
+    );
+    if (results.some((result) => result === undefined)) {
+      await transaction.done;
+      throw new Error('Task tool-result records are inconsistent.');
+    }
+    await transaction.done;
+    return {
+      task,
+      runs,
+      events,
+      toolResults: materializedResults(
+        events,
+        results.flatMap((result) => (result === undefined ? [] : [result])),
+        selectedResultIds,
+      ),
+    };
   }
 
   async listByConversation(conversationId: ConversationId): Promise<Task[]> {

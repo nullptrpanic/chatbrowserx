@@ -225,6 +225,9 @@ function repositories(
       get: vi.fn(async () => undefined),
       listAll: vi.fn(async () => []),
       listMessages,
+      listRecentMessages: vi.fn(async (_conversationId: string, limit: number) =>
+        messages.slice(-limit),
+      ),
       listTaskMessages: vi.fn(async (taskId: string) =>
         messages.filter((message) => message.taskId === taskId),
       ),

@@ -120,6 +120,7 @@ function conversationRepository(messages: MessageRecord[]): ConversationReposito
     get: vi.fn(async () => undefined),
     listAll: vi.fn(async () => []),
     listMessages: vi.fn(async () => messages),
+    listRecentMessages: vi.fn(async (_conversationId, limit) => messages.slice(-limit)),
     listTaskMessages: vi.fn(async (taskId) =>
       messages.filter((message) => message.taskId === taskId),
     ),

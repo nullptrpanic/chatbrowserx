@@ -68,24 +68,34 @@ function buildFixture() {
     events,
     toolResults: [],
   };
+  const listMessages = vi.fn(async (_conversationId?: string): Promise<MessageRecord[]> => {
+    void _conversationId;
+    return [
+      {
+        id: 'message_1',
+        kind: 'conversation',
+        conversationId: conversation.id,
+        taskId: task.id,
+        role: 'user' as const,
+        status: 'complete' as const,
+        text: 'Book a room',
+        attachmentIds: ['attachment_1'],
+        createdAt: 1_010,
+        updatedAt: 1_010,
+      },
+    ];
+  });
   const dependencies = {
     conversations: {
       listAll: vi.fn(async () => [conversation]),
       get: vi.fn(async (): Promise<typeof conversation | undefined> => conversation),
-      listMessages: vi.fn(async (): Promise<MessageRecord[]> => [
-        {
-          id: 'message_1',
-          kind: 'conversation',
-          conversationId: conversation.id,
-          taskId: task.id,
-          role: 'user' as const,
-          status: 'complete' as const,
-          text: 'Book a room',
-          attachmentIds: ['attachment_1'],
-          createdAt: 1_010,
-          updatedAt: 1_010,
-        },
-      ]),
+      listMessages,
+      listRecentMessages: vi.fn(async (conversationId: string, limit: number) =>
+        (await listMessages(conversationId)).slice(-limit),
+      ),
+      listTaskMessages: vi.fn(async (taskId: string) =>
+        (await listMessages()).filter((message) => message.taskId === taskId),
+      ),
       appendSupplement: vi.fn(async () => undefined),
       clearConversation: vi.fn(async () => undefined),
     },
@@ -102,6 +112,14 @@ function buildFixture() {
       readTaskArchive: vi.fn(async (taskId: string) => (taskId === task.id ? archive : undefined)),
       readTaskArchives: vi.fn(async (taskIds: readonly string[]) =>
         taskIds.includes(task.id) ? [archive] : [],
+      ),
+      readTaskTimelines: vi.fn(async (taskIds: readonly string[]) =>
+        taskIds.includes(task.id)
+          ? [{ task: archive.task, runs: archive.runs, events: archive.events }]
+          : [],
+      ),
+      readTaskDetailWindow: vi.fn(async (taskId: string) =>
+        taskId === task.id ? archive : undefined,
       ),
       getCheckpoint: vi.fn(async (...arguments_: [string]): Promise<Checkpoint | undefined> => {
         void arguments_;
@@ -210,6 +228,14 @@ function useArchive(
   fixture.dependencies.tasks.readTaskArchives.mockImplementation(async (taskIds) =>
     taskIds.includes(archive.task.id) ? [archive] : [],
   );
+  fixture.dependencies.tasks.readTaskTimelines.mockImplementation(async (taskIds) =>
+    taskIds.includes(archive.task.id)
+      ? [{ task: archive.task, runs: archive.runs, events: archive.events }]
+      : [],
+  );
+  fixture.dependencies.tasks.readTaskDetailWindow.mockImplementation(async (taskId) =>
+    taskId === archive.task.id ? archive : undefined,
+  );
   return archive;
 }
 
@@ -264,6 +290,29 @@ describe('PanelService', () => {
       { id: anotherConversation.id, taskStatus: null },
       { id: fixture.conversation.id, taskStatus: 'completed' },
     ]);
+  });
+
+  it('uses bounded message, timeline, and task-detail projections', async () => {
+    const fixture = buildFixture();
+    const service = new PanelService(fixture.dependencies);
+
+    await service.getSnapshot(7, fixture.conversation.id);
+    await service.getTaskDetails(fixture.task.id);
+
+    expect(fixture.dependencies.conversations.listRecentMessages).toHaveBeenCalledWith(
+      fixture.conversation.id,
+      500,
+    );
+    expect(fixture.dependencies.conversations.listTaskMessages).toHaveBeenCalledWith(
+      fixture.task.id,
+    );
+    expect(fixture.dependencies.tasks.readTaskTimelines).toHaveBeenCalledWith([fixture.task.id]);
+    expect(fixture.dependencies.tasks.readTaskDetailWindow).toHaveBeenCalledWith(
+      fixture.task.id,
+      100,
+    );
+    expect(fixture.dependencies.tasks.readTaskArchives).not.toHaveBeenCalled();
+    expect(fixture.dependencies.tasks.readTaskArchive).not.toHaveBeenCalled();
   });
 
   it('shares history across tabs while keeping the current page context separate', async () => {
@@ -919,6 +968,18 @@ describe('PanelService', () => {
           ? fixture.archive
           : undefined,
     );
+    fixture.dependencies.tasks.readTaskTimelines.mockImplementation(async (taskIds) =>
+      [fixture.archive, secondArchive]
+        .filter(({ task }) => taskIds.includes(task.id))
+        .map(({ task, runs, events }) => ({ task, runs, events })),
+    );
+    fixture.dependencies.tasks.readTaskDetailWindow.mockImplementation(async (taskId) =>
+      taskId === secondTask.id
+        ? secondArchive
+        : taskId === fixture.task.id
+          ? fixture.archive
+          : undefined,
+    );
     const service = new PanelService(fixture.dependencies);
 
     const snapshot = await service.getSnapshot(7);
@@ -944,10 +1005,13 @@ describe('PanelService', () => {
     expect(details.toolResults.at(-1)?.argumentsJson).toHaveLength(20_000);
     expect(details.toolResults.at(-1)?.output).toHaveLength(100_000);
     expect(details.toolResults.at(-1)?.attachmentIds).toEqual(['attachment_tool']);
-    expect(fixture.dependencies.tasks.readTaskArchive).toHaveBeenCalledWith(secondTask.id);
+    expect(fixture.dependencies.tasks.readTaskDetailWindow).toHaveBeenCalledWith(
+      secondTask.id,
+      100,
+    );
   });
 
-  it('rejects a permanent tool result without its TaskEvent association', async () => {
+  it('defers orphan tool-result validation until task details are requested', async () => {
     const fixture = buildFixture();
     const events: TaskEvent[] = [
       ...Array.from({ length: 441 }, (_, index): TaskEvent => ({
@@ -986,9 +1050,9 @@ describe('PanelService', () => {
     });
     const service = new PanelService(fixture.dependencies);
 
-    await expect(service.getSnapshot(7)).rejects.toThrow(
-      'A permanent tool result is missing its TaskEvent association.',
-    );
+    await expect(service.getSnapshot(7)).resolves.toMatchObject({
+      task: { completedToolCallCount: 0, toolResults: [] },
+    });
     await expect(service.getTaskDetails(fixture.task.id)).rejects.toThrow(
       'A permanent tool result is missing its TaskEvent association.',
     );

@@ -766,6 +766,127 @@ describe('IndexedDbTaskRepository', () => {
     database.close();
   });
 
+  it('reads permanent task timelines without materializing tool-result payloads', async () => {
+    const database = await openChatBrowserDatabase(createTestDatabaseName('task-timeline'));
+    const repository = new IndexedDbTaskRepository(database);
+    const fixture = submissionFixture('timeline');
+    const stored = await createSubmission(repository, fixture);
+    await database.add('tool-results', {
+      id: 'result_not_needed_by_timeline',
+      taskId: stored.id,
+      runId: fixture.run.id,
+      callId: 'call_not_needed_by_timeline',
+      toolName: 'browser_inspect',
+      output: 'x'.repeat(120_000),
+      attachmentIds: [],
+      createdAt: 110,
+    });
+
+    await expect(repository.readTaskTimelines([stored.id])).resolves.toEqual([
+      {
+        task: stored,
+        runs: [fixture.run],
+        events: fixture.events,
+      },
+    ]);
+    database.close();
+  });
+
+  it('materializes result bodies only for the retained task-detail window', async () => {
+    const database = await openChatBrowserDatabase(createTestDatabaseName('task-detail-window'));
+    const repository = new IndexedDbTaskRepository(database);
+    const fixture = submissionFixture('detail-window');
+    const stored = await createSubmission(repository, fixture);
+    const events: TaskEvent[] = [
+      {
+        id: 'event_detail_call_1',
+        taskId: stored.id,
+        runId: fixture.run.id,
+        sequence: 3,
+        at: 110,
+        type: 'tool.call',
+        callId: 'call_detail_1',
+        name: 'browser_inspect',
+        argumentsJson: '{"mode":"interactive"}',
+      },
+      {
+        id: 'event_detail_result_1',
+        taskId: stored.id,
+        runId: fixture.run.id,
+        sequence: 4,
+        at: 120,
+        type: 'tool.result',
+        callId: 'call_detail_1',
+        resultId: 'result_detail_1',
+      },
+      {
+        id: 'event_detail_call_2',
+        taskId: stored.id,
+        runId: fixture.run.id,
+        sequence: 5,
+        at: 130,
+        type: 'tool.call',
+        callId: 'call_detail_2',
+        name: 'browser_scroll',
+        argumentsJson: '{"deltaY":600}',
+      },
+      {
+        id: 'event_detail_result_2',
+        taskId: stored.id,
+        runId: fixture.run.id,
+        sequence: 6,
+        at: 140,
+        type: 'tool.result',
+        callId: 'call_detail_2',
+        resultId: 'result_detail_2',
+      },
+    ];
+    await database.put('tasks', {
+      ...stored,
+      lastEventSequence: 6,
+      updatedAt: 140,
+    });
+    for (const event of events) await database.add('task-events', event);
+    for (const result of [
+      {
+        id: 'result_detail_1',
+        callId: 'call_detail_1',
+        toolName: 'browser_inspect',
+        output: 'first result body',
+        createdAt: 120,
+      },
+      {
+        id: 'result_detail_2',
+        callId: 'call_detail_2',
+        toolName: 'browser_scroll',
+        output: 'second result body',
+        createdAt: 140,
+      },
+    ] satisfies readonly Pick<
+      ToolResult,
+      'id' | 'callId' | 'toolName' | 'output' | 'createdAt'
+    >[]) {
+      await database.add('tool-results', {
+        ...result,
+        taskId: stored.id,
+        runId: fixture.run.id,
+        attachmentIds: [],
+      });
+    }
+
+    const window = await repository.readTaskDetailWindow(stored.id, 1);
+
+    expect(window?.events).toHaveLength(6);
+    expect(window?.toolResults).toEqual([
+      expect.objectContaining({
+        id: 'result_detail_2',
+        argumentsJson: '{"deltaY":600}',
+        output: 'second result body',
+      }),
+    ]);
+    database.close();
+  });
+
   it('rejects an orphaned stored result while materializing permanent history', async () => {
     const database = await openChatBrowserDatabase(createTestDatabaseName('corrupt-result-read'));
     const repository = new IndexedDbTaskRepository(database);

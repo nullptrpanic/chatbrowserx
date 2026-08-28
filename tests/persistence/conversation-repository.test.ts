@@ -123,6 +123,32 @@ describe('IndexedDbConversationRepository', () => {
     database.close();
   });
 
+  it('lists only the newest bounded conversation messages in stable order', async () => {
+    const database = await openChatBrowserDatabase(createTestDatabaseName('recent-messages'));
+    const conversations = new IndexedDbConversationRepository(database);
+    await seedConversation(database, conversation);
+    for (let index = 1; index <= 5; index += 1) {
+      await database.add('messages', {
+        id: `message_${index}`,
+        kind: 'conversation',
+        conversationId: conversation.id,
+        taskId: `task_${index}`,
+        role: 'user',
+        status: 'complete',
+        text: `message ${index}`,
+        attachmentIds: [],
+        createdAt: index,
+        updatedAt: index,
+      });
+    }
+
+    await expect(conversations.listRecentMessages(conversation.id, 2)).resolves.toMatchObject([
+      { id: 'message_4', createdAt: 4 },
+      { id: 'message_5', createdAt: 5 },
+    ]);
+    database.close();
+  });
+
   it('updates one canonical message and reconciles attachment references', async () => {
     const database = await openChatBrowserDatabase(createTestDatabaseName('message-update'));
     const conversations = new IndexedDbConversationRepository(database);

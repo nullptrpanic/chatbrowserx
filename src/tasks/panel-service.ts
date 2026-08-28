@@ -3,7 +3,11 @@ import { IMAGE_POLICY } from '../attachments/attachment-policy';
 import type { ConversationRepository } from '../persistence/conversation-repository';
 import type { CredentialStore } from '../persistence/credential-store';
 import type { SettingsStore, AppLanguage, ReasoningEffort } from '../persistence/settings-store';
-import type { PersistedTaskArchive, TaskRepository } from '../persistence/task-repository';
+import type {
+  PersistedTaskDetailWindow,
+  PersistedTaskTimeline,
+  TaskRepository,
+} from '../persistence/task-repository';
 import type {
   PanelAttachment,
   PanelConversationSummary,
@@ -19,6 +23,7 @@ import type { SkillCatalogPort } from '../sandbox/skill-catalog';
 import type { MessageRecord, MessageSourcePage, TaskMessageDraft } from './message-types';
 import type { TaskSnapshot, TaskSubmissionPort } from './task-command-service';
 import type { Task, TaskEvent } from './task-types';
+import type { MaterializedToolResult } from './tool-result-types';
 
 const ATTACHMENT_GC_GRACE_MS = 24 * 60 * 60 * 1_000;
 const MAX_PANEL_MESSAGES = 500;
@@ -33,11 +38,16 @@ const previewImageTypes = new Set<string>(IMAGE_POLICY.acceptedMimeTypes);
 export interface PanelServiceDependencies {
   readonly conversations: Pick<
     ConversationRepository,
-    'listAll' | 'get' | 'listMessages' | 'clearConversation'
+    'listAll' | 'get' | 'listRecentMessages' | 'listTaskMessages' | 'clearConversation'
   >;
   readonly tasks: Pick<
     TaskRepository,
-    'get' | 'listAll' | 'listByConversation' | 'listEvents' | 'readTaskArchive' | 'readTaskArchives'
+    | 'get'
+    | 'listAll'
+    | 'listByConversation'
+    | 'listEvents'
+    | 'readTaskTimelines'
+    | 'readTaskDetailWindow'
   >;
   readonly attachments: Pick<AttachmentRepository, 'get' | 'deleteUnreferenced'>;
   readonly settings: Pick<SettingsStore, 'get' | 'save'>;
@@ -166,7 +176,7 @@ interface TaskDetailIndexes {
 /** Assigns stable display positions across completed tools and applied or pending supplements. */
 function taskDetailIndexes(
   events: readonly TaskEvent[],
-  materializedResults: PersistedTaskArchive['toolResults'],
+  materializedResults: readonly MaterializedToolResult[],
   supplements: readonly MessageRecord[],
 ): TaskDetailIndexes {
   const resultIndexes = new Map<string, number>();
@@ -178,10 +188,12 @@ function taskDetailIndexes(
   const supplementIds = new Set(supplements.map(({ id }) => id));
   let itemCount = 0;
   for (const event of events) {
-    if (event.type === 'tool.result' && resultIds.has(event.resultId)) {
-      resultIndexes.set(event.resultId, ++itemCount);
-    } else if (event.type === 'supplement.queued' && supplementIds.has(event.messageId)) {
-      supplementIndexes.set(event.messageId, ++itemCount);
+    if (event.type === 'tool.result') {
+      itemCount += 1;
+      if (resultIds.has(event.resultId)) resultIndexes.set(event.resultId, itemCount);
+    } else if (event.type === 'supplement.queued') {
+      itemCount += 1;
+      if (supplementIds.has(event.messageId)) supplementIndexes.set(event.messageId, itemCount);
     }
   }
   if (resultIndexes.size !== materializedResults.length) {
@@ -279,23 +291,25 @@ export class PanelService {
     const selectedSummary = selectedIndex < 0 ? null : (summaries[selectedIndex] ?? null);
     const selectedTasks = selectedIndex < 0 ? [] : (taskLists[selectedIndex] ?? []);
     const latestTask = selectedTasks.at(-1) ?? null;
-    const allStoredMessages =
-      selected === null ? [] : await this.#dependencies.conversations.listMessages(selected.id);
-    const storedMessages = allStoredMessages.slice(-MAX_PANEL_MESSAGES);
+    const storedMessages =
+      selected === null
+        ? []
+        : await this.#dependencies.conversations.listRecentMessages(
+            selected.id,
+            MAX_PANEL_MESSAGES,
+          );
     const messages = storedMessages.filter((message) => message.kind === 'conversation');
     const attachments = await this.#readAttachmentMetadata(storedMessages);
     const visibleTaskIds = new Set(storedMessages.map((message) => message.taskId));
     if (latestTask !== null) visibleTaskIds.add(latestTask.id);
     const visibleTasks = selectedTasks.filter((task) => visibleTaskIds.has(task.id));
-    const archives = await this.#dependencies.tasks.readTaskArchives(
+    const timelines = await this.#dependencies.tasks.readTaskTimelines(
       visibleTasks.map(({ id }) => id),
     );
-    const archiveByTaskId = new Map(archives.map((archive) => [archive.task.id, archive]));
+    const timelineByTaskId = new Map(timelines.map((timeline) => [timeline.task.id, timeline]));
     const panelTasks = visibleTasks.flatMap((task) => {
-      const archive = archiveByTaskId.get(task.id);
-      return archive === undefined
-        ? []
-        : [this.#projectTask(archive, allStoredMessages, 'summary')];
+      const timeline = timelineByTaskId.get(task.id);
+      return timeline === undefined ? [] : [this.#projectTask(timeline, [], 'summary')];
     });
     const panelTask =
       latestTask === null ? null : (panelTasks.find((task) => task.id === latestTask.id) ?? null);
@@ -345,12 +359,13 @@ export class PanelService {
     if (normalizedTaskId.length === 0 || normalizedTaskId.length > 256) {
       throw new Error('Task detail request is invalid.');
     }
-    const archive = await this.#dependencies.tasks.readTaskArchive(normalizedTaskId);
-    if (archive === undefined) throw new Error('Task details are unavailable.');
-    const messages = await this.#dependencies.conversations.listMessages(
-      archive.task.conversationId,
+    const window = await this.#dependencies.tasks.readTaskDetailWindow(
+      normalizedTaskId,
+      MAX_PANEL_EVENTS,
     );
-    return this.#projectTask(archive, messages, 'full');
+    if (window === undefined) throw new Error('Task details are unavailable.');
+    const messages = await this.#dependencies.conversations.listTaskMessages(window.task.id);
+    return this.#projectTask(window, messages, 'full');
   }
 
   /** Persists a user message before creating and scheduling its recoverable browser task. */
@@ -557,11 +572,12 @@ export class PanelService {
 
   /** Projects permanent task facts without reading or inferring from a runtime Checkpoint. */
   #projectTask(
-    archive: PersistedTaskArchive,
+    archive: PersistedTaskTimeline | PersistedTaskDetailWindow,
     messages: readonly MessageRecord[],
     detailLevel: 'summary' | 'full',
   ): PanelTask {
-    const { task, events, toolResults: allResults, runs } = archive;
+    const { task, events, runs } = archive;
+    const allResults = 'toolResults' in archive ? archive.toolResults : [];
     const supplements = messages.filter(
       (message) => message.kind === 'supplement' && message.taskId === task.id,
     );
@@ -597,7 +613,7 @@ export class PanelService {
       createdAt: task.createdAt,
       updatedAt: task.updatedAt,
       sequence: task.lastEventSequence,
-      completedToolCallCount: allResults.length,
+      completedToolCallCount: events.filter((event) => event.type === 'tool.result').length,
       detailItemCount: detailIndexes.itemCount,
       contextCleared: events.some((event) => event.type === 'context.cleared'),
       lastError:

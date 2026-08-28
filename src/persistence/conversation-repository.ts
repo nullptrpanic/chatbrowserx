@@ -9,6 +9,7 @@ export interface ConversationRepository {
   get(conversationId: ConversationId): Promise<Conversation | undefined>;
   listAll(): Promise<Conversation[]>;
   listMessages(conversationId: ConversationId): Promise<MessageRecord[]>;
+  listRecentMessages(conversationId: ConversationId, limit: number): Promise<MessageRecord[]>;
   listTaskMessages(taskId: TaskId): Promise<MessageRecord[]>;
   updateMessage(message: MessageRecord): Promise<void>;
   clearConversation(conversationId: ConversationId): Promise<void>;
@@ -75,6 +76,26 @@ export class IndexedDbConversationRepository implements ConversationRepository {
       ownerTimeRange(conversationId),
     );
     return messages;
+  }
+
+  /** Reads only the newest bounded messages while returning them in chronological order. */
+  async listRecentMessages(
+    conversationId: ConversationId,
+    limit: number,
+  ): Promise<MessageRecord[]> {
+    if (!Number.isSafeInteger(limit) || limit < 1) {
+      throw new Error('Recent message limit is invalid.');
+    }
+    const transaction = this.#database.transaction('messages', 'readonly');
+    const index = transaction.objectStore('messages').index('by-conversation-created-at');
+    const messages: MessageRecord[] = [];
+    let cursor = await index.openCursor(ownerTimeRange(conversationId), 'prev');
+    while (cursor !== null && messages.length < limit) {
+      messages.push(cursor.value);
+      cursor = await cursor.continue();
+    }
+    await transaction.done;
+    return messages.reverse();
   }
 
   /** Lists only messages owned by one logical task. */
