@@ -20,9 +20,6 @@ const DISCOVERY_TOOL_NAMES = new Set<BrowserToolName>([
   'browser_capture_screenshot',
   'browser_wait',
   'browser_network_start',
-  'browser_network_list',
-  'browser_network_get',
-  'browser_network_stop',
 ]);
 
 const INTERACTIVE_TOOL_NAMES = new Set<BrowserToolName>([

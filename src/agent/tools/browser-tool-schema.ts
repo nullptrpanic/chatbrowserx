@@ -531,7 +531,7 @@ export const BROWSER_TOOL_DEFINITIONS: readonly ModelToolDefinition[] = [
   ),
   taskToolDefinition(
     'browser_network_start',
-    'Start capturing future traffic only, replacing any prior frozen snapshot. Keep capture active until the requested user-visible workflow is complete; network_idle alone does not prove asynchronous business completion. For initial-load traffic, reload after starting.',
+    'Start future-traffic capture, replacing any frozen snapshot. Call first for network evidence. After success, the next model turn exposes browser_network_list, browser_network_get, and browser_network_stop. Re-read tools. Do not report them missing from this turn. Keep capture active through the workflow; network_idle is not business completion. Reload after starting for initial traffic.',
     {},
   ),
   taskToolDefinition(

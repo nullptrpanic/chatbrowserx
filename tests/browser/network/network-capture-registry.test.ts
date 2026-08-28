@@ -156,6 +156,9 @@ describe('NetworkCaptureRegistry', () => {
 
     expect(first).toMatchObject({ tabId: 7, alreadyActive: false, generation: 3 });
     expect(first.message).toContain('Earlier traffic is unavailable');
+    expect(first.message).toContain('browser_network_list');
+    expect(first.message).toContain('browser_network_get');
+    expect(first.message).toContain('browser_network_stop');
     expect(second).toMatchObject({ alreadyActive: true });
     expect(debuggerTransport.send).toHaveBeenCalledWith({ tabId: 7 }, 'Network.enable', {
       maxTotalBufferSize: 10_485_760,

@@ -288,7 +288,7 @@ const SEARCH_ARGUMENTS = {
   excludeDomains: [],
 } as const;
 
-const BROWSER_TOOL_NAMES = [
+const FIRST_TURN_BROWSER_TOOL_NAMES = [
   'browser_list_tabs',
   'browser_open_tab',
   'browser_switch_tab',
@@ -307,9 +307,6 @@ const BROWSER_TOOL_NAMES = [
   'browser_drag',
   'browser_wait',
   'browser_network_start',
-  'browser_network_list',
-  'browser_network_get',
-  'browser_network_stop',
 ] as const;
 
 const CONFIGURED_TAVILY = { isConfigured: async () => true } as const;
@@ -380,7 +377,7 @@ describe('CodexAgentPlanner', () => {
     });
     expect(model.requests[0]).not.toHaveProperty('continuation');
     expect(model.requests[0]?.tools.map(({ name }) => name)).toEqual([
-      ...BROWSER_TOOL_NAMES,
+      ...FIRST_TURN_BROWSER_TOOL_NAMES,
       'tavily_search',
       'tavily_extract',
       'tavily_crawl',
@@ -416,9 +413,11 @@ describe('CodexAgentPlanner', () => {
     await collect(planner, new AbortController().signal, planInputFor(storage.messages));
 
     expect(tavilyAvailability.isConfigured).toHaveBeenCalledTimes(2);
-    expect(model.requests[0]?.tools.map(({ name }) => name)).toEqual([...BROWSER_TOOL_NAMES]);
+    expect(model.requests[0]?.tools.map(({ name }) => name)).toEqual([
+      ...FIRST_TURN_BROWSER_TOOL_NAMES,
+    ]);
     expect(model.requests[1]?.tools.map(({ name }) => name)).toEqual([
-      ...BROWSER_TOOL_NAMES,
+      ...FIRST_TURN_BROWSER_TOOL_NAMES,
       'tavily_search',
       'tavily_extract',
       'tavily_crawl',
@@ -524,7 +523,7 @@ describe('CodexAgentPlanner', () => {
     expect(skillCatalog.get).toHaveBeenCalledOnce();
     expect(model.requests[0]?.systemPrompt).toBe('Custom safe preference.');
     expect(model.requests[0]?.tools.map(({ name }) => name)).toEqual([
-      ...BROWSER_TOOL_NAMES,
+      ...FIRST_TURN_BROWSER_TOOL_NAMES,
       'tavily_search',
       'tavily_extract',
       'tavily_crawl',
@@ -582,7 +581,7 @@ describe('CodexAgentPlanner', () => {
       },
     ]);
     expect(model.requests[0]?.tools.map(({ name }) => name)).toEqual([
-      ...BROWSER_TOOL_NAMES,
+      ...FIRST_TURN_BROWSER_TOOL_NAMES,
       'tavily_search',
       'tavily_extract',
       'tavily_crawl',

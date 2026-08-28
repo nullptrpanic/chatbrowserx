@@ -235,6 +235,19 @@ describe('BROWSER_TOOL_DEFINITIONS', () => {
     expect(definition?.description).toContain('next browser_network_start');
   });
 
+  it('describes the deferred network-reader lifecycle on capture start', () => {
+    const definition = BROWSER_TOOL_DEFINITIONS.find(
+      ({ name }) => name === 'browser_network_start',
+    );
+
+    expect(definition?.description).toContain('next model turn');
+    expect(definition?.description).toContain('browser_network_list');
+    expect(definition?.description).toContain('browser_network_get');
+    expect(definition?.description).toContain('browser_network_stop');
+    expect(definition?.description).toContain('Do not report');
+    expect(definition?.description.length).toBeLessThanOrEqual(400);
+  });
+
   it('advertises bounded and explicit deep native interactive modes', () => {
     const inspect = BROWSER_TOOL_DEFINITIONS.find(
       (definition) => definition.name === 'browser_inspect',

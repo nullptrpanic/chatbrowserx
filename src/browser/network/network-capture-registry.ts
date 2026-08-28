@@ -24,7 +24,7 @@ const NETWORK_ENABLE_PARAMETERS = {
   maxPostDataSize: 0,
 } as const;
 const CAPTURE_STARTED_MESSAGE =
-  'Capture started. Earlier traffic is unavailable, and any prior frozen snapshot was replaced. Keep capture active until the requested user-visible workflow is complete; network_idle alone does not prove asynchronous business completion. For initial page traffic, reload after starting. After completion, wait for final network quiet, list every recent cursor page, and read needed bodies. If stop happens first, the frozen snapshot remains readable until the next start.';
+  'Capture started. Earlier traffic is unavailable, and any prior frozen snapshot was replaced. On the next model turn, re-read the available tools: browser_network_list, browser_network_get, and browser_network_stop are now available. Keep capture active until the requested user-visible workflow is complete; network_idle alone does not prove asynchronous business completion. For initial page traffic, reload after starting. After completion, wait for final network quiet, list every recent cursor page, and read needed bodies. If stop happens first, the frozen snapshot remains readable until the next start.';
 const SENSITIVE_NAME =
   /(?:^|[-_])(?:authorization|proxy[-_]?authorization|cookie|set[-_]?cookie|token|secret|password|passwd|api[-_]?key|credential|session)(?:$|[-_])/i;
 

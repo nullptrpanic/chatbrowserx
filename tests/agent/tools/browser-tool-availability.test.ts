@@ -473,12 +473,25 @@ describe('browserToolDefinitionsForCheckpoint', () => {
     );
   });
 
-  it('keeps network capture and reader controls visible from the first model turn', () => {
-    const available = names(checkpoint());
-
-    expect(available).toEqual(
+  it('exposes network readers only after a successful capture start', () => {
+    const initial = names(checkpoint());
+    expect(initial).toContain('browser_network_start');
+    expect(initial).not.toEqual(
       expect.arrayContaining([
-        'browser_network_start',
+        'browser_network_list',
+        'browser_network_get',
+        'browser_network_stop',
+      ]),
+    );
+
+    const failed = pair(
+      'failed-start',
+      'browser_network_start',
+      {},
+      { ok: false, code: 'NETWORK_CAPTURE_LOST' },
+    );
+    expect(names(checkpoint(failed))).not.toEqual(
+      expect.arrayContaining([
         'browser_network_list',
         'browser_network_get',
         'browser_network_stop',
