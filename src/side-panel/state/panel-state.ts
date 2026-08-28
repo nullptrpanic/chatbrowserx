@@ -60,15 +60,15 @@ const editableSettingsSchema = z
     sandboxToken: z.string().max(20_000).default(''),
   })
   .strict();
-const completedToolResultSchema = z
+const toolResultSchema = z
   .object({
     callId: idSchema,
     toolName: z.string().min(1).max(128),
     argumentsJson: z.string().max(20_000),
     output: z.string().max(100_000),
-    resultRef: z.string().max(512),
-    attachmentIds: z.array(idSchema).max(8).default([]),
-    detailIndex: z.number().int().positive().optional(),
+    resultId: z.string().max(512),
+    attachmentIds: z.array(idSchema).max(8),
+    detailIndex: z.number().int().positive(),
   })
   .strict();
 const taskSupplementSchema = z
@@ -77,23 +77,23 @@ const taskSupplementSchema = z
     text: z.string().max(20_000),
     attachmentIds: z.array(idSchema).max(8),
     createdAt: timestampSchema,
-    applicationState: z.enum(['applied', 'pending']).optional(),
-    detailIndex: z.number().int().positive().optional(),
+    applicationState: z.enum(['applied', 'pending']),
+    detailIndex: z.number().int().positive(),
   })
   .strict();
 const panelTaskSchema = z
   .object({
     id: idSchema,
-    detailLevel: z.enum(['summary', 'full']).default('summary'),
+    detailLevel: z.enum(['summary', 'full']),
     status: taskStatusSchema,
     goal: z.string().max(20_000),
     tabId: z.number().int().nonnegative().nullable(),
     createdAt: timestampSchema,
     updatedAt: timestampSchema,
     sequence: z.number().int().nonnegative(),
-    completedToolCallCount: z.number().int().nonnegative().optional(),
-    detailItemCount: z.number().int().nonnegative().optional(),
-    contextCleared: z.boolean().optional(),
+    completedToolCallCount: z.number().int().nonnegative(),
+    detailItemCount: z.number().int().nonnegative(),
+    contextCleared: z.boolean(),
     lastError: z
       .object({
         code: z.string().max(128),
@@ -111,18 +111,19 @@ const panelTaskSchema = z
             reason: z.string().max(500),
             at: timestampSchema,
             supplementIds: z.array(idSchema).max(100).optional(),
+            resultId: z.string().max(512).optional(),
           })
           .strict(),
       )
       .max(200),
-    completedToolResults: z.array(completedToolResultSchema).max(100),
+    toolResults: z.array(toolResultSchema).max(100),
     supplements: z.array(taskSupplementSchema).max(100).default([]),
   })
   .strict();
 
 export const panelSnapshotSchema: z.ZodType<PanelSnapshot> = z
   .object({
-    stateVersion: z.number().int().nonnegative().optional(),
+    stateVersion: z.number().int().nonnegative(),
     generatedAt: timestampSchema,
     tab: z
       .object({
@@ -141,7 +142,7 @@ export const panelSnapshotSchema: z.ZodType<PanelSnapshot> = z
         z
           .object({
             id: idSchema,
-            taskId: idSchema.nullable(),
+            taskId: idSchema,
             role: z.enum(['user', 'assistant', 'system']),
             status: z.enum(['complete', 'streaming', 'interrupted', 'error']),
             text: z.string().max(1_000_000),

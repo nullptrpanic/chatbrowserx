@@ -13,30 +13,22 @@ import type { ModelStreamEvent, ModelUsage } from '../providers/stream-events';
 import type { IdGenerator } from '../shared/ids';
 import type { Clock } from '../shared/time';
 import {
-  sandboxCatalogForCompletedTools,
+  sandboxCatalogForToolResults,
   sandboxCatalogInstructions,
   type SkillCatalogPort,
 } from '../sandbox/skill-catalog';
 import type { MessageRecord } from '../tasks/message-types';
-import type { HistoricalToolResultPort } from '../tasks/historical-tool-results';
+import { orderTaskMessagesByEvent } from '../tasks/task-message-order';
 import type { ModelOutputContinuationItem } from '../tasks/continuation-types';
 import { buildAgentContext } from './context/agent-context';
-import { estimateUnmeasuredContextTokens } from './context/context-headroom';
-import {
-  createNativeCompactionContinuation,
-  shouldUseNativeContextCompaction,
-} from './context/native-context-compaction';
 import type { AgentEvent, AgentModelTurn, AgentPlanInput, AgentPlanner } from './execution-types';
 import { StreamPersistenceBuffer } from './stream-persistence-buffer';
 import { browserToolContractForCheckpoint } from './tools/browser-tool-availability';
 import { parseBrowserToolCall } from './tools/browser-tool-schema';
 import { SANDBOX_TOOL_DEFINITIONS, parseSandboxToolCall } from './tools/sandbox-tool-schema';
-import {
-  parseTaskResultToolCall,
-  TASK_RESULT_TOOL_DEFINITIONS,
-} from './tools/task-result-tool-schema';
+import { HISTORY_TOOL_DEFINITIONS, parseHistoryToolCall } from './tools/history-tool-schema';
 import { TAVILY_TOOL_DEFINITIONS, parseTavilyToolCall } from './tools/tavily-tool-schema';
-import { loadWorkSessionView, type WorkSessionView } from './work-session-view';
+import { loadConversationView, type ConversationView } from './conversation-view';
 
 export interface TavilyAvailabilityPort {
   isConfigured(): Promise<boolean>;
@@ -46,13 +38,12 @@ export interface CodexAgentPlannerDependencies {
   readonly provider: ModelProvider;
   readonly tavilyAvailability: TavilyAvailabilityPort;
   readonly skillCatalog?: SkillCatalogPort;
-  readonly historicalResults?: Pick<HistoricalToolResultPort, 'hasEvidence'>;
   readonly settings: Pick<SettingsStore, 'get'>;
-  readonly conversations: Pick<
-    ConversationRepository,
-    'listMessages' | 'appendMessage' | 'updateMessage'
+  readonly conversations: Pick<ConversationRepository, 'listMessages' | 'updateMessage'>;
+  readonly tasks: Pick<
+    TaskRepository,
+    'listByConversation' | 'readTaskMessageEvents' | 'appendTaskMessage'
   >;
-  readonly tasks: Pick<TaskRepository, 'listByConversation'>;
   readonly attachments: Pick<AttachmentRepository, 'get'>;
   readonly ids: IdGenerator;
   readonly clock: Clock;
@@ -74,6 +65,7 @@ interface ModelTurnState {
 }
 
 const MAX_REASONING_SUMMARY_CHARS = 20_000;
+const readableHistoryStatuses = new Set(['completed', 'failed', 'cancelled']);
 
 /** Requires a complete and internally consistent normalized Provider response envelope. */
 function inspectEnvelopeEvent(event: ModelStreamEvent, state: ModelTurnState): void {
@@ -138,33 +130,31 @@ export class CodexAgentPlanner implements AgentPlanner {
 
   /** Runs one model turn that yields either one validated Tavily call or final text. */
   async *plan(input: AgentPlanInput, signal: AbortSignal): AsyncGenerator<AgentEvent> {
-    const browserContract = browserToolContractForCheckpoint(input.checkpoint);
+    const browserContract = browserToolContractForCheckpoint({
+      checkpoint: input.checkpoint,
+      toolResults: input.toolResults,
+    });
     const optionalToolsAvailable = browserContract.toolChoice === undefined;
-    const [settings, workSession, tavilyConfigured, skillCatalog, historicalEvidenceAvailable] =
-      await Promise.all([
-        this.#dependencies.settings.get(),
-        loadWorkSessionView(input.task.conversationId, this.#dependencies),
-        optionalToolsAvailable
-          ? this.#dependencies.tavilyAvailability.isConfigured().catch(() => false)
-          : Promise.resolve(false),
-        optionalToolsAvailable
-          ? (this.#dependencies.skillCatalog?.get(signal).catch(() => null) ??
-            Promise.resolve(null))
-          : Promise.resolve(null),
-        optionalToolsAvailable && this.#dependencies.historicalResults !== undefined
-          ? this.#dependencies.historicalResults
-              .hasEvidence({
-                conversationId: input.task.conversationId,
-                currentTaskId: input.task.id,
-              })
-              .catch(() => false)
-          : Promise.resolve(false),
-      ]);
+    const [settings, conversationView, tavilyConfigured, skillCatalog] = await Promise.all([
+      this.#dependencies.settings.get(),
+      loadConversationView(input.task.conversationId, this.#dependencies),
+      optionalToolsAvailable
+        ? this.#dependencies.tavilyAvailability.isConfigured().catch(() => false)
+        : Promise.resolve(false),
+      optionalToolsAvailable
+        ? (this.#dependencies.skillCatalog?.get(signal).catch(() => null) ?? Promise.resolve(null))
+        : Promise.resolve(null),
+    ]);
     const tools = [
       ...browserContract.tools,
       ...(tavilyConfigured ? TAVILY_TOOL_DEFINITIONS : []),
       ...(skillCatalog === null ? [] : SANDBOX_TOOL_DEFINITIONS),
-      ...(historicalEvidenceAvailable ? TASK_RESULT_TOOL_DEFINITIONS : []),
+      ...(optionalToolsAvailable &&
+      conversationView.tasks.some(
+        (task) => task.id !== input.task.id && readableHistoryStatuses.has(task.status),
+      )
+        ? HISTORY_TOOL_DEFINITIONS
+        : []),
     ];
     const availableToolNames = new Set(tools.map(({ name }) => name));
     if (availableToolNames.size !== tools.length) {
@@ -174,55 +164,24 @@ export class CodexAgentPlanner implements AgentPlanner {
       {
         task: input.task,
         checkpoint: input.checkpoint,
+        toolResults: input.toolResults,
         customSystemPrompt: settings.systemPrompt,
         historyMessageLimit: settings.historyMessageLimit,
       },
       {
-        workSession,
+        conversationView,
         attachments: this.#dependencies.attachments,
       },
     );
     const catalogInstructions =
       skillCatalog === null
         ? ''
-        : sandboxCatalogInstructions(
-            sandboxCatalogForCompletedTools(skillCatalog, input.checkpoint.completedToolResults),
-          );
+        : sandboxCatalogInstructions(sandboxCatalogForToolResults(skillCatalog, input.toolResults));
     const systemPrompt =
       catalogInstructions.length === 0
         ? context.systemPrompt
         : `${context.systemPrompt}\n\n${catalogInstructions}`;
-    if (
-      this.#dependencies.provider.compact !== undefined &&
-      browserContract.scrollContinuation === undefined &&
-      shouldUseNativeContextCompaction(
-        input.checkpoint,
-        estimateUnmeasuredContextTokens(
-          context.activeInput,
-          input.checkpoint.completedToolResults.at(-1)?.callId,
-        ),
-      )
-    ) {
-      const compacted = await this.#dependencies.provider.compact(
-        {
-          model: CODEX_MODEL,
-          reasoningEffort: settings.reasoningEffort,
-          systemPrompt,
-          input: context.activeInput,
-          tools,
-        },
-        signal,
-      );
-      yield {
-        type: 'context.compacted',
-        continuationItems: createNativeCompactionContinuation(
-          input.checkpoint.continuationItems,
-          compacted,
-        ),
-      };
-      return;
-    }
-    const reusableMessage = await this.#prepareReusableMessage(input, workSession);
+    const reusableMessage = await this.#prepareReusableMessage(input, conversationView);
     const state: ModelTurnState = {
       responseId: null,
       completed: false,
@@ -303,7 +262,11 @@ export class CodexAgentPlanner implements AgentPlanner {
                       updatedAt: Math.max(reusableMessage.updatedAt, now),
                     };
               if (reusableMessage === null) {
-                await this.#dependencies.conversations.appendMessage(message);
+                await this.#dependencies.tasks.appendTaskMessage({
+                  message,
+                  eventId: this.#dependencies.ids.create('event'),
+                  at: now,
+                });
               } else {
                 await this.#dependencies.conversations.updateMessage(message);
               }
@@ -382,14 +345,14 @@ export class CodexAgentPlanner implements AgentPlanner {
           yield { type: 'sandbox.call', call, modelTurn, modelOutputItems };
           return;
         }
-        if (state.tool.name.startsWith('task_result_')) {
-          let call: ReturnType<typeof parseTaskResultToolCall>;
+        if (state.tool.name === 'history_read' || state.tool.name === 'result_read') {
+          let call: ReturnType<typeof parseHistoryToolCall>;
           try {
-            call = parseTaskResultToolCall(source);
+            call = parseHistoryToolCall(source);
           } catch (error) {
             throwWithInvalidResponseStage(error, 'tool_call');
           }
-          yield { type: 'task-result.call', call, modelTurn, modelOutputItems };
+          yield { type: 'history.call', call, modelTurn, modelOutputItems };
           return;
         }
         let call: ReturnType<typeof parseTavilyToolCall>;
@@ -431,9 +394,9 @@ export class CodexAgentPlanner implements AgentPlanner {
   /** Normalizes stale or uncommitted replies and returns the latest one for in-place regeneration. */
   async #prepareReusableMessage(
     input: AgentPlanInput,
-    workSession: WorkSessionView,
+    conversationView: ConversationView,
   ): Promise<MessageRecord | null> {
-    const { messages } = workSession;
+    const { messages } = conversationView;
     const now = this.#dependencies.clock.now();
     const checkpointMessageIds = new Set(
       input.checkpoint.continuationItems.flatMap((item) => {
@@ -444,12 +407,12 @@ export class CodexAgentPlanner implements AgentPlanner {
         );
       }),
     );
-    const taskReplies = messages.filter(
-      (message) =>
-        message.kind === 'conversation' &&
-        message.taskId === input.task.id &&
-        message.role === 'assistant',
-    );
+    const taskReplies = orderTaskMessagesByEvent(
+      messages,
+      input.events,
+      input.task.id,
+      'conversation',
+    ).filter((message) => message.kind === 'conversation' && message.role === 'assistant');
     const reusableReplies = taskReplies.filter(
       (message) =>
         message.status === 'streaming' ||

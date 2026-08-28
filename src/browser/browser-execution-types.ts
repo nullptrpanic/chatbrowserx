@@ -15,7 +15,7 @@ export interface BrowserExecutionContext {
   readonly currentTabId: number | null;
   /** One ephemeral runner owner whose debugger sessions are released when the run stops. */
   readonly sessionOwnerId?: string;
-  /** Task-owned assets that this WorkSession may deliver through browser actions. */
+  /** Task-owned assets that this task may deliver through browser actions. */
   readonly availableAssetIds?: readonly string[];
 }
 

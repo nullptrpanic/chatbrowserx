@@ -1,14 +1,14 @@
 import { ChevronDown, ChevronUp, Terminal } from 'lucide-react';
 import { useState } from 'react';
 import type { Translator } from '../../shared/i18n/i18n';
-import type { PanelCompletedToolResult } from '../../shared/protocol/panel-types';
+import type { PanelToolResult } from '../../shared/protocol/panel-types';
 import { toolDisplayName } from './browser-tool-label';
 import { ToolCopyButton } from './ToolCopyButton';
 
 const terminalToolNames = new Set(['bash', 'shell', 'terminal', 'exec_command', 'sandbox_exec']);
 
 export interface TerminalToolResultProps {
-  readonly result: PanelCompletedToolResult;
+  readonly result: PanelToolResult;
   readonly t: Translator;
 }
 
@@ -49,7 +49,7 @@ function readTerminalInvocation(argumentsJson: string): TerminalInvocation {
 }
 
 /** Parses only the bounded Sandbox result fields and otherwise preserves the raw output. */
-function readTerminalOutput(result: PanelCompletedToolResult): TerminalOutput {
+function readTerminalOutput(result: PanelToolResult): TerminalOutput {
   if (result.toolName.trim().toLowerCase() !== 'sandbox_exec') {
     return { stdout: result.output, stderr: '', code: null, truncated: false };
   }

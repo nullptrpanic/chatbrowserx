@@ -1,4 +1,12 @@
-import type { ConversationId, TaskId, WorkSessionId } from '../shared/ids';
+import type {
+  CheckpointId,
+  ConversationId,
+  MessageId,
+  TaskEventId,
+  TaskId,
+  TaskRunId,
+  ToolResultId,
+} from '../shared/ids';
 import type { TaskError } from './task-errors';
 
 export type TaskStatus =
@@ -11,58 +19,77 @@ export interface TaskLease {
   readonly generation: number;
 }
 
-export interface TaskRun {
+export interface Task {
   readonly id: TaskId;
-  readonly workSessionId: WorkSessionId;
   readonly conversationId: ConversationId;
+  readonly ordinal: number;
   readonly tabId: number | null;
   readonly goal: string;
   readonly status: TaskStatus;
+  readonly latestRunId: TaskRunId | null;
+  readonly lastEventSequence: number;
   readonly createdAt: number;
   readonly updatedAt: number;
-  readonly checkpointId: string | null;
-  readonly lease: TaskLease | null;
-  readonly lastError: TaskError | null;
 }
 
-export type TaskEventType =
-  | 'planning.started'
-  | 'planning.retrying'
-  | 'reasoning.summary-recorded'
-  | 'tool.call-recorded'
-  | 'tool.execution-started'
-  | 'tool.result-recorded'
-  | 'task.supplements-applied'
-  | 'task.context-compacted'
-  | 'task.context-cleared'
-  | 'task.auth-required'
-  | 'task.paused'
-  | 'task.resumed'
-  | 'task.retried'
-  | 'task.completed'
-  | 'task.failed'
-  | 'task.cancelled';
+export type TaskRunStatus = TaskStatus;
 
-export interface TaskTransitionEvent {
-  readonly type: TaskEventType;
-  readonly at: number;
-  readonly reason: string;
-  readonly error?: TaskError;
-}
-
-export interface TaskEvent {
-  readonly id: string;
+export interface TaskRun {
+  readonly id: TaskRunId;
   readonly taskId: TaskId;
-  readonly sequence: number;
-  readonly type: TaskEventType;
-  readonly reason: string;
-  readonly at: number;
+  readonly attempt: number;
+  readonly status: TaskRunStatus;
+  readonly checkpointId: CheckpointId | null;
+  readonly lease: TaskLease | null;
   readonly error: TaskError | null;
-  readonly reasoningSummary?: string | undefined;
-  readonly modelTurn?: TaskModelTurnMetrics | undefined;
-  /** Exact supplements consumed at this Agent Loop boundary. */
-  readonly supplementIds?: readonly string[] | undefined;
+  readonly startedAt: number;
+  readonly endedAt: number | null;
 }
+
+interface TaskEventBase {
+  readonly id: TaskEventId;
+  readonly taskId: TaskId;
+  readonly runId: TaskRunId;
+  readonly sequence: number;
+  readonly at: number;
+}
+
+export type TaskEvent =
+  | (TaskEventBase & { readonly type: 'message.recorded'; readonly messageId: MessageId })
+  | (TaskEventBase & {
+      readonly type: 'supplement.queued' | 'supplement.applied';
+      readonly messageId: MessageId;
+    })
+  | (TaskEventBase & { readonly type: 'reasoning.summary'; readonly summary: string })
+  | (TaskEventBase & { readonly type: 'model.turn'; readonly metrics: TaskModelTurnMetrics })
+  | (TaskEventBase & {
+      readonly type: 'tool.call';
+      readonly callId: string;
+      readonly name: string;
+      readonly argumentsJson: string;
+    })
+  | (TaskEventBase & {
+      readonly type: 'tool.result';
+      readonly callId: string;
+      readonly resultId: ToolResultId;
+    })
+  | (TaskEventBase & {
+      readonly type: 'tool.dispatched';
+      readonly callId: string;
+    })
+  | (TaskEventBase & {
+      readonly type: 'status.changed';
+      readonly taskStatus: TaskStatus;
+      readonly runStatus: TaskRunStatus;
+      readonly reason: string;
+      readonly error: TaskError | null;
+    })
+  | (TaskEventBase & {
+      readonly type: 'context.compacted';
+      readonly releasedTextCharacters: number;
+      readonly releasedImages: number;
+    })
+  | (TaskEventBase & { readonly type: 'context.cleared' });
 
 /** Numeric-only model telemetry attached to its durable task boundary. */
 export interface TaskModelTurnMetrics {

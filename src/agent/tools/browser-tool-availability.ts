@@ -1,6 +1,7 @@
 import type { Checkpoint } from '../../tasks/checkpoint-types';
 import { materializeContinuationItems } from '../../tasks/continuation-materialization';
 import type { MaterializedContinuationItem } from '../../tasks/continuation-types';
+import type { MaterializedToolResult } from '../../tasks/tool-result-types';
 import type { ModelToolChoice, ModelToolDefinition } from '../../tools/contracts/model-tool';
 import {
   BROWSER_TOOL_DEFINITIONS,
@@ -60,6 +61,7 @@ interface CapabilityState {
   semanticSnapshotCurrent: boolean;
   visualSnapshotCurrent: boolean;
   networkReadable: boolean;
+  inspectSatisfiedByLatestScroll: boolean;
   selectableRefs: Set<string>;
   scrollableRefs: Set<string>;
   readonly usedTools: Set<BrowserToolName>;
@@ -98,12 +100,15 @@ export interface BrowserToolContract {
 const MAX_EXPOSED_ASSET_IDS = 8;
 const MAX_BOUND_SCROLL_REFS = 32;
 
-function availableAssetIds(
-  completedToolResults: Pick<Checkpoint, 'completedToolResults'>['completedToolResults'],
-): readonly string[] {
+export interface BrowserToolState {
+  readonly checkpoint: Pick<Checkpoint, 'continuationItems'>;
+  readonly toolResults: readonly MaterializedToolResult[];
+}
+
+function availableAssetIds(toolResults: readonly MaterializedToolResult[]): readonly string[] {
   const ids = [
     ...new Set(
-      completedToolResults.flatMap((result) =>
+      toolResults.flatMap((result) =>
         result.toolName.startsWith('browser_') ? [...(result.attachmentIds ?? [])] : [],
       ),
     ),
@@ -167,10 +172,14 @@ function jsonRecord(value: string): Readonly<Record<string, unknown>> | null {
 }
 
 /** Materializes one checkpoint and parses each stored tool result at most once per model turn. */
-function browserToolHistory(
-  checkpoint: Pick<Checkpoint, 'continuationItems' | 'completedToolResults'>,
-): BrowserToolHistory {
-  return { items: materializeContinuationItems(checkpoint), outputRecords: new Map() };
+function browserToolHistory(state: BrowserToolState): BrowserToolHistory {
+  return {
+    items: materializeContinuationItems({
+      continuationItems: state.checkpoint.continuationItems,
+      toolResults: state.toolResults,
+    }),
+    outputRecords: new Map(),
+  };
 }
 
 function outputRecord(
@@ -238,9 +247,9 @@ const SCROLL_INVALIDATING_TOOLS = new Set([
 
 /** Reconstructs one unfinished virtualized scroll without adding mutable checkpoint state. */
 export function browserScrollContinuationForCheckpoint(
-  checkpoint: Pick<Checkpoint, 'continuationItems' | 'completedToolResults'>,
+  state: BrowserToolState,
 ): BrowserScrollContinuation | null {
-  return browserScrollContinuation(browserToolHistory(checkpoint));
+  return browserScrollContinuation(browserToolHistory(state));
 }
 
 function browserScrollContinuation(history: BrowserToolHistory): BrowserScrollContinuation | null {
@@ -535,6 +544,7 @@ function applySuccessfulBrowserResult(
     typeof result.data === 'object' && result.data !== null && !Array.isArray(result.data)
       ? (result.data as Readonly<Record<string, unknown>>)
       : null;
+  state.inspectSatisfiedByLatestScroll = false;
   if (name === 'browser_inspect') {
     state.visualSnapshotCurrent = data?.mode === 'screenshot';
     state.semanticSnapshotCurrent = isSemanticInspectionMode(data?.mode);
@@ -563,7 +573,15 @@ function applySuccessfulBrowserResult(
     state.scrollableRefs.clear();
   }
   if (name === 'browser_network_start') state.networkReadable = true;
-  for (const observation of embeddedInteractiveObservations(data)) {
+  const embeddedObservations = embeddedInteractiveObservations(data);
+  state.inspectSatisfiedByLatestScroll =
+    name === 'browser_scroll' &&
+    data?.mode !== 'traverse' &&
+    data?.verificationUnavailable !== true &&
+    data?.continuationFailure === undefined &&
+    embeddedObservations.length > 0 &&
+    embeddedObservations.every((observation) => observation.truncated !== true);
+  for (const observation of embeddedObservations) {
     state.semanticSnapshotCurrent = true;
     applySemanticRefState(observation, state.selectableRefs, selectableRefFromEntry);
     applySemanticRefState(observation, state.scrollableRefs, scrollableRefFromEntry);
@@ -587,15 +605,16 @@ function successfulCommit(
   );
 }
 
-/** Selects only tools justified by durable executor state, while keeping replay compatibility. */
+/** Selects only tools justified by durable state, including calls retained for current replay. */
 function availableBrowserToolDefinitions(
-  checkpoint: Pick<Checkpoint, 'continuationItems' | 'completedToolResults'>,
+  source: BrowserToolState,
   history: BrowserToolHistory,
 ): readonly ModelToolDefinition[] {
   const state: CapabilityState = {
     semanticSnapshotCurrent: false,
     visualSnapshotCurrent: false,
     networkReadable: false,
+    inspectSatisfiedByLatestScroll: false,
     selectableRefs: new Set(),
     scrollableRefs: new Set(),
     usedTools: new Set(),
@@ -609,6 +628,7 @@ function availableBrowserToolDefinitions(
       state.semanticSnapshotCurrent = false;
       state.visualSnapshotCurrent = false;
       state.networkReadable = false;
+      state.inspectSatisfiedByLatestScroll = false;
       state.selectableRefs.clear();
       state.scrollableRefs.clear();
       state.usedTools.clear();
@@ -627,6 +647,7 @@ function availableBrowserToolDefinitions(
       state.semanticSnapshotCurrent = false;
       state.visualSnapshotCurrent = false;
       state.networkReadable = false;
+      state.inspectSatisfiedByLatestScroll = false;
       state.selectableRefs.clear();
       state.scrollableRefs.clear();
       state.usedTools.clear();
@@ -640,6 +661,7 @@ function availableBrowserToolDefinitions(
       applySuccessfulBrowserResult(name, output, state);
       continue;
     }
+    state.inspectSatisfiedByLatestScroll = false;
     const failed = outputRecord(history, item);
     for (const observation of embeddedInteractiveObservations(
       failed === null ? null : childRecord(failed, 'data'),
@@ -663,6 +685,9 @@ function availableBrowserToolDefinitions(
     ...INTERACTIVE_TOOL_NAMES,
     ...state.usedTools,
   ]);
+  // A successful scroll already returns the latest interactive state. Suppress one immediately
+  // redundant inspection, while preserving it whenever evidence was unavailable or truncated.
+  if (state.inspectSatisfiedByLatestScroll) enabled.delete('browser_inspect');
   if (state.visualSnapshotCurrent) {
     enabled.add('browser_click_point');
     enabled.add('browser_drag_point');
@@ -674,7 +699,7 @@ function availableBrowserToolDefinitions(
   }
   if (state.selectableRefs.size >= 2) enabled.add('browser_set_checked_many');
 
-  const assetIds = availableAssetIds(checkpoint.completedToolResults);
+  const assetIds = availableAssetIds(source.toolResults);
   if (assetIds.length > 0) enabled.add('browser_paste_image');
   return BROWSER_TOOL_DEFINITIONS.filter(({ name }) => enabled.has(name as BrowserToolName)).map(
     (definition) =>
@@ -764,10 +789,8 @@ function constrainedContinuationDefinition(
 }
 
 /** Preserves unconsumed virtualized distance and forces only genuinely missing evidence. */
-export function browserToolContractForCheckpoint(
-  checkpoint: Pick<Checkpoint, 'continuationItems' | 'completedToolResults'>,
-): BrowserToolContract {
-  const history = browserToolHistory(checkpoint);
+export function browserToolContractForCheckpoint(state: BrowserToolState): BrowserToolContract {
+  const history = browserToolHistory(state);
   const scrollContinuation = browserScrollContinuation(history);
   if (scrollContinuation !== null) {
     const name = scrollContinuation.next === 'inspect' ? 'browser_inspect' : 'browser_scroll';
@@ -777,11 +800,11 @@ export function browserToolContractForCheckpoint(
       scrollContinuation,
     };
   }
-  return { tools: availableBrowserToolDefinitions(checkpoint, history) };
+  return { tools: availableBrowserToolDefinitions(state, history) };
 }
 
 export function browserToolDefinitionsForCheckpoint(
-  checkpoint: Pick<Checkpoint, 'continuationItems' | 'completedToolResults'>,
+  state: BrowserToolState,
 ): readonly ModelToolDefinition[] {
-  return browserToolContractForCheckpoint(checkpoint).tools;
+  return browserToolContractForCheckpoint(state).tools;
 }

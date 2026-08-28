@@ -50,8 +50,8 @@ export function ConversationView({
   const tasksById = new Map(tasks.map((item) => [item.id, item]));
   const taskHostMessageIds = new Map<string, string>();
   for (const message of messages) {
-    const messageTask = message.taskId === null ? null : (tasksById.get(message.taskId) ?? null);
-    if (canHostTaskDetails(message, messageTask) && message.taskId !== null) {
+    const messageTask = tasksById.get(message.taskId) ?? null;
+    if (canHostTaskDetails(message, messageTask)) {
       taskHostMessageIds.set(message.taskId, message.id);
     }
   }
@@ -96,13 +96,12 @@ export function ConversationView({
           {messages.map((message) => {
             if (
               message.role === 'assistant' &&
-              message.taskId !== null &&
               taskHostMessageIds.get(message.taskId) !== message.id
             ) {
               return null;
             }
             const messageTask =
-              message.taskId !== null && taskHostMessageIds.get(message.taskId) === message.id
+              taskHostMessageIds.get(message.taskId) === message.id
                 ? (tasksById.get(message.taskId) ?? null)
                 : null;
             return (
@@ -180,8 +179,8 @@ function conversationContentVersion(
         item.id,
         item.sequence,
         item.status,
-        item.detailLevel ?? 'summary',
-        item.completedToolResults.length,
+        item.detailLevel,
+        item.toolResults.length,
         item.supplements.length,
       ].join(':'),
     )

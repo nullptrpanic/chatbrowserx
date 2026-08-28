@@ -1704,7 +1704,7 @@ describe('CodexProvider', () => {
     expect(fetchMock).toHaveBeenCalledOnce();
   });
 
-  it('rejects missing credentials and an incomplete successful stream', async () => {
+  it('rejects missing credentials and retries a successful HTTP stream without a terminal event', async () => {
     const noTokenFetch = vi.fn<typeof fetch>();
     await expect(
       collect(
@@ -1734,7 +1734,7 @@ describe('CodexProvider', () => {
           new AbortController().signal,
         ),
       ),
-    ).rejects.toMatchObject({ code: 'INVALID_RESPONSE' });
+    ).rejects.toMatchObject({ code: 'TRANSIENT', retryable: true });
   });
 
   it('normalizes explicit upstream error events without echoing their message', async () => {

@@ -1,45 +1,99 @@
 import { describe, expect, it, vi } from 'vitest';
-import { buildAgentContext } from '../../../src/agent/context/agent-context';
+import {
+  buildAgentContext as buildAgentContextCore,
+  type AgentContextDependencies,
+  type AgentContextInput,
+} from '../../../src/agent/context/agent-context';
 import { IMAGE_POLICY } from '../../../src/attachments/attachment-policy';
 import type { AttachmentRepository } from '../../../src/persistence/attachment-repository';
 import type { ConversationRepository } from '../../../src/persistence/conversation-repository';
 import type { TaskRepository } from '../../../src/persistence/task-repository';
 import type { Checkpoint } from '../../../src/tasks/checkpoint-types';
 import type { MessageRecord } from '../../../src/tasks/message-types';
-import type { TaskRun } from '../../../src/tasks/task-types';
+import type { Task, TaskEvent } from '../../../src/tasks/task-types';
+import type { MaterializedToolResult } from '../../../src/tasks/tool-result-types';
 
-const TASK: TaskRun = {
+const TASK: Task = {
   id: 'task_1',
-  workSessionId: 'workSession_active',
   conversationId: 'conversation_1',
+  ordinal: 1,
   tabId: 7,
   goal: 'Find the safest checkout option',
   status: 'planning',
+  latestRunId: 'run_1',
+  lastEventSequence: 1,
   createdAt: 100,
   updatedAt: 200,
-  checkpointId: 'checkpoint_1',
-  lease: null,
-  lastError: null,
 };
 
 const CHECKPOINT: Checkpoint = {
   id: 'checkpoint_1',
   taskId: 'task_1',
-  sequence: 4,
-  taskStatus: 'planning',
-  completedToolResults: [
-    {
-      callId: 'call_done',
-      toolName: 'lookup_record',
-      argumentsJson: '{"type":"click"}',
-      output: '{"verified":true,"url":"https://shop.test/checkout"}',
-      resultRef: 'evidence_1',
-    },
-  ],
+  runId: 'run_1',
   continuationItems: [],
   pendingToolCall: null,
+  browserToolCallsInAttempt: 0,
+  browserTargetTabId: 7,
   createdAt: 200,
 };
+
+const COMPLETED_TOOL_RESULTS: readonly MaterializedToolResult[] = [
+  {
+    id: 'evidence_1',
+    taskId: TASK.id,
+    runId: 'run_1',
+    callId: 'call_done',
+    toolName: 'lookup_record',
+    argumentsJson: '{"type":"click"}',
+    output: '{"verified":true,"url":"https://shop.test/checkout"}',
+    attachmentIds: [],
+    createdAt: 150,
+  },
+];
+
+type ContextResultFixture = Pick<
+  MaterializedToolResult,
+  'callId' | 'toolName' | 'argumentsJson' | 'output'
+> & { readonly resultId: string } & Partial<
+    Pick<MaterializedToolResult, 'id' | 'modelOutput' | 'attachmentIds' | 'createdAt'>
+  >;
+
+type ContextInputFixture = Omit<AgentContextInput, 'toolResults'> & {
+  readonly toolResults?: readonly ContextResultFixture[];
+};
+
+/** Normalizes concise result fixtures into the canonical result store view. */
+function canonicalResults(results: readonly ContextResultFixture[]): MaterializedToolResult[] {
+  return results.map((result) => ({
+    id: result.id ?? result.resultId,
+    taskId: TASK.id,
+    runId: 'run_1',
+    callId: result.callId,
+    toolName: result.toolName,
+    argumentsJson: result.argumentsJson,
+    output: result.output,
+    ...(result.modelOutput === undefined ? {} : { modelOutput: result.modelOutput }),
+    attachmentIds: result.attachmentIds ?? [],
+    createdAt: result.createdAt ?? 150,
+  }));
+}
+
+/** Keeps test fixtures concise while exercising the production context boundary. */
+function buildAgentContext(input: ContextInputFixture, dependencies: AgentContextDependencies) {
+  return buildAgentContextCore(
+    {
+      task: input.task,
+      checkpoint: input.checkpoint,
+      toolResults:
+        input.toolResults === undefined
+          ? COMPLETED_TOOL_RESULTS
+          : canonicalResults(input.toolResults),
+      customSystemPrompt: input.customSystemPrompt,
+      historyMessageLimit: input.historyMessageLimit,
+    },
+    dependencies,
+  );
+}
 
 /** Creates a complete message fixture. */
 function message(
@@ -49,7 +103,7 @@ function message(
     id: input.id,
     kind: input.kind ?? 'conversation',
     conversationId: 'conversation_1',
-    taskId: input.taskId ?? null,
+    taskId: input.taskId ?? TASK.id,
     role: input.role,
     status: input.status ?? 'complete',
     text: input.text,
@@ -66,42 +120,72 @@ function conversationRepository(messages: MessageRecord[]): ConversationReposito
     get: vi.fn(async () => undefined),
     listAll: vi.fn(async () => []),
     listMessages: vi.fn(async () => messages),
-    appendMessage: vi.fn(async () => undefined),
-    appendSupplement: vi.fn(async () => undefined),
+    listTaskMessages: vi.fn(async (taskId) =>
+      messages.filter((message) => message.taskId === taskId),
+    ),
     updateMessage: vi.fn(async () => undefined),
     clearConversation: vi.fn(async () => undefined),
   };
 }
 
-/** Infers successful historical sessions while keeping the current task active. */
+/** Builds the canonical message-event order used by completed-task model history. */
+function taskEvents(messages: readonly MessageRecord[], taskIds: readonly string[]): TaskEvent[] {
+  const selectedTaskIds = new Set(taskIds);
+  const nextSequenceByTask = new Map<string, number>();
+  return messages.flatMap((item): TaskEvent[] => {
+    if (
+      item.kind !== 'conversation' ||
+      item.status !== 'complete' ||
+      !selectedTaskIds.has(item.taskId)
+    ) {
+      return [];
+    }
+    const sequence = (nextSequenceByTask.get(item.taskId) ?? 0) + 1;
+    nextSequenceByTask.set(item.taskId, sequence);
+    return [
+      {
+        id: `event_${item.id}`,
+        taskId: item.taskId,
+        runId: `run_${item.taskId}`,
+        sequence,
+        type: 'message.recorded',
+        messageId: item.id,
+        at: item.createdAt,
+      },
+    ];
+  });
+}
+
+/** Infers successful historical tasks while keeping the current task active. */
 function taskRepository(
   messages: readonly MessageRecord[],
-  overrides: readonly TaskRun[] = [],
-): Pick<TaskRepository, 'listByConversation'> {
+  overrides: readonly Task[] = [],
+): Pick<TaskRepository, 'listByConversation' | 'readTaskMessageEvents'> {
   const overriddenIds = new Set(overrides.map(({ id }) => id));
-  const inferred = [
-    ...new Set(messages.flatMap((item) => (item.taskId === null ? [] : [item.taskId]))),
-  ]
+  const inferred = [...new Set(messages.map((item) => item.taskId))]
     .filter((taskId) => taskId !== TASK.id && !overriddenIds.has(taskId))
-    .map((taskId, index): TaskRun => ({
+    .map((taskId, index): Task => ({
       ...TASK,
       id: taskId,
-      workSessionId: `workSession_${taskId}`,
+      ordinal: index + 1,
       status: 'completed',
       createdAt: 10 + index,
       updatedAt: 20 + index,
-      checkpointId: `checkpoint_${taskId}`,
+      latestRunId: `run_${taskId}`,
     }));
   return {
     listByConversation: vi.fn(async () => [...inferred, ...overrides, TASK]),
+    readTaskMessageEvents: vi.fn(async (taskIds) => taskEvents(messages, taskIds)),
   };
 }
 
-/** Builds all ports required by WorkSession-aware context materialization. */
+/** Builds all ports required by active-task context materialization. */
 function contextDependencies(
   messages: MessageRecord[],
   attachments: Pick<AttachmentRepository, 'get'>,
-  tasks: Pick<TaskRepository, 'listByConversation'> = taskRepository(messages),
+  tasks: Pick<TaskRepository, 'listByConversation' | 'readTaskMessageEvents'> = taskRepository(
+    messages,
+  ),
 ) {
   return {
     conversations: conversationRepository(messages),
@@ -111,7 +195,7 @@ function contextDependencies(
 }
 
 describe('buildAgentContext', () => {
-  it('does not carry a completed WorkSession supplement into later history', async () => {
+  it('does not carry a completed task supplement into later history', async () => {
     const messages = [
       message({
         id: 'history_user',
@@ -148,9 +232,9 @@ describe('buildAgentContext', () => {
         task: TASK,
         checkpoint: {
           ...CHECKPOINT,
-          completedToolResults: [],
           continuationItems: [{ type: 'message_ref', messageId: 'current_user' }],
         },
+        toolResults: [],
         customSystemPrompt: '',
         historyMessageLimit: 50,
       },
@@ -164,6 +248,90 @@ describe('buildAgentContext', () => {
     );
   });
 
+  it('orders completed history by TaskEvent sequence instead of message timestamps', async () => {
+    const historyTask: Task = {
+      ...TASK,
+      id: 'task_history',
+      ordinal: 1,
+      status: 'completed',
+      latestRunId: 'run_history',
+    };
+    const historicalAssistant = message({
+      id: 'history_assistant',
+      taskId: historyTask.id,
+      role: 'assistant',
+      text: 'Historical answer',
+      createdAt: 10,
+    });
+    const historicalUser = message({
+      id: 'history_user',
+      taskId: historyTask.id,
+      role: 'user',
+      text: 'Historical request',
+      createdAt: 20,
+    });
+    const currentUser = message({
+      id: 'current_user',
+      taskId: TASK.id,
+      role: 'user',
+      text: 'Current request',
+      createdAt: 30,
+    });
+    const messages = [historicalAssistant, historicalUser, currentUser];
+    const context = await buildAgentContext(
+      {
+        task: TASK,
+        checkpoint: {
+          ...CHECKPOINT,
+          continuationItems: [{ type: 'message_ref', messageId: currentUser.id }],
+        },
+        toolResults: [],
+        customSystemPrompt: '',
+        historyMessageLimit: 50,
+      },
+      contextDependencies(
+        messages,
+        { get: vi.fn(async () => undefined) },
+        {
+          listByConversation: vi.fn(async () => [historyTask, TASK]),
+          readTaskMessageEvents: vi.fn(async (): Promise<TaskEvent[]> => [
+            {
+              id: 'event_history_user',
+              taskId: historyTask.id,
+              runId: 'run_history',
+              sequence: 1,
+              type: 'message.recorded',
+              messageId: historicalUser.id,
+              at: 20,
+            },
+            {
+              id: 'event_history_assistant',
+              taskId: historyTask.id,
+              runId: 'run_history',
+              sequence: 2,
+              type: 'message.recorded',
+              messageId: historicalAssistant.id,
+              at: 10,
+            },
+          ]),
+        },
+      ),
+    );
+
+    expect(context.input.slice(0, 2)).toEqual([
+      {
+        type: 'message',
+        role: 'user',
+        content: [{ type: 'input_text', text: 'Historical request' }],
+      },
+      {
+        type: 'message',
+        role: 'assistant',
+        content: [{ type: 'output_text', text: 'Historical answer' }],
+      },
+    ]);
+  });
+
   it('passes the configured system prompt without injecting browser instructions', async () => {
     const context = await buildAgentContext(
       {
@@ -171,8 +339,9 @@ describe('buildAgentContext', () => {
         checkpoint: {
           ...CHECKPOINT,
           browserTargetTabId: 23,
-          completedToolResults: [],
+          continuationItems: [{ type: 'message_ref', messageId: 'current' }],
         },
+        toolResults: [],
         customSystemPrompt: '你是一个浏览器助手',
         historyMessageLimit: 50,
       },
@@ -209,9 +378,9 @@ describe('buildAgentContext', () => {
         task: TASK,
         checkpoint: {
           ...CHECKPOINT,
-          completedToolResults: [],
           continuationItems: [{ type: 'message_ref', messageId: active.id }],
         },
+        toolResults: [],
         customSystemPrompt: '你是一个浏览器助手',
         historyMessageLimit: 50,
       },
@@ -265,16 +434,6 @@ describe('buildAgentContext', () => {
         task: TASK,
         checkpoint: {
           ...CHECKPOINT,
-          completedToolResults: [
-            {
-              callId: 'call_screenshot',
-              toolName: 'browser_inspect',
-              argumentsJson: '{"tabId":7,"mode":"screenshot"}',
-              output: '{"ok":true,"data":{"mode":"screenshot"}}',
-              resultRef: 'result_screenshot',
-              attachmentIds: ['attachment_screenshot'],
-            },
-          ],
           continuationItems: [
             { type: 'message_ref', messageId: 'current' },
             {
@@ -284,14 +443,23 @@ describe('buildAgentContext', () => {
               argumentsJson: '{"tabId":7,"mode":"screenshot"}',
             },
             {
-              type: 'function_call_output',
+              type: 'function_call_output_ref',
               callId: 'call_screenshot',
-              output: '{"ok":true,"data":{"mode":"screenshot"}}',
-              resultRef: 'result_screenshot',
+              resultId: 'result_screenshot',
               attachmentIds: ['attachment_screenshot'],
             },
           ],
         },
+        toolResults: [
+          {
+            callId: 'call_screenshot',
+            toolName: 'browser_inspect',
+            argumentsJson: '{"tabId":7,"mode":"screenshot"}',
+            output: '{"ok":true,"data":{"mode":"screenshot"}}',
+            resultId: 'result_screenshot',
+            attachmentIds: ['attachment_screenshot'],
+          },
+        ],
         customSystemPrompt: '',
         historyMessageLimit: 50,
       },
@@ -352,24 +520,6 @@ describe('buildAgentContext', () => {
         task: TASK,
         checkpoint: {
           ...CHECKPOINT,
-          completedToolResults: [
-            {
-              callId: 'call_old_inspect',
-              toolName: 'browser_inspect',
-              argumentsJson: '{"mode":"screenshot"}',
-              output: largeInspectPayload,
-              resultRef: 'result_old_inspect',
-              attachmentIds: ['old_screenshot'],
-            },
-            {
-              callId: 'call_commit',
-              toolName: 'commit_context',
-              argumentsJson: commitArguments,
-              output: commitOutput,
-              resultRef: 'result_commit',
-              attachmentIds: [],
-            },
-          ],
           continuationItems: [
             { type: 'message_ref', messageId: 'current' },
             {
@@ -379,14 +529,31 @@ describe('buildAgentContext', () => {
               argumentsJson: commitArguments,
             },
             {
-              type: 'function_call_output',
+              type: 'function_call_output_ref',
               callId: 'call_commit',
-              output: commitOutput,
-              resultRef: 'result_commit',
+              resultId: 'result_commit',
               attachmentIds: [],
             },
           ],
         },
+        toolResults: [
+          {
+            callId: 'call_old_inspect',
+            toolName: 'browser_inspect',
+            argumentsJson: '{"mode":"screenshot"}',
+            output: largeInspectPayload,
+            resultId: 'result_old_inspect',
+            attachmentIds: ['old_screenshot'],
+          },
+          {
+            callId: 'call_commit',
+            toolName: 'commit_context',
+            argumentsJson: commitArguments,
+            output: commitOutput,
+            resultId: 'result_commit',
+            attachmentIds: [],
+          },
+        ],
         customSystemPrompt: '',
         historyMessageLimit: 50,
       },
@@ -421,15 +588,6 @@ describe('buildAgentContext', () => {
         task: TASK,
         checkpoint: {
           ...CHECKPOINT,
-          completedToolResults: [
-            {
-              callId: 'call_inspect',
-              toolName: 'browser_inspect',
-              argumentsJson: '{"tabId":0,"mode":"interactive"}',
-              output: '{"ok":true}',
-              resultRef: 'result_inspect',
-            },
-          ],
           continuationItems: [
             { type: 'message_ref', messageId: 'current' },
             {
@@ -451,13 +609,21 @@ describe('buildAgentContext', () => {
               ],
             },
             {
-              type: 'function_call_output',
+              type: 'function_call_output_ref',
               callId: 'call_inspect',
-              output: '{"ok":true}',
-              resultRef: 'result_inspect',
+              resultId: 'result_inspect',
             },
           ],
         },
+        toolResults: [
+          {
+            callId: 'call_inspect',
+            toolName: 'browser_inspect',
+            argumentsJson: '{"tabId":0,"mode":"interactive"}',
+            output: '{"ok":true}',
+            resultId: 'result_inspect',
+          },
+        ],
         customSystemPrompt: '',
         historyMessageLimit: 50,
       },
@@ -509,16 +675,6 @@ describe('buildAgentContext', () => {
         task: TASK,
         checkpoint: {
           ...CHECKPOINT,
-          completedToolResults: [
-            {
-              callId: 'call_inspect',
-              toolName: 'browser_inspect',
-              argumentsJson: '{"tabId":0,"mode":"interactive"}',
-              output: '{"ok":true,"audit":"full"}',
-              modelOutput: '{"ok":true}',
-              resultRef: 'result_inspect',
-            },
-          ],
           continuationItems: [
             { type: 'message_ref', messageId: 'current' },
             {
@@ -530,10 +686,20 @@ describe('buildAgentContext', () => {
             {
               type: 'function_call_output_ref',
               callId: 'call_inspect',
-              resultRef: 'result_inspect',
+              resultId: 'result_inspect',
             },
           ],
         },
+        toolResults: [
+          {
+            callId: 'call_inspect',
+            toolName: 'browser_inspect',
+            argumentsJson: '{"tabId":0,"mode":"interactive"}',
+            output: '{"ok":true,"audit":"full"}',
+            modelOutput: '{"ok":true}',
+            resultId: 'result_inspect',
+          },
+        ],
         customSystemPrompt: '',
         historyMessageLimit: 50,
       },
@@ -590,32 +756,6 @@ describe('buildAgentContext', () => {
         task: TASK,
         checkpoint: {
           ...CHECKPOINT,
-          completedToolResults: [
-            {
-              callId: 'call_old_inspect',
-              toolName: 'browser_inspect',
-              argumentsJson: '{}',
-              output: 'old output',
-              resultRef: 'result_old_inspect',
-              attachmentIds: ['old_screenshot'],
-            },
-            {
-              callId: 'call_commit',
-              toolName: 'commit_context',
-              argumentsJson: commitArguments,
-              output: commitOutput,
-              resultRef: 'result_commit',
-              attachmentIds: [],
-            },
-            {
-              callId: 'call_new_inspect',
-              toolName: 'browser_inspect',
-              argumentsJson: '{"mode":"screenshot"}',
-              output: 'new output',
-              resultRef: 'result_new_inspect',
-              attachmentIds: ['new_screenshot'],
-            },
-          ],
           continuationItems: [
             { type: 'message_ref', messageId: 'current' },
             { type: 'message_ref', messageId: 'supplement' },
@@ -626,10 +766,9 @@ describe('buildAgentContext', () => {
               argumentsJson: commitArguments,
             },
             {
-              type: 'function_call_output',
+              type: 'function_call_output_ref',
               callId: 'call_commit',
-              output: commitOutput,
-              resultRef: 'result_commit',
+              resultId: 'result_commit',
               attachmentIds: [],
             },
             {
@@ -639,14 +778,39 @@ describe('buildAgentContext', () => {
               argumentsJson: '{"mode":"screenshot"}',
             },
             {
-              type: 'function_call_output',
+              type: 'function_call_output_ref',
               callId: 'call_new_inspect',
-              output: 'new output',
-              resultRef: 'result_new_inspect',
+              resultId: 'result_new_inspect',
               attachmentIds: ['new_screenshot'],
             },
           ],
         },
+        toolResults: [
+          {
+            callId: 'call_old_inspect',
+            toolName: 'browser_inspect',
+            argumentsJson: '{}',
+            output: 'old output',
+            resultId: 'result_old_inspect',
+            attachmentIds: ['old_screenshot'],
+          },
+          {
+            callId: 'call_commit',
+            toolName: 'commit_context',
+            argumentsJson: commitArguments,
+            output: commitOutput,
+            resultId: 'result_commit',
+            attachmentIds: [],
+          },
+          {
+            callId: 'call_new_inspect',
+            toolName: 'browser_inspect',
+            argumentsJson: '{"mode":"screenshot"}',
+            output: 'new output',
+            resultId: 'result_new_inspect',
+            attachmentIds: ['new_screenshot'],
+          },
+        ],
         customSystemPrompt: '',
         historyMessageLimit: 50,
       },
@@ -751,7 +915,23 @@ describe('buildAgentContext', () => {
     const context = await buildAgentContext(
       {
         task: TASK,
-        checkpoint: CHECKPOINT,
+        checkpoint: {
+          ...CHECKPOINT,
+          continuationItems: [
+            { type: 'message_ref', messageId: 'current' },
+            {
+              type: 'function_call',
+              callId: 'call_done',
+              name: 'lookup_record',
+              argumentsJson: '{"type":"click"}',
+            },
+            {
+              type: 'function_call_output_ref',
+              callId: 'call_done',
+              resultId: 'evidence_1',
+            },
+          ],
+        },
         customSystemPrompt: 'Prefer primary sources.',
         historyMessageLimit: 2,
       },
@@ -807,7 +987,11 @@ describe('buildAgentContext', () => {
     const context = await buildAgentContext(
       {
         task: TASK,
-        checkpoint: { ...CHECKPOINT, completedToolResults: [] },
+        checkpoint: {
+          ...CHECKPOINT,
+          continuationItems: [{ type: 'message_ref', messageId: 'current' }],
+        },
+        toolResults: [],
         customSystemPrompt: '',
         historyMessageLimit: 50,
       },
@@ -839,7 +1023,8 @@ describe('buildAgentContext', () => {
       buildAgentContext(
         {
           task: TASK,
-          checkpoint: { ...CHECKPOINT, completedToolResults: [] },
+          checkpoint: CHECKPOINT,
+          toolResults: [],
           customSystemPrompt: '',
           historyMessageLimit: 50,
         },
@@ -889,7 +1074,11 @@ describe('buildAgentContext', () => {
       buildAgentContext(
         {
           task: TASK,
-          checkpoint: CHECKPOINT,
+          checkpoint: {
+            ...CHECKPOINT,
+            continuationItems: [{ type: 'message_ref', messageId: 'bad' }],
+          },
+          toolResults: [],
           customSystemPrompt: '',
           historyMessageLimit: 50,
         },
@@ -937,7 +1126,11 @@ describe('buildAgentContext', () => {
     const context = await buildAgentContext(
       {
         task: TASK,
-        checkpoint: CHECKPOINT,
+        checkpoint: {
+          ...CHECKPOINT,
+          continuationItems: [{ type: 'message_ref', messageId: 'full-batch' }],
+        },
+        toolResults: [],
         customSystemPrompt: '',
         historyMessageLimit: 50,
       },
@@ -959,7 +1152,11 @@ describe('buildAgentContext', () => {
     const context = await buildAgentContext(
       {
         task: TASK,
-        checkpoint: { ...CHECKPOINT, completedToolResults: [] },
+        checkpoint: {
+          ...CHECKPOINT,
+          continuationItems: [{ type: 'message_ref', messageId: 'current' }],
+        },
+        toolResults: [],
         customSystemPrompt: '',
         historyMessageLimit: 1,
       },
@@ -1007,7 +1204,11 @@ describe('buildAgentContext', () => {
     const context = await buildAgentContext(
       {
         task: TASK,
-        checkpoint: { ...CHECKPOINT, completedToolResults: [] },
+        checkpoint: {
+          ...CHECKPOINT,
+          continuationItems: [{ type: 'message_ref', messageId: 'current' }],
+        },
+        toolResults: [],
         customSystemPrompt: '',
         historyMessageLimit: 10,
       },
@@ -1050,7 +1251,7 @@ describe('buildAgentContext', () => {
     expect(get.mock.calls.map(([id]) => id)).toEqual([...currentIds, ...recentIds]);
   });
 
-  it('keeps 50 successful-history messages and replays one active WorkSession in exact order', async () => {
+  it('keeps 50 successful-history messages and replays one active task in exact order', async () => {
     const historicalMessages = Array.from({ length: 52 }, (_, index) =>
       message({
         id: `history_${index}`,
@@ -1063,7 +1264,7 @@ describe('buildAgentContext', () => {
     const activeMessages = [
       message({
         id: 'active_initial',
-        taskId: 'task_active_previous',
+        taskId: TASK.id,
         role: 'user',
         text: 'Initial request',
         createdAt: 100,
@@ -1093,25 +1294,19 @@ describe('buildAgentContext', () => {
       }),
     ];
     const messages = [...historicalMessages, ...activeMessages];
-    const historicalTasks = historicalMessages.map((item, index): TaskRun => ({
+    const historicalTasks = historicalMessages.map((item, index): Task => ({
       ...TASK,
       id: item.taskId as string,
-      workSessionId: `workSession_history_${index}`,
+      ordinal: index + 1,
       status: 'completed',
       createdAt: index + 1,
       updatedAt: index + 1,
     }));
-    const tasks: TaskRun[] = [
+    const tasks: Task[] = [
       ...historicalTasks,
       {
         ...TASK,
         id: 'task_cancelled_only',
-        workSessionId: 'workSession_cancelled_only',
-        status: 'cancelled',
-      },
-      {
-        ...TASK,
-        id: 'task_active_previous',
         status: 'cancelled',
       },
       TASK,
@@ -1121,15 +1316,6 @@ describe('buildAgentContext', () => {
         task: TASK,
         checkpoint: {
           ...CHECKPOINT,
-          completedToolResults: [
-            {
-              callId: 'call_1',
-              toolName: 'tavily_search',
-              argumentsJson: '{"query":"official"}',
-              output: '{"ok":true}',
-              resultRef: 'result_1',
-            },
-          ],
           continuationItems: [
             { type: 'message_ref', messageId: 'active_initial' },
             {
@@ -1139,15 +1325,23 @@ describe('buildAgentContext', () => {
               argumentsJson: '{"query":"official"}',
             },
             {
-              type: 'function_call_output',
+              type: 'function_call_output_ref',
               callId: 'call_1',
-              output: '{"ok":true}',
-              resultRef: 'result_1',
+              resultId: 'result_1',
             },
             { type: 'message_ref', messageId: 'supplement_1' },
             { type: 'message_ref', messageId: 'active_latest' },
           ],
         },
+        toolResults: [
+          {
+            callId: 'call_1',
+            toolName: 'tavily_search',
+            argumentsJson: '{"query":"official"}',
+            output: '{"ok":true}',
+            resultId: 'result_1',
+          },
+        ],
         customSystemPrompt: '',
         historyMessageLimit: 50,
       },
@@ -1169,7 +1363,10 @@ describe('buildAgentContext', () => {
               : undefined,
           ),
         },
-        { listByConversation: vi.fn(async () => tasks) },
+        {
+          listByConversation: vi.fn(async () => tasks),
+          readTaskMessageEvents: vi.fn(async (taskIds) => taskEvents(messages, taskIds)),
+        },
       ),
     );
 
@@ -1215,7 +1412,7 @@ describe('buildAgentContext', () => {
     expect(JSON.stringify(context.input)).not.toContain('MUST NOT ENTER HISTORY');
   });
 
-  it('separates completed history from active opaque compacted WorkSession input', async () => {
+  it('separates completed history from active opaque compacted task input', async () => {
     const messages = [
       message({
         id: 'history_user',
@@ -1231,10 +1428,9 @@ describe('buildAgentContext', () => {
       }),
       message({ id: 'active_user', taskId: TASK.id, role: 'user', text: 'Continue current work' }),
     ];
-    const historyTask: TaskRun = {
+    const historyTask: Task = {
       ...TASK,
       id: 'task_history',
-      workSessionId: 'workSession_history',
       status: 'completed',
     };
     const context = await buildAgentContext(
@@ -1242,7 +1438,6 @@ describe('buildAgentContext', () => {
         task: TASK,
         checkpoint: {
           ...CHECKPOINT,
-          completedToolResults: [],
           continuationItems: [
             { type: 'message_ref', messageId: 'active_user' },
             {
@@ -1252,13 +1447,17 @@ describe('buildAgentContext', () => {
             },
           ],
         },
+        toolResults: [],
         customSystemPrompt: 'Stay bounded.',
         historyMessageLimit: 50,
       },
       contextDependencies(
         messages,
         { get: vi.fn(async () => undefined) },
-        { listByConversation: vi.fn(async () => [historyTask, TASK]) },
+        {
+          listByConversation: vi.fn(async () => [historyTask, TASK]),
+          readTaskMessageEvents: vi.fn(async (taskIds) => taskEvents(messages, taskIds)),
+        },
       ),
     );
 

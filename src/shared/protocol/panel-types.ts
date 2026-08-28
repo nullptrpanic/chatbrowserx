@@ -27,7 +27,7 @@ export interface PanelMessageSourcePage {
 
 export interface PanelMessage {
   readonly id: string;
-  readonly taskId: string | null;
+  readonly taskId: string;
   readonly role: 'user' | 'assistant' | 'system';
   readonly status: 'complete' | 'streaming' | 'interrupted' | 'error';
   readonly text: string;
@@ -53,17 +53,18 @@ export interface PanelTaskEvent {
   readonly reason: string;
   readonly at: number;
   readonly supplementIds?: readonly string[] | undefined;
+  readonly resultId?: string | undefined;
 }
 
-export interface PanelCompletedToolResult {
+export interface PanelToolResult {
   readonly callId: string;
   readonly toolName: string;
   readonly argumentsJson: string;
   readonly output: string;
-  readonly resultRef: string;
-  readonly attachmentIds?: readonly string[];
+  readonly resultId: string;
+  readonly attachmentIds: readonly string[];
   /** One-based position among every user-visible execution-detail item. */
-  readonly detailIndex?: number | undefined;
+  readonly detailIndex: number;
 }
 
 export interface PanelTaskSupplement {
@@ -71,35 +72,35 @@ export interface PanelTaskSupplement {
   readonly text: string;
   readonly attachmentIds: readonly string[];
   readonly createdAt: number;
-  /** Whether this supplement is already part of the WorkSession continuation. */
-  readonly applicationState?: 'applied' | 'pending' | undefined;
+  /** Whether this supplement is already part of the active task continuation. */
+  readonly applicationState: 'applied' | 'pending';
   /** One-based position among every user-visible execution-detail item. */
-  readonly detailIndex?: number | undefined;
+  readonly detailIndex: number;
 }
 
 export interface PanelTask {
   readonly id: string;
   /** Summary projections are lightweight; full projections are loaded only after expansion. */
-  readonly detailLevel?: 'summary' | 'full';
+  readonly detailLevel: 'summary' | 'full';
   readonly status: PanelTaskStatus;
   readonly goal: string;
   readonly tabId: number | null;
   readonly createdAt: number;
   readonly updatedAt: number;
   readonly sequence: number;
-  /** Total completed tool calls; optional only for compatibility with an older live panel. */
-  readonly completedToolCallCount?: number | undefined;
+  /** Total completed tool calls in permanent task history. */
+  readonly completedToolCallCount: number;
   /** Total tool results and user supplements shown by the execution-detail timeline. */
-  readonly detailItemCount?: number | undefined;
-  /** True after the cancelled WorkSession continuation was explicitly discarded. */
-  readonly contextCleared?: boolean | undefined;
+  readonly detailItemCount: number;
+  /** True after the cancelled task continuation was explicitly discarded. */
+  readonly contextCleared: boolean;
   readonly lastError: {
     readonly code: string;
     readonly retryable: boolean;
     readonly userMessage: string;
   } | null;
   readonly events: readonly PanelTaskEvent[];
-  readonly completedToolResults: readonly PanelCompletedToolResult[];
+  readonly toolResults: readonly PanelToolResult[];
   readonly supplements: readonly PanelTaskSupplement[];
 }
 
@@ -129,8 +130,7 @@ export interface PanelEditableSettings {
 }
 
 export interface PanelSnapshot {
-  /** Optional only while an older live background instance is still connected. */
-  readonly stateVersion?: number | undefined;
+  readonly stateVersion: number;
   readonly generatedAt: number;
   readonly tab: PanelTabContext;
   readonly conversation: PanelConversationSummary | null;

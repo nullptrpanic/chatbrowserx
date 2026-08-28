@@ -14,12 +14,16 @@ const attachments = {
 function completedTask(id: string, goal: string, updatedAt: number): PanelTask {
   return {
     id,
+    detailLevel: 'full',
     status: 'completed',
     goal,
     tabId: 7,
     createdAt: updatedAt - 4_600,
     updatedAt,
     sequence: 3,
+    completedToolCallCount: 0,
+    detailItemCount: 0,
+    contextCleared: false,
     lastError: null,
     events: [
       {
@@ -36,7 +40,7 @@ function completedTask(id: string, goal: string, updatedAt: number): PanelTask {
       },
       { sequence: 3, type: 'task.completed', reason: 'done', at: updatedAt },
     ],
-    completedToolResults: [],
+    toolResults: [],
     supplements: [],
   };
 }
@@ -133,13 +137,17 @@ describe('ConversationView answer execution details', () => {
     const firstTask = completedTask('task_1', 'First request', 1_100);
     const secondTask: PanelTask = {
       ...completedTask('task_2', 'Second request', 1_300),
-      completedToolResults: [
+      completedToolCallCount: 1,
+      detailItemCount: 1,
+      toolResults: [
         {
           callId: 'call_bash_1',
           toolName: 'Bash',
           argumentsJson: '{"cmd":"npm run test:run"}',
           output: 'All tests passed',
-          resultRef: 'result_1',
+          resultId: 'result_1',
+          detailIndex: 1,
+          attachmentIds: [],
         },
       ],
     };
@@ -229,7 +237,9 @@ describe('ConversationView answer execution details', () => {
     ).toBeVisible();
     expect(within(firstAnswer as HTMLElement).queryByText('查看执行详情')).not.toBeInTheDocument();
     expect(
-      within(firstAnswer as HTMLElement).queryByText('任务已完成', { selector: 'p' }),
+      within(firstAnswer as HTMLElement).queryByText('任务已完成', {
+        selector: 'p',
+      }),
     ).not.toBeInTheDocument();
 
     await user.click(
@@ -245,7 +255,9 @@ describe('ConversationView answer execution details', () => {
     await user.click(within(terminal).getByRole('button', { name: '展开终端输出' }));
     expect(within(terminal).getByText('All tests passed')).toBeVisible();
     expect(
-      within(firstAnswer as HTMLElement).queryByRole('region', { name: 'Bash: 执行完成' }),
+      within(firstAnswer as HTMLElement).queryByRole('region', {
+        name: 'Bash: 执行完成',
+      }),
     ).not.toBeInTheDocument();
     expect(
       within(firstAnswer as HTMLElement).getByRole('button', {
@@ -263,6 +275,8 @@ describe('ConversationView answer execution details', () => {
     const user = userEvent.setup();
     const task: PanelTask = {
       ...completedTask('task_tavily', 'Research request', 1_300),
+      completedToolCallCount: 1,
+      detailItemCount: 1,
       events: [
         { sequence: 1, type: 'planning.started', reason: 'started', at: 1_000 },
         {
@@ -273,13 +287,15 @@ describe('ConversationView answer execution details', () => {
         },
         { sequence: 3, type: 'task.completed', reason: 'done', at: 1_300 },
       ],
-      completedToolResults: [
+      toolResults: [
         {
           callId: 'call_search_1',
           toolName: 'tavily_search',
           argumentsJson: '{"query":"browser reliability"}',
           output: '{"ok":true,"results":[{"title":"Reliable browsing"}]}',
-          resultRef: 'result_search_1',
+          resultId: 'result_search_1',
+          detailIndex: 1,
+          attachmentIds: [],
         },
       ],
     };
@@ -327,12 +343,16 @@ describe('ConversationView answer execution details', () => {
     expect(within(answer as HTMLElement).queryByText(/Reliable browsing/)).not.toBeInTheDocument();
 
     await user.click(
-      within(answer as HTMLElement).getByRole('button', { name: '展开 搜索网页 结果' }),
+      within(answer as HTMLElement).getByRole('button', {
+        name: '展开 搜索网页 结果',
+      }),
     );
     expect(within(answer as HTMLElement).getByText(/Reliable browsing/)).toBeVisible();
 
     await user.click(
-      within(answer as HTMLElement).getByRole('button', { name: '收起 搜索网页 结果' }),
+      within(answer as HTMLElement).getByRole('button', {
+        name: '收起 搜索网页 结果',
+      }),
     );
     expect(within(answer as HTMLElement).queryByText(/Reliable browsing/)).not.toBeInTheDocument();
   });
@@ -341,6 +361,8 @@ describe('ConversationView answer execution details', () => {
     const user = userEvent.setup();
     const task: PanelTask = {
       ...completedTask('task_commit', 'Preserve working state', 1_300),
+      completedToolCallCount: 1,
+      detailItemCount: 1,
       events: [
         { sequence: 1, type: 'planning.started', reason: 'started', at: 1_000 },
         {
@@ -351,13 +373,14 @@ describe('ConversationView answer execution details', () => {
         },
         { sequence: 3, type: 'task.completed', reason: 'done', at: 1_300 },
       ],
-      completedToolResults: [
+      toolResults: [
         {
           callId: 'call_commit',
           toolName: 'commit_context',
           argumentsJson: '{"state":"Goal: continue."}',
           output: '{"ok":true,"compactedCalls":2,"releasedTextChars":100,"releasedImages":1}',
-          resultRef: 'result_commit',
+          resultId: 'result_commit',
+          detailIndex: 1,
           attachmentIds: [],
         },
       ],
@@ -406,7 +429,9 @@ describe('ConversationView answer execution details', () => {
         id === 'attachment_screenshot'
           ? {
               id,
-              blob: new Blob([new Uint8Array([137, 80, 78, 71])], { type: 'image/png' }),
+              blob: new Blob([new Uint8Array([137, 80, 78, 71])], {
+                type: 'image/png',
+              }),
               mimeType: 'image/png',
               byteSize: 4,
               width: 800,
@@ -420,6 +445,8 @@ describe('ConversationView answer execution details', () => {
     };
     const task: PanelTask = {
       ...completedTask('task_screenshot', 'Inspect the page', 1_300),
+      completedToolCallCount: 1,
+      detailItemCount: 1,
       events: [
         { sequence: 1, type: 'planning.started', reason: 'started', at: 1_000 },
         {
@@ -430,13 +457,14 @@ describe('ConversationView answer execution details', () => {
         },
         { sequence: 3, type: 'task.completed', reason: 'done', at: 1_300 },
       ],
-      completedToolResults: [
+      toolResults: [
         {
           callId: 'call_screenshot',
           toolName: 'browser_inspect',
           argumentsJson: '{"tabId":7,"mode":"screenshot"}',
           output: '{"ok":true}',
-          resultRef: 'result_screenshot',
+          resultId: 'result_screenshot',
+          detailIndex: 1,
           attachmentIds: ['attachment_screenshot'],
         },
       ],
@@ -485,6 +513,8 @@ describe('ConversationView answer execution details', () => {
     const user = userEvent.setup();
     const task: PanelTask = {
       ...completedTask('task_multiple_tools', 'Research and extract', 1_300),
+      completedToolCallCount: 2,
+      detailItemCount: 2,
       sequence: 4,
       events: [
         { sequence: 1, type: 'planning.started', reason: 'started', at: 1_000 },
@@ -502,20 +532,24 @@ describe('ConversationView answer execution details', () => {
         },
         { sequence: 4, type: 'task.completed', reason: 'done', at: 1_300 },
       ],
-      completedToolResults: [
+      toolResults: [
         {
           callId: 'call_search',
           toolName: 'tavily_search',
           argumentsJson: '{"query":"browser reliability"}',
           output: '{"ok":true}',
-          resultRef: 'result_search',
+          resultId: 'result_search',
+          detailIndex: 1,
+          attachmentIds: [],
         },
         {
           callId: 'call_extract',
           toolName: 'tavily_extract',
           argumentsJson: '{"urls":["https://example.com"]}',
           output: '{"ok":true}',
-          resultRef: 'result_extract',
+          resultId: 'result_extract',
+          detailIndex: 2,
+          attachmentIds: [],
         },
       ],
     };
@@ -635,12 +669,16 @@ describe('ConversationView answer execution details', () => {
   it('attaches a failed task to its retained empty assistant reply', () => {
     const task: PanelTask = {
       id: 'task_failed',
+      detailLevel: 'full',
       status: 'failed',
       goal: 'Failed request',
       tabId: 7,
       createdAt: 1_000,
       updatedAt: 1_300,
       sequence: 2,
+      completedToolCallCount: 0,
+      detailItemCount: 0,
+      contextCleared: false,
       lastError: {
         code: 'TaskInputError',
         retryable: false,
@@ -655,7 +693,7 @@ describe('ConversationView answer execution details', () => {
           at: 1_300,
         },
       ],
-      completedToolResults: [],
+      toolResults: [],
       supplements: [],
     };
     const messages: PanelMessage[] = [
@@ -698,18 +736,27 @@ describe('ConversationView answer execution details', () => {
   it('renders a retained empty cancelled reply as a message bubble', () => {
     const task: PanelTask = {
       id: 'task_cancelled',
+      detailLevel: 'full',
       status: 'cancelled',
       goal: 'Cancelled request',
       tabId: 7,
       createdAt: 1_000,
       updatedAt: 1_300,
       sequence: 2,
+      completedToolCallCount: 0,
+      detailItemCount: 0,
+      contextCleared: false,
       lastError: null,
       events: [
         { sequence: 1, type: 'planning.started', reason: 'started', at: 1_000 },
-        { sequence: 2, type: 'task.cancelled', reason: 'user_cancel', at: 1_300 },
+        {
+          sequence: 2,
+          type: 'task.cancelled',
+          reason: 'user_cancel',
+          at: 1_300,
+        },
       ],
-      completedToolResults: [],
+      toolResults: [],
       supplements: [],
     };
     const messages: PanelMessage[] = [
@@ -753,7 +800,9 @@ describe('ConversationView answer execution details', () => {
     vi.spyOn(URL, 'createObjectURL').mockReturnValue('blob:runtime-supplement');
     vi.spyOn(URL, 'revokeObjectURL').mockImplementation(() => undefined);
     const user = userEvent.setup();
-    const supplementImage = new File(['png'], 'runtime-detail.png', { type: 'image/png' });
+    const supplementImage = new File(['png'], 'runtime-detail.png', {
+      type: 'image/png',
+    });
     const supplementAttachments = {
       addFiles: vi.fn(async () => []),
       get: vi.fn(async (id: string) =>
@@ -775,6 +824,7 @@ describe('ConversationView answer execution details', () => {
     const task: PanelTask = {
       ...completedTask('task_supplement', 'Analyze the layout', 1_300),
       sequence: 4,
+      detailItemCount: 3,
       events: [
         { sequence: 1, type: 'planning.started', reason: 'started', at: 1_000 },
         {
@@ -799,18 +849,24 @@ describe('ConversationView answer execution details', () => {
           text: 'Please also inspect the mobile navigation.',
           attachmentIds: ['attachment_runtime'],
           createdAt: 1_150,
+          applicationState: 'applied',
+          detailIndex: 1,
         },
         {
           id: 'supplement_2',
           text: 'Compare the compact breakpoint too.',
           attachmentIds: [],
           createdAt: 1_160,
+          applicationState: 'applied',
+          detailIndex: 2,
         },
         {
           id: 'supplement_3',
           text: 'Keep the desktop navigation unchanged.',
           attachmentIds: [],
           createdAt: 1_230,
+          applicationState: 'applied',
+          detailIndex: 3,
         },
       ],
     };
@@ -861,7 +917,9 @@ describe('ConversationView answer execution details', () => {
     expect(supplements).toHaveLength(3);
 
     await user.click(
-      within(supplements[0] as HTMLElement).getByRole('button', { name: '展开用户补充' }),
+      within(supplements[0] as HTMLElement).getByRole('button', {
+        name: '展开用户补充',
+      }),
     );
     const supplement = supplements[0] as HTMLElement;
     expect(

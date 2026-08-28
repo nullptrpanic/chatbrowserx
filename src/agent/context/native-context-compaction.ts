@@ -6,6 +6,7 @@ import type {
   ContinuationItem,
   MaterializedContinuationItem,
 } from '../../tasks/continuation-types';
+import type { MaterializedToolResult } from '../../tasks/tool-result-types';
 import { CONTEXT_COMMIT_TOOL_NAME } from '../tools/context-commit-tool-schema';
 
 export const AUTO_COMPACT_INPUT_TOKEN_HIGH_WATER = 220_000;
@@ -22,7 +23,7 @@ interface ContinuationPressure {
   readonly hasPriorBoundary: boolean;
 }
 
-function successfulLegacyCommit(output: string): boolean {
+function successfulContextCommit(output: string): boolean {
   try {
     const value: unknown = JSON.parse(output);
     return typeof value === 'object' && value !== null && 'ok' in value && value.ok === true;
@@ -53,7 +54,7 @@ function continuationPressure(
       continue;
     }
     if (item.type !== 'function_call_output' || pendingCall?.callId !== item.callId) continue;
-    if (pendingCall.name === CONTEXT_COMMIT_TOOL_NAME && successfulLegacyCommit(item.output)) {
+    if (pendingCall.name === CONTEXT_COMMIT_TOOL_NAME && successfulContextCommit(item.output)) {
       boundaryIndex = index;
       completedPairIndexes.length = 0;
     } else if (pendingCall.name !== CONTEXT_COMMIT_TOOL_NAME) {
@@ -71,6 +72,7 @@ function continuationPressure(
 /** Uses measured Provider usage plus the unmeasured continuation suffix and a durable cooldown. */
 export function shouldUseNativeContextCompaction(
   checkpoint: Checkpoint,
+  toolResults: readonly MaterializedToolResult[],
   unmeasuredInputTokens = 0,
 ): boolean {
   const measuredInputTokens = checkpoint.lastModelInputTokens;
@@ -84,7 +86,12 @@ export function shouldUseNativeContextCompaction(
   }
   const projectedInputTokens = measuredInputTokens + unmeasuredInputTokens;
   if (projectedInputTokens < AUTO_COMPACT_INPUT_TOKEN_HIGH_WATER) return false;
-  const pressure = continuationPressure(materializeContinuationItems(checkpoint));
+  const pressure = continuationPressure(
+    materializeContinuationItems({
+      continuationItems: checkpoint.continuationItems,
+      toolResults,
+    }),
+  );
   if (pressure.completedPairsAfterBoundary === 0) return false;
   if (!pressure.hasPriorBoundary) return true;
   return (

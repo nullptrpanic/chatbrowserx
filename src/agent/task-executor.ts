@@ -1,5 +1,4 @@
 import type { ConversationRepository } from '../persistence/conversation-repository';
-import type { AttachmentRepository } from '../persistence/attachment-repository';
 import type { BrowserExecutionPort } from '../browser/browser-execution-types';
 import { TaskRepositoryConflictError, type TaskRepository } from '../persistence/task-repository';
 import { isProviderError, type ProviderError } from '../providers/provider-errors';
@@ -8,7 +7,7 @@ import type { IdGenerator, TaskId } from '../shared/ids';
 import type { Clock } from '../shared/time';
 import { SandboxClientError } from '../sandbox/sandbox-client';
 import type { SandboxExecutionPort } from '../sandbox/sandbox-tool-executor';
-import type { Checkpoint, CompletedToolResult } from '../tasks/checkpoint-types';
+import type { Checkpoint } from '../tasks/checkpoint-types';
 import { materializeContinuationItems } from '../tasks/continuation-materialization';
 import type {
   ContinuationItem,
@@ -17,12 +16,13 @@ import type {
 } from '../tasks/continuation-types';
 import type { TaskSnapshot } from '../tasks/task-command-service';
 import type { TaskError } from '../tasks/task-errors';
-import type { HistoricalToolResultPort } from '../tasks/historical-tool-results';
+import type { TaskHistoryReaderPort } from '../tasks/task-history-reader';
 import { TaskLeaseManager } from '../tasks/task-lease';
 import { retainTaskReply } from '../tasks/task-reply-retention';
-import { transitionTask } from '../tasks/task-transition';
-import type { TaskEvent, TaskEventType, TaskModelTurnMetrics, TaskRun } from '../tasks/task-types';
-import { selectPendingWorkSessionSupplements } from '../tasks/work-session-supplements';
+import { transitionTask, type TaskTransitionType } from '../tasks/task-transition';
+import type { Task, TaskEvent, TaskModelTurnMetrics, TaskRun } from '../tasks/task-types';
+import type { MaterializedToolResult, ToolResult } from '../tasks/tool-result-types';
+import { selectPendingTaskSupplements } from '../tasks/task-supplements';
 import type { AgentEvent, AgentModelTurn, AgentPlanner } from './execution-types';
 import {
   compactContextAtCommit,
@@ -34,7 +34,7 @@ import { parseBrowserToolCall } from './tools/browser-tool-schema';
 import { browserScrollContinuationForCheckpoint } from './tools/browser-tool-availability';
 import { CONTEXT_COMMIT_TOOL_NAME } from './tools/context-commit-tool-schema';
 import { parseSandboxToolCall } from './tools/sandbox-tool-schema';
-import { parseTaskResultToolCall } from './tools/task-result-tool-schema';
+import { parseHistoryToolCall } from './tools/history-tool-schema';
 import { parseTavilyToolCall } from './tools/tavily-tool-schema';
 
 export type TaskExecutorErrorCode =
@@ -56,25 +56,22 @@ export class TaskExecutorError extends Error {
 
 export interface TaskExecutorDependencies {
   readonly repository: TaskRepository;
-  readonly conversations: Pick<
-    ConversationRepository,
-    'listMessages' | 'appendMessage' | 'updateMessage'
-  >;
+  readonly conversations: Pick<ConversationRepository, 'listMessages' | 'updateMessage'>;
   readonly planner: AgentPlanner;
   readonly tavily: TavilyExecutionPort;
   readonly browser: BrowserExecutionPort;
   readonly sandbox?: SandboxExecutionPort;
-  readonly historicalResults?: HistoricalToolResultPort;
-  readonly attachments?: Pick<AttachmentRepository, 'addReference' | 'removeReference'>;
+  readonly history?: TaskHistoryReaderPort;
   readonly clock: Clock;
   readonly ids: IdGenerator;
+  readonly sleep?: (milliseconds: number, signal: AbortSignal) => Promise<void>;
 }
 
 interface BoundaryInput {
-  readonly type: TaskEventType;
+  readonly type: TaskTransitionType;
   readonly reason: string;
   readonly error?: TaskError;
-  readonly completedToolResults?: readonly CompletedToolResult[];
+  readonly toolResults?: readonly MaterializedToolResult[];
   readonly continuationItems?: readonly ContinuationItem[];
   readonly pendingToolCall?: PendingToolCall | null;
   readonly reasoningSummary?: string;
@@ -85,13 +82,19 @@ interface BoundaryInput {
   readonly lastModelInputTokens?: number | null;
 }
 
+interface ActiveTaskSnapshot extends TaskSnapshot {
+  readonly checkpoint: Checkpoint;
+}
+
 type AgentOutcome = Exclude<AgentEvent, { readonly type: 'reasoning.summary' }>;
 
 const runnableStatuses = new Set<TaskRun['status']>(['queued', 'planning']);
 const TAVILY_TOOL_CALL_LIMIT = 8;
 const BROWSER_TOOL_CALL_LIMIT = 256;
 const SANDBOX_TOOL_CALL_LIMIT = 128;
-const MODEL_TRANSIENT_RETRY_LIMIT = 1;
+/** Number of retries after the initial request for transient Provider failures. */
+const MODEL_TRANSIENT_RETRY_LIMIT = 3;
+const MODEL_TRANSIENT_RETRY_DELAYS_MS = Object.freeze([500, 1_500, 3_000] as const);
 const MODEL_INVALID_RESPONSE_RETRY_LIMIT = 1;
 const tavilyToolNames = new Set(['tavily_search', 'tavily_extract', 'tavily_crawl']);
 const sandboxToolNames = new Set(['sandbox_read', 'sandbox_exec']);
@@ -121,6 +124,21 @@ function throwIfAborted(signal: AbortSignal): void {
 
 function isAbortError(error: unknown): boolean {
   return error instanceof Error && error.name === 'AbortError';
+}
+
+function sleepWithAbort(milliseconds: number, signal: AbortSignal): Promise<void> {
+  throwIfAborted(signal);
+  return new Promise((resolve, reject) => {
+    const onAbort = (): void => {
+      globalThis.clearTimeout(timer);
+      reject(new DOMException('Task execution was aborted.', 'AbortError'));
+    };
+    const timer = globalThis.setTimeout(() => {
+      signal.removeEventListener('abort', onAbort);
+      resolve();
+    }, milliseconds);
+    signal.addEventListener('abort', onAbort, { once: true });
+  });
 }
 
 function invalidPlannerResultError(): TaskError {
@@ -153,11 +171,9 @@ function toolCallLimitError(family: 'Tavily' | 'browser' | 'Sandbox'): TaskError
   };
 }
 
-/** Resolves legacy checkpoints against the immutable tab captured by their TaskRun. */
-function currentBrowserTarget(snapshot: TaskSnapshot): number | null {
-  return snapshot.checkpoint.browserTargetTabId === undefined
-    ? snapshot.task.tabId
-    : snapshot.checkpoint.browserTargetTabId;
+/** Reads the browser target captured by the current checkpoint. */
+function currentBrowserTarget(snapshot: ActiveTaskSnapshot): number | null {
+  return snapshot.checkpoint.browserTargetTabId;
 }
 
 /** Reads only the trusted internal success envelope fields needed to advance tab state. */
@@ -185,7 +201,7 @@ function successfulBrowserTabId(output: string): number | undefined {
 
 /** Advances the durable target only after a browser operation proves its state change succeeded. */
 function browserTargetAfterCall(
-  snapshot: TaskSnapshot,
+  snapshot: ActiveTaskSnapshot,
   call: ReturnType<typeof parseBrowserToolCall>,
   output: string,
 ): number | null | undefined {
@@ -220,7 +236,7 @@ function resolvedBrowserTypeTabId(arguments_: BrowserTypeArguments, currentTabId
 }
 
 function sameBrowserTypeArguments(
-  snapshot: TaskSnapshot,
+  snapshot: ActiveTaskSnapshot,
   current: BrowserTypeArguments,
   previous: BrowserTypeArguments,
 ): boolean {
@@ -238,11 +254,11 @@ function sameBrowserTypeArguments(
 
 /** Detects an immediately repeated failed editor write before it can redispatch a mutation. */
 function duplicateFailedBrowserTypeOutput(
-  snapshot: TaskSnapshot,
+  snapshot: ActiveTaskSnapshot,
   call: ReturnType<typeof parseBrowserToolCall>,
 ): string | null {
   if (call.operation !== 'type') return null;
-  const previous = snapshot.checkpoint.completedToolResults.findLast((result) =>
+  const previous = snapshot.toolResults.findLast((result) =>
     result.toolName.startsWith('browser_'),
   );
   if (previous?.toolName !== 'browser_type') return null;
@@ -696,10 +712,15 @@ function immobileScrollOutput(
 
 /** Stops a repeated read/failure strategy only after two semantically identical cycles. */
 function noProgressBrowserOutput(
-  checkpoint: Pick<Checkpoint, 'completedToolResults' | 'continuationItems'>,
+  snapshot: ActiveTaskSnapshot,
   pending: PendingToolCall,
 ): string | null {
-  const progress = recentBrowserProgress(materializeContinuationItems(checkpoint));
+  const progress = recentBrowserProgress(
+    materializeContinuationItems({
+      continuationItems: snapshot.checkpoint.continuationItems,
+      toolResults: snapshot.toolResults,
+    }),
+  );
   const replayedSelection = replayVerifiedSelectionOutput(progress, pending);
   if (replayedSelection !== null) return replayedSelection;
   const replayedSubmit = replayVerifiedSubmitOutput(progress, pending);
@@ -792,13 +813,18 @@ function taskErrorFromProvider(error: ProviderError, source: 'model' | 'tavily')
 function invalidModelResponseRetryCount(events: readonly TaskEvent[]): number {
   let planningStartIndex = -1;
   for (let index = events.length - 1; index >= 0; index -= 1) {
-    if (events[index]?.type === 'planning.started') {
+    const event = events[index];
+    if (event?.type === 'status.changed' && event.reason === 'model_request_started') {
       planningStartIndex = index;
       break;
     }
   }
-  return events.slice(planningStartIndex + 1).filter((event) => event.type === 'planning.retrying')
-    .length;
+  return events
+    .slice(planningStartIndex + 1)
+    .filter(
+      (event) =>
+        event.type === 'status.changed' && event.reason.startsWith('invalid_model_response_retry:'),
+    ).length;
 }
 
 /** Projects one completed provider turn onto bounded numeric task telemetry. */
@@ -863,9 +889,12 @@ export class TaskExecutor {
           continue;
         }
         snapshot = await this.#applySupplements(snapshot, ownerId, signal);
+        if (!runnableStatuses.has(snapshot.task.status)) return snapshot;
         let result: AgentOutcome;
         try {
           result = await this.#planOne(snapshot, signal, async (reasoningSummary) => {
+            snapshot = await this.#refreshCurrentAttempt(snapshot);
+            if (!runnableStatuses.has(snapshot.task.status)) return;
             snapshot = await this.#saveBoundary(snapshot, ownerId, signal, {
               type: 'reasoning.summary-recorded',
               reason: 'model_reasoning_summary_recorded',
@@ -878,7 +907,16 @@ export class TaskExecutor {
             error.code === 'TRANSIENT' &&
             transientModelRetryCount < MODEL_TRANSIENT_RETRY_LIMIT
           ) {
+            const retryDelay =
+              MODEL_TRANSIENT_RETRY_DELAYS_MS[transientModelRetryCount] ??
+              MODEL_TRANSIENT_RETRY_DELAYS_MS.at(-1) ??
+              3_000;
             transientModelRetryCount += 1;
+            snapshot = await this.#saveBoundary(snapshot, ownerId, signal, {
+              type: 'planning.retrying',
+              reason: 'transient_model_retry:upstream_failure',
+            });
+            await (this.#dependencies.sleep ?? sleepWithAbort)(retryDelay, signal);
             continue;
           }
           if (
@@ -894,10 +932,17 @@ export class TaskExecutor {
           }
           return await this.#handleFailure(snapshot, ownerId, signal, error, 'model');
         }
+        snapshot = await this.#refreshCurrentAttempt(snapshot);
+        if (!runnableStatuses.has(snapshot.task.status)) return snapshot;
         transientModelRetryCount = 0;
 
         if (result.type === 'task.completed') {
-          if (browserScrollContinuationForCheckpoint(snapshot.checkpoint) !== null) {
+          if (
+            browserScrollContinuationForCheckpoint({
+              checkpoint: snapshot.checkpoint,
+              toolResults: snapshot.toolResults,
+            }) !== null
+          ) {
             await this.#interruptReply(snapshot.task, result.messageId);
             continue;
           }
@@ -926,6 +971,7 @@ export class TaskExecutor {
           }
         }
 
+        // Planner-provided native compaction uses the same durable boundary as automatic compaction.
         if (result.type === 'context.compacted') {
           this.#dependencies.browser.resetObservationBaselines();
           snapshot = await this.#saveBoundary(snapshot, ownerId, signal, {
@@ -942,26 +988,22 @@ export class TaskExecutor {
           result.type === 'browser.call' ||
           result.type === 'context.commit' ||
           result.type === 'sandbox.call' ||
-          result.type === 'task-result.call'
+          result.type === 'history.call'
             ? result.call
             : result;
-        if (
-          snapshot.checkpoint.completedToolResults.some(
-            (completed) => completed.callId === call.callId,
-          )
-        ) {
+        if (snapshot.toolResults.some((completed) => completed.callId === call.callId)) {
           return this.#saveBoundary(snapshot, ownerId, signal, {
             type: 'task.failed',
             reason: 'duplicate_tool_call_id',
             error: invalidPlannerResultError(),
           });
         }
-        if (result.type !== 'context.commit' && result.type !== 'task-result.call') {
+        if (result.type !== 'context.commit' && result.type !== 'history.call') {
           const isBrowserCall = result.type === 'browser.call';
           const isSandboxCall = result.type === 'sandbox.call';
           const completedFamilyCalls = isBrowserCall
             ? (snapshot.checkpoint.browserToolCallsInAttempt ?? 0)
-            : snapshot.checkpoint.completedToolResults.filter((completed) =>
+            : snapshot.toolResults.filter((completed) =>
                 (isSandboxCall ? sandboxToolNames : tavilyToolNames).has(completed.toolName),
               ).length;
           const familyLimit = isBrowserCall
@@ -985,7 +1027,7 @@ export class TaskExecutor {
           result.type === 'browser.call' ||
           result.type === 'context.commit' ||
           result.type === 'sandbox.call' ||
-          result.type === 'task-result.call'
+          result.type === 'history.call'
             ? result.call.name
             : `tavily_${result.operation}`;
 
@@ -1029,10 +1071,10 @@ export class TaskExecutor {
 
   /** Executes a durably recorded tool and prevents ambiguous browser mutations from replaying. */
   async #executePendingTool(
-    snapshot: TaskSnapshot,
+    snapshot: ActiveTaskSnapshot,
     ownerId: string,
     signal: AbortSignal,
-  ): Promise<TaskSnapshot> {
+  ): Promise<ActiveTaskSnapshot> {
     const pending = snapshot.checkpoint.pendingToolCall;
     if (pending === null) return snapshot;
 
@@ -1045,8 +1087,8 @@ export class TaskExecutor {
     if (pending.name.startsWith('sandbox_')) {
       return this.#executePendingSandboxTool(snapshot, ownerId, signal, pending);
     }
-    if (pending.name.startsWith('task_result_')) {
-      return this.#executePendingTaskResultTool(snapshot, ownerId, signal, pending);
+    if (pending.name === 'history_read' || pending.name === 'result_read') {
+      return this.#executePendingHistoryTool(snapshot, ownerId, signal, pending);
     }
 
     let call: Extract<AgentEvent, { readonly type: 'tavily.call' }>;
@@ -1072,33 +1114,33 @@ export class TaskExecutor {
     );
   }
 
-  async #executePendingTaskResultTool(
-    snapshot: TaskSnapshot,
+  async #executePendingHistoryTool(
+    snapshot: ActiveTaskSnapshot,
     ownerId: string,
     signal: AbortSignal,
     pending: PendingToolCall,
-  ): Promise<TaskSnapshot> {
-    const historicalResults = this.#dependencies.historicalResults;
-    if (!historicalResults) {
+  ): Promise<ActiveTaskSnapshot> {
+    const history = this.#dependencies.history;
+    if (!history) {
       return this.#handleFailure(
         snapshot,
         ownerId,
         signal,
-        new Error('Historical task-result retrieval is unavailable.'),
+        new Error('Conversation history retrieval is unavailable.'),
         'model',
       );
     }
 
     try {
-      const call = parseTaskResultToolCall(pending);
+      const call = parseHistoryToolCall(pending);
       const context = {
         conversationId: snapshot.task.conversationId,
         currentTaskId: snapshot.task.id,
       };
       const result =
-        call.operation === 'search'
-          ? await historicalResults.search(context, call.arguments)
-          : await historicalResults.read(context, call.arguments);
+        call.operation === 'history'
+          ? await history.readHistory(context, call.arguments)
+          : await history.readResult(context, call.arguments);
       return this.#recordToolResult(snapshot, ownerId, signal, pending, JSON.stringify(result));
     } catch (error) {
       return this.#handleFailure(snapshot, ownerId, signal, error, 'model');
@@ -1106,11 +1148,11 @@ export class TaskExecutor {
   }
 
   async #executePendingSandboxTool(
-    snapshot: TaskSnapshot,
+    snapshot: ActiveTaskSnapshot,
     ownerId: string,
     signal: AbortSignal,
     pending: PendingToolCall,
-  ): Promise<TaskSnapshot> {
+  ): Promise<ActiveTaskSnapshot> {
     let call: ReturnType<typeof parseSandboxToolCall>;
     try {
       call = parseSandboxToolCall(pending);
@@ -1192,11 +1234,11 @@ export class TaskExecutor {
   }
 
   #pauseSandboxRecovery(
-    snapshot: TaskSnapshot,
+    snapshot: ActiveTaskSnapshot,
     ownerId: string,
     signal: AbortSignal,
     pending: PendingToolCall,
-  ): Promise<TaskSnapshot> {
+  ): Promise<ActiveTaskSnapshot> {
     return this.#saveBoundary(snapshot, ownerId, signal, {
       type: 'task.paused',
       reason: 'sandbox_execution_recovery_pending',
@@ -1214,23 +1256,29 @@ export class TaskExecutor {
 
   /** Resolves the internal commit without dispatching an external side effect. */
   async #executePendingContextCommit(
-    snapshot: TaskSnapshot,
+    snapshot: ActiveTaskSnapshot,
     ownerId: string,
     signal: AbortSignal,
     pending: PendingToolCall,
-  ): Promise<TaskSnapshot> {
-    const resultRef = this.#createId('toolResult');
+  ): Promise<ActiveTaskSnapshot> {
+    const resultId = this.#createId('toolResult');
     let compaction: ReturnType<typeof compactContextAtCommit>;
     try {
       compaction = compactContextAtCommit(
-        materializeContinuationItems(snapshot.checkpoint),
+        materializeContinuationItems({
+          continuationItems: snapshot.checkpoint.continuationItems,
+          toolResults: snapshot.toolResults,
+        }),
         pending,
-        resultRef,
+        resultId,
       );
     } catch (error) {
       if (error instanceof ContextCommitCursorError) {
         const currentCommit = snapshot.checkpoint.continuationItems.at(-1);
-        const materializedItems = materializeContinuationItems(snapshot.checkpoint);
+        const materializedItems = materializeContinuationItems({
+          continuationItems: snapshot.checkpoint.continuationItems,
+          toolResults: snapshot.toolResults,
+        });
         const candidateItems =
           currentCommit?.type === 'function_call' && currentCommit.callId === pending.callId
             ? materializedItems.slice(0, -1)
@@ -1252,46 +1300,50 @@ export class TaskExecutor {
       return this.#handleFailure(snapshot, ownerId, signal, error, 'model');
     }
 
-    const completedResult: CompletedToolResult = {
+    const completedResult: MaterializedToolResult = {
+      id: resultId,
+      taskId: snapshot.task.id,
+      runId: snapshot.run.id,
       callId: pending.callId,
       toolName: pending.name,
       argumentsJson: pending.argumentsJson,
       output: compaction.output,
-      resultRef,
       attachmentIds: [],
+      createdAt: this.#dependencies.clock.now(),
     };
-    const referencedResultRefs = new Set(
+    const referencedResultIds = new Set(
       snapshot.checkpoint.continuationItems.flatMap((item) =>
-        item.type === 'function_call_output_ref' ? [item.resultRef] : [],
+        item.type === 'function_call_output_ref' ? [item.resultId] : [],
       ),
     );
-    const continuationItems: ContinuationItem[] = compaction.continuationItems.map((item) =>
-      item.type === 'function_call_output' &&
-      (item.callId === pending.callId || referencedResultRefs.has(item.resultRef))
-        ? {
-            type: 'function_call_output_ref',
-            callId: item.callId,
-            resultRef: item.resultRef,
-            attachmentIds: item.attachmentIds ?? [],
-          }
-        : item,
-    );
+    const continuationItems = compaction.continuationItems.map((item): ContinuationItem => {
+      if (item.type !== 'function_call_output') return item;
+      if (item.callId !== pending.callId && !referencedResultIds.has(item.resultId)) {
+        throw new Error('Context commit produced an unowned tool result.');
+      }
+      return {
+        type: 'function_call_output_ref',
+        callId: item.callId,
+        resultId: item.resultId,
+        attachmentIds: item.attachmentIds ?? [],
+      };
+    });
     this.#dependencies.browser.resetObservationBaselines();
     return this.#saveBoundary(snapshot, ownerId, signal, {
       type: 'tool.result-recorded',
       reason: `${pending.name}_result_recorded`,
-      completedToolResults: [...snapshot.checkpoint.completedToolResults, completedResult],
+      toolResults: [...snapshot.toolResults, completedResult],
       continuationItems,
       pendingToolCall: null,
     });
   }
 
   async #executePendingBrowserTool(
-    snapshot: TaskSnapshot,
+    snapshot: ActiveTaskSnapshot,
     ownerId: string,
     signal: AbortSignal,
     pending: PendingToolCall,
-  ): Promise<TaskSnapshot> {
+  ): Promise<ActiveTaskSnapshot> {
     let call: ReturnType<typeof parseBrowserToolCall>;
     try {
       call = parseBrowserToolCall(pending);
@@ -1321,7 +1373,7 @@ export class TaskExecutor {
       return this.#recordToolResult(snapshot, ownerId, signal, pending, duplicateFailure);
     }
 
-    const noProgressFailure = noProgressBrowserOutput(snapshot.checkpoint, pending);
+    const noProgressFailure = noProgressBrowserOutput(snapshot, pending);
     if (noProgressFailure !== null) {
       return this.#recordToolResult(snapshot, ownerId, signal, pending, noProgressFailure);
     }
@@ -1339,11 +1391,7 @@ export class TaskExecutor {
         currentTabId: currentBrowserTarget(snapshot),
         sessionOwnerId: ownerId,
         availableAssetIds: [
-          ...new Set(
-            snapshot.checkpoint.completedToolResults.flatMap((result) => [
-              ...(result.attachmentIds ?? []),
-            ]),
-          ),
+          ...new Set(snapshot.toolResults.flatMap((result) => [...(result.attachmentIds ?? [])])),
         ],
       });
       return this.#recordToolResult(
@@ -1363,7 +1411,7 @@ export class TaskExecutor {
   }
 
   async #recordToolResult(
-    snapshot: TaskSnapshot,
+    snapshot: ActiveTaskSnapshot,
     ownerId: string,
     signal: AbortSignal,
     pending: PendingToolCall,
@@ -1372,7 +1420,7 @@ export class TaskExecutor {
     modelAttachmentIds: readonly string[] | undefined = undefined,
     browserTargetTabId?: number | null,
     modelOutput: string | undefined = undefined,
-  ): Promise<TaskSnapshot> {
+  ): Promise<ActiveTaskSnapshot> {
     const durableAttachmentIds = [...new Set(attachmentIds)];
     const continuationAttachmentIds = [...new Set(modelAttachmentIds ?? durableAttachmentIds)];
     if (
@@ -1385,81 +1433,52 @@ export class TaskExecutor {
     ) {
       throw new Error('Browser tool attachment references are invalid.');
     }
-    const resultRef = this.#createId('toolResult');
-    const referencedAttachmentIds: string[] = [];
-    try {
-      if (durableAttachmentIds.length > 0) {
-        const attachments = this.#dependencies.attachments;
-        if (!attachments) {
-          throw new Error('Browser tool attachment persistence is unavailable.');
-        }
-        for (const id of durableAttachmentIds) {
-          await attachments.addReference(id, resultRef);
-          referencedAttachmentIds.push(id);
-        }
-      }
-      const completedResult: CompletedToolResult = {
-        callId: pending.callId,
-        toolName: pending.name,
-        argumentsJson: pending.argumentsJson,
-        output,
-        ...(modelOutput === undefined || modelOutput.length >= output.length
-          ? {}
-          : { modelOutput }),
-        resultRef,
-        attachmentIds: durableAttachmentIds,
-      };
-      return await this.#saveBoundary(snapshot, ownerId, signal, {
-        type: 'tool.result-recorded',
-        reason: `${pending.name}_result_recorded`,
-        completedToolResults: [...snapshot.checkpoint.completedToolResults, completedResult],
-        continuationItems: [
-          ...snapshot.checkpoint.continuationItems,
-          {
-            type: 'function_call_output_ref',
-            callId: pending.callId,
-            resultRef: completedResult.resultRef,
-            attachmentIds: continuationAttachmentIds,
-          },
-        ],
-        pendingToolCall: null,
-        browserToolCallsInAttempt:
-          (snapshot.checkpoint.browserToolCallsInAttempt ?? 0) +
-          (pending.name.startsWith('browser_') ? 1 : 0),
-        ...(browserTargetTabId === undefined ? {} : { browserTargetTabId }),
-      });
-    } catch (error) {
-      const attachments = this.#dependencies.attachments;
-      if (attachments && referencedAttachmentIds.length > 0) {
-        await Promise.allSettled(
-          referencedAttachmentIds.map((id) => attachments.removeReference(id, resultRef)),
-        );
-      }
-      throw error;
-    }
+    const resultId = this.#createId('toolResult');
+    const completedResult: MaterializedToolResult = {
+      id: resultId,
+      taskId: snapshot.task.id,
+      runId: snapshot.run.id,
+      callId: pending.callId,
+      toolName: pending.name,
+      argumentsJson: pending.argumentsJson,
+      output,
+      ...(modelOutput === undefined || modelOutput.length >= output.length ? {} : { modelOutput }),
+      attachmentIds: durableAttachmentIds,
+      createdAt: this.#dependencies.clock.now(),
+    };
+    return this.#saveBoundary(snapshot, ownerId, signal, {
+      type: 'tool.result-recorded',
+      reason: `${pending.name}_result_recorded`,
+      toolResults: [...snapshot.toolResults, completedResult],
+      continuationItems: [
+        ...snapshot.checkpoint.continuationItems,
+        {
+          type: 'function_call_output_ref',
+          callId: pending.callId,
+          resultId: completedResult.id,
+          attachmentIds: continuationAttachmentIds,
+        },
+      ],
+      pendingToolCall: null,
+      browserToolCallsInAttempt:
+        (snapshot.checkpoint.browserToolCallsInAttempt ?? 0) +
+        (pending.name.startsWith('browser_') ? 1 : 0),
+      ...(browserTargetTabId === undefined ? {} : { browserTargetTabId }),
+    });
   }
 
-  /** Commits every unconsumed WorkSession supplement before the next model request. */
+  /** Commits every accepted but unconsumed task supplement before the next model request. */
   async #applySupplements(
-    snapshot: TaskSnapshot,
+    snapshot: ActiveTaskSnapshot,
     ownerId: string,
     signal: AbortSignal,
-  ): Promise<TaskSnapshot> {
-    const [messages, tasks] = await Promise.all([
-      this.#dependencies.conversations.listMessages(snapshot.task.conversationId),
-      this.#dependencies.repository.listByConversation(snapshot.task.conversationId),
-    ]);
-    const referencedMessageIds = new Set(
-      snapshot.checkpoint.continuationItems.flatMap((item) =>
-        item.type === 'message_ref' ? [item.messageId] : [],
-      ),
+  ): Promise<ActiveTaskSnapshot> {
+    snapshot = await this.#refreshCurrentAttempt(snapshot);
+    if (!runnableStatuses.has(snapshot.task.status)) return snapshot;
+    const messages = await this.#dependencies.conversations.listMessages(
+      snapshot.task.conversationId,
     );
-    const supplements = selectPendingWorkSessionSupplements(
-      messages,
-      tasks,
-      snapshot.task.workSessionId,
-      referencedMessageIds,
-    );
+    const supplements = selectPendingTaskSupplements(messages, snapshot.events, snapshot.task.id);
     if (supplements.length === 0) return snapshot;
 
     return this.#saveBoundary(snapshot, ownerId, signal, {
@@ -1477,7 +1496,7 @@ export class TaskExecutor {
   }
 
   /** Returns a just-completed reply to the reusable interrupted state without changing its text. */
-  async #interruptReply(task: TaskRun, messageId: string): Promise<void> {
+  async #interruptReply(task: Task, messageId: string): Promise<void> {
     const messages = await this.#dependencies.conversations.listMessages(task.conversationId);
     const message = messages.find(
       (candidate) =>
@@ -1502,13 +1521,18 @@ export class TaskExecutor {
 
   /** Persists progress events while collecting exactly one outcome for one model response. */
   async #planOne(
-    snapshot: TaskSnapshot,
+    snapshot: ActiveTaskSnapshot,
     signal: AbortSignal,
     onReasoningSummary: (summary: string) => Promise<void>,
   ): Promise<AgentOutcome> {
     let result: AgentOutcome | null = null;
     for await (const event of this.#dependencies.planner.plan(
-      { task: snapshot.task, checkpoint: snapshot.checkpoint },
+      {
+        task: snapshot.task,
+        events: snapshot.events,
+        checkpoint: snapshot.checkpoint,
+        toolResults: snapshot.toolResults,
+      },
       signal,
     )) {
       throwIfAborted(signal);
@@ -1552,13 +1576,13 @@ export class TaskExecutor {
   }
 
   async #handleSandboxFailure(
-    snapshot: TaskSnapshot,
+    snapshot: ActiveTaskSnapshot,
     ownerId: string,
     signal: AbortSignal,
     pending: PendingToolCall,
     call: ReturnType<typeof parseSandboxToolCall>,
     error: unknown,
-  ): Promise<TaskSnapshot> {
+  ): Promise<ActiveTaskSnapshot> {
     if (signal.aborted || isAbortError(error)) throw error;
     if (!(error instanceof SandboxClientError)) {
       return this.#handleFailure(snapshot, ownerId, signal, error, 'sandbox');
@@ -1612,12 +1636,12 @@ export class TaskExecutor {
 
   /** Converts one safe model or Tavily failure into its durable task boundary. */
   async #handleFailure(
-    snapshot: TaskSnapshot,
+    snapshot: ActiveTaskSnapshot,
     ownerId: string,
     signal: AbortSignal,
     error: unknown,
     source: 'model' | 'tavily' | 'browser' | 'sandbox',
-  ): Promise<TaskSnapshot> {
+  ): Promise<ActiveTaskSnapshot> {
     if (signal.aborted || isAbortError(error)) throw error;
     if (error instanceof TaskExecutorError && error.code === 'PLANNER_RESULT_INVALID') {
       return this.#saveBoundary(snapshot, ownerId, signal, {
@@ -1661,24 +1685,65 @@ export class TaskExecutor {
     });
   }
 
-  async #loadSnapshot(taskId: TaskId): Promise<TaskSnapshot> {
-    const task = await this.#dependencies.repository.get(taskId);
-    if (task === undefined) throw new TaskExecutorError('TASK_NOT_FOUND', 'Task does not exist.');
-    if (task.checkpointId === null) {
+  async #loadSnapshot(taskId: TaskId): Promise<ActiveTaskSnapshot> {
+    const snapshot = await this.#dependencies.repository.readActiveRuntimeSnapshot(taskId);
+    if (snapshot === undefined) {
+      throw new TaskExecutorError('TASK_NOT_FOUND', 'Task does not exist.');
+    }
+    if (snapshot.run.checkpointId === null) {
       throw new TaskExecutorError('CHECKPOINT_NOT_FOUND', 'Task checkpoint is missing.');
     }
-    const [checkpoint, events] = await Promise.all([
-      this.#dependencies.repository.getCheckpoint(task.checkpointId),
-      this.#dependencies.repository.listEvents(taskId),
-    ]);
-    if (checkpoint === undefined) {
+    if (snapshot.checkpoint === undefined) {
       throw new TaskExecutorError('CHECKPOINT_NOT_FOUND', 'Task checkpoint is missing.');
     }
-    return { task, checkpoint, events };
+    return {
+      task: snapshot.task,
+      run: snapshot.run,
+      checkpoint: snapshot.checkpoint,
+      events: snapshot.events,
+      toolResults: snapshot.toolResults,
+    };
+  }
+
+  /** Reloads durable events written during a model turn without crossing attempt boundaries. */
+  async #refreshCurrentAttempt(snapshot: ActiveTaskSnapshot): Promise<ActiveTaskSnapshot> {
+    const delta = await this.#dependencies.repository.readActiveRuntimeDelta(
+      snapshot.task.id,
+      snapshot.task.lastEventSequence,
+    );
+    if (
+      delta === undefined ||
+      delta.run.id !== snapshot.run.id ||
+      delta.checkpoint?.id !== snapshot.checkpoint.id
+    ) {
+      throw new TaskExecutorError(
+        'TASK_STATE_STALE',
+        'Task attempt changed while preparing the next model request.',
+      );
+    }
+    return {
+      task: delta.task,
+      run: delta.run,
+      checkpoint: delta.checkpoint,
+      events: [...snapshot.events, ...delta.events],
+      toolResults: snapshot.toolResults,
+    };
   }
 
   async #saveBoundary(
-    snapshot: TaskSnapshot,
+    snapshot: ActiveTaskSnapshot,
+    ownerId: string,
+    signal: AbortSignal,
+    input: BoundaryInput & { readonly type: 'task.completed' },
+  ): Promise<TaskSnapshot>;
+  async #saveBoundary(
+    snapshot: ActiveTaskSnapshot,
+    ownerId: string,
+    signal: AbortSignal,
+    input: BoundaryInput,
+  ): Promise<ActiveTaskSnapshot>;
+  async #saveBoundary(
+    snapshot: ActiveTaskSnapshot,
     ownerId: string,
     signal: AbortSignal,
     input: BoundaryInput,
@@ -1687,37 +1752,112 @@ export class TaskExecutor {
     const now = this.#dependencies.clock.now();
     const renewed = await this.#leases.renew(snapshot.task.id, ownerId, now);
     if (!renewed) throw new TaskExecutorError('TASK_BUSY', 'Task lease was lost.');
-    const current = await this.#dependencies.repository.get(snapshot.task.id);
-    if (current?.checkpointId !== snapshot.checkpoint.id) {
+    const current = await this.#refreshCurrentAttempt(snapshot);
+    const currentTask = current.task;
+    const currentRun = current.run;
+    const currentCheckpoint = current.checkpoint;
+    if (
+      currentTask.latestRunId !== snapshot.run.id ||
+      currentRun.checkpointId !== snapshot.checkpoint.id ||
+      currentCheckpoint.id !== snapshot.checkpoint.id
+    ) {
       throw new TaskExecutorError('TASK_STATE_STALE', 'Task changed during execution.');
     }
 
-    const transitioned = transitionTask(
-      { ...snapshot.task, lease: current.lease },
-      {
-        type: input.type,
-        at: now,
-        reason: input.reason,
-        ...(input.error === undefined ? {} : { error: input.error }),
-      },
-    );
-    const checkpointId = this.#createId('checkpoint');
-    const task: TaskRun = { ...transitioned, checkpointId };
-    const sequence = (snapshot.events.at(-1)?.sequence ?? 0) + 1;
-    const event: TaskEvent = {
-      id: this.#createId('event'),
-      taskId: task.id,
-      sequence,
+    const transitioned = transitionTask(currentTask, currentRun, {
       type: input.type,
-      reason: input.reason,
       at: now,
-      error: input.error ?? null,
-      ...(input.reasoningSummary === undefined ? {} : { reasoningSummary: input.reasoningSummary }),
-      ...(input.modelTurn === undefined ? {} : { modelTurn: input.modelTurn }),
-      ...(input.supplementIds === undefined ? {} : { supplementIds: [...input.supplementIds] }),
-    };
+      reason: input.reason,
+      ...(input.error === undefined ? {} : { error: input.error }),
+    });
+    const nextToolResults = input.toolResults ?? current.toolResults;
+    const previousResultIds = new Set(current.toolResults.map((result) => result.id));
+    const newResults = nextToolResults.filter((result) => !previousResultIds.has(result.id));
+    const canonicalResults: ToolResult[] = newResults.map((result) => ({
+      id: result.id,
+      taskId: result.taskId,
+      runId: result.runId,
+      callId: result.callId,
+      toolName: result.toolName,
+      output: result.output,
+      ...(result.modelOutput === undefined ? {} : { modelOutput: result.modelOutput }),
+      attachmentIds: result.attachmentIds,
+      createdAt: result.createdAt,
+    }));
+
+    let sequence = currentTask.lastEventSequence;
+    const eventBase = () => ({
+      id: this.#createId('event'),
+      taskId: currentTask.id,
+      runId: currentRun.id,
+      sequence: (sequence += 1),
+      at: now,
+    });
+    const events: TaskEvent[] = [];
+    if (input.modelTurn !== undefined) {
+      events.push({ ...eventBase(), type: 'model.turn', metrics: input.modelTurn });
+    }
+    if (input.type === 'reasoning.summary-recorded') {
+      if (input.reasoningSummary === undefined) {
+        throw new TaskExecutorError('TASK_STATE_STALE', 'Reasoning summary is missing.');
+      }
+      events.push({ ...eventBase(), type: 'reasoning.summary', summary: input.reasoningSummary });
+    } else if (input.type === 'tool.call-recorded') {
+      const pending = input.pendingToolCall;
+      if (pending === undefined || pending === null) {
+        throw new TaskExecutorError('TASK_STATE_STALE', 'Recorded tool call is missing.');
+      }
+      events.push({
+        ...eventBase(),
+        type: 'tool.call',
+        callId: pending.callId,
+        name: pending.name,
+        argumentsJson: pending.argumentsJson,
+      });
+    } else if (input.type === 'tool.execution-started') {
+      const pending = input.pendingToolCall ?? currentCheckpoint.pendingToolCall;
+      if (pending === null || pending === undefined) {
+        throw new TaskExecutorError('TASK_STATE_STALE', 'Dispatched tool call is missing.');
+      }
+      events.push({ ...eventBase(), type: 'tool.dispatched', callId: pending.callId });
+    } else if (input.type === 'tool.result-recorded') {
+      const result = newResults.at(-1);
+      if (result === undefined) {
+        throw new TaskExecutorError('TASK_STATE_STALE', 'Recorded tool result is missing.');
+      }
+      events.push({
+        ...eventBase(),
+        type: 'tool.result',
+        callId: result.callId,
+        resultId: result.id,
+      });
+    } else if (input.type === 'task.supplements-applied') {
+      for (const messageId of input.supplementIds ?? []) {
+        events.push({ ...eventBase(), type: 'supplement.applied', messageId });
+      }
+    } else if (input.type === 'task.context-compacted') {
+      events.push({
+        ...eventBase(),
+        type: 'context.compacted',
+        releasedTextCharacters: 0,
+        releasedImages: 0,
+      });
+    } else {
+      events.push({
+        ...eventBase(),
+        type: 'status.changed',
+        taskStatus: transitioned.task.status,
+        runStatus: transitioned.run.status,
+        reason: input.reason,
+        error: input.error ?? transitioned.run.error,
+      });
+    }
+    if (events.length === 0) {
+      throw new TaskExecutorError('TASK_STATE_STALE', 'Task boundary produced no event.');
+    }
+
     const { lastModelInputTokens: previousLastModelInputTokens, ...previousCheckpoint } =
-      snapshot.checkpoint;
+      currentCheckpoint;
     const lastModelInputTokens =
       input.lastModelInputTokens === null
         ? undefined
@@ -1726,32 +1866,53 @@ export class TaskExecutor {
           previousLastModelInputTokens);
     const checkpoint: Checkpoint = {
       ...previousCheckpoint,
-      id: checkpointId,
-      sequence,
-      taskStatus: task.status,
-      completedToolResults: input.completedToolResults ?? snapshot.checkpoint.completedToolResults,
-      continuationItems: input.continuationItems ?? snapshot.checkpoint.continuationItems,
+      continuationItems: input.continuationItems ?? currentCheckpoint.continuationItems,
       pendingToolCall:
         input.pendingToolCall === undefined
-          ? snapshot.checkpoint.pendingToolCall
+          ? currentCheckpoint.pendingToolCall
           : input.pendingToolCall,
       ...(lastModelInputTokens === undefined ? {} : { lastModelInputTokens }),
       browserToolCallsInAttempt:
-        input.browserToolCallsInAttempt ?? snapshot.checkpoint.browserToolCallsInAttempt ?? 0,
+        input.browserToolCallsInAttempt ?? currentCheckpoint.browserToolCallsInAttempt ?? 0,
       ...(input.browserTargetTabId === undefined
         ? {}
         : { browserTargetTabId: input.browserTargetTabId }),
-      createdAt: now,
+    };
+    const completed = input.type === 'task.completed';
+    const task: Task = { ...transitioned.task, lastEventSequence: sequence };
+    const run: TaskRun = {
+      ...transitioned.run,
+      checkpointId: completed ? null : checkpoint.id,
     };
     await this.#dependencies.repository.saveTransition({
       task,
-      event,
+      run,
+      events,
       checkpoint,
+      ...(completed
+        ? {
+            deleteCheckpoint: true,
+          }
+        : {}),
+      ...(canonicalResults.length === 0 ? {} : { toolResults: canonicalResults }),
     });
     if (input.type === 'task.failed') {
       await retainTaskReply(task, 'error', this.#dependencies);
+      return this.#refreshCurrentAttempt({
+        task,
+        run,
+        checkpoint,
+        events: [...current.events, ...events],
+        toolResults: nextToolResults,
+      });
     }
-    return { task, checkpoint, events: [...snapshot.events, event] };
+    return {
+      task,
+      run,
+      checkpoint: completed ? null : checkpoint,
+      events: [...current.events, ...events],
+      toolResults: nextToolResults,
+    };
   }
 
   #createId(prefix: string): string {

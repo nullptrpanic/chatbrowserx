@@ -364,12 +364,16 @@ describe('MessageItem', () => {
         t={t}
         task={{
           id: 'task_error',
+          detailLevel: 'full',
           status: 'failed',
           goal: 'Failed request',
           tabId: 7,
           createdAt: 1_000,
           updatedAt: 1_000,
           sequence: 1,
+          completedToolCallCount: 0,
+          detailItemCount: 0,
+          contextCleared: false,
           lastError: {
             code: 'TaskInputError',
             retryable: false,
@@ -383,7 +387,7 @@ describe('MessageItem', () => {
               at: 1_000,
             },
           ],
-          completedToolResults: [],
+          toolResults: [],
           supplements: [],
         }}
         taskInteractive
@@ -448,15 +452,19 @@ describe('MessageItem', () => {
     };
     const task = {
       id: 'task_cancelled',
+      detailLevel: 'full' as const,
       status: 'cancelled' as const,
       goal: 'Cancelled task',
       tabId: 7,
       createdAt: 1_000,
       updatedAt: 1_100,
       sequence: 2,
+      completedToolCallCount: 0,
+      detailItemCount: 0,
+      contextCleared: false,
       lastError: null,
       events: [],
-      completedToolResults: [],
+      toolResults: [],
       supplements: [],
     };
     const { rerender } = render(

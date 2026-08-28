@@ -8,6 +8,7 @@ import { App } from '../../src/side-panel/App';
 /** Builds the minimal complete panel snapshot rendered by the conversation-first shell. */
 function buildSnapshot(): PanelSnapshot {
   return {
+    stateVersion: 1,
     generatedAt: 1_000,
     tab: {
       id: 7,
@@ -73,7 +74,9 @@ describe('App background connection', () => {
 
     render(<App runtimePort={{ send }} environment={environment} attachmentClient={attachments} />);
     await user.click(await screen.findByRole('button', { name: '设置' }));
-    const input = await screen.findByRole('spinbutton', { name: '历史消息条数' });
+    const input = await screen.findByRole('spinbutton', {
+      name: '历史消息条数',
+    });
     await user.clear(input);
     await user.type(input, '24');
     await user.click(screen.getByRole('button', { name: '保存设置' }));
@@ -173,7 +176,9 @@ describe('App background connection', () => {
     expect(tokenInput).toHaveAttribute('type', 'password');
     expect(tavilyInput).toHaveAttribute('type', 'password');
 
-    const showTokenButton = screen.getAllByRole('button', { name: '显示密钥' })[0];
+    const showTokenButton = screen.getAllByRole('button', {
+      name: '显示密钥',
+    })[0];
     if (showTokenButton === undefined) throw new Error('Token reveal button is missing.');
     await user.click(showTokenButton);
     expect(tokenInput).toHaveAttribute('type', 'text');
@@ -283,7 +288,10 @@ describe('App background connection', () => {
             version: 1,
             requestId: message.requestId,
             ok: false,
-            error: { code: 'COMMAND_FAILED', message: 'Settings could not be loaded.' },
+            error: {
+              code: 'COMMAND_FAILED',
+              message: 'Settings could not be loaded.',
+            },
           }
         : {
             version: 1,
@@ -363,7 +371,9 @@ describe('App background connection', () => {
       />,
     );
 
-    const consoleButton = await screen.findByRole('button', { name: '沙箱控制台' });
+    const consoleButton = await screen.findByRole('button', {
+      name: '沙箱控制台',
+    });
     expect(consoleButton).toBeEnabled();
     const clearButton = screen.getByRole('button', { name: '清空当前对话' });
     expect(consoleButton).toHaveClass('sandbox-console-button');
@@ -394,7 +404,10 @@ describe('App background connection', () => {
             version: 1,
             requestId: message.requestId,
             ok: false,
-            error: { code: 'SANDBOX_UNAVAILABLE', message: 'Sandbox is unavailable.' },
+            error: {
+              code: 'SANDBOX_UNAVAILABLE',
+              message: 'Sandbox is unavailable.',
+            },
           }
         : {
             version: 1,
@@ -406,7 +419,9 @@ describe('App background connection', () => {
 
     render(<App runtimePort={{ send }} environment={environment} attachmentClient={attachments} />);
 
-    const consoleButton = await screen.findByRole('button', { name: '沙箱控制台' });
+    const consoleButton = await screen.findByRole('button', {
+      name: '沙箱控制台',
+    });
     expect(consoleButton).toBeDisabled();
     expect(consoleButton).toHaveClass('is-unavailable');
     expect(consoleButton.querySelectorAll('svg')).toHaveLength(2);
@@ -457,15 +472,19 @@ describe('App background connection', () => {
     const base = buildSnapshot();
     const task = {
       id: 'task_running',
+      detailLevel: 'full' as const,
       status: 'planning' as const,
       goal: 'Inspect the current layout',
       tabId: 7,
       createdAt: 900,
       updatedAt: 1_000,
       sequence: 1,
+      completedToolCallCount: 0,
+      detailItemCount: 0,
+      contextCleared: false,
       lastError: null,
       events: [{ sequence: 1, type: 'planning.started', reason: 'started', at: 1_000 }],
-      completedToolResults: [],
+      toolResults: [],
       supplements: [],
     };
     const runningSnapshot: PanelSnapshot = {
@@ -539,15 +558,19 @@ describe('App background connection', () => {
       },
       task: {
         id: 'task_1',
+        detailLevel: 'full',
         status: 'paused',
         goal: 'Existing task',
         tabId: 7,
         createdAt: 900,
         updatedAt: 1_000,
         sequence: 1,
+        completedToolCallCount: 0,
+        detailItemCount: 0,
+        contextCleared: false,
         lastError: null,
         events: [{ sequence: 1, type: 'task.paused', reason: 'user_pause', at: 1_000 }],
-        completedToolResults: [],
+        toolResults: [],
         supplements: [],
       },
     };
@@ -615,19 +638,30 @@ describe('App background connection', () => {
       },
       task: {
         id: 'task_1',
+        detailLevel: 'full',
         status: 'failed',
         goal: 'Failed task',
         tabId: 7,
         createdAt: 900,
         updatedAt: 1_000,
         sequence: 1,
+        completedToolCallCount: 0,
+        detailItemCount: 0,
+        contextCleared: false,
         lastError: {
           code: 'TransientProviderError',
           retryable: true,
           userMessage: 'Temporary failure.',
         },
-        events: [{ sequence: 1, type: 'task.failed', reason: 'provider_failure', at: 1_000 }],
-        completedToolResults: [],
+        events: [
+          {
+            sequence: 1,
+            type: 'task.failed',
+            reason: 'provider_failure',
+            at: 1_000,
+          },
+        ],
+        toolResults: [],
         supplements: [],
       },
     };

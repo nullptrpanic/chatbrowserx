@@ -324,10 +324,10 @@ export class CodexEventTranslator {
     }
   }
 
-  /** Verifies that a normal SSE EOF followed a complete model response. */
+  /** Treats a clean transport EOF without a terminal response event as retryable interruption. */
   finish(): void {
     if (!this.#responseCompleted) {
-      throw providerErrorFromCode('INVALID_RESPONSE');
+      throw providerErrorFromCode('TRANSIENT');
     }
   }
 

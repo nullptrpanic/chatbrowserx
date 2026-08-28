@@ -28,14 +28,19 @@ describe('TerminalToolResult', () => {
         result={{
           callId: 'call_sandbox',
           toolName: 'sandbox_exec',
-          argumentsJson: JSON.stringify({ command: 'bash scripts/run.sh', cwd: '/tmp/fixture' }),
+          argumentsJson: JSON.stringify({
+            command: 'bash scripts/run.sh',
+            cwd: '/tmp/fixture',
+          }),
           output: JSON.stringify({
             code: 7,
             stdout: 'partial output\n',
             stderr: 'fixture failed\n',
             truncated: true,
           }),
-          resultRef: 'result_sandbox',
+          resultId: 'result_sandbox',
+          detailIndex: 1,
+          attachmentIds: [],
         }}
         t={t}
       />,
@@ -62,7 +67,9 @@ describe('TerminalToolResult', () => {
           toolName: 'Bash',
           argumentsJson: JSON.stringify({ cmd: 'npm run test:run' }),
           output: '37 tests passed',
-          resultRef: 'result_1',
+          resultId: 'result_1',
+          detailIndex: 1,
+          attachmentIds: [],
         }}
         t={t}
       />,
@@ -92,7 +99,9 @@ describe('TerminalToolResult', () => {
           toolName: 'shell',
           argumentsJson: '<script>alert("unsafe")</script>',
           output: '',
-          resultRef: 'result_2',
+          resultId: 'result_2',
+          detailIndex: 1,
+          attachmentIds: [],
         }}
         t={t}
       />,
@@ -118,7 +127,9 @@ describe('TerminalToolResult', () => {
           toolName: 'bash',
           argumentsJson: JSON.stringify({ cmd: 'npm run test:run' }),
           output: '42 tests passed',
-          resultRef: 'result_copy',
+          resultId: 'result_copy',
+          detailIndex: 1,
+          attachmentIds: [],
         }}
         t={t}
       />,
@@ -152,7 +163,9 @@ describe('TerminalToolResult', () => {
             stderr: 'standard error',
             truncated: false,
           }),
-          resultRef: 'result_sandbox_copy',
+          resultId: 'result_sandbox_copy',
+          detailIndex: 1,
+          attachmentIds: [],
         }}
         t={t}
       />,

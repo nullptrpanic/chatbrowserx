@@ -2,7 +2,7 @@ import { z } from 'zod';
 import type { SettingsStore } from '../persistence/settings-store';
 import type { TrustedStorageAreaPort } from '../persistence/storage-area';
 import type { Clock } from '../shared/time';
-import type { CompletedToolResult } from '../tasks/checkpoint-types';
+import type { MaterializedToolResult } from '../tasks/tool-result-types';
 import type { SandboxClientPort } from './sandbox-client';
 
 const CACHE_KEY = 'sandbox.skillCatalog.v1';
@@ -302,12 +302,12 @@ export function sandboxCatalogInstructions(snapshot: SkillCatalogSnapshot): stri
 }
 
 /** Retains only the latest successfully read catalog Skill for subsequent model turns. */
-export function sandboxCatalogForCompletedTools(
+export function sandboxCatalogForToolResults(
   snapshot: SkillCatalogSnapshot,
-  completedTools: readonly CompletedToolResult[],
+  toolResults: readonly MaterializedToolResult[],
 ): SkillCatalogSnapshot {
-  for (let index = completedTools.length - 1; index >= 0; index -= 1) {
-    const result = completedTools[index];
+  for (let index = toolResults.length - 1; index >= 0; index -= 1) {
+    const result = toolResults[index];
     if (result?.toolName !== 'sandbox_read') continue;
     try {
       const arguments_: unknown = JSON.parse(result.argumentsJson);

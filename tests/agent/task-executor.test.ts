@@ -7,17 +7,20 @@ import type { AgentEvent, AgentPlanInput } from '../../src/agent/execution-types
 import { parseBrowserToolCall } from '../../src/agent/tools/browser-tool-schema';
 import { parseContextCommitToolCall } from '../../src/agent/tools/context-commit-tool-schema';
 import { parseSandboxToolCall } from '../../src/agent/tools/sandbox-tool-schema';
-import { parseTaskResultToolCall } from '../../src/agent/tools/task-result-tool-schema';
 import type { BrowserExecutionPort } from '../../src/browser/browser-execution-types';
 import { openChatBrowserDatabase } from '../../src/persistence/open-database';
-import { IndexedDbConversationRepository } from '../../src/persistence/conversation-repository';
+import {
+  IndexedDbConversationRepository,
+  type ConversationRepository,
+} from '../../src/persistence/conversation-repository';
 import { IndexedDbTaskRepository } from '../../src/persistence/task-repository';
 import { providerErrorFromCode } from '../../src/providers/provider-errors';
 import type { TavilyExecutionPort } from '../../src/providers/tavily/tavily-types';
 import { SandboxClientError } from '../../src/sandbox/sandbox-client';
 import type { SandboxExecutionPort } from '../../src/sandbox/sandbox-tool-executor';
-import { TaskCommandService } from '../../src/tasks/task-command-service';
-import type { MessageRecord } from '../../src/tasks/message-types';
+import { TaskCommandService as DurableTaskCommandService } from '../../src/tasks/task-command-service';
+import type { CreateTaskInput } from '../../src/tasks/task-factory';
+import type { MessageRecord, TaskMessageDraft } from '../../src/tasks/message-types';
 import { createTestDatabaseName, seedConversation } from '../persistence/test-helpers';
 
 function sources() {
@@ -39,6 +42,85 @@ function sources() {
       }),
     },
   };
+}
+
+/** Creates only valid message-backed submissions after the production empty-task path was removed. */
+type ExecutorConversationStore = Pick<ConversationRepository, 'listMessages'> & {
+  readonly appendMessage?: (message: MessageRecord) => Promise<void>;
+};
+
+class TaskCommandService extends DurableTaskCommandService {
+  readonly #clock: ReturnType<typeof sources>['clock'];
+  readonly #ids: ReturnType<typeof sources>['ids'];
+  readonly #conversations: ExecutorConversationStore;
+
+  constructor(
+    repository: IndexedDbTaskRepository,
+    clock: ReturnType<typeof sources>['clock'],
+    ids: ReturnType<typeof sources>['ids'],
+    conversations: ExecutorConversationStore,
+  ) {
+    super(repository, clock, ids, conversations);
+    this.#clock = clock;
+    this.#ids = ids;
+    this.#conversations = conversations;
+  }
+
+  async create(input: CreateTaskInput & { readonly userMessageId?: string }) {
+    const now = this.#clock.now();
+    const message: TaskMessageDraft = {
+      id: input.userMessageId ?? this.#ids.create('message'),
+      kind: 'conversation',
+      conversationId: input.conversationId,
+      role: 'user',
+      status: 'complete',
+      text: input.goal,
+      attachmentIds: [],
+      createdAt: now,
+      updatedAt: now,
+    };
+    const conversation = {
+      id: input.conversationId,
+      tabId: input.tabId,
+      title: input.goal,
+      createdAt: now,
+      updatedAt: now,
+    };
+    const submit = (createConversation: boolean) =>
+      this.createSubmission({ ...input, conversation, createConversation, message });
+    let snapshot;
+    try {
+      snapshot = await submit(true);
+    } catch (error) {
+      if (!(error instanceof Error) || error.message !== 'Conversation already exists.') {
+        throw error;
+      }
+      snapshot = await submit(false);
+    }
+    if (
+      this.#conversations.appendMessage !== undefined &&
+      !(await this.#conversations.listMessages(input.conversationId)).some(
+        ({ id }) => id === message.id,
+      )
+    ) {
+      await this.#conversations.appendMessage({ ...message, taskId: snapshot.task.id });
+    }
+    return snapshot;
+  }
+}
+
+async function seedExecutorConversation(
+  database: Awaited<ReturnType<typeof openChatBrowserDatabase>>,
+  title = 'Executor test',
+): Promise<void> {
+  if ((await database.get('conversations', 'conversation_1')) !== undefined) return;
+  await seedConversation(database, {
+    id: 'conversation_1',
+    tabId: 7,
+    title,
+    createdAt: 1_000,
+    updatedAt: 1_000,
+  });
 }
 
 function tavilyPort(overrides: Partial<TavilyExecutionPort> = {}): TavilyExecutionPort {
@@ -115,17 +197,6 @@ function sandboxCall(callId: string, name: string, arguments_: unknown): AgentEv
   };
 }
 
-function taskResultCall(callId: string, name: string, arguments_: unknown): AgentEvent {
-  return {
-    type: 'task-result.call',
-    call: parseTaskResultToolCall({
-      callId,
-      name,
-      argumentsJson: JSON.stringify(arguments_),
-    }),
-  };
-}
-
 async function runBrowserProgressScenario(
   databaseName: string,
   calls: readonly AgentEvent[],
@@ -133,6 +204,7 @@ async function runBrowserProgressScenario(
   configure?: (context: {
     readonly taskId: string;
     readonly appendMessage: (message: MessageRecord) => Promise<void>;
+    readonly appendSupplement: (message: MessageRecord) => Promise<void>;
     readonly now: () => number;
   }) => void,
 ) {
@@ -153,6 +225,10 @@ async function runBrowserProgressScenario(
   configure?.({
     taskId: created.task.id,
     appendMessage: dependencies.conversations.appendMessage,
+    appendSupplement: async (message) => {
+      await commands.appendSupplement(message);
+      await dependencies.conversations.appendMessage(message);
+    },
     now: dependencies.clock.now,
   });
   let turn = 0;
@@ -189,10 +265,8 @@ async function runBrowserProgressScenario(
 }
 
 describe('TaskExecutor', () => {
-  it('records historical result search and read calls without external dispatch', async () => {
-    const database = await openChatBrowserDatabase(
-      createTestDatabaseName('historical-tool-result-dispatch'),
-    );
+  it('loads the full runtime snapshot only once during a text-only execution', async () => {
+    const database = await openChatBrowserDatabase(createTestDatabaseName('runtime-delta-loop'));
     const repository = new IndexedDbTaskRepository(database);
     const dependencies = sources();
     const commands = new TaskCommandService(
@@ -204,106 +278,32 @@ describe('TaskExecutor', () => {
     const created = await commands.create({
       conversationId: 'conversation_1',
       tabId: 7,
-      goal: 'Use exact evidence from a previous task',
+      goal: 'Complete without rereading the full event stream',
     });
-    let turn = 0;
-    const planner = {
-      plan: () =>
-        (async function* () {
-          turn += 1;
-          if (turn === 1) {
-            yield taskResultCall('call_search_history', 'task_result_search', {
-              scope: 'previous_task',
-              taskId: null,
-              query: 'response body',
-              toolName: 'browser_network_get',
-              limit: 5,
-            });
-          } else if (turn === 2) {
-            yield taskResultCall('call_read_history', 'task_result_read', {
-              evidenceId: 'toolResult_previous',
-              offset: 0,
-              limit: 2_000,
-            });
-          } else {
+    const fullSnapshotReads = vi.spyOn(repository, 'readActiveRuntimeSnapshot');
+    const executor = new TaskExecutor({
+      repository,
+      conversations: dependencies.conversations,
+      planner: {
+        plan: () =>
+          (async function* () {
             yield {
               type: 'task.completed',
               reason: 'model_response_completed',
               messageId: 'message_answer',
             } as const;
-          }
-        })(),
-    };
-    const search = vi.fn(async () => ({
-      ok: true as const,
-      results: [
-        {
-          evidenceId: 'toolResult_previous',
-          taskId: 'task_previous',
-          taskStatus: 'completed' as const,
-          toolName: 'browser_network_get',
-          summary: 'HTTP 200',
-          summaryKind: 'derived' as const,
-          outputLength: 8,
-          contentState: 'complete' as const,
-          recordedAt: 900,
-        },
-      ],
-    }));
-    const read = vi.fn(async () => ({
-      ok: true as const,
-      evidenceId: 'toolResult_previous',
-      taskId: 'task_previous',
-      taskStatus: 'completed' as const,
-      toolName: 'browser_network_get',
-      content: 'HTTP 200',
-      offset: 0,
-      returnedLength: 8,
-      totalLength: 8,
-      hasMore: false,
-      contentState: 'complete' as const,
-      contentSource: 'stored_tool_output' as const,
-    }));
-    const tavily = tavilyPort();
-    const browser = browserPort();
-    const sandboxExecute = vi.fn<SandboxExecutionPort['execute']>();
-    const executor = new TaskExecutor({
-      repository,
-      conversations: dependencies.conversations,
-      planner,
-      tavily,
-      browser,
-      sandbox: { execute: sandboxExecute, recover: vi.fn() },
-      historicalResults: { hasEvidence: vi.fn(async () => true), search, read },
+          })(),
+      },
+      tavily: tavilyPort(),
+      browser: browserPort(),
       clock: dependencies.clock,
       ids: dependencies.ids,
     });
 
-    const result = await executor.run(created.task.id, new AbortController().signal);
-
-    expect(search).toHaveBeenCalledWith(
-      { conversationId: 'conversation_1', currentTaskId: created.task.id },
-      {
-        scope: 'previous_task',
-        taskId: null,
-        query: 'response body',
-        toolName: 'browser_network_get',
-        limit: 5,
-      },
-    );
-    expect(read).toHaveBeenCalledWith(
-      { conversationId: 'conversation_1', currentTaskId: created.task.id },
-      { evidenceId: 'toolResult_previous', offset: 0, limit: 2_000 },
-    );
-    expect(tavily.search).not.toHaveBeenCalled();
-    expect(browser.execute).not.toHaveBeenCalled();
-    expect(sandboxExecute).not.toHaveBeenCalled();
-    expect(
-      result.checkpoint.completedToolResults.map(({ toolName, output }) => [toolName, output]),
-    ).toEqual([
-      ['task_result_search', JSON.stringify(await search.mock.results[0]?.value)],
-      ['task_result_read', JSON.stringify(await read.mock.results[0]?.value)],
-    ]);
+    await expect(
+      executor.run(created.task.id, new AbortController().signal),
+    ).resolves.toMatchObject({ task: { status: 'completed' } });
+    expect(fullSnapshotReads).toHaveBeenCalledOnce();
     database.close();
   });
 
@@ -385,11 +385,11 @@ describe('TaskExecutor', () => {
       { code: 'ABORTED' },
     );
     const interrupted = await commands.getSnapshot(created.task.id);
-    expect(interrupted.checkpoint.pendingToolCall).toMatchObject({
+    expect(interrupted.checkpoint?.pendingToolCall).toMatchObject({
       callId: 'call_search',
       name: 'tavily_search',
     });
-    expect(interrupted.checkpoint.continuationItems.at(-1)).toMatchObject({
+    expect(interrupted.checkpoint?.continuationItems.at(-1)).toMatchObject({
       type: 'function_call',
       callId: 'call_search',
       modelOutputItems: [
@@ -400,181 +400,29 @@ describe('TaskExecutor', () => {
         },
       ],
     });
-    expect(interrupted.checkpoint.lastModelInputTokens).toBe(120);
-    expect(interrupted.events.at(-1)?.modelTurn).toEqual({
-      inputItemCount: 1,
-      elapsedMs: 25,
-      firstEventMs: 4,
-      firstTextMs: 10,
-      inputTokens: 120,
-      outputTokens: 15,
-      totalTokens: 135,
-      cachedInputTokens: 80,
+    expect(interrupted.checkpoint?.lastModelInputTokens).toBe(120);
+    expect(interrupted.events.findLast(({ type }) => type === 'model.turn')).toMatchObject({
+      type: 'model.turn',
+      metrics: {
+        inputItemCount: 1,
+        elapsedMs: 25,
+        firstEventMs: 4,
+        firstTextMs: 10,
+        inputTokens: 120,
+        outputTokens: 15,
+        totalTokens: 135,
+        cachedInputTokens: 80,
+      },
     });
 
     const recovered = await executor.run(created.task.id, new AbortController().signal);
 
     expect(recovered.task.status).toBe('completed');
-    expect(recovered.events.map(({ type }) => type)).toEqual([
-      'planning.started',
-      'tool.call-recorded',
-      'tool.result-recorded',
-      'task.completed',
-    ]);
+    expect(recovered.events.map(({ type }) => type)).toEqual(
+      expect.arrayContaining(['model.turn', 'tool.call', 'tool.result', 'status.changed']),
+    );
     expect(plan).toHaveBeenCalledTimes(2);
     expect(tavily.search).toHaveBeenCalledTimes(2);
-    database.close();
-  });
-
-  it('safely completes a legacy recorded pending context commit after executor restart', async () => {
-    const database = await openChatBrowserDatabase(
-      createTestDatabaseName('pending-context-commit-resume'),
-    );
-    const repository = new IndexedDbTaskRepository(database);
-    const dependencies = sources();
-    const commands = new TaskCommandService(
-      repository,
-      dependencies.clock,
-      dependencies.ids,
-      dependencies.conversations,
-    );
-    const created = await commands.create({
-      conversationId: 'conversation_1',
-      tabId: 7,
-      goal: 'Resume a context commit',
-      userMessageId: 'message_user',
-    });
-    const recordedAt = created.task.updatedAt;
-    const planningCheckpoint = {
-      ...created.checkpoint,
-      id: 'checkpoint_planning_commit',
-      sequence: 1,
-      taskStatus: 'planning' as const,
-      createdAt: recordedAt,
-    };
-    await repository.saveTransition({
-      task: {
-        ...created.task,
-        status: 'planning',
-        checkpointId: planningCheckpoint.id,
-        updatedAt: recordedAt,
-      },
-      event: {
-        id: 'event_planning_commit',
-        taskId: created.task.id,
-        sequence: 1,
-        type: 'planning.started',
-        reason: 'model_request_started',
-        at: recordedAt,
-        error: null,
-      },
-      checkpoint: planningCheckpoint,
-    });
-    const argumentsJson = JSON.stringify({
-      state: 'Search completed. Next: answer.',
-    });
-    const pendingCheckpoint = {
-      ...planningCheckpoint,
-      id: 'checkpoint_pending_commit',
-      sequence: 2,
-      completedToolResults: [
-        {
-          callId: 'call_search',
-          toolName: 'tavily_search',
-          argumentsJson: JSON.stringify(SEARCH_ARGUMENTS),
-          output: '{"ok":true,"results":[],"truncated":false}',
-          resultRef: 'result_search',
-          attachmentIds: [],
-        },
-      ],
-      continuationItems: [
-        { type: 'message_ref' as const, messageId: 'message_user' },
-        {
-          type: 'function_call' as const,
-          callId: 'call_search',
-          name: 'tavily_search',
-          argumentsJson: JSON.stringify(SEARCH_ARGUMENTS),
-        },
-        {
-          type: 'function_call_output' as const,
-          callId: 'call_search',
-          output: '{"ok":true,"results":[],"truncated":false}',
-          resultRef: 'result_search',
-          attachmentIds: [],
-        },
-        {
-          type: 'function_call' as const,
-          callId: 'call_commit',
-          name: 'commit_context',
-          argumentsJson,
-        },
-      ],
-      pendingToolCall: {
-        callId: 'call_commit',
-        name: 'commit_context',
-        argumentsJson,
-        executionState: 'recorded' as const,
-      },
-      createdAt: recordedAt,
-    };
-    await repository.saveTransition({
-      task: {
-        ...created.task,
-        status: 'planning',
-        checkpointId: pendingCheckpoint.id,
-        updatedAt: recordedAt,
-      },
-      event: {
-        id: 'event_pending_commit',
-        taskId: created.task.id,
-        sequence: 2,
-        type: 'tool.call-recorded',
-        reason: 'commit_context_call_recorded',
-        at: recordedAt,
-        error: null,
-      },
-      checkpoint: pendingCheckpoint,
-    });
-    const plan = vi.fn(() =>
-      (async function* () {
-        yield {
-          type: 'task.completed',
-          reason: 'model_response_completed',
-          messageId: 'message_answer',
-        } as const;
-      })(),
-    );
-    const tavily = tavilyPort();
-    const browser = browserPort();
-    const executor = new TaskExecutor({
-      repository,
-      conversations: dependencies.conversations,
-      planner: { plan },
-      tavily,
-      browser,
-      clock: dependencies.clock,
-      ids: dependencies.ids,
-    });
-
-    const recovered = await executor.run(created.task.id, new AbortController().signal);
-
-    expect(recovered.task.status).toBe('completed');
-    expect(recovered.events.map(({ type }) => type)).toEqual([
-      'planning.started',
-      'tool.call-recorded',
-      'tool.result-recorded',
-      'task.completed',
-    ]);
-    expect(recovered.events).not.toContainEqual(
-      expect.objectContaining({ type: 'tool.execution-started' }),
-    );
-    expect(recovered.checkpoint.completedToolResults.map(({ toolName }) => toolName)).toEqual([
-      'tavily_search',
-      'commit_context',
-    ]);
-    expect(plan).toHaveBeenCalledOnce();
-    expect(tavily.search).not.toHaveBeenCalled();
-    expect(browser.execute).not.toHaveBeenCalled();
     database.close();
   });
 
@@ -644,8 +492,8 @@ describe('TaskExecutor', () => {
 
     expect(result.task.status).toBe('completed');
     expect(execute).toHaveBeenCalledOnce();
-    expect(result.checkpoint.completedToolResults).toHaveLength(2);
-    expect(JSON.parse(result.checkpoint.completedToolResults[1]?.output ?? '')).toEqual({
+    expect(result.toolResults).toHaveLength(2);
+    expect(JSON.parse(result.toolResults[1]?.output ?? '')).toEqual({
       ok: false,
       code: 'DUPLICATE_FAILED_ACTION',
       message:
@@ -723,8 +571,8 @@ describe('TaskExecutor', () => {
 
     expect(result.task.status).toBe('completed');
     expect(execute).toHaveBeenCalledOnce();
-    expect(result.checkpoint.completedToolResults).toHaveLength(2);
-    expect(JSON.parse(result.checkpoint.completedToolResults[1]?.output ?? '')).toMatchObject({
+    expect(result.toolResults).toHaveLength(2);
+    expect(JSON.parse(result.toolResults[1]?.output ?? '')).toMatchObject({
       ok: true,
       data: {
         action: 'type',
@@ -825,7 +673,7 @@ describe('TaskExecutor', () => {
     const result = await executor.run(created.task.id, new AbortController().signal);
 
     expect(execute).toHaveBeenCalledTimes(4);
-    expect(JSON.parse(result.checkpoint.completedToolResults.at(-1)?.output ?? '')).toMatchObject({
+    expect(JSON.parse(result.toolResults.at(-1)?.output ?? '')).toMatchObject({
       ok: false,
       code: 'NO_PROGRESS',
       needsInspect: false,
@@ -866,7 +714,7 @@ describe('TaskExecutor', () => {
     );
 
     expect(execute).toHaveBeenCalledTimes(2);
-    expect(JSON.parse(result.checkpoint.completedToolResults.at(-1)?.output ?? '')).toMatchObject({
+    expect(JSON.parse(result.toolResults.at(-1)?.output ?? '')).toMatchObject({
       ok: false,
       code: 'NO_PROGRESS',
       retryable: false,
@@ -929,7 +777,7 @@ describe('TaskExecutor', () => {
       'browser_scroll',
       'browser_inspect',
     ]);
-    expect(JSON.parse(result.checkpoint.completedToolResults.at(-1)?.output ?? '')).toMatchObject({
+    expect(JSON.parse(result.toolResults.at(-1)?.output ?? '')).toMatchObject({
       ok: false,
       code: 'NO_PROGRESS',
       retryable: false,
@@ -981,7 +829,7 @@ describe('TaskExecutor', () => {
     const result = await runBrowserProgressScenario('bounded-scroll-no-progress', calls, execute);
 
     expect(execute).toHaveBeenCalledOnce();
-    expect(JSON.parse(result.checkpoint.completedToolResults.at(-1)?.output ?? '')).toMatchObject({
+    expect(JSON.parse(result.toolResults.at(-1)?.output ?? '')).toMatchObject({
       ok: false,
       code: 'NO_PROGRESS',
       retryable: false,
@@ -1113,21 +961,16 @@ describe('TaskExecutor', () => {
 
     expect(result.task.status).toBe('completed');
     expect(execute).toHaveBeenCalledTimes(4);
-    expect(result.events.filter(({ type }) => type === 'task.completed')).toHaveLength(1);
-    expect(result.checkpoint.continuationItems).toEqual(
+    expect(
+      result.events.filter(
+        (event) => event.type === 'status.changed' && event.taskStatus === 'completed',
+      ),
+    ).toHaveLength(1);
+    expect(result.toolResults.map(({ callId }) => callId)).toEqual(
       expect.arrayContaining([
-        expect.objectContaining({
-          type: 'function_call',
-          callId: 'call_inspect_loaded_batch',
-        }),
-        expect.objectContaining({
-          type: 'function_call',
-          callId: 'call_scroll_remaining',
-        }),
-        expect.objectContaining({
-          type: 'function_call',
-          callId: 'call_inspect_completed_scroll',
-        }),
+        'call_inspect_loaded_batch',
+        'call_scroll_remaining',
+        'call_inspect_completed_scroll',
       ]),
     );
   });
@@ -1187,7 +1030,7 @@ describe('TaskExecutor', () => {
     const result = await runBrowserProgressScenario('verified-selection-replay', calls, execute);
 
     expect(execute).toHaveBeenCalledTimes(2);
-    expect(JSON.parse(result.checkpoint.completedToolResults.at(-1)?.output ?? '')).toMatchObject({
+    expect(JSON.parse(result.toolResults.at(-1)?.output ?? '')).toMatchObject({
       ok: true,
       data: {
         action: 'set_checked',
@@ -1290,7 +1133,7 @@ describe('TaskExecutor', () => {
         checked: true,
       }),
     ];
-    let appendSupplement = async () => undefined;
+    let triggerSupplement = async () => undefined;
     let supplementAdded = false;
     const execute = vi.fn<BrowserExecutionPort['execute']>(async (call) => {
       if (call.operation === 'inspect') {
@@ -1312,7 +1155,7 @@ describe('TaskExecutor', () => {
       const ref = (call.arguments as { readonly ref: string }).ref;
       if (!supplementAdded) {
         supplementAdded = true;
-        await appendSupplement();
+        await triggerSupplement();
       }
       return {
         output: JSON.stringify({
@@ -1340,10 +1183,10 @@ describe('TaskExecutor', () => {
       'supplement-preserves-page-evidence',
       calls,
       execute,
-      ({ taskId, appendMessage, now }) => {
-        appendSupplement = async () => {
+      ({ taskId, appendSupplement: persistSupplement, now }) => {
+        triggerSupplement = async () => {
           const at = now();
-          await appendMessage({
+          await persistSupplement({
             id: 'supplement_progress_detail',
             kind: 'supplement',
             conversationId: 'conversation_1',
@@ -1361,11 +1204,12 @@ describe('TaskExecutor', () => {
 
     expect(result.task.status).toBe('completed');
     expect(execute).toHaveBeenCalledTimes(3);
-    expect(
-      result.checkpoint.continuationItems.some(
-        (item) => item.type === 'message_ref' && item.messageId === 'supplement_progress_detail',
-      ),
-    ).toBe(true);
+    expect(result.events).toContainEqual(
+      expect.objectContaining({
+        type: 'supplement.applied',
+        messageId: 'supplement_progress_detail',
+      }),
+    );
   });
 
   it('retains browser screenshot attachment IDs and gives them a durable result reference', async () => {
@@ -1383,10 +1227,22 @@ describe('TaskExecutor', () => {
       tabId: 7,
       goal: 'Inspect the current page visually',
     });
+    await database.add('attachments', {
+      id: 'attachment_screenshot',
+      blob: new Blob(['image'], { type: 'image/png' }),
+      mimeType: 'image/png',
+      byteSize: 5,
+      width: 1,
+      height: 1,
+      source: 'viewport_capture',
+      createdAt: dependencies.clock.now(),
+    });
     let turn = 0;
+    const inputs: AgentPlanInput[] = [];
     const planner = {
-      plan: () =>
+      plan: (input: AgentPlanInput) =>
         (async function* () {
+          inputs.push(input);
           turn += 1;
           if (turn === 1) {
             yield browserCall('call_screenshot', 'browser_inspect', {
@@ -1402,8 +1258,6 @@ describe('TaskExecutor', () => {
           }
         })(),
     };
-    const addReference = vi.fn(async () => undefined);
-    const removeReference = vi.fn(async () => undefined);
     const release = vi.fn(async () => undefined);
     const executor = new TaskExecutor({
       repository,
@@ -1417,20 +1271,19 @@ describe('TaskExecutor', () => {
         })),
         release,
       }),
-      attachments: { addReference, removeReference },
       clock: dependencies.clock,
       ids: dependencies.ids,
     });
 
     const result = await executor.run(created.task.id, new AbortController().signal);
-    const completed = result.checkpoint.completedToolResults[0];
+    const completed = result.toolResults[0];
 
     expect(completed).toMatchObject({
       callId: 'call_screenshot',
       attachmentIds: ['attachment_screenshot'],
     });
     expect(
-      result.checkpoint.continuationItems.find(
+      inputs[1]?.checkpoint.continuationItems.find(
         (item) => item.type === 'function_call_output_ref' && item.callId === 'call_screenshot',
       ),
     ).toMatchObject({
@@ -1438,8 +1291,12 @@ describe('TaskExecutor', () => {
       callId: 'call_screenshot',
       attachmentIds: ['attachment_screenshot'],
     });
-    expect(addReference).toHaveBeenCalledWith('attachment_screenshot', completed?.resultRef);
-    expect(removeReference).not.toHaveBeenCalled();
+    expect(
+      await database.get('attachment-references', ['attachment_screenshot', completed?.id ?? '']),
+    ).toEqual({
+      attachmentId: 'attachment_screenshot',
+      referenceId: completed?.id,
+    });
     expect(release).toHaveBeenCalledOnce();
     expect(release).toHaveBeenCalledWith(expect.stringMatching(/^runner_/));
     database.close();
@@ -1461,12 +1318,14 @@ describe('TaskExecutor', () => {
       goal: 'Inspect the page without replaying audit-only metadata',
     });
     let turn = 0;
+    const inputs: AgentPlanInput[] = [];
     const executor = new TaskExecutor({
       repository,
       conversations: dependencies.conversations,
       planner: {
-        plan: () =>
+        plan: (input: AgentPlanInput) =>
           (async function* () {
+            inputs.push(input);
             turn += 1;
             if (turn === 1) {
               yield browserCall('call_inspect', 'browser_inspect', {
@@ -1497,11 +1356,11 @@ describe('TaskExecutor', () => {
 
     const result = await executor.run(created.task.id, new AbortController().signal);
 
-    expect(result.checkpoint.completedToolResults[0]).toMatchObject({
+    expect(result.toolResults[0]).toMatchObject({
       output: '{"ok":true,"data":{"full":"audit"}}',
       modelOutput: '{"ok":true,"verified":true}',
     });
-    const continuationOutput = result.checkpoint.continuationItems.find(
+    const continuationOutput = inputs[1]?.checkpoint.continuationItems.find(
       (item) => 'callId' in item && item.callId === 'call_inspect' && item.type !== 'function_call',
     );
     expect(continuationOutput).toMatchObject({
@@ -1528,9 +1387,11 @@ describe('TaskExecutor', () => {
       goal: 'Capture and send the current page',
     });
     let turn = 0;
+    const inputs: AgentPlanInput[] = [];
     const planner = {
-      plan: () =>
+      plan: (input: AgentPlanInput) =>
         (async function* () {
+          inputs.push(input);
           turn += 1;
           if (turn === 1) {
             yield browserCall('call_capture', 'browser_capture_screenshot', {
@@ -1551,19 +1412,29 @@ describe('TaskExecutor', () => {
           }
         })(),
     };
-    const addReference = vi.fn(async () => undefined);
-    const executeBrowser = vi.fn(async (call_) =>
-      call_.operation === 'capture_screenshot'
-        ? {
-            output: '{"ok":true,"assetId":"attachment_capture"}',
-            attachmentIds: ['attachment_capture'],
-            modelAttachmentIds: [],
-          }
-        : {
-            output: '{"ok":true,"pasted":true}',
-            attachmentIds: [],
-          },
-    );
+    const executeBrowser = vi.fn(async (call_) => {
+      if (call_.operation === 'capture_screenshot') {
+        await database.add('attachments', {
+          id: 'attachment_capture',
+          blob: new Blob(['image'], { type: 'image/png' }),
+          mimeType: 'image/png',
+          byteSize: 5,
+          width: 1,
+          height: 1,
+          source: 'viewport_capture',
+          createdAt: dependencies.clock.now(),
+        });
+        return {
+          output: '{"ok":true,"assetId":"attachment_capture"}',
+          attachmentIds: ['attachment_capture'],
+          modelAttachmentIds: [],
+        };
+      }
+      return {
+        output: '{"ok":true,"pasted":true}',
+        attachmentIds: [],
+      };
+    });
     const executor = new TaskExecutor({
       repository,
       conversations: dependencies.conversations,
@@ -1572,17 +1443,13 @@ describe('TaskExecutor', () => {
       browser: browserPort({
         execute: executeBrowser,
       }),
-      attachments: {
-        addReference,
-        removeReference: vi.fn(async () => undefined),
-      },
       clock: dependencies.clock,
       ids: dependencies.ids,
     });
 
     const result = await executor.run(created.task.id, new AbortController().signal);
-    const completed = result.checkpoint.completedToolResults[0];
-    const continuation = result.checkpoint.continuationItems.find(
+    const completed = result.toolResults[0];
+    const continuation = inputs[1]?.checkpoint.continuationItems.find(
       (item) => item.type === 'function_call_output_ref' && item.callId === 'call_capture',
     );
 
@@ -1592,71 +1459,17 @@ describe('TaskExecutor', () => {
       callId: 'call_capture',
       attachmentIds: [],
     });
-    expect(addReference).toHaveBeenCalledWith('attachment_capture', completed?.resultRef);
+    expect(
+      await database.get('attachment-references', ['attachment_capture', completed?.id ?? '']),
+    ).toEqual({
+      attachmentId: 'attachment_capture',
+      referenceId: completed?.id,
+    });
     expect(executeBrowser).toHaveBeenNthCalledWith(
       2,
       expect.objectContaining({ operation: 'paste_image' }),
       expect.any(AbortSignal),
       expect.objectContaining({ availableAssetIds: ['attachment_capture'] }),
-    );
-    database.close();
-  });
-
-  it('rolls back screenshot references when the result checkpoint cannot be saved', async () => {
-    const database = await openChatBrowserDatabase(
-      createTestDatabaseName('browser-screenshot-race'),
-    );
-    const repository = new IndexedDbTaskRepository(database);
-    const dependencies = sources();
-    const commands = new TaskCommandService(
-      repository,
-      dependencies.clock,
-      dependencies.ids,
-      dependencies.conversations,
-    );
-    const created = await commands.create({
-      conversationId: 'conversation_1',
-      tabId: 7,
-      goal: 'Inspect the current page visually',
-    });
-    const originalSaveTransition = repository.saveTransition.bind(repository);
-    vi.spyOn(repository, 'saveTransition').mockImplementation(async (input) => {
-      if (input.event.type === 'tool.result-recorded') throw new Error('synthetic conflict');
-      return originalSaveTransition(input);
-    });
-    const addReference = vi.fn(async () => undefined);
-    const removeReference = vi.fn(async () => undefined);
-    const executor = new TaskExecutor({
-      repository,
-      conversations: dependencies.conversations,
-      planner: {
-        plan: () =>
-          (async function* () {
-            yield browserCall('call_screenshot', 'browser_inspect', {
-              tabId: 7,
-              mode: 'screenshot',
-            });
-          })(),
-      },
-      tavily: tavilyPort(),
-      browser: browserPort({
-        execute: vi.fn(async () => ({
-          output: '{"ok":true,"data":{"mode":"screenshot"}}',
-          attachmentIds: ['attachment_screenshot'],
-        })),
-      }),
-      attachments: { addReference, removeReference },
-      clock: dependencies.clock,
-      ids: dependencies.ids,
-    });
-
-    await expect(executor.run(created.task.id, new AbortController().signal)).rejects.toThrow(
-      'synthetic conflict',
-    );
-    expect(addReference).toHaveBeenCalledOnce();
-    expect(removeReference).toHaveBeenCalledWith(
-      'attachment_screenshot',
-      expect.stringMatching(/^toolResult_/),
     );
     database.close();
   });
@@ -1697,8 +1510,8 @@ describe('TaskExecutor', () => {
     };
     const execute = vi.fn(async () => {
       const dispatchBoundary = await commands.getSnapshot(created.task.id);
-      expect(dispatchBoundary.events.at(-1)?.type).toBe('tool.execution-started');
-      expect(dispatchBoundary.checkpoint.pendingToolCall).toMatchObject({
+      expect(dispatchBoundary.events.at(-1)?.type).toBe('tool.dispatched');
+      expect(dispatchBoundary.checkpoint?.pendingToolCall).toMatchObject({
         callId: 'call_open',
         executionState: 'may_have_dispatched',
       });
@@ -1726,18 +1539,20 @@ describe('TaskExecutor', () => {
       }),
     );
     expect(result.events.map(({ type }) => type)).toEqual([
-      'planning.started',
-      'tool.call-recorded',
-      'tool.execution-started',
-      'tool.result-recorded',
-      'task.completed',
+      'message.recorded',
+      'status.changed',
+      'status.changed',
+      'tool.call',
+      'tool.dispatched',
+      'tool.result',
+      'status.changed',
     ]);
-    expect(result.checkpoint.completedToolResults[0]).toMatchObject({
+    expect(result.toolResults[0]).toMatchObject({
       callId: 'call_open',
       toolName: 'browser_open_tab',
       output: '{"ok":true,"tabId":91}',
     });
-    expect(result.checkpoint.browserTargetTabId).toBe(91);
+    expect(result.checkpoint).toBeNull();
     database.close();
   });
 
@@ -1784,8 +1599,8 @@ describe('TaskExecutor', () => {
     const execute = vi.fn<SandboxExecutionPort['execute']>(async (call) => {
       if (call.operation === 'exec') {
         const dispatchBoundary = await commands.getSnapshot(created.task.id);
-        expect(dispatchBoundary.events.at(-1)?.type).toBe('tool.execution-started');
-        expect(dispatchBoundary.checkpoint.pendingToolCall).toMatchObject({
+        expect(dispatchBoundary.events.at(-1)?.type).toBe('tool.dispatched');
+        expect(dispatchBoundary.checkpoint?.pendingToolCall).toMatchObject({
           callId: 'call_exec',
           executionState: 'may_have_dispatched',
           executionId: expect.stringMatching(/^sandboxExecution_/),
@@ -1809,26 +1624,23 @@ describe('TaskExecutor', () => {
 
     expect(execute).toHaveBeenCalledTimes(2);
     expect(result.events.map(({ type }) => type)).toEqual([
-      'planning.started',
-      'tool.call-recorded',
-      'tool.result-recorded',
-      'tool.call-recorded',
-      'tool.execution-started',
-      'tool.result-recorded',
-      'task.completed',
+      'message.recorded',
+      'status.changed',
+      'status.changed',
+      'tool.call',
+      'tool.result',
+      'tool.call',
+      'tool.dispatched',
+      'tool.result',
+      'status.changed',
     ]);
-    expect(result.checkpoint.completedToolResults.map(({ toolName }) => toolName)).toEqual([
+    expect(result.toolResults.map(({ toolName }) => toolName)).toEqual([
       'sandbox_read',
       'sandbox_exec',
     ]);
     expect(
-      result.checkpoint.continuationItems.filter(
-        (item) => 'callId' in item && item.callId === 'call_exec',
-      ),
-    ).toMatchObject([
-      { type: 'function_call', callId: 'call_exec', name: 'sandbox_exec' },
-      { type: 'function_call_output_ref', callId: 'call_exec' },
-    ]);
+      result.toolResults.filter((item) => 'callId' in item && item.callId === 'call_exec'),
+    ).toMatchObject([{ callId: 'call_exec', toolName: 'sandbox_exec' }]);
     database.close();
   });
 
@@ -1904,8 +1716,7 @@ describe('TaskExecutor', () => {
     expect(recovered.task.status).toBe('completed');
     expect(
       JSON.parse(
-        recovered.checkpoint.completedToolResults.find(({ callId }) => callId === 'call_exec')
-          ?.output ?? '{}',
+        recovered.toolResults.find(({ callId }) => callId === 'call_exec')?.output ?? '{}',
       ),
     ).toEqual({ code: 0, stdout: 'done', stderr: '', truncated: false });
     database.close();
@@ -2035,8 +1846,8 @@ describe('TaskExecutor', () => {
     expect(execute).toHaveBeenCalledOnce();
     expect(recover).toHaveBeenCalledOnce();
     expect(paused.task.status).toBe('paused');
-    expect(paused.checkpoint.completedToolResults).toEqual([]);
-    expect(paused.checkpoint.pendingToolCall).toMatchObject({
+    expect(paused.toolResults).toEqual([]);
+    expect(paused.checkpoint?.pendingToolCall).toMatchObject({
       callId: 'call_exec',
       executionState: 'may_have_dispatched',
       executionId: expect.stringMatching(/^sandboxExecution_/),
@@ -2083,11 +1894,11 @@ describe('TaskExecutor', () => {
     const result = await executor.run(created.task.id, new AbortController().signal);
 
     expect(result.task.status).toBe('waiting_for_auth');
-    expect(result.task.lastError).toMatchObject({
+    expect(result.run.error).toMatchObject({
       code: 'AuthError',
       userMessage: 'Sandbox authentication is required. Update the Sandbox Token in Settings.',
     });
-    expect(result.checkpoint.pendingToolCall).toMatchObject({
+    expect(result.checkpoint?.pendingToolCall).toMatchObject({
       callId: 'call_exec',
       executionState: 'recorded',
     });
@@ -2150,7 +1961,7 @@ describe('TaskExecutor', () => {
 
     expect(result.task.status).toBe('completed');
     expect(result.events.map(({ type }) => type)).not.toContain('task.paused');
-    expect(JSON.parse(result.checkpoint.completedToolResults[0]?.output ?? '{}')).toEqual({
+    expect(JSON.parse(result.toolResults[0]?.output ?? '{}')).toEqual({
       ok: false,
       code: 'SANDBOX_UNAVAILABLE',
       message: 'The Sandbox is temporarily unavailable.',
@@ -2212,12 +2023,12 @@ describe('TaskExecutor', () => {
 
     expect(execute).toHaveBeenCalledOnce();
     expect(result.task.status).toBe('paused');
-    expect(result.task.lastError).toMatchObject({
+    expect(result.run.error).toMatchObject({
       code: 'TransientProviderError',
       retryable: true,
     });
-    expect(result.checkpoint.completedToolResults).toEqual([]);
-    expect(result.checkpoint.pendingToolCall).toMatchObject({
+    expect(result.toolResults).toEqual([]);
+    expect(result.checkpoint?.pendingToolCall).toMatchObject({
       callId: 'call_exec',
       executionState: 'may_have_dispatched',
       executionId: expect.stringMatching(/^sandboxExecution_/),
@@ -2227,6 +2038,7 @@ describe('TaskExecutor', () => {
 
   it('enforces an independent 128-call Sandbox ceiling', async () => {
     const database = await openChatBrowserDatabase(createTestDatabaseName('sandbox-limit'));
+    await seedExecutorConversation(database, 'Sandbox limit');
     const repository = new IndexedDbTaskRepository(database);
     const dependencies = sources();
     const commands = new TaskCommandService(
@@ -2268,12 +2080,12 @@ describe('TaskExecutor', () => {
     const result = await executor.run(created.task.id, new AbortController().signal);
 
     expect(result.task.status).toBe('failed');
-    expect(result.task.lastError).toMatchObject({
+    expect(result.run.error).toMatchObject({
       code: 'ToolCallLimitError',
       userMessage: 'The task exceeded the Sandbox tool-call limit.',
     });
     expect(execute).toHaveBeenCalledTimes(128);
-    expect(result.checkpoint.completedToolResults).toHaveLength(128);
+    expect(result.toolResults).toHaveLength(128);
     database.close();
   });
 
@@ -2341,7 +2153,7 @@ describe('TaskExecutor', () => {
     expect(contexts.map((context) => context?.currentTabId)).toEqual([7, 7, 7]);
     expect(new Set(contexts.map((context) => context?.sessionOwnerId)).size).toBe(1);
     expect(contexts[0]?.sessionOwnerId).toMatch(/^runner_/);
-    expect(result.checkpoint.browserTargetTabId).toBe(7);
+    expect(result.checkpoint).toBeNull();
     database.close();
   });
 
@@ -2413,9 +2225,7 @@ describe('TaskExecutor', () => {
 
     expect(execute).toHaveBeenCalledOnce();
     expect(recovered.task.status).toBe('completed');
-    const ambiguous = recovered.checkpoint.completedToolResults.find(
-      ({ callId }) => callId === 'call_click',
-    );
+    const ambiguous = recovered.toolResults.find(({ callId }) => callId === 'call_click');
     expect(JSON.parse(ambiguous?.output ?? '{}')).toMatchObject({
       ok: false,
       code: 'AMBIGUOUS_MUTATION',
@@ -2467,12 +2277,14 @@ describe('TaskExecutor', () => {
 
     expect(result.task.status).toBe('completed');
     expect(result.events.map((event) => event.type)).toEqual([
-      'planning.started',
-      'reasoning.summary-recorded',
-      'task.completed',
+      'message.recorded',
+      'status.changed',
+      'status.changed',
+      'reasoning.summary',
+      'status.changed',
     ]);
-    expect(result.events[1]).toMatchObject({
-      reasoningSummary: 'Verified the available context.',
+    expect(result.events.find(({ type }) => type === 'reasoning.summary')).toMatchObject({
+      summary: 'Verified the available context.',
     });
     expect(plan).toHaveBeenCalledOnce();
     database.close();
@@ -2494,6 +2306,7 @@ describe('TaskExecutor', () => {
       goal: 'Retry one stalled model response',
     });
     let attempt = 0;
+    const sleep = vi.fn(async () => undefined);
     const plan = vi.fn(() =>
       (async function* () {
         attempt += 1;
@@ -2515,20 +2328,32 @@ describe('TaskExecutor', () => {
       browser: browserPort(),
       clock: dependencies.clock,
       ids: dependencies.ids,
+      sleep,
     });
 
     const result = await executor.run(created.task.id, new AbortController().signal);
 
     expect(result.task.status).toBe('completed');
     expect(result.events.map((event) => event.type)).toEqual([
-      'planning.started',
-      'task.completed',
+      'message.recorded',
+      'status.changed',
+      'status.changed',
+      'status.changed',
+      'status.changed',
     ]);
+    expect(result.events).toContainEqual(
+      expect.objectContaining({
+        type: 'status.changed',
+        reason: 'transient_model_retry:upstream_failure',
+      }),
+    );
+    expect(sleep).toHaveBeenCalledTimes(1);
+    expect(sleep).toHaveBeenCalledWith(500, expect.any(AbortSignal));
     expect(plan).toHaveBeenCalledTimes(2);
     database.close();
   });
 
-  it('keeps a completed reasoning summary and pauses after two transient failures', async () => {
+  it('keeps a completed reasoning summary and pauses after three transient retries', async () => {
     const database = await openChatBrowserDatabase(createTestDatabaseName('reasoning-failure'));
     const repository = new IndexedDbTaskRepository(database);
     const dependencies = sources();
@@ -2544,6 +2369,7 @@ describe('TaskExecutor', () => {
       goal: 'Keep the reasoning summary',
     });
     let attempt = 0;
+    const sleep = vi.fn(async () => undefined);
     const plan = vi.fn(() =>
       (async function* () {
         attempt += 1;
@@ -2564,20 +2390,24 @@ describe('TaskExecutor', () => {
       browser: browserPort(),
       clock: dependencies.clock,
       ids: dependencies.ids,
+      sleep,
     });
 
     const result = await executor.run(created.task.id, new AbortController().signal);
 
     expect(result.task.status).toBe('paused');
-    expect(result.events.map((event) => event.type)).toEqual([
-      'planning.started',
-      'reasoning.summary-recorded',
-      'task.paused',
-    ]);
-    expect(result.events[1]).toMatchObject({
-      reasoningSummary: 'Checked the source before the outage.',
+    expect(
+      result.events.filter(
+        (event) =>
+          event.type === 'status.changed' &&
+          event.reason === 'transient_model_retry:upstream_failure',
+      ),
+    ).toHaveLength(3);
+    expect(result.events.find(({ type }) => type === 'reasoning.summary')).toMatchObject({
+      summary: 'Checked the source before the outage.',
     });
-    expect(plan).toHaveBeenCalledTimes(2);
+    expect(plan).toHaveBeenCalledTimes(4);
+    expect(sleep).toHaveBeenCalledTimes(3);
     database.close();
   });
 
@@ -2628,11 +2458,11 @@ describe('TaskExecutor', () => {
     const tavily = tavilyPort({
       search: vi.fn(async () => {
         const pending = await commands.getSnapshot(created.task.id);
-        expect(pending.checkpoint.pendingToolCall).toMatchObject({
+        expect(pending.checkpoint?.pendingToolCall).toMatchObject({
           callId: 'call_search',
           name: 'tavily_search',
         });
-        expect(pending.checkpoint.continuationItems.at(-1)).toMatchObject({
+        expect(pending.checkpoint?.continuationItems.at(-1)).toMatchObject({
           type: 'function_call',
           callId: 'call_search',
         });
@@ -2676,34 +2506,32 @@ describe('TaskExecutor', () => {
 
     expect(result.task.status).toBe('completed');
     expect(result.events.map(({ type }) => type)).toEqual([
-      'planning.started',
-      'tool.call-recorded',
-      'tool.result-recorded',
-      'tool.call-recorded',
-      'tool.result-recorded',
-      'task.completed',
+      'message.recorded',
+      'status.changed',
+      'status.changed',
+      'tool.call',
+      'tool.result',
+      'tool.call',
+      'tool.result',
+      'status.changed',
     ]);
-    expect(inputs.map(({ checkpoint }) => checkpoint.completedToolResults.length)).toEqual([
-      0, 1, 2,
-    ]);
-    expect(result.checkpoint.completedToolResults).toHaveLength(2);
-    expect(result.checkpoint.completedToolResults[0]).toMatchObject({
+    expect(inputs.map(({ toolResults }) => toolResults.length)).toEqual([0, 1, 2]);
+    expect(result.toolResults).toHaveLength(2);
+    expect(result.toolResults[0]).toMatchObject({
       callId: 'call_search',
       toolName: 'tavily_search',
       argumentsJson: JSON.stringify(SEARCH_ARGUMENTS),
     });
-    expect(JSON.parse(result.checkpoint.completedToolResults[0]?.output ?? '')).toMatchObject({
+    expect(JSON.parse(result.toolResults[0]?.output ?? '')).toMatchObject({
       ok: true,
       results: [{ content: 'Authentication overview', source: 'search' }],
       truncated: false,
     });
-    expect(result.checkpoint.completedToolResults[1]).toMatchObject({
+    expect(result.toolResults[1]).toMatchObject({
       callId: 'call_extract',
       toolName: 'tavily_extract',
     });
-    expect(
-      result.checkpoint.completedToolResults.every(({ resultRef }) => resultRef.length > 0),
-    ).toBe(true);
+    expect(result.toolResults.every(({ id }) => id.length > 0)).toBe(true);
     expect(tavily.search).toHaveBeenCalledOnce();
     expect(tavily.extract).toHaveBeenCalledOnce();
     database.close();
@@ -2771,20 +2599,21 @@ describe('TaskExecutor', () => {
 
     expect(result.task.status).toBe('completed');
     expect(result.events.map(({ type }) => type)).toEqual([
-      'planning.started',
-      'tool.call-recorded',
-      'tool.result-recorded',
-      'tool.call-recorded',
-      'tool.result-recorded',
-      'tool.call-recorded',
-      'tool.result-recorded',
-      'task.completed',
+      'message.recorded',
+      'status.changed',
+      'status.changed',
+      'tool.call',
+      'tool.result',
+      'tool.call',
+      'tool.result',
+      'tool.call',
+      'tool.result',
+      'status.changed',
     ]);
-    const commitBoundary = transitions.find(
-      ({ event }) =>
-        event.type === 'tool.call-recorded' && event.reason === 'commit_context_call_recorded',
+    const commitBoundary = transitions.find(({ events }) =>
+      events.some((event) => event.type === 'tool.call' && event.name === 'commit_context'),
     );
-    expect(commitBoundary?.checkpoint.pendingToolCall).toEqual({
+    expect(commitBoundary?.checkpoint?.pendingToolCall).toEqual({
       callId: 'call_commit',
       name: 'commit_context',
       argumentsJson: JSON.stringify({
@@ -2793,7 +2622,7 @@ describe('TaskExecutor', () => {
       }),
       executionState: 'recorded',
     });
-    expect(result.checkpoint.completedToolResults.map(({ toolName }) => toolName)).toEqual([
+    expect(result.toolResults.map(({ toolName }) => toolName)).toEqual([
       'tavily_search',
       'tavily_search',
       'commit_context',
@@ -2828,8 +2657,7 @@ describe('TaskExecutor', () => {
     ]);
     expect(
       JSON.parse(
-        inputs[3]?.checkpoint.completedToolResults.find((item) => item.callId === 'call_commit')
-          ?.output ?? '',
+        inputs[3]?.toolResults.find((item) => item.callId === 'call_commit')?.output ?? '',
       ),
     ).toMatchObject({ ok: true, compactedCalls: 1, releasedImages: 0 });
     expect(tavily.search).toHaveBeenCalledTimes(2);
@@ -2901,30 +2729,30 @@ describe('TaskExecutor', () => {
 
     expect(result.task.status).toBe('completed');
     expect(inputs).toHaveLength(4);
-    const retryInput = inputs[2]?.checkpoint;
+    const retryInput = inputs[2];
     expect(
-      retryInput?.continuationItems.some(
+      retryInput?.checkpoint.continuationItems.some(
         (item) => item.type === 'function_call' && item.callId === 'call_search',
       ),
     ).toBe(true);
-    expect(
-      retryInput?.completedToolResults.find((item) => item.callId === 'call_bad_commit'),
-    ).toMatchObject({
-      output: JSON.stringify({
-        ok: false,
-        code: 'INVALID_CONTEXT_COMMIT_CURSOR',
-        message:
-          'throughCallId did not match a current completed non-commit tool call. Retry commit_context with one of validThroughCallIds.',
-        validThroughCallIds: ['call_search'],
-      }),
-    });
-    expect(result.checkpoint.completedToolResults.map(({ callId }) => callId)).toEqual([
+    expect(retryInput?.toolResults.find((item) => item.callId === 'call_bad_commit')).toMatchObject(
+      {
+        output: JSON.stringify({
+          ok: false,
+          code: 'INVALID_CONTEXT_COMMIT_CURSOR',
+          message:
+            'throughCallId did not match a current completed non-commit tool call. Retry commit_context with one of validThroughCallIds.',
+          validThroughCallIds: ['call_search'],
+        }),
+      },
+    );
+    expect(result.toolResults.map(({ callId }) => callId)).toEqual([
       'call_search',
       'call_bad_commit',
       'call_good_commit',
     ]);
     expect(
-      result.checkpoint.continuationItems.some(
+      inputs[3]?.checkpoint.continuationItems.some(
         (item) =>
           'callId' in item && (item.callId === 'call_search' || item.callId === 'call_bad_commit'),
       ),
@@ -2985,7 +2813,7 @@ describe('TaskExecutor', () => {
     expect(result.task.status).toBe('completed');
     expect(turn).toBe(10);
     expect(tavily.search).toHaveBeenCalledTimes(8);
-    expect(result.checkpoint.completedToolResults.at(-1)?.toolName).toBe('commit_context');
+    expect(result.toolResults.at(-1)?.toolName).toBe('commit_context');
     database.close();
   });
 
@@ -3009,7 +2837,7 @@ describe('TaskExecutor', () => {
     let turn = 0;
     const seenResultCounts: number[] = [];
     const plan = vi.fn<(input: AgentPlanInput) => AsyncGenerator<AgentEvent>>((input) => {
-      seenResultCounts.push(input.checkpoint.completedToolResults.length);
+      seenResultCounts.push(input.toolResults.length);
       turn += 1;
       return (async function* () {
         if (turn === 1) yield searchCall('call_search');
@@ -3039,7 +2867,7 @@ describe('TaskExecutor', () => {
     const interrupted = await commands.getSnapshot(created.task.id);
     expect(interrupted).toMatchObject({
       task: { status: 'planning' },
-      checkpoint: { completedToolResults: [{ callId: 'call_search' }] },
+      toolResults: [{ callId: 'call_search' }],
     });
 
     const recovered = await executor.run(created.task.id, new AbortController().signal);
@@ -3103,8 +2931,8 @@ describe('TaskExecutor', () => {
     );
     await expect(commands.getSnapshot(created.task.id)).resolves.toMatchObject({
       task: { status: 'planning' },
+      toolResults: [],
       checkpoint: {
-        completedToolResults: [],
         pendingToolCall: { callId: 'call_pending', name: 'tavily_search' },
       },
     });
@@ -3122,42 +2950,37 @@ describe('TaskExecutor', () => {
     const repository = new IndexedDbTaskRepository(database);
     const conversations = new IndexedDbConversationRepository(database);
     const dependencies = sources();
-    await seedConversation(database, {
+    const conversation = {
       id: 'conversation_1',
       tabId: 7,
       title: 'Research this',
       createdAt: 1_000,
       updatedAt: 1_000,
-    });
-    await conversations.appendMessage({
+    } as const;
+    const userMessage: TaskMessageDraft = {
       id: 'message_user',
       kind: 'conversation',
       conversationId: 'conversation_1',
-      taskId: null,
       role: 'user',
       status: 'complete',
       text: 'Research this',
       attachmentIds: [],
       createdAt: 1_000,
       updatedAt: 1_000,
-    });
+    };
     const commands = new TaskCommandService(
       repository,
       dependencies.clock,
       dependencies.ids,
       conversations,
     );
-    const created = await commands.create({
+    const created = await commands.createSubmission({
       conversationId: 'conversation_1',
       tabId: 7,
       goal: 'Research this',
-      userMessageId: 'message_user',
-    });
-    const [userMessage] = await conversations.listMessages('conversation_1');
-    if (userMessage === undefined) throw new Error('User message fixture is missing.');
-    await conversations.updateMessage({
-      ...userMessage,
-      taskId: created.task.id,
+      conversation,
+      createConversation: true,
+      message: userMessage,
     });
     let turn = 0;
     const plan = vi.fn<(input: AgentPlanInput) => AsyncGenerator<AgentEvent>>((input) => {
@@ -3175,17 +2998,22 @@ describe('TaskExecutor', () => {
           { type: 'message_ref', messageId: 'supplement_during_tool' },
           { type: 'message_ref', messageId: 'supplement_during_tool_2' },
         ]);
-        await conversations.appendMessage({
-          id: 'message_answer',
-          kind: 'conversation',
-          conversationId: 'conversation_1',
-          taskId: created.task.id,
-          role: 'assistant',
-          status: 'complete',
-          text: 'Finished with the additional detail.',
-          attachmentIds: [],
-          createdAt: dependencies.clock.now(),
-          updatedAt: dependencies.clock.now(),
+        const at = dependencies.clock.now();
+        await repository.appendTaskMessage({
+          eventId: dependencies.ids.create('event'),
+          at,
+          message: {
+            id: 'message_answer',
+            kind: 'conversation',
+            conversationId: 'conversation_1',
+            taskId: created.task.id,
+            role: 'assistant',
+            status: 'complete',
+            text: 'Finished with the additional detail.',
+            attachmentIds: [],
+            createdAt: at,
+            updatedAt: at,
+          },
         });
         yield {
           type: 'task.completed',
@@ -3196,7 +3024,8 @@ describe('TaskExecutor', () => {
     });
     const tavily = tavilyPort({
       search: vi.fn(async () => {
-        await conversations.appendSupplement({
+        const firstAt = dependencies.clock.now();
+        await commands.appendSupplement({
           id: 'supplement_during_tool',
           kind: 'supplement',
           conversationId: 'conversation_1',
@@ -3205,10 +3034,11 @@ describe('TaskExecutor', () => {
           status: 'complete',
           text: 'Prioritize official sources.',
           attachmentIds: [],
-          createdAt: dependencies.clock.now(),
-          updatedAt: dependencies.clock.now(),
+          createdAt: firstAt,
+          updatedAt: firstAt,
         });
-        await conversations.appendSupplement({
+        const secondAt = dependencies.clock.now();
+        await commands.appendSupplement({
           id: 'supplement_during_tool_2',
           kind: 'supplement',
           conversationId: 'conversation_1',
@@ -3217,8 +3047,8 @@ describe('TaskExecutor', () => {
           status: 'complete',
           text: 'Include the mobile layout.',
           attachmentIds: [],
-          createdAt: dependencies.clock.now(),
-          updatedAt: dependencies.clock.now(),
+          createdAt: secondAt,
+          updatedAt: secondAt,
         });
         return { results: [], truncated: false };
       }),
@@ -3235,15 +3065,10 @@ describe('TaskExecutor', () => {
 
     const result = await executor.run(created.task.id, new AbortController().signal);
 
-    expect(result.events.map(({ type }) => type)).toEqual([
-      'planning.started',
-      'tool.call-recorded',
-      'tool.result-recorded',
-      'task.supplements-applied',
-      'task.completed',
-    ]);
     expect(
-      result.events.find(({ type }) => type === 'task.supplements-applied')?.supplementIds,
+      result.events
+        .filter(({ type }) => type === 'supplement.applied')
+        .map((event) => (event.type === 'supplement.applied' ? event.messageId : '')),
     ).toEqual(['supplement_during_tool', 'supplement_during_tool_2']);
     expect(plan).toHaveBeenCalledTimes(2);
     database.close();
@@ -3254,42 +3079,37 @@ describe('TaskExecutor', () => {
     const repository = new IndexedDbTaskRepository(database);
     const conversations = new IndexedDbConversationRepository(database);
     const dependencies = sources();
-    await seedConversation(database, {
+    const conversation = {
       id: 'conversation_1',
       tabId: 7,
       title: 'Answer this',
       createdAt: 1_000,
       updatedAt: 1_000,
-    });
-    await conversations.appendMessage({
+    } as const;
+    const userMessage: TaskMessageDraft = {
       id: 'message_user',
       kind: 'conversation',
       conversationId: 'conversation_1',
-      taskId: null,
       role: 'user',
       status: 'complete',
       text: 'Answer this',
       attachmentIds: [],
       createdAt: 1_000,
       updatedAt: 1_000,
-    });
+    };
     const commands = new TaskCommandService(
       repository,
       dependencies.clock,
       dependencies.ids,
       conversations,
     );
-    const created = await commands.create({
+    const created = await commands.createSubmission({
       conversationId: 'conversation_1',
       tabId: 7,
       goal: 'Answer this',
-      userMessageId: 'message_user',
-    });
-    const [userMessage] = await conversations.listMessages('conversation_1');
-    if (userMessage === undefined) throw new Error('User message fixture is missing.');
-    await conversations.updateMessage({
-      ...userMessage,
-      taskId: created.task.id,
+      conversation,
+      createConversation: true,
+      message: userMessage,
     });
     let turn = 0;
     const plan = vi.fn<(input: AgentPlanInput) => AsyncGenerator<AgentEvent>>((input) => {
@@ -3299,19 +3119,25 @@ describe('TaskExecutor', () => {
           ({ id }) => id === 'message_answer',
         );
         if (turn === 1) {
-          await conversations.appendMessage({
-            id: 'message_answer',
-            kind: 'conversation',
-            conversationId: 'conversation_1',
-            taskId: created.task.id,
-            role: 'assistant',
-            status: 'complete',
-            text: 'First answer',
-            attachmentIds: [],
-            createdAt: dependencies.clock.now(),
-            updatedAt: dependencies.clock.now(),
+          const replyAt = dependencies.clock.now();
+          await repository.appendTaskMessage({
+            eventId: dependencies.ids.create('event'),
+            at: replyAt,
+            message: {
+              id: 'message_answer',
+              kind: 'conversation',
+              conversationId: 'conversation_1',
+              taskId: created.task.id,
+              role: 'assistant',
+              status: 'complete',
+              text: 'First answer',
+              attachmentIds: [],
+              createdAt: replyAt,
+              updatedAt: replyAt,
+            },
           });
-          await conversations.appendSupplement({
+          const supplementAt = dependencies.clock.now();
+          await commands.appendSupplement({
             id: 'supplement_during_model',
             kind: 'supplement',
             conversationId: 'conversation_1',
@@ -3320,8 +3146,8 @@ describe('TaskExecutor', () => {
             status: 'complete',
             text: 'Add the missing detail.',
             attachmentIds: [],
-            createdAt: dependencies.clock.now(),
-            updatedAt: dependencies.clock.now(),
+            createdAt: supplementAt,
+            updatedAt: supplementAt,
           });
         } else {
           expect(input.checkpoint.continuationItems.at(-1)).toEqual({
@@ -3363,11 +3189,14 @@ describe('TaskExecutor', () => {
     );
 
     expect(result.task.status).toBe('completed');
-    expect(result.events.map(({ type }) => type)).toEqual([
-      'planning.started',
-      'task.supplements-applied',
-      'task.completed',
-    ]);
+    expect(result.events.map(({ type }) => type)).toEqual(
+      expect.arrayContaining([
+        'message.recorded',
+        'supplement.queued',
+        'supplement.applied',
+        'status.changed',
+      ]),
+    );
     expect(plan).toHaveBeenCalledTimes(2);
     expect(assistantMessages).toEqual([
       expect.objectContaining({
@@ -3381,6 +3210,7 @@ describe('TaskExecutor', () => {
 
   it('fails safely when the model repeats an already completed call ID', async () => {
     const database = await openChatBrowserDatabase(createTestDatabaseName('duplicate-tool-call'));
+    await seedExecutorConversation(database, 'Duplicate tool call');
     const repository = new IndexedDbTaskRepository(database);
     const dependencies = sources();
     const commands = new TaskCommandService(
@@ -3414,11 +3244,14 @@ describe('TaskExecutor', () => {
     const result = await executor.run(created.task.id, new AbortController().signal);
 
     expect(turn).toBe(2);
-    expect(result.task).toMatchObject({
-      status: 'failed',
-      lastError: { code: 'InvalidProviderResponse', retryable: false },
+    expect(result.task.status).toBe('failed');
+    expect(result.run.error).toMatchObject({
+      code: 'InvalidProviderResponse',
+      retryable: false,
     });
-    expect(dependencies.conversations.appendMessage).toHaveBeenCalledWith(
+    expect(
+      await new IndexedDbConversationRepository(database).listMessages('conversation_1'),
+    ).toContainEqual(
       expect.objectContaining({
         conversationId: 'conversation_1',
         taskId: created.task.id,
@@ -3433,6 +3266,7 @@ describe('TaskExecutor', () => {
 
   it('fails before a ninth completed Tavily call can execute', async () => {
     const database = await openChatBrowserDatabase(createTestDatabaseName('tool-call-limit'));
+    await seedExecutorConversation(database, 'Tavily limit');
     const repository = new IndexedDbTaskRepository(database);
     const dependencies = sources();
     const commands = new TaskCommandService(
@@ -3467,99 +3301,9 @@ describe('TaskExecutor', () => {
 
     expect(turn).toBe(9);
     expect(tavily.search).toHaveBeenCalledTimes(8);
-    expect(result.task).toMatchObject({
-      status: 'failed',
-      lastError: { code: 'ToolCallLimitError', retryable: false },
-    });
-    expect(result.checkpoint.completedToolResults).toHaveLength(8);
-    database.close();
-  });
-
-  it('does not charge retained browser audit results against a fresh execution attempt', async () => {
-    const database = await openChatBrowserDatabase(
-      createTestDatabaseName('browser-audit-budget-separation'),
-    );
-    const repository = new IndexedDbTaskRepository(database);
-    const dependencies = sources();
-    const commands = new TaskCommandService(
-      repository,
-      dependencies.clock,
-      dependencies.ids,
-      dependencies.conversations,
-    );
-    const created = await commands.create({
-      conversationId: 'conversation_1',
-      tabId: 7,
-      goal: 'Continue after compacted browser work',
-    });
-    const planningAt = created.task.updatedAt;
-    const auditResults = Array.from({ length: 256 }, (_, index) => ({
-      callId: `call_audit_${String(index + 1)}`,
-      toolName: 'browser_inspect',
-      argumentsJson: '{"tabId":0,"mode":"interactive","since":""}',
-      output: '{"ok":true}',
-      resultRef: `result_audit_${String(index + 1)}`,
-      attachmentIds: [],
-    }));
-    const planningCheckpoint = {
-      ...created.checkpoint,
-      id: 'checkpoint_compacted_browser_audit',
-      sequence: 1,
-      taskStatus: 'planning' as const,
-      completedToolResults: auditResults,
-      continuationItems: [],
-      browserToolCallsInAttempt: 0,
-      createdAt: planningAt,
-    };
-    await repository.saveTransition({
-      task: {
-        ...created.task,
-        status: 'planning',
-        checkpointId: planningCheckpoint.id,
-        updatedAt: planningAt,
-      },
-      event: {
-        id: 'event_compacted_browser_audit',
-        taskId: created.task.id,
-        sequence: 1,
-        type: 'planning.started',
-        reason: 'model_request_started',
-        at: planningAt,
-        error: null,
-      },
-      checkpoint: planningCheckpoint,
-    });
-    let turn = 0;
-    const plan = () =>
-      (async function* () {
-        turn += 1;
-        if (turn === 1) {
-          yield browserCall('call_fresh_browser', 'browser_get_current_tab', {});
-          return;
-        }
-        yield {
-          type: 'task.completed',
-          reason: 'model_response_completed',
-          messageId: 'message_answer',
-        } as const;
-      })();
-    const browser = browserPort();
-    const executor = new TaskExecutor({
-      repository,
-      conversations: dependencies.conversations,
-      planner: { plan },
-      tavily: tavilyPort(),
-      browser,
-      clock: dependencies.clock,
-      ids: dependencies.ids,
-    });
-
-    const result = await executor.run(created.task.id, new AbortController().signal);
-
-    expect(result.task.status).toBe('completed');
-    expect(browser.execute).toHaveBeenCalledOnce();
-    expect(result.checkpoint).toMatchObject({ browserToolCallsInAttempt: 1 });
-    expect(result.checkpoint.completedToolResults).toHaveLength(257);
+    expect(result.task.status).toBe('failed');
+    expect(result.run.error).toMatchObject({ code: 'ToolCallLimitError', retryable: false });
+    expect(result.toolResults).toHaveLength(8);
     database.close();
   });
 
@@ -3567,6 +3311,7 @@ describe('TaskExecutor', () => {
     const database = await openChatBrowserDatabase(
       createTestDatabaseName('browser-attempt-call-limit'),
     );
+    await seedExecutorConversation(database, 'Browser limit');
     const repository = new IndexedDbTaskRepository(database);
     const dependencies = sources();
     const commands = new TaskCommandService(
@@ -3610,10 +3355,8 @@ describe('TaskExecutor', () => {
 
     expect(turn).toBe(257);
     expect(browser.execute).toHaveBeenCalledTimes(256);
-    expect(result.task).toMatchObject({
-      status: 'failed',
-      lastError: { code: 'ToolCallLimitError', retryable: false },
-    });
+    expect(result.task.status).toBe('failed');
+    expect(result.run.error).toMatchObject({ code: 'ToolCallLimitError', retryable: false });
     expect(result.checkpoint).toMatchObject({ browserToolCallsInAttempt: 256 });
     database.close();
   });
@@ -3622,6 +3365,7 @@ describe('TaskExecutor', () => {
     const database = await openChatBrowserDatabase(
       createTestDatabaseName('browser-attempt-retry-budget'),
     );
+    await seedExecutorConversation(database, 'Browser retry limit');
     const repository = new IndexedDbTaskRepository(database);
     const dependencies = sources();
     const commands = new TaskCommandService(
@@ -3635,31 +3379,34 @@ describe('TaskExecutor', () => {
       tabId: 7,
       goal: 'Retry a bounded browser workflow',
     });
-    const planningAt = created.task.updatedAt;
+    const planningAt = dependencies.clock.now();
+    if (created.checkpoint === null) throw new Error('Initial checkpoint is missing.');
     const exhaustedCheckpoint = {
       ...created.checkpoint,
-      id: 'checkpoint_exhausted_browser_attempt',
-      sequence: 1,
-      taskStatus: 'planning' as const,
       browserToolCallsInAttempt: 256,
-      createdAt: planningAt,
     };
     await repository.saveTransition({
       task: {
         ...created.task,
         status: 'planning',
-        checkpointId: exhaustedCheckpoint.id,
+        lastEventSequence: created.task.lastEventSequence + 1,
         updatedAt: planningAt,
       },
-      event: {
-        id: 'event_exhausted_browser_attempt',
-        taskId: created.task.id,
-        sequence: 1,
-        type: 'planning.started',
-        reason: 'model_request_started',
-        at: planningAt,
-        error: null,
-      },
+      run: { ...created.run, status: 'planning' },
+      events: [
+        {
+          id: 'event_exhausted_browser_attempt',
+          taskId: created.task.id,
+          runId: created.run.id,
+          sequence: created.task.lastEventSequence + 1,
+          type: 'status.changed',
+          taskStatus: 'planning',
+          runStatus: 'planning',
+          reason: 'model_request_started',
+          at: planningAt,
+          error: null,
+        },
+      ],
       checkpoint: exhaustedCheckpoint,
     });
     let mode: 'exhausted' | 'retry' = 'exhausted';
@@ -3705,9 +3452,7 @@ describe('TaskExecutor', () => {
 
     expect(completed.task.status).toBe('completed');
     expect(browser.execute).toHaveBeenCalledOnce();
-    expect(completed.checkpoint).toMatchObject({
-      browserToolCallsInAttempt: 1,
-    });
+    expect(completed.checkpoint).toBeNull();
     database.close();
   });
 
@@ -3745,16 +3490,15 @@ describe('TaskExecutor', () => {
     await expect(
       executor.run(created.task.id, new AbortController().signal),
     ).resolves.toMatchObject({
-      task: {
-        status: 'waiting_for_auth',
-        lastError: { code: 'AuthError', recoveryAction: 'update_credentials' },
-      },
+      task: { status: 'waiting_for_auth' },
+      run: { error: { code: 'AuthError', recoveryAction: 'update_credentials' } },
     });
     database.close();
   });
 
   it('fails durably when task input cannot be prepared instead of remaining stuck in planning', async () => {
     const database = await openChatBrowserDatabase(createTestDatabaseName('input-error-executor'));
+    await seedExecutorConversation(database, 'Input preparation');
     const repository = new IndexedDbTaskRepository(database);
     const dependencies = sources();
     const commands = new TaskCommandService(
@@ -3787,15 +3531,17 @@ describe('TaskExecutor', () => {
     await expect(
       executor.run(created.task.id, new AbortController().signal),
     ).resolves.toMatchObject({
-      task: {
-        status: 'failed',
-        lastError: {
+      task: { status: 'failed' },
+      run: {
+        error: {
           code: 'TaskInputError',
           userMessage: 'Task input could not be prepared.',
         },
       },
     });
-    expect(dependencies.conversations.appendMessage).toHaveBeenCalledWith(
+    expect(
+      await new IndexedDbConversationRepository(database).listMessages('conversation_1'),
+    ).toContainEqual(
       expect.objectContaining({
         taskId: created.task.id,
         role: 'assistant',
@@ -3859,7 +3605,11 @@ describe('TaskExecutor', () => {
       executor.run(created.task.id, new AbortController().signal),
     ).resolves.toMatchObject({ task: { status: 'failed' } });
     expect(attempts).toBe(2);
-    expect(dependencies.conversations.appendMessage).not.toHaveBeenCalled();
+    expect(
+      dependencies.conversations.appendMessage.mock.calls
+        .map(([message]) => message)
+        .filter(({ role }) => role === 'assistant'),
+    ).toEqual([]);
     database.close();
   });
 
@@ -3913,7 +3663,8 @@ describe('TaskExecutor', () => {
     expect(result.events).toEqual(
       expect.arrayContaining([
         expect.objectContaining({
-          type: 'planning.retrying',
+          type: 'status.changed',
+          taskStatus: 'planning',
           reason: 'invalid_model_response_retry:sse_protocol',
           error: null,
         }),
@@ -3926,6 +3677,7 @@ describe('TaskExecutor', () => {
     const database = await openChatBrowserDatabase(
       createTestDatabaseName('invalid-model-retry-exhausted'),
     );
+    await seedExecutorConversation(database, 'Invalid model response');
     const repository = new IndexedDbTaskRepository(database);
     const dependencies = sources();
     const commands = new TaskCommandService(
@@ -3962,17 +3714,18 @@ describe('TaskExecutor', () => {
     const result = await executor.run(created.task.id, new AbortController().signal);
 
     expect(attempts).toBe(2);
-    expect(result.task).toMatchObject({
-      status: 'failed',
-      lastError: {
-        code: 'InvalidProviderResponse',
-        userMessage: 'The provider returned an invalid response (stage: tool_call).',
-      },
+    expect(result.task.status).toBe('failed');
+    expect(result.run.error).toMatchObject({
+      code: 'InvalidProviderResponse',
+      userMessage: 'The provider returned an invalid response (stage: tool_call).',
     });
-    expect(result.events.at(-1)).toMatchObject({
-      type: 'task.failed',
-      reason: 'invalid_model_response:tool_call',
-    });
+    expect(result.events).toContainEqual(
+      expect.objectContaining({
+        type: 'status.changed',
+        taskStatus: 'failed',
+        reason: 'invalid_model_response:tool_call',
+      }),
+    );
     expect(JSON.stringify(result.events)).not.toContain('encrypted_content');
     database.close();
   });
@@ -3986,6 +3739,7 @@ describe('TaskExecutor', () => {
     'maps Tavily %s failures to a durable %s boundary',
     async (code, status, taskCode) => {
       const database = await openChatBrowserDatabase(createTestDatabaseName(`tavily-${code}`));
+      await seedExecutorConversation(database, `Tavily ${code}`);
       const repository = new IndexedDbTaskRepository(database);
       const dependencies = sources();
       const commands = new TaskCommandService(
@@ -4020,14 +3774,12 @@ describe('TaskExecutor', () => {
 
       const result = await executor.run(created.task.id, new AbortController().signal);
 
-      expect(result.task).toMatchObject({
-        status,
-        lastError: { code: taskCode },
-      });
+      expect(result.task.status).toBe(status);
+      expect(result.run.error).toMatchObject({ code: taskCode });
       if (code === 'AUTH') {
-        expect(result.task.lastError?.userMessage).toMatch(/tavily/i);
+        expect(result.run.error?.userMessage).toMatch(/tavily/i);
       }
-      expect(result.checkpoint.completedToolResults).toEqual([]);
+      expect(result.toolResults).toEqual([]);
       database.close();
     },
   );
@@ -4071,7 +3823,8 @@ describe('TaskExecutor', () => {
     );
     await expect(commands.getSnapshot(created.task.id)).resolves.toMatchObject({
       task: { status: 'planning' },
-      checkpoint: { completedToolResults: [] },
+      toolResults: [],
+      checkpoint: { pendingToolCall: { callId: 'call_aborted' } },
     });
     database.close();
   });
@@ -4131,16 +3884,10 @@ describe('TaskExecutor', () => {
     const result = await executor.run(created.task.id, new AbortController().signal);
 
     expect(result.task.status).toBe('completed');
-    expect(result.events.map(({ type }) => type)).toContain('task.context-compacted');
-    expect(result.checkpoint.continuationItems).toEqual([
-      {
-        type: 'compaction',
-        itemId: 'cmp_native',
-        encryptedContent: 'opaque-native-context',
-      },
-      { type: 'message_ref', messageId: 'message_answer' },
-    ]);
+    expect(result.events.map(({ type }) => type)).toContain('context.compacted');
+    expect(result.checkpoint).toBeNull();
     expect(browser.resetObservationBaselines).toHaveBeenCalledOnce();
+    expect(turn).toBe(2);
     database.close();
   });
 });

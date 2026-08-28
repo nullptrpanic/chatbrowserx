@@ -14,7 +14,7 @@ export interface MessageRecord {
   readonly id: MessageId;
   readonly kind: MessageKind;
   readonly conversationId: ConversationId;
-  readonly taskId: TaskId | null;
+  readonly taskId: TaskId;
   readonly role: MessageRole;
   readonly status: MessageStatus;
   readonly text: string;
@@ -23,3 +23,6 @@ export interface MessageRecord {
   readonly createdAt: number;
   readonly updatedAt: number;
 }
+
+/** User input before the command service assigns it to a durable Task. */
+export type TaskMessageDraft = Omit<MessageRecord, 'taskId'>;

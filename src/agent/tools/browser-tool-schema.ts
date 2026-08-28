@@ -395,12 +395,12 @@ export const BROWSER_TOOL_DEFINITIONS: readonly ModelToolDefinition[] = [
   ),
   taskToolDefinition(
     'browser_capture_screenshot',
-    'Capture the current webpage viewport as a task-owned image asset for later delivery through the page. This is not a visual inspection: use browser_inspect mode screenshot when the model must see pixels. The returned assetId can be passed only to browser_paste_image in this WorkSession.',
+    'Capture the current webpage viewport as a task-owned image asset for later delivery through the page. This is not a visual inspection: use browser_inspect mode screenshot when the model must see pixels. The returned assetId can be passed only to browser_paste_image in this task.',
     {},
   ),
   taskToolDefinition(
     'browser_paste_image',
-    'Paste a task-owned screenshot into a recent semantic editable message or file-input ref. This tool becomes available after capture returns an assetId. It first uses bounded page-local delivery and may fall back to staging the image on the system clipboard plus a native browser paste; clipboardChanged=true reports that fallback. Captured assets remain valid across context compaction within the current WorkSession, and currently available IDs are listed in the assetId enum. Continue only when the result reports verified=true; that means a real editor or attachment-preview change was measured, not merely a retained hidden file input. After sending, inspect again to verify remote delivery. Never paste the same asset twice after an ambiguous result.',
+    'Paste a task-owned screenshot into a recent semantic editable message or file-input ref. This tool becomes available after capture returns an assetId. It first uses bounded page-local delivery and may fall back to staging the image on the system clipboard plus a native browser paste; clipboardChanged=true reports that fallback. Captured assets remain valid across context compaction within the current task, and currently available IDs are listed in the assetId enum. Continue only when the result reports verified=true; that means a real editor or attachment-preview change was measured, not merely a retained hidden file input. After sending, inspect again to verify remote delivery. Never paste the same asset twice after an ambiguous result.',
     {
       ref: REF_PROPERTY,
       assetId: {

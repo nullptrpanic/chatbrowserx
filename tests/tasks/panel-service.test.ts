@@ -1,8 +1,10 @@
 import { describe, expect, it, vi } from 'vitest';
+import type { PersistedTaskArchive } from '../../src/persistence/task-repository';
 import { PanelService } from '../../src/tasks/panel-service';
 import type { Checkpoint } from '../../src/tasks/checkpoint-types';
 import type { MessageRecord } from '../../src/tasks/message-types';
-import type { TaskEvent, TaskRun } from '../../src/tasks/task-types';
+import type { Task, TaskEvent, TaskRun } from '../../src/tasks/task-types';
+import type { MaterializedToolResult } from '../../src/tasks/tool-result-types';
 
 /** Builds a complete Panel service dependency fixture with no secret-bearing output. */
 function buildFixture() {
@@ -13,28 +15,58 @@ function buildFixture() {
     createdAt: 1_000,
     updatedAt: 1_200,
   };
-  const task: TaskRun = {
+  const task: Task = {
     id: 'task_1',
-    workSessionId: 'workSession_1',
     conversationId: conversation.id,
+    ordinal: 1,
     tabId: 7,
     goal: 'Book a room',
     status: 'completed' as const,
+    latestRunId: 'run_1',
+    lastEventSequence: 1,
     createdAt: 1_010,
     updatedAt: 1_190,
-    checkpointId: 'checkpoint_1',
+  };
+  const run: TaskRun = {
+    id: 'run_1',
+    taskId: task.id,
+    attempt: 1,
+    status: 'completed',
+    checkpointId: null,
     lease: null,
-    lastError: null,
+    error: null,
+    startedAt: 1_010,
+    endedAt: 1_190,
   };
   const checkpoint: Checkpoint = {
     id: 'checkpoint_1',
     taskId: task.id,
-    sequence: 1,
-    taskStatus: task.status,
-    completedToolResults: [],
+    runId: run.id,
     continuationItems: [{ type: 'message_ref' as const, messageId: 'message_1' }],
     pendingToolCall: null,
+    browserToolCallsInAttempt: 0,
+    browserTargetTabId: 7,
     createdAt: 1_190,
+  };
+  const events: TaskEvent[] = [
+    {
+      id: 'event_1',
+      taskId: task.id,
+      runId: run.id,
+      sequence: 1,
+      type: 'status.changed',
+      taskStatus: 'completed',
+      runStatus: 'completed',
+      reason: 'task.completed',
+      at: 1_190,
+      error: null,
+    },
+  ];
+  const archive: PersistedTaskArchive = {
+    task,
+    runs: [run],
+    events,
+    toolResults: [],
   };
   const dependencies = {
     conversations: {
@@ -58,25 +90,19 @@ function buildFixture() {
       clearConversation: vi.fn(async () => undefined),
     },
     tasks: {
-      listAll: vi.fn(async (): Promise<TaskRun[]> => [task]),
-      listByConversation: vi.fn(async (conversationId: string): Promise<TaskRun[]> => {
+      listAll: vi.fn(async (): Promise<Task[]> => [task]),
+      listByConversation: vi.fn(async (conversationId: string): Promise<Task[]> => {
         void conversationId;
         return [task];
       }),
       listEvents: vi.fn(async (taskId: string): Promise<TaskEvent[]> => {
         void taskId;
-        return [
-          {
-            id: 'event_1',
-            taskId: task.id,
-            sequence: 1,
-            type: 'task.completed' as const,
-            reason: 'done',
-            at: 1_190,
-            error: null,
-          },
-        ];
+        return events;
       }),
+      readTaskArchive: vi.fn(async (taskId: string) => (taskId === task.id ? archive : undefined)),
+      readTaskArchives: vi.fn(async (taskIds: readonly string[]) =>
+        taskIds.includes(task.id) ? [archive] : [],
+      ),
       getCheckpoint: vi.fn(async (...arguments_: [string]): Promise<Checkpoint | undefined> => {
         void arguments_;
         return checkpoint;
@@ -120,10 +146,29 @@ function buildFixture() {
       setSandboxToken: vi.fn(async () => undefined),
     },
     commands: {
-      createSubmission: vi.fn(async () => ({ task, checkpoint, events: [] })),
-      continueCancelledSubmission: vi.fn(async () => ({ task, checkpoint, events: [] })),
+      createSubmission: vi.fn(async () => ({
+        task,
+        run,
+        checkpoint,
+        events: [],
+        toolResults: [],
+      })),
+      continueCancelledSubmission: vi.fn(async () => ({
+        task,
+        run,
+        checkpoint,
+        events: [],
+        toolResults: [],
+      })),
+      appendSupplement: vi.fn(async () => undefined),
     },
-    cancelTask: vi.fn(async () => ({ task, checkpoint, events: [] })),
+    cancelTask: vi.fn(async () => ({
+      task,
+      run,
+      checkpoint,
+      events: [],
+      toolResults: [],
+    })),
     tabs: {
       get: vi.fn(async () => ({
         id: 7,
@@ -143,7 +188,50 @@ function buildFixture() {
       void arguments_;
     }),
   };
-  return { conversation, dependencies, task, checkpoint };
+  return { conversation, dependencies, task, run, checkpoint, events, archive };
+}
+
+type PanelFixture = ReturnType<typeof buildFixture>;
+
+/** Replaces the permanent task archive returned to both summary and detail projections. */
+function useArchive(
+  fixture: PanelFixture,
+  overrides: Partial<PersistedTaskArchive>,
+): PersistedTaskArchive {
+  const archive: PersistedTaskArchive = {
+    task: overrides.task ?? fixture.task,
+    runs: overrides.runs ?? [fixture.run],
+    events: overrides.events ?? fixture.events,
+    toolResults: overrides.toolResults ?? [],
+  };
+  fixture.dependencies.tasks.readTaskArchive.mockImplementation(async (taskId) =>
+    taskId === archive.task.id ? archive : undefined,
+  );
+  fixture.dependencies.tasks.readTaskArchives.mockImplementation(async (taskIds) =>
+    taskIds.includes(archive.task.id) ? [archive] : [],
+  );
+  return archive;
+}
+
+/** Creates one canonical permanent tool result for panel projection tests. */
+function panelResult(
+  fixture: PanelFixture,
+  input: Pick<MaterializedToolResult, 'callId' | 'toolName' | 'argumentsJson' | 'output'> & {
+    readonly resultId: string;
+    readonly attachmentIds?: readonly string[];
+  },
+): MaterializedToolResult {
+  return {
+    id: input.resultId,
+    taskId: fixture.task.id,
+    runId: fixture.run.id,
+    callId: input.callId,
+    toolName: input.toolName,
+    argumentsJson: input.argumentsJson,
+    output: input.output,
+    attachmentIds: input.attachmentIds ?? [],
+    createdAt: 1_100,
+  };
 }
 
 describe('PanelService', () => {
@@ -232,7 +320,6 @@ describe('PanelService', () => {
         message: expect.objectContaining({
           id: 'message_new',
           conversationId: fixture.conversation.id,
-          taskId: null,
           text: 'Continue from another page',
         }),
       }),
@@ -269,66 +356,42 @@ describe('PanelService', () => {
     );
   });
 
-  it('drops a legacy source tab ID when projecting a persisted user message', async () => {
-    const fixture = buildFixture();
-    const legacySourcePage = {
-      tabId: 7,
-      title: 'Median of Two Sorted Arrays',
-      url: 'https://leetcode.com/problems/median-of-two-sorted-arrays/description/',
-      favIconUrl: 'https://leetcode.com/favicon.ico',
-    };
-    fixture.dependencies.conversations.listMessages.mockResolvedValue([
-      {
-        id: 'message_source',
-        kind: 'conversation',
-        conversationId: fixture.conversation.id,
-        taskId: fixture.task.id,
-        role: 'user',
-        status: 'complete',
-        text: 'Fill in this solution',
-        attachmentIds: [],
-        createdAt: 1_010,
-        updatedAt: 1_010,
-        sourcePage: legacySourcePage,
-      } as MessageRecord,
-    ]);
-    const service = new PanelService(fixture.dependencies);
-
-    const snapshot = await service.getSnapshot(7);
-
-    expect(snapshot.messages[0]?.sourcePage).toEqual({
-      title: 'Median of Two Sorted Arrays',
-      url: 'https://leetcode.com/problems/median-of-two-sorted-arrays/description/',
-      favIconUrl: 'https://leetcode.com/favicon.ico',
-    });
-  });
-
-  it('continues the latest cancelled task in the same WorkSession', async () => {
+  it('continues the latest cancelled logical task with a new run', async () => {
     const fixture = buildFixture();
     const cancelledTask = { ...fixture.task, status: 'cancelled' as const };
     const continuedTask = {
       ...fixture.task,
-      id: 'task_continued',
       status: 'queued' as const,
       tabId: 9,
+      latestRunId: 'run_continued',
+    };
+    const continuedRun: TaskRun = {
+      ...fixture.run,
+      id: 'run_continued',
+      attempt: 2,
+      status: 'queued',
+      checkpointId: 'checkpoint_continued',
+      endedAt: null,
     };
     fixture.dependencies.tasks.listByConversation.mockResolvedValue([cancelledTask]);
     fixture.dependencies.commands.continueCancelledSubmission.mockResolvedValue({
       task: continuedTask,
+      run: continuedRun,
       checkpoint: {
         id: 'checkpoint_continued',
         taskId: continuedTask.id,
-        sequence: 0,
-        taskStatus: 'queued',
-        completedToolResults: [],
+        runId: continuedRun.id,
         continuationItems: [
           { type: 'message_ref', messageId: 'message_1' },
           { type: 'message_ref', messageId: 'message_new' },
         ],
         pendingToolCall: null,
+        browserToolCallsInAttempt: 0,
+        browserTargetTabId: 9,
         createdAt: 2_000,
       },
       events: [],
+      toolResults: [],
     });
     const service = new PanelService(fixture.dependencies);
 
@@ -343,50 +406,62 @@ describe('PanelService', () => {
       expect.objectContaining({
         sourceTaskId: cancelledTask.id,
         tabId: 9,
-        goal: 'Continue after cancellation',
         conversation: fixture.conversation,
-        message: expect.objectContaining({ id: 'message_new', taskId: null }),
+        message: expect.objectContaining({ id: 'message_new' }),
       }),
     );
     expect(fixture.dependencies.commands.createSubmission).not.toHaveBeenCalled();
     expect(fixture.dependencies.scheduleTask).toHaveBeenCalledWith(continuedTask.id);
   });
 
-  it('creates a fresh WorkSession after the cancelled task context was cleared', async () => {
+  it('creates a fresh logical task after the cancelled task context was cleared', async () => {
     const fixture = buildFixture();
     const cancelledTask = { ...fixture.task, status: 'cancelled' as const };
     const freshTask = {
       ...fixture.task,
       id: 'task_fresh',
-      workSessionId: 'workSession_fresh',
+      ordinal: 2,
       status: 'queued' as const,
       tabId: 9,
+      latestRunId: 'run_fresh',
     };
+    const freshRun: TaskRun = {
+      ...fixture.run,
+      id: 'run_fresh',
+      taskId: freshTask.id,
+      status: 'queued',
+      checkpointId: 'checkpoint_fresh',
+      endedAt: null,
+    };
+    fixture.dependencies.tasks.listAll.mockResolvedValue([cancelledTask]);
     fixture.dependencies.tasks.listByConversation.mockResolvedValue([cancelledTask]);
-    fixture.dependencies.tasks.listEvents.mockResolvedValue([
+    const clearEvents: TaskEvent[] = [
       {
         id: 'event_clear',
         taskId: cancelledTask.id,
+        runId: fixture.run.id,
         sequence: 1,
-        type: 'task.context-cleared',
-        reason: 'user_clear_task_context',
+        type: 'context.cleared',
         at: 1_500,
-        error: null,
       },
-    ]);
+    ];
+    fixture.dependencies.tasks.listEvents.mockResolvedValue(clearEvents);
+    useArchive(fixture, { task: cancelledTask, events: clearEvents });
     fixture.dependencies.commands.createSubmission.mockResolvedValue({
       task: freshTask,
+      run: freshRun,
       checkpoint: {
         id: 'checkpoint_fresh',
         taskId: freshTask.id,
-        sequence: 0,
-        taskStatus: 'queued',
-        completedToolResults: [],
+        runId: freshRun.id,
         continuationItems: [{ type: 'message_ref', messageId: 'message_new' }],
         pendingToolCall: null,
+        browserToolCallsInAttempt: 0,
+        browserTargetTabId: 9,
         createdAt: 2_000,
       },
       events: [],
+      toolResults: [],
     });
     const service = new PanelService(fixture.dependencies);
 
@@ -407,7 +482,7 @@ describe('PanelService', () => {
         conversationId: fixture.conversation.id,
         tabId: 9,
         goal: 'Start from a clean task context',
-        message: expect.objectContaining({ id: 'message_new', taskId: null }),
+        message: expect.objectContaining({ id: 'message_new' }),
       }),
     );
   });
@@ -442,34 +517,40 @@ describe('PanelService', () => {
 
   it('keeps summary snapshots to the latest status event without hidden reasoning text', async () => {
     const fixture = buildFixture();
-    fixture.dependencies.tasks.listEvents.mockResolvedValue([
+    const events: TaskEvent[] = [
       {
         id: 'event_reasoning',
         taskId: fixture.task.id,
+        runId: fixture.run.id,
         sequence: 1,
-        type: 'reasoning.summary-recorded',
-        reason: 'model_reasoning_summary_recorded',
+        type: 'reasoning.summary',
+        summary: 'r'.repeat(20_100),
         at: 1_180,
-        error: null,
-        reasoningSummary: 'r'.repeat(20_100),
       },
       {
         id: 'event_completed',
         taskId: fixture.task.id,
+        runId: fixture.run.id,
         sequence: 2,
-        type: 'task.completed',
+        type: 'status.changed',
+        taskStatus: 'completed',
+        runStatus: 'completed',
         reason: 'done',
         at: 1_190,
         error: null,
       },
-    ]);
+    ];
+    useArchive(fixture, {
+      task: { ...fixture.task, lastEventSequence: 2 },
+      events,
+    });
     const service = new PanelService(fixture.dependencies);
 
     const snapshot = await service.getSnapshot(7);
 
     expect(snapshot.task?.events).toEqual([
       expect.objectContaining({
-        type: 'task.completed',
+        type: 'done',
         sequence: 2,
       }),
     ]);
@@ -479,27 +560,29 @@ describe('PanelService', () => {
   it('projects supplements under their running task without creating chat bubbles', async () => {
     const fixture = buildFixture();
     const runningTask = { ...fixture.task, status: 'planning' as const };
+    fixture.dependencies.tasks.listAll.mockResolvedValue([runningTask]);
     fixture.dependencies.tasks.listByConversation.mockResolvedValue([runningTask]);
-    fixture.dependencies.tasks.getCheckpoint.mockResolvedValue({
-      ...fixture.checkpoint,
-      taskStatus: 'planning',
-      continuationItems: [
-        { type: 'message_ref', messageId: 'message_1' },
-        { type: 'message_ref', messageId: 'supplement_1' },
-      ],
-    });
-    fixture.dependencies.tasks.listEvents.mockResolvedValue([
+    const supplementEvents: TaskEvent[] = [
       {
         id: 'event_supplements',
         taskId: runningTask.id,
+        runId: fixture.run.id,
         sequence: 1,
-        type: 'task.supplements-applied',
-        reason: 'user_supplements_applied',
+        type: 'supplement.queued',
+        messageId: 'supplement_1',
         at: 1_150,
-        error: null,
-        supplementIds: ['supplement_1'],
       },
-    ]);
+      {
+        id: 'event_supplements_applied',
+        taskId: runningTask.id,
+        runId: fixture.run.id,
+        sequence: 2,
+        type: 'supplement.applied',
+        messageId: 'supplement_1',
+        at: 1_151,
+      },
+    ];
+    useArchive(fixture, { task: runningTask, events: supplementEvents });
     fixture.dependencies.conversations.listMessages.mockResolvedValue([
       {
         id: 'message_1',
@@ -531,7 +614,8 @@ describe('PanelService', () => {
     const snapshot = await service.getSnapshot(7);
 
     expect(snapshot.messages.map(({ id }) => id)).toEqual(['message_1']);
-    expect(snapshot.task?.supplements).toEqual([
+    const details = await service.getTaskDetails(runningTask.id);
+    expect(details.supplements).toEqual([
       {
         id: 'supplement_1',
         text: 'Use official sources',
@@ -541,28 +625,31 @@ describe('PanelService', () => {
         applicationState: 'applied',
       },
     ]);
-    expect(snapshot.task?.events[0]?.supplementIds).toEqual(['supplement_1']);
+    expect(details.events[0]?.supplementIds).toEqual(['supplement_1']);
     expect(snapshot.attachments).toEqual([
       expect.objectContaining({ id: 'attachment_1', fileName: 'photo.png' }),
     ]);
   });
 
-  it('keeps a newly queued supplement pending until a WorkSession checkpoint references it', async () => {
+  it('keeps a newly queued supplement pending until an applied event is recorded', async () => {
     const fixture = buildFixture();
     const runningTask = { ...fixture.task, status: 'planning' as const };
+    fixture.dependencies.tasks.listAll.mockResolvedValue([runningTask]);
     fixture.dependencies.tasks.listByConversation.mockResolvedValue([runningTask]);
-    fixture.dependencies.tasks.listEvents.mockResolvedValue([
-      {
-        id: 'event_other_supplement',
-        taskId: runningTask.id,
-        sequence: 1,
-        type: 'task.supplements-applied',
-        reason: 'user_supplements_applied',
-        at: 1_200,
-        error: null,
-        supplementIds: ['another_supplement'],
-      },
-    ]);
+    useArchive(fixture, {
+      task: runningTask,
+      events: [
+        {
+          id: 'event_other_supplement',
+          taskId: runningTask.id,
+          runId: fixture.run.id,
+          sequence: 1,
+          type: 'supplement.queued',
+          messageId: 'supplement_pending',
+          at: 1_200,
+        },
+      ],
+    });
     fixture.dependencies.conversations.listMessages.mockResolvedValue([
       {
         id: 'message_1',
@@ -592,340 +679,65 @@ describe('PanelService', () => {
     const service = new PanelService(fixture.dependencies);
 
     const snapshot = await service.getSnapshot(7);
+    const details = await service.getTaskDetails(runningTask.id);
 
-    expect(snapshot.task?.supplements).toEqual([
-      expect.objectContaining({ id: 'supplement_pending', applicationState: 'pending' }),
-    ]);
-  });
-
-  it('marks an earlier task supplement applied when a continued WorkSession references it', async () => {
-    const fixture = buildFixture();
-    const cancelledTask: TaskRun = {
-      ...fixture.task,
-      status: 'cancelled',
-      checkpointId: 'checkpoint_cancelled',
-    };
-    const continuedTask: TaskRun = {
-      ...fixture.task,
-      id: 'task_continued',
-      status: 'planning',
-      createdAt: 1_200,
-      updatedAt: 1_300,
-      checkpointId: 'checkpoint_continued',
-    };
-    fixture.dependencies.tasks.get.mockResolvedValue(cancelledTask);
-    fixture.dependencies.tasks.listByConversation.mockResolvedValue([cancelledTask, continuedTask]);
-    fixture.dependencies.tasks.listEvents.mockResolvedValue([]);
-    fixture.dependencies.tasks.getCheckpoint.mockImplementation(async (checkpointId) =>
-      checkpointId === 'checkpoint_continued'
-        ? {
-            ...fixture.checkpoint,
-            id: checkpointId,
-            taskId: continuedTask.id,
-            taskStatus: continuedTask.status,
-            continuationItems: [
-              { type: 'message_ref', messageId: 'message_1' },
-              { type: 'message_ref', messageId: 'supplement_from_cancelled' },
-            ],
-          }
-        : {
-            ...fixture.checkpoint,
-            id: checkpointId,
-            taskId: cancelledTask.id,
-            taskStatus: cancelledTask.status,
-          },
-    );
-    fixture.dependencies.conversations.listMessages.mockResolvedValue([
-      {
-        id: 'message_1',
-        kind: 'conversation',
-        conversationId: fixture.conversation.id,
-        taskId: cancelledTask.id,
-        role: 'user',
-        status: 'complete',
-        text: 'Research this',
-        attachmentIds: [],
-        createdAt: 1_010,
-        updatedAt: 1_010,
-      },
-      {
-        id: 'supplement_from_cancelled',
-        kind: 'supplement',
-        conversationId: fixture.conversation.id,
-        taskId: cancelledTask.id,
-        role: 'user',
-        status: 'complete',
-        text: 'Use Go instead.',
-        attachmentIds: [],
-        createdAt: 1_100,
-        updatedAt: 1_100,
-      },
-    ]);
-    const service = new PanelService(fixture.dependencies);
-
-    const details = await service.getTaskDetails(cancelledTask.id);
-
+    expect(snapshot.task?.supplements).toEqual([]);
     expect(details.supplements).toEqual([
-      expect.objectContaining({
-        id: 'supplement_from_cancelled',
-        applicationState: 'applied',
-      }),
-    ]);
-  });
-
-  it('projects each continued task as its cumulative WorkSession prefix with original event times', async () => {
-    const fixture = buildFixture();
-    const cancelledTask: TaskRun = {
-      ...fixture.task,
-      status: 'cancelled',
-      createdAt: 1_000,
-      updatedAt: 1_500,
-      checkpointId: 'checkpoint_cancelled',
-    };
-    const continuedTask: TaskRun = {
-      ...fixture.task,
-      id: 'task_continued',
-      status: 'completed',
-      createdAt: 2_000,
-      updatedAt: 2_500,
-      checkpointId: 'checkpoint_continued',
-    };
-    const oldResult = {
-      callId: 'call_old',
-      toolName: 'browser_inspect',
-      argumentsJson: '{"tabId":7}',
-      output: '{"ok":true,"page":"old"}',
-      resultRef: 'result_old',
-      attachmentIds: [],
-    };
-    const newResult = {
-      callId: 'call_new',
-      toolName: 'browser_click',
-      argumentsJson: '{"ref":"e2"}',
-      output: '{"ok":true,"page":"new"}',
-      resultRef: 'result_new',
-      attachmentIds: [],
-    };
-    fixture.dependencies.tasks.get.mockImplementation(async (taskId) =>
-      taskId === continuedTask.id ? continuedTask : cancelledTask,
-    );
-    fixture.dependencies.tasks.listAll.mockResolvedValue([cancelledTask, continuedTask]);
-    fixture.dependencies.tasks.listByConversation.mockResolvedValue([continuedTask, cancelledTask]);
-    fixture.dependencies.tasks.listEvents.mockImplementation(async (taskId) =>
-      taskId === cancelledTask.id
-        ? [
-            {
-              id: 'event_old_result',
-              taskId,
-              sequence: 1,
-              type: 'tool.result-recorded',
-              reason: 'browser_inspect_result_recorded',
-              at: 1_100,
-              error: null,
-            },
-            {
-              id: 'event_old_supplement',
-              taskId,
-              sequence: 2,
-              type: 'task.supplements-applied',
-              reason: 'user_supplements_applied',
-              at: 1_300,
-              error: null,
-              supplementIds: ['supplement_old'],
-            },
-          ]
-        : [
-            {
-              id: 'event_new_result',
-              taskId,
-              sequence: 1,
-              type: 'tool.result-recorded',
-              reason: 'browser_click_result_recorded',
-              at: 2_100,
-              error: null,
-            },
-            {
-              id: 'event_new_supplement',
-              taskId,
-              sequence: 2,
-              type: 'task.supplements-applied',
-              reason: 'user_supplements_applied',
-              at: 2_300,
-              error: null,
-              supplementIds: ['supplement_new'],
-            },
-          ],
-    );
-    fixture.dependencies.tasks.getCheckpoint.mockImplementation(async (checkpointId) =>
-      checkpointId === cancelledTask.checkpointId
-        ? {
-            ...fixture.checkpoint,
-            id: checkpointId,
-            taskId: cancelledTask.id,
-            sequence: 2,
-            taskStatus: cancelledTask.status,
-            completedToolResults: [oldResult],
-            continuationItems: [
-              { type: 'message_ref', messageId: 'message_1' },
-              { type: 'message_ref', messageId: 'supplement_old' },
-            ],
-            createdAt: 1_500,
-          }
-        : {
-            ...fixture.checkpoint,
-            id: checkpointId,
-            taskId: continuedTask.id,
-            sequence: 2,
-            taskStatus: continuedTask.status,
-            completedToolResults: [oldResult, newResult],
-            continuationItems: [
-              { type: 'message_ref', messageId: 'message_1' },
-              { type: 'message_ref', messageId: 'supplement_old' },
-              { type: 'message_ref', messageId: 'supplement_new' },
-            ],
-            createdAt: 2_500,
-          },
-    );
-    fixture.dependencies.conversations.listMessages.mockResolvedValue([
-      {
-        id: 'message_1',
-        kind: 'conversation',
-        conversationId: fixture.conversation.id,
-        taskId: cancelledTask.id,
-        role: 'user',
-        status: 'complete',
-        text: 'Inspect this page',
-        attachmentIds: [],
-        createdAt: 1_010,
-        updatedAt: 1_010,
-      },
-      {
-        id: 'supplement_old',
-        kind: 'supplement',
-        conversationId: fixture.conversation.id,
-        taskId: cancelledTask.id,
-        role: 'user',
-        status: 'complete',
-        text: 'Use the old task context.',
-        attachmentIds: [],
-        createdAt: 1_250,
-        updatedAt: 1_250,
-      },
-      {
-        id: 'supplement_new',
-        kind: 'supplement',
-        conversationId: fixture.conversation.id,
-        taskId: continuedTask.id,
-        role: 'user',
-        status: 'complete',
-        text: 'Then continue from here.',
-        attachmentIds: [],
-        createdAt: 2_250,
-        updatedAt: 2_250,
-      },
-    ]);
-    const service = new PanelService(fixture.dependencies);
-
-    const snapshot = await service.getSnapshot(7);
-    const [cancelledDetails, continuedDetails] = await Promise.all([
-      service.getTaskDetails(cancelledTask.id),
-      service.getTaskDetails(continuedTask.id),
-    ]);
-
-    const continuedSummary = snapshot.tasks.find(({ id }) => id === continuedTask.id);
-    expect(continuedSummary?.events.map(({ type, at }) => ({ type, at }))).toEqual([
-      { type: 'task.supplements-applied', at: 2_300 },
-    ]);
-    expect(continuedSummary?.supplements.map(({ id }) => id)).toEqual([
-      'supplement_old',
-      'supplement_new',
-    ]);
-    expect(
-      cancelledDetails.events.map(({ sequence, type, at }) => ({ sequence, type, at })),
-    ).toEqual([
-      { sequence: 1, type: 'tool.result-recorded', at: 1_100 },
-      { sequence: 2, type: 'task.supplements-applied', at: 1_300 },
-    ]);
-    expect(cancelledDetails.supplements.map(({ id }) => id)).toEqual(['supplement_old']);
-    expect(
-      continuedDetails.events.map(({ sequence, type, at }) => ({ sequence, type, at })),
-    ).toEqual([
-      { sequence: 1, type: 'tool.result-recorded', at: 1_100 },
-      { sequence: 2, type: 'task.supplements-applied', at: 1_300 },
-      { sequence: 1, type: 'tool.result-recorded', at: 2_100 },
-      { sequence: 2, type: 'task.supplements-applied', at: 2_300 },
-    ]);
-    expect(
-      continuedDetails.completedToolResults.map(({ callId, detailIndex }) => [callId, detailIndex]),
-    ).toEqual([
-      ['call_old', 1],
-      ['call_new', 3],
-    ]);
-    expect(
-      continuedDetails.supplements.map(({ id, detailIndex, createdAt }) => ({
-        id,
-        detailIndex,
-        createdAt,
-      })),
-    ).toEqual([
-      { id: 'supplement_old', detailIndex: 2, createdAt: 1_250 },
-      { id: 'supplement_new', detailIndex: 4, createdAt: 2_250 },
+      expect.objectContaining({ id: 'supplement_pending', applicationState: 'pending' }),
     ]);
   });
 
   it('projects one continuous detail index across tool results and user supplements', async () => {
     const fixture = buildFixture();
-    fixture.dependencies.tasks.listEvents.mockResolvedValue([
+    const first = panelResult(fixture, {
+      callId: 'call_1',
+      toolName: 'browser_inspect',
+      argumentsJson: '{}',
+      output: '{"ok":true}',
+      resultId: 'result_1',
+    });
+    const second = panelResult(fixture, {
+      callId: 'call_2',
+      toolName: 'browser_click',
+      argumentsJson: '{"ref":"e2"}',
+      output: '{"ok":true}',
+      resultId: 'result_2',
+    });
+    const events: TaskEvent[] = [
       {
         id: 'event_result_1',
         taskId: fixture.task.id,
+        runId: fixture.run.id,
         sequence: 1,
-        type: 'tool.result-recorded',
-        reason: 'browser_inspect_result_recorded',
+        type: 'tool.result',
+        callId: first.callId,
+        resultId: first.id,
         at: 1_100,
-        error: null,
       },
       {
         id: 'event_supplement',
         taskId: fixture.task.id,
+        runId: fixture.run.id,
         sequence: 2,
-        type: 'task.supplements-applied',
-        reason: 'user_supplements_applied',
+        type: 'supplement.queued',
+        messageId: 'supplement_1',
         at: 1_200,
-        error: null,
-        supplementIds: ['supplement_1'],
       },
       {
         id: 'event_result_2',
         taskId: fixture.task.id,
+        runId: fixture.run.id,
         sequence: 3,
-        type: 'tool.result-recorded',
-        reason: 'browser_click_result_recorded',
+        type: 'tool.result',
+        callId: second.callId,
+        resultId: second.id,
         at: 1_300,
-        error: null,
       },
-    ]);
-    fixture.dependencies.tasks.getCheckpoint.mockResolvedValue({
-      ...fixture.checkpoint,
-      sequence: 3,
-      completedToolResults: [
-        {
-          callId: 'call_1',
-          toolName: 'browser_inspect',
-          argumentsJson: '{}',
-          output: '{"ok":true}',
-          resultRef: 'result_1',
-          attachmentIds: [],
-        },
-        {
-          callId: 'call_2',
-          toolName: 'browser_click',
-          argumentsJson: '{"ref":"e2"}',
-          output: '{"ok":true}',
-          resultRef: 'result_2',
-          attachmentIds: [],
-        },
-      ],
+    ];
+    useArchive(fixture, {
+      task: { ...fixture.task, lastEventSequence: 3 },
+      events,
+      toolResults: [first, second],
     });
     fixture.dependencies.conversations.listMessages.mockResolvedValue([
       {
@@ -958,9 +770,7 @@ describe('PanelService', () => {
     const details = await service.getTaskDetails(fixture.task.id);
 
     expect(details.detailItemCount).toBe(3);
-    expect(
-      details.completedToolResults.map(({ callId, detailIndex }) => [callId, detailIndex]),
-    ).toEqual([
+    expect(details.toolResults.map(({ callId, detailIndex }) => [callId, detailIndex])).toEqual([
       ['call_1', 1],
       ['call_2', 3],
     ]);
@@ -982,7 +792,7 @@ describe('PanelService', () => {
         attachmentIds: [],
       }),
     ).resolves.toEqual({ accepted: true, id: 'supplement_new' });
-    expect(fixture.dependencies.conversations.appendSupplement).toHaveBeenCalledWith({
+    expect(fixture.dependencies.commands.appendSupplement).toHaveBeenCalledWith({
       id: 'supplement_new',
       kind: 'supplement',
       conversationId: fixture.conversation.id,
@@ -1001,21 +811,64 @@ describe('PanelService', () => {
     const secondTask = {
       ...fixture.task,
       id: 'task_2',
+      ordinal: 2,
       goal: 'Run tests',
+      latestRunId: 'run_2',
+      lastEventSequence: 23,
       createdAt: 1_200,
       updatedAt: 1_300,
-      checkpointId: 'checkpoint_2',
+    };
+    const secondRun: TaskRun = {
+      ...fixture.run,
+      id: 'run_2',
+      taskId: secondTask.id,
+      startedAt: 1_200,
+      endedAt: 1_300,
     };
     const longArguments = `{"cmd":"${'a'.repeat(20_100)}"}`;
     const longOutput = 'o'.repeat(100_100);
-    const completedToolResults = Array.from({ length: 22 }, (_, index) => ({
+    const toolResults: MaterializedToolResult[] = Array.from({ length: 22 }, (_, index) => ({
+      id: `result_${index}`,
+      taskId: secondTask.id,
+      runId: secondRun.id,
       callId: `call_${index}`,
       toolName: index === 21 ? 'bash' : 'lookup',
       argumentsJson: index === 21 ? longArguments : '{}',
       output: index === 21 ? longOutput : `output_${index}`,
-      resultRef: `result_${index}`,
+      resultId: `result_${index}`,
       attachmentIds: index === 21 ? ['attachment_tool'] : [],
+      createdAt: 1_200 + index,
     }));
+    const secondEvents: TaskEvent[] = [
+      ...toolResults.map((result, index): TaskEvent => ({
+        id: `event_tool_${index}`,
+        taskId: secondTask.id,
+        runId: secondRun.id,
+        sequence: index + 1,
+        type: 'tool.result',
+        callId: result.callId,
+        resultId: result.id,
+        at: 1_200 + index,
+      })),
+      {
+        id: `event_${secondTask.id}`,
+        taskId: secondTask.id,
+        runId: secondRun.id,
+        sequence: 23,
+        type: 'status.changed',
+        taskStatus: 'completed',
+        runStatus: 'completed',
+        reason: 'done',
+        at: 1_300,
+        error: null,
+      },
+    ];
+    const secondArchive: PersistedTaskArchive = {
+      task: secondTask,
+      runs: [secondRun],
+      events: secondEvents,
+      toolResults,
+    };
     fixture.dependencies.conversations.listMessages.mockResolvedValue([
       {
         id: 'message_user_1',
@@ -1056,52 +909,15 @@ describe('PanelService', () => {
     ]);
     fixture.dependencies.tasks.listAll.mockResolvedValue([fixture.task, secondTask]);
     fixture.dependencies.tasks.listByConversation.mockResolvedValue([fixture.task, secondTask]);
-    fixture.dependencies.tasks.listEvents.mockImplementation(async (taskId) =>
-      taskId === secondTask.id
-        ? [
-            ...completedToolResults.map((_, index): TaskEvent => ({
-              id: `event_tool_${index}`,
-              taskId,
-              sequence: index + 1,
-              type: 'tool.result-recorded',
-              reason: 'tool_result_recorded',
-              at: 1_200 + index,
-              error: null,
-            })),
-            {
-              id: `event_${taskId}`,
-              taskId,
-              sequence: 23,
-              type: 'task.completed',
-              reason: 'done',
-              at: 1_300,
-              error: null,
-            },
-          ]
-        : [
-            {
-              id: `event_${taskId}`,
-              taskId,
-              sequence: 1,
-              type: 'task.completed',
-              reason: 'done',
-              at: 1_190,
-              error: null,
-            },
-          ],
+    fixture.dependencies.tasks.readTaskArchives.mockImplementation(async (taskIds) =>
+      [fixture.archive, secondArchive].filter(({ task }) => taskIds.includes(task.id)),
     );
-    fixture.dependencies.tasks.getCheckpoint.mockImplementation(async (checkpointId) => ({
-      id: checkpointId,
-      taskId: checkpointId === 'checkpoint_2' ? secondTask.id : fixture.task.id,
-      sequence: checkpointId === 'checkpoint_2' ? 23 : 1,
-      taskStatus: 'completed',
-      completedToolResults: checkpointId === 'checkpoint_2' ? completedToolResults : [],
-      continuationItems: [],
-      pendingToolCall: null,
-      createdAt: checkpointId === 'checkpoint_2' ? 1_300 : 1_190,
-    }));
-    fixture.dependencies.tasks.get.mockImplementation(async (taskId) =>
-      taskId === secondTask.id ? secondTask : fixture.task,
+    fixture.dependencies.tasks.readTaskArchive.mockImplementation(async (taskId) =>
+      taskId === secondTask.id
+        ? secondArchive
+        : taskId === fixture.task.id
+          ? fixture.archive
+          : undefined,
     );
     const service = new PanelService(fixture.dependencies);
 
@@ -1114,107 +930,143 @@ describe('PanelService', () => {
     ]);
     expect(snapshot.tasks.map(({ id }) => id)).toEqual([fixture.task.id, secondTask.id]);
     const bashTask = snapshot.tasks.find(({ id }) => id === secondTask.id);
-    expect(bashTask?.completedToolResults).toEqual([]);
+    expect(bashTask?.toolResults).toEqual([]);
 
     const details = await service.getTaskDetails(secondTask.id);
 
     expect(details.detailLevel).toBe('full');
-    expect(details.completedToolResults).toHaveLength(22);
-    expect(details.completedToolResults[0]?.callId).toBe('call_0');
-    expect(details.completedToolResults.at(-1)).toMatchObject({
+    expect(details.toolResults).toHaveLength(22);
+    expect(details.toolResults[0]?.callId).toBe('call_0');
+    expect(details.toolResults.at(-1)).toMatchObject({
       callId: 'call_21',
       toolName: 'bash',
     });
-    expect(details.completedToolResults.at(-1)?.argumentsJson).toHaveLength(20_000);
-    expect(details.completedToolResults.at(-1)?.output).toHaveLength(100_000);
-    expect(details.completedToolResults.at(-1)?.attachmentIds).toEqual(['attachment_tool']);
-    expect(fixture.dependencies.tasks.get).toHaveBeenCalledWith(secondTask.id);
+    expect(details.toolResults.at(-1)?.argumentsJson).toHaveLength(20_000);
+    expect(details.toolResults.at(-1)?.output).toHaveLength(100_000);
+    expect(details.toolResults.at(-1)?.attachmentIds).toEqual(['attachment_tool']);
+    expect(fixture.dependencies.tasks.readTaskArchive).toHaveBeenCalledWith(secondTask.id);
   });
 
-  it('omits historical audit noise while retaining a legacy tool result', async () => {
+  it('rejects a permanent tool result without its TaskEvent association', async () => {
     const fixture = buildFixture();
-    const events = Array.from({ length: 442 }, (_, index): TaskEvent => ({
-      id: `event_${index + 1}`,
-      taskId: fixture.task.id,
-      sequence: index + 1,
-      type: index === 441 ? 'task.completed' : 'reasoning.summary-recorded',
-      reason: index === 441 ? 'done' : 'progress',
-      at: 1_000 + index,
-      error: null,
-    }));
-    fixture.dependencies.tasks.listEvents.mockResolvedValue(events);
-    fixture.dependencies.tasks.getCheckpoint.mockResolvedValue({
-      ...fixture.checkpoint,
-      sequence: 442,
-      completedToolResults: [
-        {
-          callId: 'call_before_window',
-          toolName: 'browser_inspect',
-          argumentsJson: '{}',
-          output: 'old output',
-          resultRef: 'result_before_window',
-          attachmentIds: [],
-        },
-      ],
+    const events: TaskEvent[] = [
+      ...Array.from({ length: 441 }, (_, index): TaskEvent => ({
+        id: `event_${index + 1}`,
+        taskId: fixture.task.id,
+        runId: fixture.run.id,
+        sequence: index + 1,
+        type: 'reasoning.summary',
+        summary: 'progress',
+        at: 1_000 + index,
+      })),
+      {
+        id: 'event_442',
+        taskId: fixture.task.id,
+        runId: fixture.run.id,
+        sequence: 442,
+        type: 'status.changed',
+        taskStatus: 'completed',
+        runStatus: 'completed',
+        reason: 'done',
+        at: 1_442,
+        error: null,
+      },
+    ];
+    const result = panelResult(fixture, {
+      callId: 'call_without_event',
+      toolName: 'browser_inspect',
+      argumentsJson: '{}',
+      output: 'old output',
+      resultId: 'result_without_event',
+    });
+    useArchive(fixture, {
+      task: { ...fixture.task, lastEventSequence: 442 },
+      events,
+      toolResults: [result],
     });
     const service = new PanelService(fixture.dependencies);
 
-    const summary = await service.getSnapshot(7);
-    const details = await service.getTaskDetails(fixture.task.id);
-
-    expect(summary.task?.events).toHaveLength(1);
-    expect(summary.task?.events[0]?.sequence).toBe(442);
-    expect(summary.task?.completedToolCallCount).toBe(1);
-    expect(details.events).toEqual([]);
-    expect(details.completedToolResults).toHaveLength(1);
-    expect(details.completedToolResults[0]?.callId).toBe('call_before_window');
+    await expect(service.getSnapshot(7)).rejects.toThrow(
+      'A permanent tool result is missing its TaskEvent association.',
+    );
+    await expect(service.getTaskDetails(fixture.task.id)).rejects.toThrow(
+      'A permanent tool result is missing its TaskEvent association.',
+    );
   });
 
   it('returns the latest 100 tool results even when audit events surround every call', async () => {
     const fixture = buildFixture();
-    const events = Array.from({ length: 120 }, (_, index) =>
-      [
-        ['reasoning.summary-recorded', 'model_reasoning_summary_recorded'],
-        ['tool.call-recorded', 'browser_inspect_call_recorded'],
-        ['tool.execution-started', 'browser_inspect_execution_started'],
-        ['tool.result-recorded', 'browser_inspect_result_recorded'],
-      ].map(([type, reason], eventIndex): TaskEvent => ({
-        id: `event_${index + 1}_${eventIndex + 1}`,
-        taskId: fixture.task.id,
-        sequence: index * 4 + eventIndex + 1,
-        type: type as TaskEvent['type'],
-        reason: reason ?? 'progress',
-        at: 1_000 + index * 4 + eventIndex,
-        error: null,
-      })),
-    ).flat();
-    const completedToolResults = Array.from({ length: 120 }, (_, index) => ({
+    const toolResults: MaterializedToolResult[] = Array.from({ length: 120 }, (_, index) => ({
+      id: `result_${index + 1}`,
+      taskId: fixture.task.id,
+      runId: fixture.run.id,
       callId: `call_${index + 1}`,
       toolName: 'browser_inspect',
       argumentsJson: '{}',
       output: `output_${index + 1}`,
-      resultRef: `result_${index + 1}`,
+      resultId: `result_${index + 1}`,
       attachmentIds: [],
+      createdAt: 1_000 + index * 4 + 3,
     }));
-    fixture.dependencies.tasks.listEvents.mockResolvedValue(events);
-    fixture.dependencies.tasks.getCheckpoint.mockResolvedValue({
-      ...fixture.checkpoint,
-      sequence: 480,
-      completedToolResults,
+    const events: TaskEvent[] = toolResults.flatMap((result, index): TaskEvent[] => [
+      {
+        id: `event_${index + 1}_1`,
+        taskId: fixture.task.id,
+        runId: fixture.run.id,
+        sequence: index * 4 + 1,
+        type: 'reasoning.summary',
+        summary: 'Inspect the page.',
+        at: 1_000 + index * 4,
+      },
+      {
+        id: `event_${index + 1}_2`,
+        taskId: fixture.task.id,
+        runId: fixture.run.id,
+        sequence: index * 4 + 2,
+        type: 'tool.call',
+        callId: result.callId,
+        name: result.toolName,
+        argumentsJson: result.argumentsJson,
+        at: 1_000 + index * 4 + 1,
+      },
+      {
+        id: `event_${index + 1}_3`,
+        taskId: fixture.task.id,
+        runId: fixture.run.id,
+        sequence: index * 4 + 3,
+        type: 'tool.dispatched',
+        callId: result.callId,
+        at: 1_000 + index * 4 + 2,
+      },
+      {
+        id: `event_${index + 1}_4`,
+        taskId: fixture.task.id,
+        runId: fixture.run.id,
+        sequence: index * 4 + 4,
+        type: 'tool.result',
+        callId: result.callId,
+        resultId: result.id,
+        at: 1_000 + index * 4 + 3,
+      },
+    ]);
+    useArchive(fixture, {
+      task: { ...fixture.task, lastEventSequence: 480 },
+      events,
+      toolResults,
     });
     const service = new PanelService(fixture.dependencies);
 
     const summary = await service.getSnapshot(7);
     const details = await service.getTaskDetails(fixture.task.id);
 
-    expect(summary.task?.completedToolResults).toEqual([]);
+    expect(summary.task?.toolResults).toEqual([]);
     expect(summary.task?.completedToolCallCount).toBe(120);
     expect(details.events).toHaveLength(100);
     expect(details.events[0]?.sequence).toBe(84);
     expect(details.events.every(({ type }) => type === 'tool.result-recorded')).toBe(true);
-    expect(details.completedToolResults).toHaveLength(100);
-    expect(details.completedToolResults[0]?.callId).toBe('call_21');
-    expect(details.completedToolResults.at(-1)?.callId).toBe('call_120');
+    expect(details.toolResults).toHaveLength(100);
+    expect(details.toolResults[0]?.callId).toBe('call_21');
+    expect(details.toolResults.at(-1)?.callId).toBe('call_120');
   });
 
   it('returns persisted credentials only from the explicit settings query', async () => {
@@ -1270,7 +1122,7 @@ describe('PanelService', () => {
     expect(fixture.dependencies.commands.createSubmission).toHaveBeenCalledWith(
       expect.objectContaining({
         createConversation: true,
-        message: expect.objectContaining({ taskId: null }),
+        message: expect.objectContaining({ id: 'message_new' }),
       }),
     );
   });

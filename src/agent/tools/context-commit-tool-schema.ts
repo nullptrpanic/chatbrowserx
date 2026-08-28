@@ -25,16 +25,9 @@ const recordedContextCommitSchema = z
   })
   .strict();
 
-const legacyContextCommitSchema = recordedContextCommitSchema.omit({
-  throughCallId: true,
-});
-
 export type ContextCommitToolInput = z.infer<typeof recordedContextCommitSchema>;
 
-export interface RecordedContextCommitToolInput {
-  readonly state: string;
-  readonly throughCallId?: string;
-}
+export type RecordedContextCommitToolInput = ContextCommitToolInput;
 
 export type ContextCommitToolCallSource = ModelToolCallSource;
 
@@ -45,7 +38,7 @@ export interface ParsedContextCommitToolCall {
   readonly arguments: ContextCommitToolInput;
 }
 
-/** Keeps the injected AgentPlanner contract compatible without exposing this tool to Codex. */
+/** Parses the internal AgentPlanner contract without exposing this tool to Codex. */
 export function parseContextCommitToolCall(
   input: ContextCommitToolCallSource,
 ): ParsedContextCommitToolCall {
@@ -64,14 +57,12 @@ export function parseContextCommitToolCall(
   }
 }
 
-/** Parses only durable legacy checkpoints; new model requests never expose this tool. */
+/** Parses the one durable record format accepted by current checkpoints. */
 export function parseRecordedContextCommitToolCall(
   input: ContextCommitToolCallSource,
 ): RecordedContextCommitToolInput {
   if (input.name !== CONTEXT_COMMIT_TOOL_NAME) {
     throw new Error('Recorded context commit is invalid.');
   }
-  const value = parseToolCallArguments(input);
-  const current = recordedContextCommitSchema.safeParse(value);
-  return current.success ? current.data : legacyContextCommitSchema.parse(value);
+  return recordedContextCommitSchema.parse(parseToolCallArguments(input));
 }

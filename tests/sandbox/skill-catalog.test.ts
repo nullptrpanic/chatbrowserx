@@ -3,7 +3,7 @@ import { DEFAULT_APP_SETTINGS } from '../../src/persistence/settings-store';
 import type { SandboxClientPort, SandboxExecResponse } from '../../src/sandbox/sandbox-client';
 import {
   SkillCatalog,
-  sandboxCatalogForCompletedTools,
+  sandboxCatalogForToolResults,
   sandboxCatalogInstructions,
 } from '../../src/sandbox/skill-catalog';
 import type { Clock } from '../../src/shared/time';
@@ -251,8 +251,11 @@ describe('sandboxCatalogInstructions', () => {
     };
 
     expect(
-      sandboxCatalogForCompletedTools(snapshot, [
+      sandboxCatalogForToolResults(snapshot, [
         {
+          id: 'result_read',
+          taskId: 'task_1',
+          runId: 'run_1',
           callId: 'call_read',
           toolName: 'sandbox_read',
           argumentsJson: JSON.stringify({
@@ -261,7 +264,8 @@ describe('sandboxCatalogInstructions', () => {
             maxLines: 400,
           }),
           output: JSON.stringify({ code: 0, path: '/skills/b/SKILL.md', content: '---' }),
-          resultRef: 'result_read',
+          attachmentIds: [],
+          createdAt: 1,
         },
       ]),
     ).toEqual({

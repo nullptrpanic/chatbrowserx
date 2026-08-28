@@ -1,16 +1,18 @@
 import type { ConversationRepository } from '../persistence/conversation-repository';
+import type { TaskRepository } from '../persistence/task-repository';
 import type { IdGenerator } from '../shared/ids';
 import type { MessageStatus } from './message-types';
-import type { TaskRun } from './task-types';
+import type { Task } from './task-types';
 
 export interface TaskReplyRetentionDependencies {
-  readonly conversations: Pick<ConversationRepository, 'listMessages' | 'appendMessage'>;
+  readonly conversations: Pick<ConversationRepository, 'listMessages'>;
+  readonly repository: Pick<TaskRepository, 'appendTaskMessage'>;
   readonly ids: IdGenerator;
 }
 
 /** Ensures a terminal task remains anchored in history without replacing generated assistant text. */
 export async function retainTaskReply(
-  task: TaskRun,
+  task: Task,
   status: Extract<MessageStatus, 'error' | 'interrupted'>,
   dependencies: TaskReplyRetentionDependencies,
 ): Promise<void> {
@@ -20,7 +22,7 @@ export async function retainTaskReply(
   }
   const messageId = dependencies.ids.create('message').trim();
   if (messageId.length === 0) throw new Error('Reply identifier generation failed.');
-  await dependencies.conversations.appendMessage({
+  const message = {
     id: messageId,
     kind: 'conversation',
     conversationId: task.conversationId,
@@ -31,5 +33,10 @@ export async function retainTaskReply(
     attachmentIds: [],
     createdAt: task.updatedAt,
     updatedAt: task.updatedAt,
+  } as const;
+  await dependencies.repository.appendTaskMessage({
+    message,
+    eventId: dependencies.ids.create('event'),
+    at: task.updatedAt,
   });
 }

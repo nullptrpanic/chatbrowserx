@@ -563,7 +563,7 @@ describe('BrowserToolExecutor', () => {
     expect(result.modelAttachmentIds).toEqual([]);
   });
 
-  it('pastes only a screenshot asset owned by the current WorkSession', async () => {
+  it('pastes only a screenshot asset owned by the current task', async () => {
     const actions = {
       execute: vi.fn(async () => ({
         tabId: 7,

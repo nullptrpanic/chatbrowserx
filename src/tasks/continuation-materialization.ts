@@ -1,8 +1,8 @@
-import type { CompletedToolResult } from './checkpoint-types';
+import type { MaterializedToolResult } from './tool-result-types';
 import type { ContinuationItem, MaterializedContinuationItem } from './continuation-types';
 
 interface ContinuationSource {
-  readonly completedToolResults: readonly CompletedToolResult[];
+  readonly toolResults: readonly MaterializedToolResult[];
   readonly continuationItems: readonly ContinuationItem[];
 }
 
@@ -10,29 +10,38 @@ interface ContinuationSource {
 export function materializeContinuationItems(
   source: ContinuationSource,
 ): readonly MaterializedContinuationItem[] {
-  const results = new Map<string, CompletedToolResult>();
-  for (const result of source.completedToolResults) {
-    if (results.has(result.resultRef)) {
-      throw new Error('WorkSession tool result reference is invalid.');
+  const results = new Map<string, MaterializedToolResult>();
+  for (const result of source.toolResults) {
+    if (results.has(result.id)) {
+      throw new Error('Task tool result reference is invalid.');
     }
-    results.set(result.resultRef, result);
+    results.set(result.id, result);
   }
   return source.continuationItems.map((item): MaterializedContinuationItem => {
-    if (item.type !== 'function_call_output_ref') return item;
-    const result = results.get(item.resultRef);
+    if (item.type !== 'function_call_output_ref') {
+      if (
+        item.type !== 'message_ref' &&
+        item.type !== 'function_call' &&
+        item.type !== 'compaction'
+      ) {
+        throw new Error('Task continuation item is invalid.');
+      }
+      return item;
+    }
+    const result = results.get(item.resultId);
     const attachmentIds = item.attachmentIds ?? [];
     if (
       result === undefined ||
       result.callId !== item.callId ||
       attachmentIds.some((id) => !(result.attachmentIds ?? []).includes(id))
     ) {
-      throw new Error('WorkSession tool result reference is invalid.');
+      throw new Error('Task tool result reference is invalid.');
     }
     return {
       type: 'function_call_output',
       callId: item.callId,
       output: result.modelOutput ?? result.output,
-      resultRef: item.resultRef,
+      resultId: item.resultId,
       attachmentIds,
     };
   });

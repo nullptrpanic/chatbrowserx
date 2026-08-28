@@ -80,7 +80,7 @@ export class CodexProvider implements ModelProvider {
     this.#fetch = (input, init) => fetchPort(input, init);
   }
 
-  /** Compacts one active WorkSession through the fixed unary Codex endpoint. */
+  /** Compacts one active task through the fixed unary Codex endpoint. */
   async compact(request: ModelRequest, signal: AbortSignal): Promise<ModelCompactionResult> {
     if (signal.aborted) throw providerErrorFromCode('ABORTED');
     const { accessToken, accountId } = await this.#credentialsForRequest();

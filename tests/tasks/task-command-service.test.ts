@@ -1,754 +1,395 @@
 // @vitest-environment node
-
 import 'fake-indexeddb/auto';
 import { describe, expect, it } from 'vitest';
 import { IndexedDbConversationRepository } from '../../src/persistence/conversation-repository';
 import { openChatBrowserDatabase } from '../../src/persistence/open-database';
 import { IndexedDbTaskRepository } from '../../src/persistence/task-repository';
-import { TaskCommandService } from '../../src/tasks/task-command-service';
-import type { TaskError } from '../../src/tasks/task-errors';
-import { createTestDatabaseName, seedConversation } from '../persistence/test-helpers';
+import type { Conversation } from '../../src/tasks/conversation-types';
+import type { MessageRecord, TaskMessageDraft } from '../../src/tasks/message-types';
+import {
+  TaskCommandError,
+  TaskCommandService,
+  type TaskSnapshot,
+} from '../../src/tasks/task-command-service';
+import type { TaskEvent } from '../../src/tasks/task-types';
+import { createTestDatabaseName } from '../persistence/test-helpers';
 
-/**
- * Creates deterministic clock and ID sources whose values can advance between commands.
- */
-function createCommandSources() {
-  let now = 1_000;
-  let sequence = 0;
-
+function dependencies(label: string) {
+  let now = 100;
+  let identifier = 0;
   return {
-    clock: { now: () => now },
-    ids: { create: (prefix: string) => `${prefix}_${String(++sequence)}` },
-    advance(next: number) {
-      now = next;
-    },
+    databaseName: createTestDatabaseName(label),
+    clock: { now: () => ++now },
+    ids: { create: (prefix: string) => `${prefix}_${String(++identifier)}` },
   };
 }
 
-/** Exercises the production continuation boundary while keeping test setup concise. */
-async function continueCancelled(
-  commands: TaskCommandService,
-  conversations: IndexedDbConversationRepository,
-  input: {
-    readonly sourceTaskId: string;
-    readonly tabId: number;
-    readonly goal: string;
-    readonly userMessageId: string;
-  },
-) {
-  const source = await commands.getSnapshot(input.sourceTaskId);
-  const conversation = await conversations.get(source.task.conversationId);
-  if (conversation === undefined) throw new Error('Continuation test conversation is missing.');
-  const at = source.task.updatedAt + 1;
-  return commands.continueCancelledSubmission({
-    sourceTaskId: input.sourceTaskId,
-    tabId: input.tabId,
-    goal: input.goal,
-    conversation,
-    message: {
-      id: input.userMessageId,
-      kind: 'conversation',
-      conversationId: conversation.id,
-      taskId: null,
-      role: 'user',
-      status: 'complete',
-      text: input.goal,
-      attachmentIds: [],
-      createdAt: at,
+function conversation(id = 'conversation_1'): Conversation {
+  return { id, tabId: 7, title: 'Fixture conversation', createdAt: 100, updatedAt: 100 };
+}
+
+function userMessage(conversationId: string, id = 'message_user'): TaskMessageDraft {
+  return {
+    id,
+    kind: 'conversation',
+    conversationId,
+    role: 'user',
+    status: 'complete',
+    text: 'Inspect this page',
+    attachmentIds: [],
+    createdAt: 101,
+    updatedAt: 101,
+  };
+}
+
+async function setup(label: string) {
+  const source = dependencies(label);
+  const database = await openChatBrowserDatabase(source.databaseName);
+  const repository = new IndexedDbTaskRepository(database);
+  const conversations = new IndexedDbConversationRepository(database);
+  const commands = new TaskCommandService(repository, source.clock, source.ids, conversations);
+  return { ...source, database, repository, conversations, commands };
+}
+
+async function createSubmission(
+  setupResult: Awaited<ReturnType<typeof setup>>,
+  conversationRecord = conversation(),
+): Promise<TaskSnapshot> {
+  return setupResult.commands.createSubmission({
+    conversation: conversationRecord,
+    createConversation: true,
+    conversationId: conversationRecord.id,
+    tabId: conversationRecord.tabId ?? 0,
+    goal: 'Inspect this page',
+    message: userMessage(conversationRecord.id),
+  });
+}
+
+async function markFailed(
+  setupResult: Awaited<ReturnType<typeof setup>>,
+  snapshot: TaskSnapshot,
+): Promise<void> {
+  if (snapshot.checkpoint === null) throw new Error('Expected a checkpoint.');
+  const at = setupResult.clock.now();
+  const event: TaskEvent = {
+    id: setupResult.ids.create('event'),
+    taskId: snapshot.task.id,
+    runId: snapshot.run.id,
+    sequence: snapshot.task.lastEventSequence + 1,
+    at,
+    type: 'status.changed',
+    taskStatus: 'failed',
+    runStatus: 'failed',
+    reason: 'provider_failed',
+    error: {
+      code: 'TransientProviderError',
+      retryable: true,
+      recoveryAction: 'resume_task',
+      userMessage: 'Provider unavailable.',
+      evidenceRef: null,
+    },
+  };
+  await setupResult.repository.saveTransition({
+    task: {
+      ...snapshot.task,
+      status: 'failed',
+      lastEventSequence: event.sequence,
       updatedAt: at,
     },
+    run: {
+      ...snapshot.run,
+      status: 'failed',
+      lease: null,
+      error: event.error,
+      endedAt: at,
+    },
+    events: [event],
+    checkpoint: snapshot.checkpoint,
   });
 }
 
 describe('TaskCommandService', () => {
-  it('clears only cancelled-task continuation state and prevents later WorkSession reuse', async () => {
-    const database = await openChatBrowserDatabase(
-      createTestDatabaseName('command-clear-cancelled-context'),
-    );
-    const repository = new IndexedDbTaskRepository(database);
-    const conversations = new IndexedDbConversationRepository(database);
-    const sources = createCommandSources();
-    await seedConversation(database, {
-      id: 'conv_clear',
-      tabId: 7,
-      title: 'Clear context',
-      createdAt: 1_000,
-      updatedAt: 1_000,
-    });
-    const commands = new TaskCommandService(repository, sources.clock, sources.ids, conversations);
-    const created = await commands.create({
-      conversationId: 'conv_clear',
-      tabId: 7,
-      goal: 'Keep visible history but discard continuation',
-      userMessageId: 'message_user',
-    });
-    sources.advance(1_100);
-    const cancelled = await commands.cancel(created.task.id);
-    sources.advance(1_200);
+  it('creates one stable task, first run, message event, and runtime checkpoint', async () => {
+    const fixture = await setup('command-create');
+    const created = await createSubmission(fixture);
 
-    const cleared = await commands.clearContext(cancelled.task.id);
-
-    expect(cleared.task.status).toBe('cancelled');
-    expect(cleared.checkpoint.continuationItems).toEqual([]);
-    expect(cleared.checkpoint.pendingToolCall).toBeNull();
-    expect(cleared.events.at(-1)).toMatchObject({
-      type: 'task.context-cleared',
-      reason: 'user_clear_task_context',
+    expect(created).toMatchObject({
+      task: { ordinal: 1, status: 'queued', lastEventSequence: 2 },
+      run: { attempt: 1, status: 'queued' },
+      checkpoint: { browserTargetTabId: 7 },
+      events: [
+        { sequence: 1, type: 'message.recorded', messageId: 'message_user' },
+        { sequence: 2, type: 'status.changed', taskStatus: 'queued' },
+      ],
     });
-    await expect(commands.clearContext(cancelled.task.id)).resolves.toEqual(cleared);
-    await expect(
-      continueCancelled(commands, conversations, {
-        sourceTaskId: cancelled.task.id,
-        tabId: 8,
-        goal: 'Do not reuse cleared state',
-        userMessageId: 'message_new',
-      }),
-    ).rejects.toMatchObject({ code: 'TASK_STATE_INVALID' });
-    database.close();
+    expect(
+      (await fixture.conversations.listMessages(created.task.conversationId))[0],
+    ).toMatchObject({
+      id: 'message_user',
+      taskId: created.task.id,
+    });
+    fixture.database.close();
   });
 
-  it('atomically creates a queued task with a sequence-zero checkpoint', async () => {
-    const database = await openChatBrowserDatabase(createTestDatabaseName('command-create'));
-    const repository = new IndexedDbTaskRepository(database);
-    const sources = createCommandSources();
-    const commands = new TaskCommandService(
-      repository,
-      sources.clock,
-      sources.ids,
-      new IndexedDbConversationRepository(database),
-    );
+  it('pauses the current run and resumes with another run under the same task', async () => {
+    const fixture = await setup('command-resume');
+    const created = await createSubmission(fixture);
+    const paused = await fixture.commands.pause(created.task.id);
+    const resumed = await fixture.commands.resume(created.task.id);
 
-    const snapshot = await commands.create({
-      conversationId: 'conv_1',
-      tabId: 7,
-      goal: 'Complete the page',
-      userMessageId: 'message_1',
+    expect(paused).toMatchObject({
+      task: { id: created.task.id, status: 'paused', lastEventSequence: 3 },
+      run: { id: created.run.id, attempt: 1, status: 'paused' },
     });
-
-    expect(snapshot.task).toMatchObject({
-      status: 'queued',
-      checkpointId: snapshot.checkpoint.id,
+    expect(resumed).toMatchObject({
+      task: { id: created.task.id, status: 'queued', lastEventSequence: 4 },
+      run: { attempt: 2, status: 'queued' },
+      events: [{ sequence: 1 }, { sequence: 2 }, { sequence: 3 }, { sequence: 4 }],
     });
-    expect(snapshot.checkpoint).toMatchObject({
-      sequence: 0,
-      taskStatus: 'queued',
-      browserTargetTabId: 7,
-    });
-    expect(snapshot.events).toEqual([]);
-    await expect(repository.get(snapshot.task.id)).resolves.toEqual(snapshot.task);
-    database.close();
+    expect(resumed.run.id).not.toBe(created.run.id);
+    expect(await fixture.repository.getRun(created.run.id)).toMatchObject({ checkpointId: null });
+    expect(await fixture.repository.getCheckpoint(created.checkpoint?.id ?? '')).toBeUndefined();
+    fixture.database.close();
   });
 
-  it('rejects creation while another global task is unfinished', async () => {
-    const database = await openChatBrowserDatabase(createTestDatabaseName('command-single-task'));
-    const repository = new IndexedDbTaskRepository(database);
-    const sources = createCommandSources();
-    const commands = new TaskCommandService(
-      repository,
-      sources.clock,
-      sources.ids,
-      new IndexedDbConversationRepository(database),
-    );
-    await commands.create({
-      conversationId: 'conv_1',
-      tabId: 7,
-      goal: 'First task',
+  it('cancels a paused task and releases the global submission slot', async () => {
+    const fixture = await setup('command-cancel-paused');
+    const created = await createSubmission(fixture);
+    await fixture.commands.pause(created.task.id);
+
+    const cancelled = await fixture.commands.cancel(created.task.id);
+    const nextConversation = conversation('conversation_after_cancel');
+    const next = await fixture.commands.createSubmission({
+      conversation: nextConversation,
+      createConversation: true,
+      conversationId: nextConversation.id,
+      tabId: nextConversation.tabId ?? 0,
+      goal: 'Run the next task',
+      message: userMessage(nextConversation.id, 'message_after_cancel'),
     });
 
-    await expect(
-      commands.create({
-        conversationId: 'conv_2',
-        tabId: 8,
-        goal: 'Second task',
-      }),
-    ).rejects.toMatchObject({
+    expect(cancelled.task.status).toBe('cancelled');
+    expect(next.task.status).toBe('queued');
+    fixture.database.close();
+  });
+
+  it('retries a failed run without changing the logical task identity', async () => {
+    const fixture = await setup('command-retry');
+    const created = await createSubmission(fixture);
+    await markFailed(fixture, created);
+    const retried = await fixture.commands.retry(created.task.id);
+
+    expect(retried.task.id).toBe(created.task.id);
+    expect(retried).toMatchObject({
+      task: { status: 'queued', lastEventSequence: 4 },
+      run: { attempt: 2, status: 'queued', error: null },
+      events: [{ sequence: 1 }, { sequence: 2 }, { sequence: 3 }, { sequence: 4 }],
+    });
+    fixture.database.close();
+  });
+
+  it('reports the global running-task conflict when retrying an older task', async () => {
+    const fixture = await setup('command-retry-busy');
+    const created = await createSubmission(fixture);
+    await markFailed(fixture, created);
+    const otherConversation = conversation('conversation_other');
+    await fixture.commands.createSubmission({
+      conversation: otherConversation,
+      createConversation: true,
+      conversationId: otherConversation.id,
+      tabId: 8,
+      goal: 'Run another task',
+      message: userMessage(otherConversation.id, 'message_other'),
+    });
+
+    await expect(fixture.commands.retry(created.task.id)).rejects.toMatchObject({
       code: 'TASK_ALREADY_RUNNING',
       message: '已有任务运行中',
     });
-    await expect(repository.listAll()).resolves.toHaveLength(1);
-    database.close();
+    fixture.database.close();
   });
 
-  it('persists pause, resume, and cancel as ordered checkpoints and events', async () => {
-    const database = await openChatBrowserDatabase(createTestDatabaseName('command-transition'));
-    const repository = new IndexedDbTaskRepository(database);
-    const conversations = new IndexedDbConversationRepository(database);
-    const sources = createCommandSources();
-    await seedConversation(database, {
-      id: 'conv_1',
-      tabId: 7,
-      title: 'Complete the page',
-      createdAt: 1_000,
-      updatedAt: 1_000,
-    });
-    const commands = new TaskCommandService(repository, sources.clock, sources.ids, conversations);
-    const created = await commands.create({
-      conversationId: 'conv_1',
-      tabId: 7,
-      goal: 'Complete the page',
-      userMessageId: 'message_1',
-    });
+  it('retains a durable assistant bubble and returns its latest event after cancellation', async () => {
+    const fixture = await setup('command-cancel-retention');
+    const created = await createSubmission(fixture);
+    const cancelled = await fixture.commands.cancel(created.task.id);
 
-    sources.advance(1_100);
-    await expect(commands.pause(created.task.id)).resolves.toMatchObject({
-      task: { status: 'paused' },
-      checkpoint: { sequence: 1, taskStatus: 'paused' },
+    expect(cancelled).toMatchObject({
+      task: { status: 'cancelled', lastEventSequence: 4 },
+      run: { status: 'cancelled' },
+      events: [
+        { sequence: 1, type: 'message.recorded' },
+        { sequence: 2, type: 'status.changed' },
+        { sequence: 3, type: 'status.changed', taskStatus: 'cancelled' },
+        { sequence: 4, type: 'message.recorded' },
+      ],
     });
-    sources.advance(1_200);
-    await expect(commands.resume(created.task.id)).resolves.toMatchObject({
-      task: { status: 'queued' },
-      checkpoint: { sequence: 2, taskStatus: 'queued' },
-    });
-    sources.advance(1_300);
-    const cancelled = await commands.cancel(created.task.id);
-
-    expect(cancelled.task.status).toBe('cancelled');
-    expect(cancelled.events.map((event) => [event.sequence, event.type])).toEqual([
-      [1, 'task.paused'],
-      [2, 'task.resumed'],
-      [3, 'task.cancelled'],
-    ]);
-    await expect(conversations.listMessages('conv_1')).resolves.toEqual([
+    expect(await fixture.conversations.listMessages(created.task.conversationId)).toContainEqual(
       expect.objectContaining({
         taskId: created.task.id,
         role: 'assistant',
         status: 'interrupted',
         text: '',
       }),
-    ]);
-    database.close();
+    );
+    fixture.database.close();
   });
 
-  it('continues repeated cancellations in one WorkSession with ordered user references', async () => {
-    const database = await openChatBrowserDatabase(createTestDatabaseName('command-continuation'));
-    const repository = new IndexedDbTaskRepository(database);
-    const conversations = new IndexedDbConversationRepository(database);
-    const sources = createCommandSources();
-    await seedConversation(database, {
-      id: 'conv_1',
-      tabId: 7,
-      title: 'Continue the task',
-      createdAt: 1_000,
-      updatedAt: 1_000,
-    });
-    const commands = new TaskCommandService(repository, sources.clock, sources.ids, conversations);
-    const created = await commands.create({
-      conversationId: 'conv_1',
-      tabId: 7,
-      goal: 'Initial request',
-      userMessageId: 'message_1',
-    });
-
-    sources.advance(1_100);
-    const firstCancelled = await commands.cancel(created.task.id);
-    sources.advance(1_200);
-    const firstContinuation = await continueCancelled(commands, conversations, {
-      sourceTaskId: firstCancelled.task.id,
-      tabId: 8,
-      goal: 'Continue with more detail',
-      userMessageId: 'message_2',
-    });
-
-    expect(firstContinuation.task.id).not.toBe(firstCancelled.task.id);
-    expect(firstContinuation.task.workSessionId).toBe(firstCancelled.task.workSessionId);
-    expect(firstContinuation.checkpoint.browserTargetTabId).toBe(8);
-    expect(firstContinuation.checkpoint.continuationItems).toEqual([
-      { type: 'message_ref', messageId: 'message_1' },
-      { type: 'message_ref', messageId: 'message_2' },
-    ]);
-
-    sources.advance(1_300);
-    const secondCancelled = await commands.cancel(firstContinuation.task.id);
-    sources.advance(1_400);
-    const secondContinuation = await continueCancelled(commands, conversations, {
-      sourceTaskId: secondCancelled.task.id,
+  it('continues a cancelled task with a new run and a chronologically placed user message', async () => {
+    const fixture = await setup('command-cancel-continuation');
+    const created = await createSubmission(fixture);
+    const cancelled = await fixture.commands.cancel(created.task.id);
+    const nextMessage = userMessage(created.task.conversationId, 'message_continue');
+    const continued = await fixture.commands.continueCancelledSubmission({
+      sourceTaskId: created.task.id,
       tabId: 9,
-      goal: 'Continue again',
-      userMessageId: 'message_3',
+      conversation: conversation(created.task.conversationId),
+      message: { ...nextMessage, text: 'Continue with more detail' },
     });
 
-    expect(secondContinuation.task.workSessionId).toBe(created.task.workSessionId);
-    expect(secondContinuation.checkpoint.browserTargetTabId).toBe(9);
-    expect(secondContinuation.checkpoint.continuationItems).toEqual([
-      { type: 'message_ref', messageId: 'message_1' },
-      { type: 'message_ref', messageId: 'message_2' },
-      { type: 'message_ref', messageId: 'message_3' },
-    ]);
-    database.close();
-  });
-
-  it('continues a cancelled committed context without expanding older audit results', async () => {
-    const database = await openChatBrowserDatabase(
-      createTestDatabaseName('command-continuation-context-commit'),
-    );
-    const repository = new IndexedDbTaskRepository(database);
-    const conversations = new IndexedDbConversationRepository(database);
-    const sources = createCommandSources();
-    await seedConversation(database, {
-      id: 'conv_1',
-      tabId: 7,
-      title: 'Continue committed context',
-      createdAt: 1_000,
-      updatedAt: 1_000,
-    });
-    const commands = new TaskCommandService(repository, sources.clock, sources.ids, conversations);
-    const created = await commands.create({
-      conversationId: 'conv_1',
-      tabId: 7,
-      goal: 'Initial request',
-      userMessageId: 'message_1',
-    });
-    const commitArguments = JSON.stringify({
-      state: 'Goal: continue. Next: inspect the form.',
-      throughCallId: 'call_inspect',
-    });
-    const commitOutput =
-      '{"ok":true,"compactedCalls":1,"releasedTextChars":100,"releasedImages":1}';
-    const committedCheckpoint = {
-      ...created.checkpoint,
-      id: 'checkpoint_committed',
-      sequence: 1,
-      taskStatus: 'planning' as const,
-      completedToolResults: [
-        {
-          callId: 'call_inspect',
-          toolName: 'browser_inspect',
-          argumentsJson: '{"mode":"screenshot"}',
-          output: '{"ok":true,"data":"old raw result"}',
-          resultRef: 'result_inspect',
-          attachmentIds: ['attachment_old'],
-        },
-        {
-          callId: 'call_commit',
-          toolName: 'commit_context',
-          argumentsJson: commitArguments,
-          output: commitOutput,
-          resultRef: 'result_commit',
-          attachmentIds: [],
-        },
-      ],
-      continuationItems: [
-        { type: 'message_ref' as const, messageId: 'message_1' },
-        {
-          type: 'function_call' as const,
-          callId: 'call_commit',
-          name: 'commit_context',
-          argumentsJson: commitArguments,
-        },
-        {
-          type: 'function_call_output' as const,
-          callId: 'call_commit',
-          output: commitOutput,
-          resultRef: 'result_commit',
-          attachmentIds: [],
-        },
-      ],
-      pendingToolCall: null,
-      createdAt: 1_100,
-    };
-    await repository.saveTransition({
+    expect(continued).toMatchObject({
       task: {
-        ...created.task,
-        status: 'planning',
-        checkpointId: committedCheckpoint.id,
-        updatedAt: 1_100,
+        id: created.task.id,
+        ordinal: created.task.ordinal,
+        tabId: 9,
+        status: 'queued',
+        lastEventSequence: cancelled.task.lastEventSequence + 2,
       },
-      event: {
-        id: 'event_committed',
-        taskId: created.task.id,
-        sequence: 1,
-        type: 'tool.result-recorded',
-        reason: 'commit_context_result_recorded',
-        at: 1_100,
-        error: null,
-      },
-      checkpoint: committedCheckpoint,
+      run: { attempt: 2, status: 'queued' },
     });
-
-    sources.advance(1_200);
-    const cancelled = await commands.cancel(created.task.id);
-    sources.advance(1_300);
-    const continued = await continueCancelled(commands, conversations, {
-      sourceTaskId: cancelled.task.id,
-      tabId: 8,
-      goal: 'Continue after commit',
-      userMessageId: 'message_2',
+    expect(continued.events.slice(-2)).toMatchObject([
+      { type: 'message.recorded', messageId: nextMessage.id },
+      { type: 'status.changed', taskStatus: 'queued' },
+    ]);
+    expect(continued.checkpoint?.continuationItems.at(-1)).toEqual({
+      type: 'message_ref',
+      messageId: nextMessage.id,
     });
-
-    expect(continued.checkpoint.completedToolResults.map(({ toolName }) => toolName)).toEqual([
-      'browser_inspect',
-      'commit_context',
-    ]);
-    expect(continued.checkpoint.continuationItems).toEqual([
-      { type: 'message_ref', messageId: 'message_1' },
-      {
-        type: 'function_call',
-        callId: 'call_commit',
-        name: 'commit_context',
-        argumentsJson: commitArguments,
-      },
-      {
-        type: 'function_call_output',
-        callId: 'call_commit',
-        output: commitOutput,
-        resultRef: 'result_commit',
-        attachmentIds: [],
-      },
-      { type: 'message_ref', messageId: 'message_2' },
-    ]);
-    expect(continued.checkpoint.continuationItems).not.toContainEqual(
-      expect.objectContaining({ callId: 'call_inspect' }),
-    );
-    database.close();
+    fixture.database.close();
   });
 
-  it('places an unapplied cancelled-run supplement before the continuation user message', async () => {
-    const database = await openChatBrowserDatabase(
-      createTestDatabaseName('command-continuation-supplement-order'),
-    );
-    const repository = new IndexedDbTaskRepository(database);
-    const conversations = new IndexedDbConversationRepository(database);
-    const sources = createCommandSources();
-    await seedConversation(database, {
-      id: 'conv_1',
-      tabId: 7,
-      title: 'Continue with supplement',
-      createdAt: 1_000,
-      updatedAt: 1_000,
-    });
-    const commands = new TaskCommandService(repository, sources.clock, sources.ids, conversations);
-    const created = await commands.create({
-      conversationId: 'conv_1',
-      tabId: 7,
-      goal: 'Initial request',
-      userMessageId: 'message_1',
-    });
-    await conversations.appendSupplement({
+  it('records pending supplements as applied when a cancelled task starts its next run', async () => {
+    const fixture = await setup('command-cancel-supplement-continuation');
+    const created = await createSubmission(fixture);
+    const supplement: MessageRecord = {
       id: 'supplement_before_cancel',
       kind: 'supplement',
-      conversationId: 'conv_1',
+      conversationId: created.task.conversationId,
       taskId: created.task.id,
       role: 'user',
       status: 'complete',
-      text: 'Use the corrected requirement.',
+      text: 'Use the newer requirement.',
       attachmentIds: [],
-      createdAt: 1_050,
-      updatedAt: 1_050,
-    });
-
-    sources.advance(1_100);
-    const cancelled = await commands.cancel(created.task.id);
-    sources.advance(1_200);
-    const continued = await continueCancelled(commands, conversations, {
-      sourceTaskId: cancelled.task.id,
-      tabId: 7,
-      goal: 'Continue after cancellation',
-      userMessageId: 'message_2',
-    });
-
-    expect(continued.checkpoint.continuationItems).toEqual([
-      { type: 'message_ref', messageId: 'message_1' },
-      { type: 'message_ref', messageId: 'supplement_before_cancel' },
-      { type: 'message_ref', messageId: 'message_2' },
-    ]);
-    database.close();
-  });
-
-  it('keeps resumed messages before an unresolved tool call when cancellation interrupts it', async () => {
-    const database = await openChatBrowserDatabase(
-      createTestDatabaseName('command-continuation-pending-tool'),
-    );
-    const repository = new IndexedDbTaskRepository(database);
-    const conversations = new IndexedDbConversationRepository(database);
-    const sources = createCommandSources();
-    await seedConversation(database, {
-      id: 'conv_1',
-      tabId: 7,
-      title: 'Continue pending tool',
-      createdAt: 1_000,
-      updatedAt: 1_000,
-    });
-    const commands = new TaskCommandService(repository, sources.clock, sources.ids, conversations);
-    const created = await commands.create({
-      conversationId: 'conv_1',
-      tabId: 7,
-      goal: 'Initial request',
-      userMessageId: 'message_1',
-    });
-    const planningCheckpoint = {
-      ...created.checkpoint,
-      id: 'checkpoint_planning',
-      sequence: 1,
-      taskStatus: 'planning' as const,
-      createdAt: 1_100,
+      createdAt: 102,
+      updatedAt: 102,
     };
-    await repository.saveTransition({
-      task: {
-        ...created.task,
-        status: 'planning',
-        updatedAt: 1_100,
-        checkpointId: planningCheckpoint.id,
-      },
-      event: {
-        id: 'event_planning',
-        taskId: created.task.id,
-        sequence: 1,
-        type: 'planning.started',
-        reason: 'model_request_started',
-        at: 1_100,
-        error: null,
-      },
-      checkpoint: planningCheckpoint,
-    });
-    const pendingCheckpoint = {
-      ...planningCheckpoint,
-      id: 'checkpoint_pending',
-      sequence: 2,
-      continuationItems: [
-        ...planningCheckpoint.continuationItems,
-        {
-          type: 'function_call' as const,
-          callId: 'call_search',
-          name: 'tavily_search',
-          argumentsJson: '{"query":"browser recovery"}',
-        },
-      ],
-      pendingToolCall: {
-        callId: 'call_search',
-        name: 'tavily_search',
-        argumentsJson: '{"query":"browser recovery"}',
-        executionState: 'recorded' as const,
-      },
-      createdAt: 1_200,
-    };
-    await repository.saveTransition({
-      task: {
-        ...created.task,
-        status: 'planning',
-        updatedAt: 1_200,
-        checkpointId: pendingCheckpoint.id,
-      },
-      event: {
-        id: 'event_pending',
-        taskId: created.task.id,
-        sequence: 2,
-        type: 'tool.call-recorded',
-        reason: 'tavily_search_call_recorded',
-        at: 1_200,
-        error: null,
-      },
-      checkpoint: pendingCheckpoint,
-    });
-    await conversations.appendMessage({
-      id: 'message_partial',
-      kind: 'conversation',
-      conversationId: 'conv_1',
-      taskId: created.task.id,
-      role: 'assistant',
-      status: 'interrupted',
-      text: 'Partial answer before the tool call.',
-      attachmentIds: [],
-      createdAt: 1_150,
-      updatedAt: 1_150,
-    });
-    await conversations.appendSupplement({
-      id: 'supplement_pending',
-      kind: 'supplement',
-      conversationId: 'conv_1',
-      taskId: created.task.id,
-      role: 'user',
-      status: 'complete',
-      text: 'Use the corrected domain.',
-      attachmentIds: [],
-      createdAt: 1_250,
-      updatedAt: 1_250,
+    await fixture.commands.appendSupplement(supplement);
+    const cancelled = await fixture.commands.cancel(created.task.id);
+    const nextMessage = userMessage(created.task.conversationId, 'message_after_supplement');
+
+    const continued = await fixture.commands.continueCancelledSubmission({
+      sourceTaskId: created.task.id,
+      tabId: 9,
+      conversation: conversation(created.task.conversationId),
+      message: nextMessage,
     });
 
-    sources.advance(1_300);
-    const cancelled = await commands.cancel(created.task.id);
-    sources.advance(1_400);
-    const continued = await continueCancelled(commands, conversations, {
-      sourceTaskId: cancelled.task.id,
-      tabId: 7,
-      goal: 'Continue after the pending call',
-      userMessageId: 'message_2',
-    });
-
-    expect(continued.checkpoint.continuationItems).toEqual([
-      { type: 'message_ref', messageId: 'message_1' },
-      { type: 'message_ref', messageId: 'message_partial' },
-      { type: 'message_ref', messageId: 'supplement_pending' },
-      { type: 'message_ref', messageId: 'message_2' },
+    expect(continued.events.slice(-3)).toMatchObject([
       {
-        type: 'function_call',
-        callId: 'call_search',
-        name: 'tavily_search',
-        argumentsJson: '{"query":"browser recovery"}',
+        sequence: cancelled.task.lastEventSequence + 1,
+        type: 'supplement.applied',
+        messageId: supplement.id,
+      },
+      {
+        sequence: cancelled.task.lastEventSequence + 2,
+        type: 'message.recorded',
+        messageId: nextMessage.id,
+      },
+      {
+        sequence: cancelled.task.lastEventSequence + 3,
+        type: 'status.changed',
+        taskStatus: 'queued',
       },
     ]);
-    expect(continued.checkpoint.pendingToolCall).toEqual(pendingCheckpoint.pendingToolCall);
-    database.close();
+    expect(continued.checkpoint?.continuationItems).toEqual(
+      expect.arrayContaining([
+        { type: 'message_ref', messageId: supplement.id },
+        { type: 'message_ref', messageId: nextMessage.id },
+      ]),
+    );
+    fixture.database.close();
   });
 
-  it('keeps partial assistant output without appending a cancellation placeholder', async () => {
-    const database = await openChatBrowserDatabase(
-      createTestDatabaseName('command-cancel-partial'),
-    );
-    const repository = new IndexedDbTaskRepository(database);
-    const conversations = new IndexedDbConversationRepository(database);
-    const sources = createCommandSources();
-    await seedConversation(database, {
-      id: 'conv_1',
-      tabId: 7,
-      title: 'Partial reply',
-      createdAt: 1_000,
-      updatedAt: 1_000,
-    });
-    const commands = new TaskCommandService(repository, sources.clock, sources.ids, conversations);
-    const created = await commands.create({
-      conversationId: 'conv_1',
-      tabId: 7,
-      goal: 'Keep partial output',
-      userMessageId: 'message_1',
-    });
-    await conversations.appendMessage({
-      id: 'message_partial',
-      kind: 'conversation',
-      conversationId: 'conv_1',
+  it('queues a supplement as one canonical message and one exact task event', async () => {
+    const fixture = await setup('command-supplement');
+    const created = await createSubmission(fixture);
+    const supplement: MessageRecord = {
+      id: 'supplement_1',
+      kind: 'supplement',
+      conversationId: created.task.conversationId,
       taskId: created.task.id,
-      role: 'assistant',
-      status: 'interrupted',
-      text: 'Partial output',
+      role: 'user',
+      status: 'complete',
+      text: 'Use only official sources.',
       attachmentIds: [],
-      createdAt: 1_010,
-      updatedAt: 1_010,
-    });
-
-    sources.advance(1_100);
-    const cancelled = await commands.cancel(created.task.id);
-    await commands.cancel(created.task.id);
-
-    sources.advance(1_200);
-    const continued = await continueCancelled(commands, conversations, {
-      sourceTaskId: cancelled.task.id,
-      tabId: 7,
-      goal: 'Continue after partial output',
-      userMessageId: 'message_2',
-    });
-
-    const messages = await conversations.listMessages('conv_1');
-    expect(messages.filter(({ role }) => role === 'assistant')).toEqual([
-      expect.objectContaining({
-        id: 'message_partial',
-        status: 'interrupted',
-        text: 'Partial output',
-      }),
-    ]);
-    expect(messages).toContainEqual(
-      expect.objectContaining({
-        id: 'message_2',
-        role: 'user',
-        text: 'Continue after partial output',
-      }),
-    );
-    expect(continued.checkpoint.continuationItems).toEqual([
-      { type: 'message_ref', messageId: 'message_1' },
-      { type: 'message_ref', messageId: 'message_partial' },
-      { type: 'message_ref', messageId: 'message_2' },
-    ]);
-    database.close();
-  });
-
-  it('retries the same failed task with a fresh queued checkpoint and no stale error or lease', async () => {
-    const database = await openChatBrowserDatabase(createTestDatabaseName('command-retry'));
-    const repository = new IndexedDbTaskRepository(database);
-    const sources = createCommandSources();
-    const commands = new TaskCommandService(
-      repository,
-      sources.clock,
-      sources.ids,
-      new IndexedDbConversationRepository(database),
-    );
-    const created = await commands.create({
-      conversationId: 'conv_1',
-      tabId: 7,
-      goal: 'Complete the page',
-      userMessageId: 'message_1',
-    });
-    const error: TaskError = {
-      code: 'TransientProviderError',
-      retryable: true,
-      recoveryAction: 'resume_task' as const,
-      userMessage: 'The provider is temporarily unavailable.',
-      evidenceRef: null,
+      createdAt: 110,
+      updatedAt: 110,
     };
-    await repository.saveTransition({
-      task: {
-        ...created.task,
-        status: 'failed',
-        updatedAt: 1_100,
-        checkpointId: 'checkpoint_failed',
-        lease: {
-          ownerId: 'stale',
-          acquiredAt: 1_050,
-          expiresAt: 9_999,
-          generation: 1,
-        },
-        lastError: error,
-      },
-      event: {
-        id: 'event_failed',
-        taskId: created.task.id,
-        sequence: 1,
-        type: 'task.failed',
-        reason: 'Provider failed.',
-        at: 1_100,
-        error,
-      },
-      checkpoint: {
-        ...created.checkpoint,
-        id: 'checkpoint_failed',
-        sequence: 1,
-        taskStatus: 'failed',
-        createdAt: 1_100,
-      },
-    });
+    await fixture.commands.appendSupplement(supplement);
 
-    sources.advance(1_200);
-    const retried = await commands.retry(created.task.id);
-
-    expect(retried.task).toMatchObject({
-      id: created.task.id,
-      status: 'queued',
-      lastError: null,
-      lease: null,
-    });
-    expect(retried.checkpoint).toMatchObject({
-      sequence: 2,
-      taskStatus: 'queued',
-    });
-    expect(retried.events.at(-1)).toMatchObject({
-      sequence: 2,
-      type: 'task.retried',
-      reason: 'user_retry',
-    });
-    database.close();
+    expect(await fixture.repository.listEvents(created.task.id)).toMatchObject([
+      { sequence: 1 },
+      { sequence: 2 },
+      { sequence: 3, type: 'supplement.queued', messageId: supplement.id },
+    ]);
+    expect(await fixture.conversations.listMessages(created.task.conversationId)).toContainEqual(
+      supplement,
+    );
+    fixture.database.close();
   });
 
-  it('returns a stable command error when the task does not exist', async () => {
-    const database = await openChatBrowserDatabase(createTestDatabaseName('command-missing'));
-    const repository = new IndexedDbTaskRepository(database);
-    const sources = createCommandSources();
-    const commands = new TaskCommandService(
-      repository,
-      sources.clock,
-      sources.ids,
-      new IndexedDbConversationRepository(database),
-    );
+  it('clears only resumable context while retaining permanent task facts', async () => {
+    const fixture = await setup('command-clear-context');
+    const created = await createSubmission(fixture);
+    const cancelled = await fixture.commands.cancel(created.task.id);
+    const cleared = await fixture.commands.clearContext(created.task.id);
 
-    await expect(commands.getSnapshot('missing')).rejects.toEqual(
-      expect.objectContaining({ code: 'TASK_NOT_FOUND' }),
+    expect(cleared).toMatchObject({
+      task: { id: created.task.id, status: 'cancelled' },
+      run: { id: cancelled.run.id, checkpointId: null },
+      checkpoint: null,
+    });
+    expect(cleared.events.at(-1)).toMatchObject({ type: 'context.cleared' });
+    expect(await fixture.repository.readTaskArchive(created.task.id)).toMatchObject({
+      task: { id: created.task.id },
+      events: expect.arrayContaining([
+        expect.objectContaining({ type: 'message.recorded' }),
+        expect.objectContaining({ type: 'context.cleared' }),
+      ]),
+    });
+    await expect(
+      fixture.commands.continueCancelledSubmission({
+        sourceTaskId: created.task.id,
+        tabId: 7,
+        conversation: conversation(created.task.conversationId),
+        message: userMessage(created.task.conversationId, 'message_after_clear'),
+      }),
+    ).rejects.toMatchObject({ code: 'TASK_STATE_INVALID' });
+    fixture.database.close();
+  });
+
+  it('rejects invalid lifecycle commands without mutating durable state', async () => {
+    const fixture = await setup('command-invalid');
+    const created = await createSubmission(fixture);
+    await expect(fixture.commands.clearContext(created.task.id)).rejects.toBeInstanceOf(
+      TaskCommandError,
     );
-    database.close();
+    await expect(fixture.commands.getSnapshot('missing_task')).rejects.toMatchObject({
+      code: 'TASK_NOT_FOUND',
+    });
+    expect(
+      (await fixture.repository.listEvents(created.task.id)).map(({ sequence }) => sequence),
+    ).toEqual([1, 2]);
+    fixture.database.close();
   });
 });

@@ -1,7 +1,7 @@
 import { ChevronDown, ChevronUp } from 'lucide-react';
 import { useState } from 'react';
 import type { Translator } from '../../shared/i18n/i18n';
-import type { PanelCompletedToolResult } from '../../shared/protocol/panel-types';
+import type { PanelToolResult } from '../../shared/protocol/panel-types';
 import { MessageImages } from '../chat/MessageImages';
 import { copyMessageToClipboard } from '../chat/copy-message';
 import type { AttachmentDraftClient } from '../chat/use-image-draft';
@@ -9,7 +9,7 @@ import { toolDisplayName } from './browser-tool-label';
 import { ToolCopyButton } from './ToolCopyButton';
 
 export interface ToolResultProps {
-  readonly result: PanelCompletedToolResult;
+  readonly result: PanelToolResult;
   readonly attachments: AttachmentDraftClient;
   readonly t: Translator;
   readonly onOpenImagePreview?: ((attachmentId: string) => Promise<boolean>) | undefined;
@@ -27,7 +27,7 @@ function formatToolPayload(value: string): string {
 }
 
 /** Reads only the bounded numeric fields from a trusted internal commit result. */
-function contextCommitSummary(result: PanelCompletedToolResult, t: Translator): string | null {
+function contextCommitSummary(result: PanelToolResult, t: Translator): string | null {
   if (result.toolName !== 'commit_context') return null;
   try {
     const value: unknown = JSON.parse(result.output);
@@ -114,7 +114,7 @@ export function ToolResult({ result, attachments, t, onOpenImagePreview }: ToolR
               </pre>
             </section>
           )}
-          {result.output.length === 0 && (result.attachmentIds?.length ?? 0) === 0 ? null : (
+          {result.output.length === 0 && result.attachmentIds.length === 0 ? null : (
             <section className="tool-result-payload">
               <header className="tool-result-payload-header">
                 <span>{t('toolResult')}</span>
@@ -124,7 +124,7 @@ export function ToolResult({ result, attachments, t, onOpenImagePreview }: ToolR
                   onCopy={() =>
                     copyMessageToClipboard({
                       text: formattedOutput,
-                      attachmentIds: result.attachmentIds ?? [],
+                      attachmentIds: result.attachmentIds,
                       client: attachments,
                     })
                   }
@@ -136,7 +136,7 @@ export function ToolResult({ result, attachments, t, onOpenImagePreview }: ToolR
                 </pre>
               )}
               <MessageImages
-                attachmentIds={result.attachmentIds ?? []}
+                attachmentIds={result.attachmentIds}
                 client={attachments}
                 t={t}
                 onOpenImagePreview={onOpenImagePreview}

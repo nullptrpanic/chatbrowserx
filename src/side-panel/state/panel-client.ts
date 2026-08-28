@@ -39,7 +39,7 @@ export interface PanelClientOptions {
 type PanelListener = () => void;
 
 function snapshotVersion(snapshot: PanelSnapshot | null): number {
-  return snapshot?.stateVersion ?? snapshot?.generatedAt ?? -1;
+  return snapshot?.stateVersion ?? -1;
 }
 
 function readStateVersion(value: unknown): number | null {
@@ -579,7 +579,7 @@ export class PanelClient {
         ...task,
         detailLevel: detailed.sequence === task.sequence ? ('full' as const) : ('summary' as const),
         events: detailed.events,
-        completedToolResults: detailed.completedToolResults,
+        toolResults: detailed.toolResults,
         supplements: task.supplements,
       };
     });

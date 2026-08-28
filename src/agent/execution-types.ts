@@ -1,5 +1,6 @@
 import type { Checkpoint } from '../tasks/checkpoint-types';
-import type { TaskRun } from '../tasks/task-types';
+import type { Task, TaskEvent } from '../tasks/task-types';
+import type { MaterializedToolResult } from '../tasks/tool-result-types';
 import type {
   TavilyCrawlToolInput,
   TavilyExtractToolInput,
@@ -8,14 +9,16 @@ import type {
 import type { ParsedBrowserToolCall } from './tools/browser-tool-schema';
 import type { ParsedContextCommitToolCall } from './tools/context-commit-tool-schema';
 import type { ParsedSandboxToolCall } from './tools/sandbox-tool-schema';
-import type { ParsedTaskResultToolCall } from './tools/task-result-tool-schema';
+import type { ParsedHistoryToolCall } from './tools/history-tool-schema';
 import type { ModelUsage } from '../providers/stream-events';
 import type { ModelOutputContinuationItem } from '../tasks/continuation-types';
 import type { ContinuationItem } from '../tasks/continuation-types';
 
 export interface AgentPlanInput {
-  readonly task: TaskRun;
+  readonly task: Task;
+  readonly events: readonly TaskEvent[];
   readonly checkpoint: Checkpoint;
+  readonly toolResults: readonly MaterializedToolResult[];
 }
 
 /** Safe numeric metadata for one completed model response. */
@@ -51,8 +54,8 @@ export type AgentEvent =
       readonly call: ParsedSandboxToolCall;
     })
   | (AgentOutcomeMetadata & {
-      readonly type: 'task-result.call';
-      readonly call: ParsedTaskResultToolCall;
+      readonly type: 'history.call';
+      readonly call: ParsedHistoryToolCall;
     })
   | (AgentOutcomeMetadata & {
       readonly type: 'tavily.call';

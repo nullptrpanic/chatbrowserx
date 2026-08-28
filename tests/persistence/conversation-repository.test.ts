@@ -5,147 +5,182 @@ import { IndexedDbAttachmentRepository } from '../../src/persistence/attachment-
 import { IndexedDbConversationRepository } from '../../src/persistence/conversation-repository';
 import { openChatBrowserDatabase } from '../../src/persistence/open-database';
 import { IndexedDbTaskRepository } from '../../src/persistence/task-repository';
-import { createTask } from '../../src/tasks/task-factory';
+import type { Checkpoint } from '../../src/tasks/checkpoint-types';
 import type { Conversation } from '../../src/tasks/conversation-types';
 import type { MessageRecord } from '../../src/tasks/message-types';
+import type { Task, TaskEvent, TaskRun } from '../../src/tasks/task-types';
+import type { ToolResult } from '../../src/tasks/tool-result-types';
 import { createTestDatabaseName, seedConversation, seedTask } from './test-helpers';
 
 const conversation: Conversation = {
-  id: 'conv_1',
+  id: 'conversation_1',
   tabId: 7,
   title: 'Fixture task',
   createdAt: 1,
   updatedAt: 1,
 };
 
-const message: MessageRecord = {
-  id: 'message_1',
-  kind: 'conversation',
-  conversationId: conversation.id,
-  taskId: null,
-  role: 'user',
-  status: 'streaming',
-  text: 'Hello',
-  attachmentIds: ['attachment_1'],
-  createdAt: 2,
-  updatedAt: 2,
-};
+function durableRecords(status: Task['status'] = 'queued') {
+  const task: Task = {
+    id: 'task_1',
+    conversationId: conversation.id,
+    ordinal: 1,
+    tabId: 7,
+    goal: 'Inspect the page',
+    status,
+    latestRunId: 'run_1',
+    lastEventSequence: 2,
+    createdAt: 2,
+    updatedAt: 3,
+  };
+  const run: TaskRun = {
+    id: 'run_1',
+    taskId: task.id,
+    attempt: 1,
+    status,
+    checkpointId: status === 'completed' ? null : 'checkpoint_1',
+    lease: null,
+    error: null,
+    startedAt: 2,
+    endedAt: status === 'completed' ? 3 : null,
+  };
+  const message: MessageRecord = {
+    id: 'message_1',
+    kind: 'conversation',
+    conversationId: conversation.id,
+    taskId: task.id,
+    role: 'user',
+    status: 'complete',
+    text: 'Inspect the page',
+    attachmentIds: ['attachment_1'],
+    createdAt: 2,
+    updatedAt: 2,
+  };
+  const events: TaskEvent[] = [
+    {
+      id: 'event_1',
+      taskId: task.id,
+      runId: run.id,
+      sequence: 1,
+      at: 2,
+      type: 'message.recorded',
+      messageId: message.id,
+    },
+    {
+      id: 'event_2',
+      taskId: task.id,
+      runId: run.id,
+      sequence: 2,
+      at: 3,
+      type: 'status.changed',
+      taskStatus: status,
+      runStatus: status,
+      reason: `task.${status}`,
+      error: null,
+    },
+  ];
+  const checkpoint: Checkpoint = {
+    id: 'checkpoint_1',
+    taskId: task.id,
+    runId: run.id,
+    continuationItems: [{ type: 'message_ref', messageId: message.id }],
+    pendingToolCall: null,
+    browserToolCallsInAttempt: 0,
+    browserTargetTabId: 7,
+    createdAt: 2,
+  };
+  return { task, run, message, events, checkpoint };
+}
 
 describe('IndexedDbConversationRepository', () => {
-  it('normalizes legacy messages to ordinary conversation messages', async () => {
-    const database = await openChatBrowserDatabase(createTestDatabaseName('legacy-message-kind'));
-    const conversations = new IndexedDbConversationRepository(database);
-    await seedConversation(database, conversation);
-    await database.add('messages', {
-      id: 'legacy_message',
-      conversationId: conversation.id,
-      taskId: null,
-      role: 'user',
-      status: 'complete',
-      text: 'Legacy message',
-      attachmentIds: [],
-      createdAt: 2,
-      updatedAt: 2,
-    } as never);
-
-    await expect(conversations.listMessages(conversation.id)).resolves.toEqual([
-      expect.objectContaining({ id: 'legacy_message', kind: 'conversation' }),
-    ]);
-    database.close();
-  });
-
-  it('lists conversations from every tab by most recent activity', async () => {
+  it('lists global conversations by most recent activity', async () => {
     const database = await openChatBrowserDatabase(createTestDatabaseName('conversation-global'));
     const conversations = new IndexedDbConversationRepository(database);
-    await seedConversation(database, {
-      id: 'conversation_tab_7_older',
-      tabId: 7,
-      title: 'Older task',
-      createdAt: 10,
-      updatedAt: 20,
-    });
-    await seedConversation(database, {
-      id: 'conversation_tab_9_newest',
-      tabId: 9,
-      title: 'Newest task',
-      createdAt: 30,
-      updatedAt: 40,
+    await seedConversation(database, { ...conversation, id: 'older', updatedAt: 20 });
+    await seedConversation(database, { ...conversation, id: 'newer', tabId: 9, updatedAt: 40 });
+
+    expect((await conversations.listAll()).map(({ id }) => id)).toEqual(['newer', 'older']);
+    database.close();
+  });
+
+  it('lists only messages owned by one task', async () => {
+    const database = await openChatBrowserDatabase(createTestDatabaseName('messages-by-task'));
+    const conversations = new IndexedDbConversationRepository(database);
+    const records = durableRecords();
+    await seedConversation(database, conversation);
+    await database.add('messages', records.message);
+    await database.add('messages', {
+      ...records.message,
+      id: 'message_other_task',
+      taskId: 'task_other',
+      createdAt: 4,
+      updatedAt: 4,
     });
 
-    expect((await conversations.listAll()).map(({ id }) => id)).toEqual([
-      'conversation_tab_9_newest',
-      'conversation_tab_7_older',
+    await expect(conversations.listTaskMessages(records.task.id)).resolves.toEqual([
+      records.message,
     ]);
     database.close();
   });
 
-  it('orders messages, updates streaming text, and clears attachment references transactionally', async () => {
-    const database = await openChatBrowserDatabase(createTestDatabaseName('conversation'));
+  it('updates one canonical message and reconciles attachment references', async () => {
+    const database = await openChatBrowserDatabase(createTestDatabaseName('message-update'));
     const conversations = new IndexedDbConversationRepository(database);
     const attachments = new IndexedDbAttachmentRepository(database);
+    const records = durableRecords();
     await seedConversation(database, conversation);
-    await attachments.put({
-      id: 'attachment_1',
-      blob: new Blob([new Uint8Array([1])], { type: 'image/png' }),
-      mimeType: 'image/png',
-      byteSize: 1,
-      width: 1,
-      height: 1,
-      source: 'file',
-      createdAt: 1,
-    });
-    await attachments.put({
-      id: 'attachment_2',
-      blob: new Blob([new Uint8Array([2])], { type: 'image/png' }),
-      mimeType: 'image/png',
-      byteSize: 1,
-      width: 1,
-      height: 1,
-      source: 'file',
-      createdAt: 1,
-    });
+    for (const id of ['attachment_1', 'attachment_2']) {
+      await attachments.put({
+        id,
+        blob: new Blob([new Uint8Array([1])], { type: 'image/png' }),
+        mimeType: 'image/png',
+        byteSize: 1,
+        width: 1,
+        height: 1,
+        source: 'file',
+        createdAt: 1,
+      });
+    }
+    await database.add('messages', records.message);
+    await attachments.addReference('attachment_1', `message:${records.message.id}`);
 
-    await conversations.appendMessage(message);
     await conversations.updateMessage({
-      ...message,
-      status: 'complete',
-      text: 'Hello world',
+      ...records.message,
+      status: 'interrupted',
+      text: 'Partial assistant response',
       attachmentIds: ['attachment_2'],
-      updatedAt: 3,
+      updatedAt: 5,
     });
 
-    await expect(conversations.get(conversation.id)).resolves.toEqual(
-      expect.objectContaining({ id: conversation.id, updatedAt: 3 }),
-    );
     await expect(conversations.listMessages(conversation.id)).resolves.toEqual([
       expect.objectContaining({
-        status: 'complete',
-        text: 'Hello world',
+        status: 'interrupted',
+        text: 'Partial assistant response',
         attachmentIds: ['attachment_2'],
       }),
     ]);
-    await expect(attachments.deleteUnreferenced(10)).resolves.toBe(1);
-    await expect(attachments.get('attachment_1')).resolves.toBeUndefined();
-    await expect(attachments.get('attachment_2')).resolves.toBeDefined();
-
-    await conversations.clearConversation(conversation.id);
-    await expect(conversations.get(conversation.id)).resolves.toBeUndefined();
-    await expect(conversations.listMessages(conversation.id)).resolves.toEqual([]);
+    expect(
+      await database.get('attachment-references', [
+        'attachment_1',
+        `message:${records.message.id}`,
+      ]),
+    ).toBeUndefined();
+    expect(
+      await database.get('attachment-references', [
+        'attachment_2',
+        `message:${records.message.id}`,
+      ]),
+    ).toBeDefined();
     await expect(attachments.deleteUnreferenced(10)).resolves.toBe(1);
     database.close();
   });
 
-  it('rejects clearing a conversation with a non-terminal task', async () => {
+  it('rejects clearing a conversation with an unfinished logical task', async () => {
     const database = await openChatBrowserDatabase(createTestDatabaseName('conversation-active'));
     const conversations = new IndexedDbConversationRepository(database);
+    const { task } = durableRecords('planning');
     await seedConversation(database, conversation);
-    await seedTask(
-      database,
-      createTask(
-        { conversationId: conversation.id, tabId: 7, goal: 'Still running' },
-        { clock: { now: () => 2 }, ids: { create: () => 'task_1' } },
-      ),
-    );
+    await seedTask(database, task);
 
     await expect(conversations.clearConversation(conversation.id)).rejects.toThrow(
       /non-terminal task/i,
@@ -154,213 +189,53 @@ describe('IndexedDbConversationRepository', () => {
     database.close();
   });
 
-  it('rejects a message that references a missing attachment', async () => {
-    const database = await openChatBrowserDatabase(createTestDatabaseName('conversation-missing'));
-    const conversations = new IndexedDbConversationRepository(database);
-    await seedConversation(database, conversation);
-
-    await expect(conversations.appendMessage(message)).rejects.toThrow(
-      /attachment does not exist/i,
-    );
-    await expect(conversations.listMessages(conversation.id)).resolves.toEqual([]);
-    database.close();
-  });
-
-  it('atomically appends an image-only supplement to a running task', async () => {
-    const database = await openChatBrowserDatabase(createTestDatabaseName('supplement-running'));
-    const conversations = new IndexedDbConversationRepository(database);
-    const attachments = new IndexedDbAttachmentRepository(database);
-    await seedConversation(database, conversation);
-    const task = createTask(
-      { conversationId: conversation.id, tabId: 7, goal: 'Research sources' },
-      { clock: { now: () => 2 }, ids: { create: (prefix) => `${prefix}_supplement` } },
-    );
-    await seedTask(database, task);
-    await attachments.put({
-      id: 'attachment_1',
-      blob: new Blob([new Uint8Array([1])], { type: 'image/png' }),
-      mimeType: 'image/png',
-      byteSize: 1,
-      width: 1,
-      height: 1,
-      source: 'file',
-      createdAt: 1,
-    });
-
-    await conversations.appendSupplement({
-      id: 'supplement_1',
-      kind: 'supplement',
-      conversationId: conversation.id,
-      taskId: task.id,
-      role: 'user',
-      status: 'complete',
-      text: '',
-      attachmentIds: ['attachment_1'],
-      createdAt: 3,
-      updatedAt: 3,
-    });
-
-    await expect(conversations.listMessages(conversation.id)).resolves.toContainEqual(
-      expect.objectContaining({
-        id: 'supplement_1',
-        kind: 'supplement',
-        taskId: task.id,
-        attachmentIds: ['attachment_1'],
-      }),
-    );
-    await expect(attachments.deleteUnreferenced(10)).resolves.toBe(0);
-    database.close();
-  });
-
-  it.each(['paused', 'waiting_for_auth', 'completed', 'failed', 'cancelled'] as const)(
-    'rejects supplements after a task becomes %s',
-    async (status) => {
-      const database = await openChatBrowserDatabase(
-        createTestDatabaseName(`supplement-${status}`),
-      );
-      const conversations = new IndexedDbConversationRepository(database);
-      await seedConversation(database, conversation);
-      const task = {
-        ...createTask(
-          { conversationId: conversation.id, tabId: 7, goal: 'Research sources' },
-          { clock: { now: () => 2 }, ids: { create: (prefix) => `${prefix}_${status}` } },
-        ),
-        status,
-      };
-      await seedTask(database, task);
-
-      await expect(
-        conversations.appendSupplement({
-          id: `supplement_${status}`,
-          kind: 'supplement',
-          conversationId: conversation.id,
-          taskId: task.id,
-          role: 'user',
-          status: 'complete',
-          text: 'Use official sources.',
-          attachmentIds: [],
-          createdAt: 3,
-          updatedAt: 3,
-        }),
-      ).rejects.toThrow(/running task/i);
-      await expect(conversations.listMessages(conversation.id)).resolves.toEqual([]);
-      database.close();
-    },
-  );
-
-  it('cascades terminal task events and checkpoints when clearing history', async () => {
+  it('cascades permanent task facts, runtime state, and all attachment references', async () => {
     const database = await openChatBrowserDatabase(createTestDatabaseName('conversation-cascade'));
     const conversations = new IndexedDbConversationRepository(database);
     const tasks = new IndexedDbTaskRepository(database);
-    await seedConversation(database, conversation);
-    const queued = createTask(
-      { conversationId: conversation.id, tabId: 7, goal: 'Completed work' },
-      { clock: { now: () => 2 }, ids: { create: () => 'task_terminal' } },
-    );
-    await seedTask(database, queued);
-    const completed = {
-      ...queued,
-      status: 'completed' as const,
-      updatedAt: 3,
-      checkpointId: 'checkpoint_terminal',
-    };
-    await tasks.saveTransition({
-      task: completed,
-      event: {
-        id: 'event_terminal',
-        taskId: completed.id,
-        sequence: 1,
-        type: 'task.completed',
-        reason: 'Goal verified.',
-        at: 3,
-        error: null,
-      },
-      checkpoint: {
-        id: 'checkpoint_terminal',
-        taskId: completed.id,
-        sequence: 1,
-        taskStatus: 'completed',
-        completedToolResults: [],
-        continuationItems: [],
-        pendingToolCall: null,
-        createdAt: 3,
-      },
-    });
-
-    await conversations.clearConversation(conversation.id);
-
-    await expect(tasks.get(completed.id)).resolves.toBeUndefined();
-    await expect(tasks.listEvents(completed.id)).resolves.toEqual([]);
-    await expect(tasks.getCheckpoint('checkpoint_terminal')).resolves.toBeUndefined();
-    database.close();
-  });
-
-  it('removes tool-result attachment references when clearing history', async () => {
-    const database = await openChatBrowserDatabase(
-      createTestDatabaseName('conversation-tool-attachment'),
-    );
-    const conversations = new IndexedDbConversationRepository(database);
-    const tasks = new IndexedDbTaskRepository(database);
     const attachments = new IndexedDbAttachmentRepository(database);
-    await seedConversation(database, conversation);
-    await attachments.put({
-      id: 'attachment_tool',
-      blob: new Blob([new Uint8Array([1])], { type: 'image/png' }),
-      mimeType: 'image/png',
-      byteSize: 1,
-      width: 1,
-      height: 1,
-      source: 'viewport_capture',
-      createdAt: 1,
-    });
-    await attachments.addReference('attachment_tool', 'tool_result_1');
-    const queued = createTask(
-      { conversationId: conversation.id, tabId: 7, goal: 'Capture the page' },
-      { clock: { now: () => 2 }, ids: { create: () => 'task_tool_attachment' } },
-    );
-    await seedTask(database, queued);
-    const completed = {
-      ...queued,
-      status: 'completed' as const,
-      updatedAt: 3,
-      checkpointId: 'checkpoint_tool_attachment',
+    const records = durableRecords('completed');
+    const result: ToolResult = {
+      id: 'result_1',
+      taskId: records.task.id,
+      runId: records.run.id,
+      callId: 'call_1',
+      toolName: 'browser_capture_screenshot',
+      output: '{"ok":true}',
+      attachmentIds: ['attachment_2'],
+      createdAt: 3,
     };
-    await tasks.saveTransition({
-      task: completed,
-      event: {
-        id: 'event_tool_attachment',
-        taskId: completed.id,
-        sequence: 1,
-        type: 'task.completed',
-        reason: 'Capture completed.',
-        at: 3,
-        error: null,
-      },
-      checkpoint: {
-        id: 'checkpoint_tool_attachment',
-        taskId: completed.id,
-        sequence: 1,
-        taskStatus: 'completed',
-        completedToolResults: [
-          {
-            callId: 'call_capture',
-            toolName: 'browser_capture_screenshot',
-            argumentsJson: '{}',
-            output: '{"ok":true}',
-            resultRef: 'tool_result_1',
-            attachmentIds: ['attachment_tool'],
-          },
-        ],
-        continuationItems: [],
-        pendingToolCall: null,
-        createdAt: 3,
-      },
-    });
+    await seedConversation(database, conversation);
+    for (const id of ['attachment_1', 'attachment_2']) {
+      await attachments.put({
+        id,
+        blob: new Blob([new Uint8Array([1])], { type: 'image/png' }),
+        mimeType: 'image/png',
+        byteSize: 1,
+        width: 1,
+        height: 1,
+        source: 'file',
+        createdAt: 1,
+      });
+    }
+    await database.add('messages', records.message);
+    await database.add('tasks', records.task);
+    await database.add('task-runs', records.run);
+    for (const event of records.events) await database.add('task-events', event);
+    await database.add('tool-results', result);
+    await database.add('checkpoints', records.checkpoint);
+    await attachments.addReference('attachment_1', `message:${records.message.id}`);
+    await attachments.addReference('attachment_2', result.id);
 
     await conversations.clearConversation(conversation.id);
 
-    await expect(attachments.deleteUnreferenced(10)).resolves.toBe(1);
-    await expect(attachments.get('attachment_tool')).resolves.toBeUndefined();
+    await expect(conversations.get(conversation.id)).resolves.toBeUndefined();
+    await expect(tasks.get(records.task.id)).resolves.toBeUndefined();
+    await expect(tasks.listRuns(records.task.id)).resolves.toEqual([]);
+    await expect(tasks.listEvents(records.task.id)).resolves.toEqual([]);
+    await expect(tasks.listToolResults(records.task.id)).resolves.toEqual([]);
+    await expect(tasks.getCheckpoint(records.checkpoint.id)).resolves.toBeUndefined();
+    await expect(attachments.deleteUnreferenced(10)).resolves.toBe(2);
     database.close();
   });
 });

@@ -15,6 +15,14 @@ export type ModelOutputContinuationItem =
       readonly messageId: MessageId;
     };
 
+export interface MaterializedFunctionCallOutput {
+  readonly type: 'function_call_output';
+  readonly callId: string;
+  readonly output: string;
+  readonly resultId: string;
+  readonly attachmentIds?: readonly string[];
+}
+
 export type ContinuationItem =
   | {
       readonly type: 'message_ref';
@@ -28,16 +36,9 @@ export type ContinuationItem =
       readonly modelOutputItems?: readonly ModelOutputContinuationItem[];
     }
   | {
-      readonly type: 'function_call_output';
-      readonly callId: string;
-      readonly output: string;
-      readonly resultRef: string;
-      readonly attachmentIds?: readonly string[];
-    }
-  | {
       readonly type: 'function_call_output_ref';
       readonly callId: string;
-      readonly resultRef: string;
+      readonly resultId: string;
       readonly attachmentIds?: readonly string[];
     }
   | {
@@ -46,10 +47,9 @@ export type ContinuationItem =
       readonly encryptedContent: string;
     };
 
-export type MaterializedContinuationItem = Exclude<
-  ContinuationItem,
-  { readonly type: 'function_call_output_ref' }
->;
+export type MaterializedContinuationItem =
+  | Exclude<ContinuationItem, { readonly type: 'function_call_output_ref' }>
+  | MaterializedFunctionCallOutput;
 
 export interface PendingToolCall {
   readonly callId: string;

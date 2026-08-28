@@ -4174,6 +4174,47 @@ describe('BrowserActionExecutor', () => {
     });
   });
 
+  it('accepts a subpixel viewport remainder as the physical boundary', async () => {
+    vi.useFakeTimers();
+    const { executor } = harness({
+      responder: (_session, method) => {
+        if (method === 'Page.getLayoutMetrics') {
+          return {
+            visualViewport: {
+              pageX: 0,
+              pageY: 399.5,
+              clientWidth: 800,
+              clientHeight: 600,
+            },
+            contentSize: { x: 0, y: 0, width: 800, height: 1_000 },
+          };
+        }
+        return undefined;
+      },
+    });
+
+    const execution = executor.execute(
+      call('browser_scroll', {
+        tabId: 7,
+        target: 'viewport',
+        deltaX: 0,
+        deltaY: 600,
+        maxSegments: 1,
+        stopText: '',
+      }),
+      new AbortController().signal,
+    );
+    await vi.advanceTimersByTimeAsync(2_000);
+    const result = await execution;
+
+    expect(result.data).toMatchObject({
+      moved: false,
+      boundaryVerified: true,
+      needsBoundaryProbe: false,
+      position: { y: 399.5, maxY: 400 },
+    });
+  });
+
   it('waits for delayed viewport growth before declaring the current edge a boundary', async () => {
     let metricReads = 0;
     const { executor } = harness({
@@ -4705,6 +4746,92 @@ describe('BrowserActionExecutor', () => {
       boundaryVerified: false,
       needsBoundaryProbe: true,
       position: { y: 0, maxY: 1_000 },
+    });
+  });
+
+  it('accepts a subpixel element remainder as the physical boundary', async () => {
+    vi.useFakeTimers();
+    const { executor } = harness({
+      targets: [
+        {
+          frameTargetId: null,
+          documentFrameId: 'frame-main',
+          loaderId: 'loader-1',
+          backendNodeId: 42,
+          role: 'region',
+          name: 'Document',
+          state: [],
+          actions: ['scroll'],
+          frame: 'main',
+        },
+      ],
+      responder: (_session, method, params) => {
+        if (
+          method === 'Runtime.callFunctionOn' &&
+          typeof params?.functionDeclaration === 'string' &&
+          params.functionDeclaration.includes('__chatbrowserxScrollTarget')
+        ) {
+          return {
+            result: {
+              type: 'object',
+              value: {
+                found: true,
+                beforeX: 0,
+                beforeY: 20_131.5,
+                afterX: 0,
+                afterY: 20_131.5,
+                beforeMaxX: 0,
+                beforeMaxY: 20_132,
+                maxX: 0,
+                maxY: 20_132,
+                beforeContentKey: 'document-end',
+                afterContentKey: 'document-end',
+              },
+            },
+          };
+        }
+        if (
+          method === 'Runtime.callFunctionOn' &&
+          typeof params?.functionDeclaration === 'string' &&
+          params.functionDeclaration.includes('__chatbrowserxScrollState')
+        ) {
+          return {
+            result: {
+              type: 'object',
+              value: {
+                found: true,
+                x: 0,
+                y: 20_131.5,
+                maxX: 0,
+                maxY: 20_132,
+                contentKey: 'document-end',
+              },
+            },
+          };
+        }
+        return undefined;
+      },
+    });
+
+    const execution = executor.execute(
+      call('browser_scroll', {
+        tabId: 7,
+        target: 'ref_1',
+        deltaX: 0,
+        deltaY: 4_469,
+        maxSegments: 1,
+        stopText: '',
+      }),
+      new AbortController().signal,
+    );
+    await vi.advanceTimersByTimeAsync(2_000);
+    const result = await execution;
+
+    expect(result.data).toMatchObject({
+      moved: false,
+      boundaryVerified: true,
+      needsBoundaryProbe: false,
+      position: { y: 20_131.5, maxY: 20_132 },
     });
   });
 

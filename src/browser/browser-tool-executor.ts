@@ -182,7 +182,7 @@ function failureFor(error: unknown): BrowserToolFailure {
     case 'ASSET_NOT_AVAILABLE':
       return failure(
         'ASSET_NOT_AVAILABLE',
-        'This image asset is not available in the current WorkSession.',
+        'This image asset is not available in the current task.',
         false,
         false,
       );
@@ -1129,7 +1129,7 @@ export class BrowserToolExecutor implements BrowserExecutionPort {
             if (!context?.availableAssetIds?.includes(assetId)) {
               output = failure(
                 'ASSET_NOT_AVAILABLE',
-                'This image asset is not available in the current WorkSession.',
+                'This image asset is not available in the current task.',
                 false,
                 false,
               );

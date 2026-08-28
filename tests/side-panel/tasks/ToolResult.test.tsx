@@ -35,7 +35,8 @@ describe('ToolResult reviewed labels', () => {
           toolName: 'sandbox_read',
           argumentsJson: '{"path":"/tmp/SKILL.md","startLine":1,"maxLines":400}',
           output: '{"code":0,"content":"skill body\\n","truncated":false}',
-          resultRef: 'result_read',
+          resultId: 'result_read',
+          detailIndex: 1,
           attachmentIds: [],
         }}
         attachments={attachments}
@@ -61,7 +62,8 @@ describe('ToolResult reviewed labels', () => {
           toolName: 'tavily_search',
           argumentsJson: '{"query":"browser reliability"}',
           output: '{"ok":true}',
-          resultRef: 'result_search',
+          resultId: 'result_search',
+          detailIndex: 1,
           attachmentIds: [],
         }}
         attachments={attachments}
@@ -86,7 +88,8 @@ describe('ToolResult reviewed labels', () => {
           toolName: 'browser_inspect',
           argumentsJson: '{"tabId":7,"mode":"content"}',
           output: '{"ok":true}',
-          resultRef: 'result_1',
+          resultId: 'result_1',
+          detailIndex: 1,
           attachmentIds: [],
         }}
         attachments={attachments}
@@ -116,7 +119,8 @@ describe('ToolResult reviewed labels', () => {
           toolName: 'browser_set_checked_many',
           argumentsJson: '{"items":[{"ref":"ref_1","checked":true}]}',
           output: '{"ok":true}',
-          resultRef: 'result_batch',
+          resultId: 'result_batch',
+          detailIndex: 1,
           attachmentIds: [],
         }}
         attachments={attachments}
@@ -136,7 +140,8 @@ describe('ToolResult reviewed labels', () => {
           toolName: 'custom_browser_tool',
           argumentsJson: '{}',
           output: '{}',
-          resultRef: 'result_unknown',
+          resultId: 'result_unknown',
+          detailIndex: 1,
           attachmentIds: [],
         }}
         attachments={attachments}
@@ -175,7 +180,8 @@ describe('ToolResult reviewed labels', () => {
           toolName: 'browser_capture_screenshot',
           argumentsJson: '{"tabId":7}',
           output: '{"ok":true,"data":{"assetId":"result_image"}}',
-          resultRef: 'result_capture',
+          resultId: 'result_capture',
+          detailIndex: 1,
           attachmentIds: ['result_image'],
         }}
         attachments={screenshotAttachments}
@@ -201,7 +207,8 @@ describe('ToolResult reviewed labels', () => {
           toolName: 'commit_context',
           argumentsJson: '{"state":"Goal: continue."}',
           output: '{"ok":true,"compactedCalls":2,"releasedTextChars":100,"releasedImages":1}',
-          resultRef: 'result_commit',
+          resultId: 'result_commit',
+          detailIndex: 1,
           attachmentIds: [],
         }}
         attachments={attachments}
@@ -249,7 +256,8 @@ describe('ToolResult reviewed labels', () => {
           toolName: 'browser_inspect',
           argumentsJson: '{"tabId":7,"mode":"interactive"}',
           output: '{"ok":true,"snapshot":"page_1"}',
-          resultRef: 'result_copy',
+          resultId: 'result_copy',
+          detailIndex: 1,
           attachmentIds: ['result_image'],
         }}
         attachments={imageAttachments}
@@ -265,8 +273,12 @@ describe('ToolResult reviewed labels', () => {
     const output = '{\n  "ok": true,\n  "snapshot": "page_1"\n}';
     const payloads = document.querySelectorAll('.tool-result-content code');
     expect(payloads).toHaveLength(2);
-    expect(payloads[0]).toHaveTextContent(invocation, { normalizeWhitespace: false });
-    expect(payloads[1]).toHaveTextContent(output, { normalizeWhitespace: false });
+    expect(payloads[0]).toHaveTextContent(invocation, {
+      normalizeWhitespace: false,
+    });
+    expect(payloads[1]).toHaveTextContent(output, {
+      normalizeWhitespace: false,
+    });
 
     await user.click(screen.getByRole('button', { name: '复制调用参数' }));
     expect(writeText).toHaveBeenCalledWith(invocation);
@@ -293,7 +305,8 @@ describe('ToolResult reviewed labels', () => {
           toolName: 'custom_tool',
           argumentsJson: 'query=browser reliability',
           output: 'partial {"ok":true',
-          resultRef: 'result_text',
+          resultId: 'result_text',
+          detailIndex: 1,
           attachmentIds: [],
         }}
         attachments={attachments}

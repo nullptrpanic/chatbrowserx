@@ -12,36 +12,61 @@ import type { ModelProvider, ModelRequest } from '../../src/providers/provider-t
 import type { ModelStreamEvent } from '../../src/providers/stream-events';
 import type { Checkpoint } from '../../src/tasks/checkpoint-types';
 import type { MessageRecord } from '../../src/tasks/message-types';
-import type { TaskRun } from '../../src/tasks/task-types';
+import type { Task, TaskEvent } from '../../src/tasks/task-types';
+import type { MaterializedToolResult } from '../../src/tasks/tool-result-types';
 
-const TASK: TaskRun = {
+const TASK: Task = {
   id: 'task_1',
-  workSessionId: 'workSession_1',
   conversationId: 'conversation_1',
+  ordinal: 1,
   tabId: 7,
   goal: 'Continue checkout',
   status: 'planning',
+  latestRunId: 'run_1',
+  lastEventSequence: 1,
   createdAt: 100,
   updatedAt: 200,
-  checkpointId: 'checkpoint_1',
-  lease: null,
-  lastError: null,
+};
+
+const HISTORICAL_TASK: Task = {
+  id: 'task_0',
+  conversationId: TASK.conversationId,
+  ordinal: 0,
+  tabId: 7,
+  goal: 'Inspect the previous page',
+  status: 'completed',
+  latestRunId: 'run_0',
+  lastEventSequence: 0,
+  createdAt: 50,
+  updatedAt: 75,
 };
 
 const CHECKPOINT: Checkpoint = {
   id: 'checkpoint_1',
   taskId: 'task_1',
-  sequence: 1,
-  taskStatus: 'planning',
-  completedToolResults: [],
-  continuationItems: [],
+  runId: 'run_1',
+  continuationItems: [{ type: 'message_ref', messageId: 'message_user' }],
   pendingToolCall: null,
+  browserToolCallsInAttempt: 0,
+  browserTargetTabId: 7,
   createdAt: 200,
 };
 
 const PLAN_INPUT: AgentPlanInput = {
   task: TASK,
+  events: [
+    {
+      id: 'event_message_user',
+      taskId: TASK.id,
+      runId: 'run_1',
+      sequence: 1,
+      at: 100,
+      type: 'message.recorded',
+      messageId: 'message_user',
+    },
+  ],
   checkpoint: CHECKPOINT,
+  toolResults: [],
 };
 
 const USER_MESSAGE: MessageRecord = {
@@ -56,6 +81,46 @@ const USER_MESSAGE: MessageRecord = {
   createdAt: 100,
   updatedAt: 100,
 };
+
+/** Builds the permanent process order expected by a direct planner invocation. */
+function planInputFor(messages: readonly MessageRecord[]): AgentPlanInput {
+  const taskMessages = messages.filter(
+    (message) => message.taskId === TASK.id && message.kind === 'conversation',
+  );
+  const events = taskMessages.map((message, index): TaskEvent => ({
+    id: `event_${message.id}`,
+    taskId: TASK.id,
+    runId: 'run_1',
+    sequence: index + 1,
+    at: message.createdAt,
+    type: 'message.recorded',
+    messageId: message.id,
+  }));
+  return {
+    ...PLAN_INPUT,
+    task: { ...TASK, lastEventSequence: events.length },
+    events,
+  };
+}
+
+/** Creates one canonical completed tool result for planner replay tests. */
+function completedResult(
+  input: Pick<MaterializedToolResult, 'callId' | 'toolName' | 'argumentsJson' | 'output'> & {
+    readonly resultId: string;
+  },
+): MaterializedToolResult {
+  return {
+    id: input.resultId,
+    taskId: TASK.id,
+    runId: 'run_1',
+    callId: input.callId,
+    toolName: input.toolName,
+    argumentsJson: input.argumentsJson,
+    output: input.output,
+    attachmentIds: [],
+    createdAt: 150,
+  };
+}
 
 /** Creates an injected Provider stream and captures its normalized request. */
 function provider(events: () => AsyncGenerator<ModelStreamEvent>): {
@@ -113,21 +178,37 @@ function responsesProvider(
 }
 
 /** Creates storage ports and returns the message writes for assertions. */
-function repositories(existingMessages: readonly MessageRecord[] = []): {
+function repositories(
+  existingMessages: readonly MessageRecord[] = [],
+  historicalTasks: readonly Task[] = [],
+): {
   readonly conversations: ConversationRepository;
   readonly attachments: AttachmentRepository;
-  readonly tasks: Pick<TaskRepository, 'listByConversation'>;
+  readonly tasks: Pick<
+    TaskRepository,
+    'listByConversation' | 'readTaskMessageEvents' | 'appendTaskMessage'
+  >;
   readonly messages: MessageRecord[];
   readonly listMessages: ReturnType<typeof vi.fn>;
   readonly listTasks: ReturnType<typeof vi.fn>;
-  readonly appendMessage: ReturnType<typeof vi.fn>;
+  readonly appendTaskMessage: ReturnType<typeof vi.fn>;
   readonly updateMessage: ReturnType<typeof vi.fn>;
 } {
   const messages = [USER_MESSAGE, ...existingMessages];
   const listMessages = vi.fn(async () => [...messages]);
-  const listTasks = vi.fn(async () => [TASK]);
-  const appendMessage = vi.fn(async (message: MessageRecord) => {
+  const listTasks = vi.fn(async () => [...historicalTasks, TASK]);
+  const readTaskMessageEvents = vi.fn(async () => [] as TaskEvent[]);
+  const appendTaskMessage = vi.fn(async ({ message }: { message: MessageRecord }) => {
     messages.push(message);
+    return {
+      id: `event_${message.id}`,
+      taskId: TASK.id,
+      runId: 'run_1',
+      sequence: TASK.lastEventSequence + 1,
+      type: 'message.recorded',
+      messageId: message.id,
+      at: message.createdAt,
+    } satisfies TaskEvent;
   });
   const updateMessage = vi.fn(async (message: MessageRecord) => {
     const index = messages.findIndex(({ id }) => id === message.id);
@@ -138,14 +219,15 @@ function repositories(existingMessages: readonly MessageRecord[] = []): {
     messages,
     listMessages,
     listTasks,
-    appendMessage,
+    appendTaskMessage,
     updateMessage,
     conversations: {
       get: vi.fn(async () => undefined),
       listAll: vi.fn(async () => []),
       listMessages,
-      appendMessage,
-      appendSupplement: vi.fn(async () => undefined),
+      listTaskMessages: vi.fn(async (taskId: string) =>
+        messages.filter((message) => message.taskId === taskId),
+      ),
       updateMessage,
       clearConversation: vi.fn(async () => undefined),
     },
@@ -158,6 +240,8 @@ function repositories(existingMessages: readonly MessageRecord[] = []): {
     },
     tasks: {
       listByConversation: listTasks,
+      readTaskMessageEvents,
+      appendTaskMessage,
     },
   };
 }
@@ -264,11 +348,13 @@ describe('CodexAgentPlanner', () => {
         },
       },
     ]);
-    expect(storage.appendMessage).toHaveBeenCalledWith(
+    expect(storage.appendTaskMessage).toHaveBeenCalledWith(
       expect.objectContaining({
-        id: 'message_1',
-        status: 'streaming',
-        text: '',
+        message: expect.objectContaining({
+          id: 'message_1',
+          status: 'streaming',
+          text: '',
+        }),
       }),
     );
     expect(storage.updateMessage).toHaveBeenCalledTimes(1);
@@ -327,10 +413,10 @@ describe('CodexAgentPlanner', () => {
     });
 
     await collect(planner);
-    await collect(planner);
+    await collect(planner, new AbortController().signal, planInputFor(storage.messages));
 
     expect(tavilyAvailability.isConfigured).toHaveBeenCalledTimes(2);
-    expect(model.requests[0]?.tools.map(({ name }) => name)).toEqual(BROWSER_TOOL_NAMES);
+    expect(model.requests[0]?.tools.map(({ name }) => name)).toEqual([...BROWSER_TOOL_NAMES]);
     expect(model.requests[1]?.tools.map(({ name }) => name)).toEqual([
       ...BROWSER_TOOL_NAMES,
       'tavily_search',
@@ -339,7 +425,7 @@ describe('CodexAgentPlanner', () => {
     ]);
   });
 
-  it('omits historical result tools when the current conversation has no terminal evidence', async () => {
+  it('registers bounded history tools only when a readable historical task exists', async () => {
     const model = provider(async function* () {
       yield { type: 'response.started', responseId: 'resp_without_history_tools' };
       yield { type: 'text.delta', delta: 'No historical evidence.' };
@@ -349,12 +435,10 @@ describe('CodexAgentPlanner', () => {
         usage: null,
       };
     });
-    const storage = repositories();
-    const historicalResults = { hasEvidence: vi.fn(async () => false) };
+    const storage = repositories([], [HISTORICAL_TASK]);
     const planner = new CodexAgentPlanner({
       provider: model.instance,
       tavilyAvailability: { isConfigured: vi.fn(async () => false) },
-      historicalResults,
       settings: settings(),
       conversations: storage.conversations,
       tasks: storage.tasks,
@@ -365,33 +449,29 @@ describe('CodexAgentPlanner', () => {
 
     await collect(planner);
 
-    expect(historicalResults.hasEvidence).toHaveBeenCalledWith({
-      conversationId: 'conversation_1',
-      currentTaskId: 'task_1',
-    });
-    expect(model.requests[0]?.tools.some(({ name }) => name.startsWith('task_result_'))).toBe(
-      false,
-    );
+    expect(model.requests[0]?.tools.map(({ name }) => name).slice(-2)).toEqual([
+      'history_read',
+      'result_read',
+    ]);
   });
 
-  it('registers and parses historical result tools only when terminal evidence exists', async () => {
-    const arguments_ = { evidenceId: 'toolResult_1', offset: 0, limit: 20_000 };
+  it('parses result history calls using a stable result identifier', async () => {
+    const arguments_ = { resultId: 'toolResult_1', offset: 0, limit: 20_000 };
     const model = provider(async function* () {
       yield { type: 'response.started', responseId: 'resp_history_read' };
-      yield { type: 'tool.started', callId: 'call_history_read', name: 'task_result_read' };
+      yield { type: 'tool.started', callId: 'call_history_read', name: 'result_read' };
       yield {
         type: 'tool.completed',
         callId: 'call_history_read',
-        name: 'task_result_read',
+        name: 'result_read',
         argumentsJson: JSON.stringify(arguments_),
       };
       yield { type: 'response.completed', responseId: 'resp_history_read', usage: null };
     });
-    const storage = repositories();
+    const storage = repositories([], [HISTORICAL_TASK]);
     const planner = new CodexAgentPlanner({
       provider: model.instance,
       tavilyAvailability: { isConfigured: vi.fn(async () => false) },
-      historicalResults: { hasEvidence: vi.fn(async () => true) },
       settings: settings(),
       conversations: storage.conversations,
       tasks: storage.tasks,
@@ -402,20 +482,20 @@ describe('CodexAgentPlanner', () => {
 
     await expect(collect(planner)).resolves.toMatchObject([
       {
-        type: 'task-result.call',
+        type: 'history.call',
         call: {
-          family: 'task_result',
-          operation: 'read',
+          family: 'history',
+          operation: 'result',
           replay: 'safe',
           callId: 'call_history_read',
-          name: 'task_result_read',
+          name: 'result_read',
           arguments: arguments_,
         },
       },
     ]);
     expect(model.requests[0]?.tools.map(({ name }) => name).slice(-2)).toEqual([
-      'task_result_search',
-      'task_result_read',
+      'history_read',
+      'result_read',
     ]);
   });
 
@@ -501,7 +581,11 @@ describe('CodexAgentPlanner', () => {
         },
       },
     ]);
-    expect(model.requests[0]?.tools.map(({ name }) => name).slice(-2)).toEqual([
+    expect(model.requests[0]?.tools.map(({ name }) => name)).toEqual([
+      ...BROWSER_TOOL_NAMES,
+      'tavily_search',
+      'tavily_extract',
+      'tavily_crawl',
       'sandbox_read',
       'sandbox_exec',
     ]);
@@ -509,7 +593,7 @@ describe('CodexAgentPlanner', () => {
     expect(model.requests[0]?.systemPrompt).toContain('Run the example workflow.');
   });
 
-  it('replays the complete local WorkSession on every model turn', async () => {
+  it('replays the complete local task on every model turn', async () => {
     const continuationItems = [
       { type: 'message_ref' as const, messageId: USER_MESSAGE.id },
       {
@@ -519,10 +603,9 @@ describe('CodexAgentPlanner', () => {
         argumentsJson: '{"tabId":7,"ref":"page_1_1","button":"left","count":1}',
       },
       {
-        type: 'function_call_output' as const,
+        type: 'function_call_output_ref' as const,
         callId: 'call_previous',
-        output: '{"ok":true}',
-        resultRef: 'result_previous',
+        resultId: 'result_previous',
       },
     ];
     const model = provider(async function* () {
@@ -552,6 +635,15 @@ describe('CodexAgentPlanner', () => {
         ...CHECKPOINT,
         continuationItems,
       },
+      toolResults: [
+        completedResult({
+          callId: 'call_previous',
+          toolName: 'browser_click',
+          argumentsJson: '{"tabId":7,"ref":"page_1_1","button":"left","count":1}',
+          output: '{"ok":true}',
+          resultId: 'result_previous',
+        }),
+      ],
     });
 
     expect(model.requests).toHaveLength(1);
@@ -578,16 +670,16 @@ describe('CodexAgentPlanner', () => {
     expect(model.requests[0]).not.toHaveProperty('continuation');
   });
 
-  it('never exposes the legacy context commit tool in new model requests', async () => {
+  it('does not expose the internal context commit tool in ordinary model requests', async () => {
     const model = provider(async function* () {
       yield {
         type: 'response.started',
-        responseId: 'resp_without_legacy_commit',
+        responseId: 'resp_without_internal_commit',
       };
-      yield { type: 'text.delta', delta: 'Continue without the legacy tool.' };
+      yield { type: 'text.delta', delta: 'Continue without the internal tool.' };
       yield {
         type: 'response.completed',
-        responseId: 'resp_without_legacy_commit',
+        responseId: 'resp_without_internal_commit',
         usage: null,
       };
     });
@@ -599,7 +691,7 @@ describe('CodexAgentPlanner', () => {
       conversations: storage.conversations,
       tasks: storage.tasks,
       attachments: storage.attachments,
-      ids: { create: (prefix) => `${prefix}_without_legacy_commit` },
+      ids: { create: (prefix) => `${prefix}_without_internal_commit` },
       clock: { now: () => 600 },
     });
     const continuationItems = [
@@ -614,10 +706,9 @@ describe('CodexAgentPlanner', () => {
             argumentsJson: JSON.stringify({ ref: `ref_${String(index + 1)}` }),
           },
           {
-            type: 'function_call_output' as const,
+            type: 'function_call_output_ref' as const,
             callId,
-            output: 'x'.repeat(2_048),
-            resultRef: `result_${String(index + 1)}`,
+            resultId: `result_${String(index + 1)}`,
             attachmentIds: [],
           },
         ];
@@ -627,6 +718,16 @@ describe('CodexAgentPlanner', () => {
     await collect(planner, new AbortController().signal, {
       ...PLAN_INPUT,
       checkpoint: { ...CHECKPOINT, continuationItems },
+      toolResults: Array.from({ length: 48 }, (_, index) => {
+        const callId = `call_browser_${String(index + 1)}`;
+        return completedResult({
+          callId,
+          toolName: 'browser_click',
+          argumentsJson: JSON.stringify({ ref: `ref_${String(index + 1)}` }),
+          output: 'x'.repeat(2_048),
+          resultId: `result_${String(index + 1)}`,
+        });
+      }),
     });
 
     expect(model.requests[0]?.toolChoice).toBeUndefined();
@@ -848,7 +949,7 @@ describe('CodexAgentPlanner', () => {
           arguments: arguments_,
         },
       ]);
-      expect(storage.appendMessage).not.toHaveBeenCalled();
+      expect(storage.appendTaskMessage).not.toHaveBeenCalled();
       expect(storage.updateMessage).not.toHaveBeenCalled();
     },
   );
@@ -880,16 +981,30 @@ describe('CodexAgentPlanner', () => {
       ...PLAN_INPUT,
       checkpoint: {
         ...CHECKPOINT,
-        completedToolResults: [
+        continuationItems: [
+          { type: 'message_ref', messageId: USER_MESSAGE.id },
           {
+            type: 'function_call',
             callId: 'call_previous',
-            toolName: 'tavily_search',
+            name: 'tavily_search',
             argumentsJson,
-            output: '{"ok":true,"results":[]}',
-            resultRef: 'result_previous',
+          },
+          {
+            type: 'function_call_output_ref',
+            callId: 'call_previous',
+            resultId: 'result_previous',
           },
         ],
       },
+      toolResults: [
+        completedResult({
+          callId: 'call_previous',
+          toolName: 'tavily_search',
+          argumentsJson,
+          output: '{"ok":true,"results":[]}',
+          resultId: 'result_previous',
+        }),
+      ],
     });
 
     expect(model.requests[0]?.input.slice(-2)).toEqual([
@@ -939,7 +1054,7 @@ describe('CodexAgentPlanner', () => {
       code: 'INVALID_RESPONSE',
       invalidResponseStage: 'model_turn',
     });
-    expect(storage.appendMessage).not.toHaveBeenCalled();
+    expect(storage.appendTaskMessage).not.toHaveBeenCalled();
   });
 
   it('rejects unsupported tool output without creating an empty assistant message', async () => {
@@ -974,7 +1089,7 @@ describe('CodexAgentPlanner', () => {
       code: 'INVALID_RESPONSE',
       invalidResponseStage: 'tool_call',
     });
-    expect(invalidStorage.appendMessage).not.toHaveBeenCalled();
+    expect(invalidStorage.appendTaskMessage).not.toHaveBeenCalled();
     expect(invalidStorage.updateMessage).not.toHaveBeenCalled();
   });
 
@@ -1027,7 +1142,7 @@ describe('CodexAgentPlanner', () => {
       invalidResponseStage: 'tool_call',
     });
     expect(String(thrown)).not.toContain('secret-value');
-    expect(storage.appendMessage).not.toHaveBeenCalled();
+    expect(storage.appendTaskMessage).not.toHaveBeenCalled();
   });
 
   it('rejects multiple calls in one model response', async () => {
@@ -1064,7 +1179,7 @@ describe('CodexAgentPlanner', () => {
       code: 'INVALID_RESPONSE',
       invalidResponseStage: 'model_turn',
     });
-    expect(storage.appendMessage).not.toHaveBeenCalled();
+    expect(storage.appendTaskMessage).not.toHaveBeenCalled();
   });
 
   it('keeps provisional text and accepts a following tool call from the real Provider', async () => {
@@ -1357,7 +1472,7 @@ describe('CodexAgentPlanner', () => {
       clock: { now: () => 500 },
     });
 
-    await collect(planner);
+    await collect(planner, new AbortController().signal, planInputFor(storage.messages));
 
     expect(storage.updateMessage).toHaveBeenCalledWith(
       expect.objectContaining({
@@ -1373,7 +1488,7 @@ describe('CodexAgentPlanner', () => {
         text: 'Recovered',
       }),
     );
-    expect(storage.appendMessage).not.toHaveBeenCalled();
+    expect(storage.appendTaskMessage).not.toHaveBeenCalled();
     expect(storage.messages.filter(({ role }) => role === 'assistant')).toEqual([
       expect.objectContaining({
         id: 'message_abandoned',
@@ -1418,9 +1533,9 @@ describe('CodexAgentPlanner', () => {
       clock: { now: () => 500 },
     });
 
-    await collect(planner);
+    await collect(planner, new AbortController().signal, planInputFor(storage.messages));
 
-    expect(storage.appendMessage).not.toHaveBeenCalled();
+    expect(storage.appendTaskMessage).not.toHaveBeenCalled();
     expect(storage.messages.filter(({ role }) => role === 'assistant')).toEqual([
       expect.objectContaining({
         id: 'message_paused',
@@ -1465,9 +1580,9 @@ describe('CodexAgentPlanner', () => {
       clock: { now: () => 500 },
     });
 
-    await collect(planner);
+    await collect(planner, new AbortController().signal, planInputFor(storage.messages));
 
-    expect(storage.appendMessage).not.toHaveBeenCalled();
+    expect(storage.appendTaskMessage).not.toHaveBeenCalled();
     expect(storage.messages.filter(({ role }) => role === 'assistant')).toEqual([
       expect.objectContaining({
         id: 'message_pause_race',
@@ -1504,13 +1619,19 @@ describe('CodexAgentPlanner', () => {
     );
   });
 
-  it('uses native compaction before another model stream at the token high-water mark', async () => {
+  it('continues with the existing context instead of initiating provider compaction', async () => {
     const compact = vi.fn<NonNullable<ModelProvider['compact']>>(async () => ({
       itemId: 'cmp_native',
       encryptedContent: 'opaque-native-context',
     }));
-    const stream = vi.fn<ModelProvider['stream']>(() => {
-      throw new Error('stream must not run before compaction is persisted');
+    const stream = vi.fn<ModelProvider['stream']>(async function* () {
+      yield { type: 'response.started', responseId: 'resp_without_compaction' };
+      yield { type: 'text.delta', delta: 'Continued without compaction.' };
+      yield {
+        type: 'response.completed',
+        responseId: 'resp_without_compaction',
+        usage: null,
+      };
     });
     const storage = repositories();
     const planner = new CodexAgentPlanner({
@@ -1525,18 +1646,10 @@ describe('CodexAgentPlanner', () => {
     });
     const input: AgentPlanInput = {
       task: TASK,
+      events: PLAN_INPUT.events,
       checkpoint: {
         ...CHECKPOINT,
         lastModelInputTokens: 220_000,
-        completedToolResults: [
-          {
-            callId: 'call_inspect',
-            toolName: 'browser_inspect',
-            argumentsJson: '{"tabId":7,"mode":"interactive"}',
-            output: '{"ok":true}',
-            resultRef: 'result_inspect',
-          },
-        ],
         continuationItems: [
           { type: 'message_ref', messageId: USER_MESSAGE.id },
           {
@@ -1546,31 +1659,29 @@ describe('CodexAgentPlanner', () => {
             argumentsJson: '{"tabId":7,"mode":"interactive"}',
           },
           {
-            type: 'function_call_output',
+            type: 'function_call_output_ref',
             callId: 'call_inspect',
-            output: '{"ok":true}',
-            resultRef: 'result_inspect',
+            resultId: 'result_inspect',
           },
         ],
       },
+      toolResults: [
+        completedResult({
+          callId: 'call_inspect',
+          toolName: 'browser_inspect',
+          argumentsJson: '{"tabId":7,"mode":"interactive"}',
+          output: '{"ok":true}',
+          resultId: 'result_inspect',
+        }),
+      ],
     };
 
-    await expect(collect(planner, new AbortController().signal, input)).resolves.toEqual([
-      {
-        type: 'context.compacted',
-        continuationItems: [
-          { type: 'message_ref', messageId: USER_MESSAGE.id },
-          {
-            type: 'compaction',
-            itemId: 'cmp_native',
-            encryptedContent: 'opaque-native-context',
-          },
-        ],
-      },
+    await expect(collect(planner, new AbortController().signal, input)).resolves.toMatchObject([
+      { type: 'task.completed', reason: 'model_response_completed' },
     ]);
-    expect(stream).not.toHaveBeenCalled();
-    expect(compact).toHaveBeenCalledOnce();
-    expect(compact.mock.calls[0]?.[0].input).toEqual([
+    expect(compact).not.toHaveBeenCalled();
+    expect(stream).toHaveBeenCalledOnce();
+    expect(stream.mock.calls[0]?.[0].input).toEqual([
       {
         type: 'message',
         role: 'user',
@@ -1633,6 +1744,32 @@ describe('CodexAgentPlanner', () => {
     });
     const input: AgentPlanInput = {
       task: TASK,
+      events: PLAN_INPUT.events,
+      toolResults: [
+        completedResult({
+          callId: 'call_incomplete_scroll',
+          toolName: 'browser_scroll',
+          argumentsJson: JSON.stringify({
+            tabId: 0,
+            target: 'ref_history',
+            deltaX: 0,
+            deltaY: -10_000,
+          }),
+          output: JSON.stringify({
+            ok: true,
+            tabId: 7,
+            data: {
+              action: 'scroll',
+              requestedDeltaApplied: false,
+              remainingDeltaX: 0,
+              remainingDeltaY: -9_035,
+              loadedMore: true,
+              boundaryVerified: false,
+            },
+          }),
+          resultId: 'result_incomplete_scroll',
+        }),
+      ],
       checkpoint: {
         ...CHECKPOINT,
         lastModelInputTokens: 220_000,
@@ -1650,21 +1787,9 @@ describe('CodexAgentPlanner', () => {
             }),
           },
           {
-            type: 'function_call_output',
+            type: 'function_call_output_ref',
             callId: 'call_incomplete_scroll',
-            output: JSON.stringify({
-              ok: true,
-              tabId: 7,
-              data: {
-                action: 'scroll',
-                requestedDeltaApplied: false,
-                remainingDeltaX: 0,
-                remainingDeltaY: -9_035,
-                loadedMore: true,
-                boundaryVerified: false,
-              },
-            }),
-            resultRef: 'result_incomplete_scroll',
+            resultId: 'result_incomplete_scroll',
           },
         ],
       },

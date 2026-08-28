@@ -1,150 +1,188 @@
 import { describe, expect, it } from 'vitest';
-import { createTask } from '../../src/tasks/task-factory';
+import { createTaskRecords } from '../../src/tasks/task-factory';
 import { transitionTask } from '../../src/tasks/task-transition';
-import type { TaskRun } from '../../src/tasks/task-types';
 
 const clock = { now: () => 1_000 };
-const ids = { create: (prefix: string) => `${prefix}_1` };
+let identifier = 0;
+const ids = { create: (prefix: string) => `${prefix}_${String(++identifier)}` };
 
-describe('task transitions', () => {
-  it('advances through one durable model turn without browser states', () => {
-    const queued = createTask(
-      { conversationId: 'conv_1', tabId: 7, goal: 'Answer the message' },
-      { clock, ids },
-    );
-    const planning = transitionTask(queued, {
+function queuedRecords() {
+  return createTaskRecords(
+    { conversationId: 'conversation_1', tabId: 7, goal: 'Answer the message' },
+    { clock, ids },
+  );
+}
+
+describe('transitionTask', () => {
+  it('updates the logical task and latest run together through one model turn', () => {
+    const queued = queuedRecords();
+    const planning = transitionTask(queued.task, queued.run, {
       type: 'planning.started',
       at: 1_001,
-      reason: 'Request started.',
+      reason: 'model_request_started',
     });
-    const retrying = transitionTask(planning, {
-      type: 'planning.retrying',
-      at: 1_002,
-      reason: 'Invalid model response will be retried once.',
-    });
-    const callRecorded = transitionTask(retrying, {
+    const call = transitionTask(planning.task, planning.run, {
       type: 'tool.call-recorded',
-      at: 1_003,
-      reason: 'Tavily call recorded.',
+      at: 1_002,
+      reason: 'browser_click_call_recorded',
     });
-    const executionStarted = transitionTask(callRecorded, {
-      type: 'tool.execution-started',
-      at: 1_004,
-      reason: 'Browser mutation dispatch started.',
-    });
-    const resultRecorded = transitionTask(executionStarted, {
+    const result = transitionTask(call.task, call.run, {
       type: 'tool.result-recorded',
-      at: 1_005,
-      reason: 'Tavily result recorded.',
+      at: 1_003,
+      reason: 'browser_click_result_recorded',
     });
-    const supplementsApplied = transitionTask(resultRecorded, {
-      type: 'task.supplements-applied',
-      at: 1_006,
-      reason: 'User supplements applied.',
-    });
-    const completed = transitionTask(supplementsApplied, {
+    const completed = transitionTask(result.task, result.run, {
       type: 'task.completed',
-      at: 1_007,
-      reason: 'Response completed.',
+      at: 1_004,
+      reason: 'model_response_completed',
     });
 
-    expect(queued.status).toBe('queued');
-    expect(planning.status).toBe('planning');
-    expect(retrying.status).toBe('planning');
-    expect(callRecorded.status).toBe('planning');
-    expect(executionStarted.status).toBe('planning');
-    expect(resultRecorded.status).toBe('planning');
-    expect(supplementsApplied.status).toBe('planning');
-    expect(completed.status).toBe('completed');
+    expect(planning).toMatchObject({ task: { status: 'planning' }, run: { status: 'planning' } });
+    expect(result).toMatchObject({ task: { status: 'planning' }, run: { status: 'planning' } });
+    expect(completed).toMatchObject({
+      task: { status: 'completed', latestRunId: queued.run.id },
+      run: { status: 'completed', endedAt: 1_004, lease: null },
+    });
   });
 
-  it('persists authentication waits and clears the error on resume', () => {
-    const queued = createTask(
-      { conversationId: 'conv_1', tabId: 7, goal: 'Answer the message' },
-      { clock, ids },
-    );
-    const waiting = transitionTask(queued, {
-      type: 'task.auth-required',
-      at: 1_001,
-      reason: 'Token expired.',
-      error: {
-        code: 'AuthError',
-        retryable: false,
-        recoveryAction: 'update_credentials',
-        userMessage: 'Access Token is invalid.',
-        evidenceRef: null,
-      },
-    });
-    const resumed = transitionTask(waiting, {
-      type: 'task.resumed',
-      at: 1_002,
-      reason: 'Token updated.',
-    });
+  it('normalizes auth, pause, failure, and cancellation on the current run', () => {
+    const error = {
+      code: 'AuthError',
+      retryable: false,
+      recoveryAction: 'update_credentials',
+      userMessage: 'Access Token is invalid.',
+      evidenceRef: null,
+    } as const;
+    for (const [type, expected] of [
+      ['task.auth-required', 'waiting_for_auth'],
+      ['task.paused', 'paused'],
+      ['task.cancelled', 'cancelled'],
+    ] as const) {
+      const queued = queuedRecords();
+      expect(
+        transitionTask(queued.task, queued.run, {
+          type,
+          at: 1_001,
+          reason: type,
+          ...(type === 'task.auth-required' ? { error } : {}),
+        }),
+      ).toMatchObject({ task: { status: expected }, run: { status: expected, endedAt: 1_001 } });
+    }
 
-    expect(waiting.status).toBe('waiting_for_auth');
-    expect(resumed).toMatchObject({ status: 'queued', lastError: null });
+    const queued = queuedRecords();
+    expect(
+      transitionTask(queued.task, queued.run, {
+        type: 'task.failed',
+        at: 1_001,
+        reason: 'provider_failed',
+        error,
+      }),
+    ).toMatchObject({
+      task: { status: 'failed' },
+      run: { status: 'failed', error, endedAt: 1_001 },
+    });
   });
 
-  it('returns a failed task to the queued boundary only through retry', () => {
-    const queued = createTask(
-      { conversationId: 'conv_1', tabId: 7, goal: 'Answer the message' },
-      { clock, ids },
-    );
-    const failed = transitionTask(queued, {
-      type: 'task.failed',
+  it('requires a new TaskRun for resume and retry instead of reopening a terminal run', () => {
+    const queued = queuedRecords();
+    const paused = transitionTask(queued.task, queued.run, {
+      type: 'task.paused',
       at: 1_001,
-      reason: 'Provider failed.',
-      error: {
-        code: 'TransientProviderError',
-        retryable: true,
-        recoveryAction: 'resume_task',
-        userMessage: 'The provider is temporarily unavailable.',
-        evidenceRef: null,
-      },
+      reason: 'user_pause',
     });
-    const retried = transitionTask(failed, {
-      type: 'task.retried',
-      at: 1_002,
-      reason: 'User retried.',
-    });
-
-    expect(retried).toMatchObject({ status: 'queued', lastError: null });
     expect(() =>
-      transitionTask(failed, {
-        type: 'task.resumed',
+      transitionTask(paused.task, paused.run, {
+        type: 'planning.started',
         at: 1_002,
-        reason: 'Failed tasks are retried, not resumed.',
+        reason: 'resume_without_new_run',
       }),
     ).toThrow(/illegal task transition/i);
   });
 
-  it('rejects skipped states, stale timestamps, and terminal-state changes', () => {
-    const queued = createTask(
-      { conversationId: 'conv_1', tabId: 7, goal: 'Answer the message' },
-      { clock, ids },
-    );
-    const completed: TaskRun = { ...queued, status: 'completed' };
+  it.each([
+    ['task.paused', 'paused'],
+    ['task.auth-required', 'waiting_for_auth'],
+  ] as const)('allows cancellation from the resumable %s state', (waitingType, expectedStatus) => {
+    const queued = queuedRecords();
+    const waiting = transitionTask(queued.task, queued.run, {
+      type: waitingType,
+      at: 1_001,
+      reason: waitingType,
+      ...(waitingType === 'task.auth-required'
+        ? {
+            error: {
+              code: 'AuthError',
+              retryable: false,
+              recoveryAction: 'update_credentials',
+              userMessage: 'Access Token is invalid.',
+              evidenceRef: null,
+            } as const,
+          }
+        : {}),
+    });
+    expect(waiting.task.status).toBe(expectedStatus);
 
+    expect(
+      transitionTask(waiting.task, waiting.run, {
+        type: 'task.cancelled',
+        at: 1_002,
+        reason: 'user_cancel',
+      }),
+    ).toMatchObject({ task: { status: 'cancelled' }, run: { status: 'cancelled' } });
+  });
+
+  it('preserves the real run end time when cancelled context is cleared later', () => {
+    const queued = queuedRecords();
+    const cancelled = transitionTask(queued.task, queued.run, {
+      type: 'task.cancelled',
+      at: 1_001,
+      reason: 'user_cancel',
+    });
+    const cleared = transitionTask(cancelled.task, cancelled.run, {
+      type: 'task.context-cleared',
+      at: 1_100,
+      reason: 'user_clear_task_context',
+    });
+
+    expect(cleared).toMatchObject({
+      task: { status: 'cancelled', updatedAt: 1_100 },
+      run: { status: 'cancelled', endedAt: 1_001 },
+    });
+  });
+
+  it('rejects mismatched runs, skipped states, stale time, and incomplete failures', () => {
+    const queued = queuedRecords();
     expect(() =>
-      transitionTask(queued, {
+      transitionTask(
+        queued.task,
+        { ...queued.run, id: 'another_run' },
+        {
+          type: 'planning.started',
+          at: 1_001,
+          reason: 'wrong_run',
+        },
+      ),
+    ).toThrow(/latest run/i);
+    expect(() =>
+      transitionTask(queued.task, queued.run, {
         type: 'task.completed',
         at: 1_001,
-        reason: 'Skipped planning.',
+        reason: 'skipped_planning',
       }),
     ).toThrow(/illegal task transition/i);
     expect(() =>
-      transitionTask(queued, {
+      transitionTask(queued.task, queued.run, {
         type: 'planning.started',
         at: 999,
-        reason: 'Clock moved backwards.',
+        reason: 'clock_moved_backwards',
       }),
-    ).toThrow(/transition timestamp/i);
+    ).toThrow(/timestamp/i);
     expect(() =>
-      transitionTask(completed, {
-        type: 'task.paused',
+      transitionTask(queued.task, queued.run, {
+        type: 'task.failed',
         at: 1_001,
-        reason: 'Terminal tasks do not restart.',
+        reason: 'missing_error',
       }),
-    ).toThrow(/illegal task transition/i);
+    ).toThrow(/require.*error/i);
   });
 });

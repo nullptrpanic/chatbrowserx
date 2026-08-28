@@ -5,49 +5,46 @@ import type { Clock } from '../shared/time';
 import type { Checkpoint } from './checkpoint-types';
 import type { Conversation } from './conversation-types';
 import type { ContinuationItem, PendingToolCall } from './continuation-types';
-import type { MessageRecord } from './message-types';
-import { createTask, type CreateTaskInput } from './task-factory';
+import type { MessageRecord, TaskMessageDraft } from './message-types';
+import { createTaskRecords, createTaskRun, type CreateTaskInput } from './task-factory';
 import { retainTaskReply } from './task-reply-retention';
-import { transitionTask } from './task-transition';
-import type { TaskEvent, TaskEventType, TaskRun } from './task-types';
-import { selectPendingWorkSessionSupplements } from './work-session-supplements';
+import { orderTaskMessagesByEvent } from './task-message-order';
+import { transitionTask, type TaskTransitionType } from './task-transition';
+import type { Task, TaskEvent, TaskRun } from './task-types';
+import type { MaterializedToolResult } from './tool-result-types';
+import { selectPendingTaskSupplements } from './task-supplements';
 
 export type TaskCommandErrorCode =
   'TASK_NOT_FOUND' | 'TASK_STATE_INVALID' | 'CHECKPOINT_NOT_FOUND' | 'TASK_ALREADY_RUNNING';
 
 export interface TaskSnapshot {
-  readonly task: TaskRun;
-  readonly checkpoint: Checkpoint;
+  readonly task: Task;
+  readonly run: TaskRun;
+  readonly checkpoint: Checkpoint | null;
   readonly events: readonly TaskEvent[];
-}
-
-export interface CreateTaskCommandInput extends CreateTaskInput {
-  readonly userMessageId?: MessageId;
+  readonly toolResults: readonly MaterializedToolResult[];
 }
 
 interface ContinuationSnapshotInput {
   readonly sourceTaskId: TaskId;
   readonly tabId: number;
-  readonly goal: string;
   readonly userMessageId: MessageId;
 }
 
 export interface CreateTaskSubmissionInput extends CreateTaskInput {
   readonly conversation: Conversation;
   readonly createConversation: boolean;
-  readonly message: MessageRecord;
+  readonly message: TaskMessageDraft;
 }
 
 export interface ContinueCancelledTaskSubmissionInput {
   readonly sourceTaskId: TaskId;
   readonly tabId: number;
-  readonly goal: string;
   readonly conversation: Conversation;
-  readonly message: MessageRecord;
+  readonly message: TaskMessageDraft;
 }
 
 export interface TaskCommandPort {
-  create(input: CreateTaskCommandInput): Promise<TaskSnapshot>;
   getSnapshot(taskId: TaskId): Promise<TaskSnapshot>;
   pause(taskId: TaskId): Promise<TaskSnapshot>;
   resume(taskId: TaskId): Promise<TaskSnapshot>;
@@ -59,14 +56,12 @@ export interface TaskCommandPort {
 export interface TaskSubmissionPort {
   createSubmission(input: CreateTaskSubmissionInput): Promise<TaskSnapshot>;
   continueCancelledSubmission(input: ContinueCancelledTaskSubmissionInput): Promise<TaskSnapshot>;
+  appendSupplement(message: MessageRecord): Promise<void>;
 }
 
 export class TaskCommandError extends Error {
   readonly code: TaskCommandErrorCode;
 
-  /**
-   * Creates a stable public command failure without including storage or credential details.
-   */
   constructor(code: TaskCommandErrorCode, message: string) {
     super(message);
     this.name = 'TaskCommandError';
@@ -74,7 +69,7 @@ export class TaskCommandError extends Error {
   }
 }
 
-/** Inserts later messages before an unresolved call so its output can remain structurally adjacent. */
+/** Inserts user input before an unresolved call so the call/output pair remains adjacent. */
 function insertBeforePendingToolCall(
   items: readonly ContinuationItem[],
   pendingToolCall: PendingToolCall | null,
@@ -108,16 +103,13 @@ export class TaskCommandService implements TaskCommandPort, TaskSubmissionPort {
   readonly #repository: TaskRepository;
   readonly #clock: Clock;
   readonly #ids: IdGenerator;
-  readonly #conversations: Pick<ConversationRepository, 'listMessages' | 'appendMessage'>;
+  readonly #conversations: Pick<ConversationRepository, 'listMessages'>;
 
-  /**
-   * Creates a command service with durable task transitions and terminal reply retention.
-   */
   constructor(
     repository: TaskRepository,
     clock: Clock,
     ids: IdGenerator,
-    conversations: Pick<ConversationRepository, 'listMessages' | 'appendMessage'>,
+    conversations: Pick<ConversationRepository, 'listMessages'>,
   ) {
     this.#repository = repository;
     this.#clock = clock;
@@ -125,18 +117,6 @@ export class TaskCommandService implements TaskCommandPort, TaskSubmissionPort {
     this.#conversations = conversations;
   }
 
-  /**
-   * Creates a queued task and its sequence-zero checkpoint before exposing the task to scheduling.
-   */
-  async create(input: CreateTaskCommandInput): Promise<TaskSnapshot> {
-    const snapshot = this.#createInitialSnapshot(input, input.userMessageId);
-    await this.#mapBusyError(() =>
-      this.#repository.createInitial(snapshot.task, snapshot.checkpoint),
-    );
-    return snapshot;
-  }
-
-  /** Atomically creates a conversation message with its queued task and initial checkpoint. */
   async createSubmission(input: CreateTaskSubmissionInput): Promise<TaskSnapshot> {
     if (
       input.message.conversationId !== input.conversation.id ||
@@ -147,53 +127,86 @@ export class TaskCommandService implements TaskCommandPort, TaskSubmissionPort {
         'Submission conversation records do not match.',
       );
     }
-    const snapshot = this.#createInitialSnapshot(input, input.message.id);
-    await this.#mapBusyError(() =>
+    const snapshot = await this.#createSubmissionSnapshot(input, input.message.id);
+    if (snapshot.events[0]?.type !== 'message.recorded') {
+      throw new TaskCommandError('TASK_STATE_INVALID', 'Initial message event is missing.');
+    }
+    const storedTask = await this.#mapBusyError(() =>
       this.#repository.createSubmission({
         conversation: input.conversation,
         createConversation: input.createConversation,
         message: { ...input.message, taskId: snapshot.task.id },
         task: snapshot.task,
-        checkpoint: snapshot.checkpoint,
+        run: snapshot.run,
+        events: snapshot.events,
+        checkpoint: this.#requiredCheckpoint(snapshot),
       }),
     );
-    return snapshot;
+    return { ...snapshot, task: storedTask };
   }
 
-  #createInitialSnapshot(
-    input: CreateTaskInput,
-    userMessageId: MessageId | undefined,
-  ): TaskSnapshot {
-    const initialTask = createTask(input, {
-      clock: this.#clock,
-      ids: this.#ids,
+  async appendSupplement(message: MessageRecord): Promise<void> {
+    if (message.kind !== 'supplement') {
+      throw new TaskCommandError('TASK_STATE_INVALID', 'Supplement message is invalid.');
+    }
+    const now = this.#clock.now();
+    await this.#repository.appendTaskMessage({
+      message,
+      eventId: this.#createId('event'),
+      at: now,
     });
+  }
+
+  async #createSubmissionSnapshot(
+    input: CreateTaskInput,
+    userMessageId: MessageId,
+  ): Promise<TaskSnapshot> {
+    const records = createTaskRecords(input, { clock: this.#clock, ids: this.#ids });
     const checkpointId = this.#createId('checkpoint');
-    const task: TaskRun = { ...initialTask, checkpointId };
+    const run: TaskRun = { ...records.run, checkpointId };
+    const sequence = 2;
+    const task: Task = {
+      ...records.task,
+      latestRunId: run.id,
+      lastEventSequence: sequence,
+    };
     const checkpoint: Checkpoint = {
       id: checkpointId,
       taskId: task.id,
-      sequence: 0,
-      taskStatus: 'queued',
-      completedToolResults: [],
-      continuationItems:
-        userMessageId === undefined
-          ? []
-          : [
-              {
-                type: 'message_ref',
-                messageId: this.#readMessageId(userMessageId),
-              },
-            ],
+      runId: run.id,
+      continuationItems: [{ type: 'message_ref', messageId: this.#readMessageId(userMessageId) }],
       pendingToolCall: null,
       browserToolCallsInAttempt: 0,
       browserTargetTabId: task.tabId,
-      createdAt: task.createdAt,
+      createdAt: run.startedAt,
     };
-    return { task, checkpoint, events: [] };
+    const events: TaskEvent[] = [
+      {
+        id: this.#createId('event'),
+        taskId: task.id,
+        runId: run.id,
+        sequence: 1,
+        type: 'message.recorded',
+        messageId: this.#readMessageId(userMessageId),
+        at: task.createdAt,
+      },
+    ];
+    events.push({
+      id: this.#createId('event'),
+      taskId: task.id,
+      runId: run.id,
+      sequence,
+      type: 'status.changed',
+      taskStatus: 'queued',
+      runStatus: 'queued',
+      reason: 'task.queued',
+      error: null,
+      at: task.createdAt,
+    });
+    return { task, run, checkpoint, events, toolResults: [] };
   }
 
-  /** Atomically stores a continuation message with its fresh queued WorkSession task. */
+  /** Stores a new user message while keeping the same logical cancelled task. */
   async continueCancelledSubmission(
     input: ContinueCancelledTaskSubmissionInput,
   ): Promise<TaskSnapshot> {
@@ -206,109 +219,134 @@ export class TaskCommandService implements TaskCommandPort, TaskSubmissionPort {
     const snapshot = await this.#createContinuationSnapshot({
       sourceTaskId: input.sourceTaskId,
       tabId: input.tabId,
-      goal: input.goal,
       userMessageId: input.message.id,
     });
-    await this.#mapBusyError(() =>
+    const newEvents = snapshot.events.filter((event) => event.runId === snapshot.run.id);
+    if (newEvents.at(-2)?.type !== 'message.recorded') {
+      throw new TaskCommandError('TASK_STATE_INVALID', 'Continuation message event is missing.');
+    }
+    const storedTask = await this.#mapBusyError(() =>
       this.#repository.createSubmission({
         conversation: input.conversation,
         createConversation: false,
         message: { ...input.message, taskId: snapshot.task.id },
         task: snapshot.task,
-        checkpoint: snapshot.checkpoint,
+        run: snapshot.run,
+        events: newEvents,
+        checkpoint: this.#requiredCheckpoint(snapshot),
         continuationSourceTaskId: input.sourceTaskId,
       }),
     );
-    return snapshot;
+    return { ...snapshot, task: storedTask };
   }
 
   async #createContinuationSnapshot(input: ContinuationSnapshotInput): Promise<TaskSnapshot> {
     const source = await this.getSnapshot(input.sourceTaskId);
-    if (source.task.status !== 'cancelled') {
+    if (source.task.status !== 'cancelled' || source.run.status !== 'cancelled') {
       throw new TaskCommandError(
         'TASK_STATE_INVALID',
-        'Only a cancelled task can start a WorkSession continuation.',
+        'Only a cancelled task can start another execution attempt.',
       );
     }
-    if (source.events.some((event) => event.type === 'task.context-cleared')) {
+    if (source.events.some((event) => event.type === 'context.cleared')) {
       throw new TaskCommandError(
         'TASK_STATE_INVALID',
-        'Cleared task context cannot start a WorkSession continuation.',
+        'Cleared task context cannot start another execution attempt.',
       );
     }
-
+    const sourceCheckpoint = this.#requiredCheckpoint(source);
     const userMessageId = this.#readMessageId(input.userMessageId);
-    const [messages, conversationTasks] = await Promise.all([
-      this.#conversations.listMessages(source.task.conversationId),
-      this.#repository.listByConversation(source.task.conversationId),
-    ]);
-    let continuationItems = [...source.checkpoint.continuationItems];
-    if (!continuationItems.some((item) => item.type === 'message_ref')) {
-      const sourceUserMessage = messages.find(
-        (message) =>
-          message.kind === 'conversation' &&
-          message.taskId === source.task.id &&
-          message.role === 'user' &&
-          message.status === 'complete',
-      );
-      if (sourceUserMessage !== undefined) {
-        continuationItems = [
-          { type: 'message_ref' as const, messageId: sourceUserMessage.id },
-          ...continuationItems,
-        ];
-      }
-    }
-    const referencedMessageIds = new Set(
-      continuationItems.flatMap((item) => (item.type === 'message_ref' ? [item.messageId] : [])),
-    );
-    const pendingSupplementItems = selectPendingWorkSessionSupplements(
+    const messages = await this.#conversations.listMessages(source.task.conversationId);
+    let continuationItems = [...sourceCheckpoint.continuationItems];
+    const pendingSupplements = selectPendingTaskSupplements(
       messages,
-      conversationTasks,
-      source.task.workSessionId,
-      referencedMessageIds,
-    ).map((message): ContinuationItem => ({
-      type: 'message_ref',
-      messageId: message.id,
-    }));
+      source.events,
+      source.task.id,
+    );
     continuationItems = insertBeforePendingToolCall(
       continuationItems,
-      source.checkpoint.pendingToolCall,
-      [...pendingSupplementItems, { type: 'message_ref', messageId: userMessageId }],
+      sourceCheckpoint.pendingToolCall,
+      [
+        ...pendingSupplements.map((message): ContinuationItem => ({
+          type: 'message_ref',
+          messageId: message.id,
+        })),
+        { type: 'message_ref', messageId: userMessageId },
+      ],
     );
 
-    const initialTask = createTask(
-      {
-        conversationId: source.task.conversationId,
-        tabId: input.tabId,
-        goal: input.goal,
-        workSessionId: source.task.workSessionId,
-      },
-      { clock: this.#clock, ids: this.#ids },
-    );
+    const run = createTaskRun(source.task, source.run.attempt + 1, {
+      clock: this.#clock,
+      ids: this.#ids,
+    });
     const checkpointId = this.#createId('checkpoint');
-    const task: TaskRun = { ...initialTask, checkpointId };
+    const currentRun: TaskRun = { ...run, checkpointId };
+    let sequence = source.task.lastEventSequence;
+    const appliedEvents: TaskEvent[] = pendingSupplements.map((message) => ({
+      id: this.#createId('event'),
+      taskId: source.task.id,
+      runId: currentRun.id,
+      sequence: (sequence += 1),
+      type: 'supplement.applied',
+      messageId: message.id,
+      at: currentRun.startedAt,
+    }));
+    const messageSequence = (sequence += 1);
+    const statusSequence = messageSequence + 1;
+    const task: Task = {
+      ...source.task,
+      tabId: input.tabId,
+      status: 'queued',
+      latestRunId: currentRun.id,
+      lastEventSequence: statusSequence,
+      updatedAt: currentRun.startedAt,
+    };
     const checkpoint: Checkpoint = {
+      ...sourceCheckpoint,
       id: checkpointId,
       taskId: task.id,
-      sequence: 0,
-      taskStatus: 'queued',
-      completedToolResults: source.checkpoint.completedToolResults.map((result) => ({ ...result })),
+      runId: currentRun.id,
       continuationItems,
-      pendingToolCall:
-        source.checkpoint.pendingToolCall === null
-          ? null
-          : { ...source.checkpoint.pendingToolCall },
       browserToolCallsInAttempt: 0,
-      browserTargetTabId: task.tabId,
-      createdAt: task.createdAt,
+      browserTargetTabId: input.tabId,
+      createdAt: currentRun.startedAt,
     };
-
-    return { task, checkpoint, events: [] };
+    const newEvents: TaskEvent[] = [
+      ...appliedEvents,
+      {
+        id: this.#createId('event'),
+        taskId: task.id,
+        runId: currentRun.id,
+        sequence: messageSequence,
+        type: 'message.recorded',
+        messageId: userMessageId,
+        at: currentRun.startedAt,
+      },
+      {
+        id: this.#createId('event'),
+        taskId: task.id,
+        runId: currentRun.id,
+        sequence: statusSequence,
+        type: 'status.changed',
+        taskStatus: 'queued',
+        runStatus: 'queued',
+        reason: 'task.queued',
+        error: null,
+        at: currentRun.startedAt,
+      },
+    ];
+    return {
+      task,
+      run: currentRun,
+      checkpoint,
+      events: [...source.events, ...newEvents],
+      toolResults: source.toolResults,
+    };
   }
 
-  async #mapBusyError(operation: () => Promise<void>): Promise<void> {
+  async #mapBusyError<T>(operation: () => Promise<T>): Promise<T> {
     try {
-      await operation();
+      return await operation();
     } catch (error) {
       if (error instanceof TaskRepositoryBusyError) {
         throw new TaskCommandError('TASK_ALREADY_RUNNING', '已有任务运行中');
@@ -317,97 +355,125 @@ export class TaskCommandService implements TaskCommandPort, TaskSubmissionPort {
     }
   }
 
-  /**
-   * Loads the durable task, current checkpoint, and ordered event history as one public snapshot.
-   */
   async getSnapshot(taskId: TaskId): Promise<TaskSnapshot> {
-    const task = await this.#repository.get(taskId);
-    if (task === undefined) {
+    const snapshot = await this.#repository.readActiveRuntimeSnapshot(taskId);
+    if (snapshot === undefined) {
       throw new TaskCommandError('TASK_NOT_FOUND', 'Task does not exist.');
     }
-    if (task.checkpointId === null) {
-      throw new TaskCommandError('TASK_STATE_INVALID', 'Task has no recovery checkpoint.');
-    }
-
-    const [checkpoint, events] = await Promise.all([
-      this.#repository.getCheckpoint(task.checkpointId),
-      this.#repository.listEvents(task.id),
-    ]);
-    if (checkpoint === undefined) {
+    if (snapshot.run.checkpointId !== null && snapshot.checkpoint === undefined) {
       throw new TaskCommandError('CHECKPOINT_NOT_FOUND', 'Task recovery checkpoint is missing.');
     }
-
-    return { task, checkpoint, events };
+    return {
+      task: snapshot.task,
+      run: snapshot.run,
+      checkpoint: snapshot.checkpoint ?? null,
+      events: snapshot.events,
+      toolResults: snapshot.toolResults,
+    };
   }
 
-  /**
-   * Persists a user-requested pause and makes repeated pause messages idempotent.
-   */
   async pause(taskId: TaskId): Promise<TaskSnapshot> {
     const snapshot = await this.getSnapshot(taskId);
-    if (snapshot.task.status === 'paused') {
-      return snapshot;
-    }
-    return this.#saveTransition(snapshot, 'task.paused', 'user_pause');
+    if (snapshot.task.status === 'paused') return snapshot;
+    return this.#saveStatusTransition(snapshot, 'task.paused', 'user_pause');
   }
 
-  /**
-   * Returns a paused or waiting task to the queued scheduler boundary.
-   */
   async resume(taskId: TaskId): Promise<TaskSnapshot> {
     const snapshot = await this.getSnapshot(taskId);
-    if (snapshot.task.status === 'queued') {
-      return snapshot;
+    if (snapshot.task.status === 'queued') return snapshot;
+    if (!['paused', 'waiting_for_auth'].includes(snapshot.task.status)) {
+      throw new TaskCommandError('TASK_STATE_INVALID', 'Only a paused task can resume.');
     }
-    return this.#saveTransition(snapshot, 'task.resumed', 'user_resume');
+    return this.#startRun(snapshot, 'user_resume');
   }
 
-  /** Requeues the same failed task without creating another persisted user message. */
   async retry(taskId: TaskId): Promise<TaskSnapshot> {
     const snapshot = await this.getSnapshot(taskId);
-    if (snapshot.task.status === 'queued') {
-      return snapshot;
+    if (snapshot.task.status === 'queued') return snapshot;
+    if (snapshot.task.status !== 'failed') {
+      throw new TaskCommandError('TASK_STATE_INVALID', 'Only a failed task can retry.');
     }
-    return this.#saveTransition(
-      snapshot,
-      'task.retried',
-      'user_retry',
-      snapshot.checkpoint.continuationItems,
-      0,
-    );
+    return this.#startRun(snapshot, 'user_retry');
   }
 
-  /**
-   * Persists terminal cancellation while treating a repeated cancellation as a no-op.
-   */
+  async #startRun(snapshot: TaskSnapshot, reason: string): Promise<TaskSnapshot> {
+    const previousCheckpoint = this.#requiredCheckpoint(snapshot);
+    const run = createTaskRun(snapshot.task, snapshot.run.attempt + 1, {
+      clock: this.#clock,
+      ids: this.#ids,
+    });
+    const checkpointId = this.#createId('checkpoint');
+    const currentRun: TaskRun = { ...run, checkpointId };
+    const sequence = snapshot.task.lastEventSequence + 1;
+    const task: Task = {
+      ...snapshot.task,
+      status: 'queued',
+      latestRunId: currentRun.id,
+      lastEventSequence: sequence,
+      updatedAt: currentRun.startedAt,
+    };
+    const checkpoint: Checkpoint = {
+      ...previousCheckpoint,
+      id: checkpointId,
+      runId: currentRun.id,
+      pendingToolCall:
+        previousCheckpoint.pendingToolCall === null
+          ? null
+          : { ...previousCheckpoint.pendingToolCall },
+      browserToolCallsInAttempt: 0,
+      createdAt: currentRun.startedAt,
+    };
+    const event: TaskEvent = {
+      id: this.#createId('event'),
+      taskId: task.id,
+      runId: currentRun.id,
+      sequence,
+      type: 'status.changed',
+      taskStatus: 'queued',
+      runStatus: 'queued',
+      reason,
+      error: null,
+      at: currentRun.startedAt,
+    };
+    await this.#mapBusyError(() => this.#repository.startRun(task, currentRun, event, checkpoint));
+    return {
+      task,
+      run: currentRun,
+      checkpoint,
+      events: [...snapshot.events, event],
+      toolResults: snapshot.toolResults,
+    };
+  }
+
   async cancel(taskId: TaskId): Promise<TaskSnapshot> {
     const snapshot = await this.getSnapshot(taskId);
-    if (['completed', 'failed'].includes(snapshot.task.status)) {
-      return snapshot;
-    }
+    if (['completed', 'failed'].includes(snapshot.task.status)) return snapshot;
     let cancelled = snapshot;
     if (snapshot.task.status !== 'cancelled') {
+      const checkpoint = this.#requiredCheckpoint(snapshot);
       const messages = await this.#conversations.listMessages(snapshot.task.conversationId);
-      const reply = messages.findLast(
+      const reply = orderTaskMessagesByEvent(
+        messages,
+        snapshot.events,
+        snapshot.task.id,
+        'conversation',
+      ).findLast(
         (message) =>
           message.kind === 'conversation' &&
-          message.taskId === snapshot.task.id &&
           message.role === 'assistant' &&
           (message.status === 'complete' || message.status === 'interrupted') &&
           message.text.length > 0,
       );
       const continuationItems =
         reply === undefined ||
-        snapshot.checkpoint.continuationItems.some(
+        checkpoint.continuationItems.some(
           (item) => item.type === 'message_ref' && item.messageId === reply.id,
         )
-          ? snapshot.checkpoint.continuationItems
-          : insertBeforePendingToolCall(
-              snapshot.checkpoint.continuationItems,
-              snapshot.checkpoint.pendingToolCall,
-              [{ type: 'message_ref', messageId: reply.id }],
-            );
-      cancelled = await this.#saveTransition(
+          ? checkpoint.continuationItems
+          : insertBeforePendingToolCall(checkpoint.continuationItems, checkpoint.pendingToolCall, [
+              { type: 'message_ref', messageId: reply.id },
+            ]);
+      cancelled = await this.#saveStatusTransition(
         snapshot,
         'task.cancelled',
         'user_cancel',
@@ -416,12 +482,12 @@ export class TaskCommandService implements TaskCommandPort, TaskSubmissionPort {
     }
     await retainTaskReply(cancelled.task, 'interrupted', {
       conversations: this.#conversations,
+      repository: this.#repository,
       ids: this.#ids,
     });
-    return cancelled;
+    return this.getSnapshot(cancelled.task.id);
   }
 
-  /** Discards only continuation state for the latest cancelled task and retains its audit trail. */
   async clearContext(taskId: TaskId): Promise<TaskSnapshot> {
     const snapshot = await this.getSnapshot(taskId);
     if (snapshot.task.status !== 'cancelled') {
@@ -430,88 +496,82 @@ export class TaskCommandService implements TaskCommandPort, TaskSubmissionPort {
         'Only a cancelled task can clear its continuation context.',
       );
     }
-    if (snapshot.events.some((event) => event.type === 'task.context-cleared')) return snapshot;
-    const conversationTasks = await this.#repository.listByConversation(
-      snapshot.task.conversationId,
-    );
-    const latestInWorkSession = conversationTasks
-      .filter((task) => task.workSessionId === snapshot.task.workSessionId)
-      .at(-1);
-    if (latestInWorkSession?.id !== snapshot.task.id) {
-      throw new TaskCommandError(
-        'TASK_STATE_INVALID',
-        'Only the latest cancelled task can clear its continuation context.',
-      );
-    }
-    return this.#saveTransition(
+    if (snapshot.events.some((event) => event.type === 'context.cleared')) return snapshot;
+    return this.#saveStatusTransition(
       snapshot,
       'task.context-cleared',
       'user_clear_task_context',
       [],
-      0,
-      null,
       true,
     );
   }
 
-  /**
-   * Writes one command transition, event, and cloned checkpoint as one durable transaction.
-   */
-  async #saveTransition(
+  async #saveStatusTransition(
     snapshot: TaskSnapshot,
-    type: TaskEventType,
+    type: TaskTransitionType,
     reason: string,
-    continuationItems = snapshot.checkpoint.continuationItems,
-    browserToolCallsInAttempt = snapshot.checkpoint.browserToolCallsInAttempt ?? 0,
-    pendingToolCall: PendingToolCall | null = snapshot.checkpoint.pendingToolCall,
-    clearModelInputTokens = false,
+    continuationItems?: readonly ContinuationItem[],
+    clearCheckpoint = false,
   ): Promise<TaskSnapshot> {
-    const latestEventSequence = snapshot.events.at(-1)?.sequence ?? 0;
-    if (latestEventSequence !== snapshot.checkpoint.sequence) {
-      throw new TaskCommandError(
-        'TASK_STATE_INVALID',
-        'Task event history and checkpoint are inconsistent.',
-      );
-    }
-
+    const checkpoint = this.#requiredCheckpoint(snapshot);
     const at = this.#clock.now();
-    const checkpointId = this.#createId('checkpoint');
-    const transitioned = transitionTask(snapshot.task, {
-      type,
-      at,
-      reason,
+    const transitioned = transitionTask(snapshot.task, snapshot.run, { type, at, reason });
+    const sequence = snapshot.task.lastEventSequence + 1;
+    const task: Task = { ...transitioned.task, lastEventSequence: sequence };
+    const event: TaskEvent =
+      type === 'task.context-cleared'
+        ? {
+            id: this.#createId('event'),
+            taskId: task.id,
+            runId: transitioned.run.id,
+            sequence,
+            type: 'context.cleared',
+            at,
+          }
+        : {
+            id: this.#createId('event'),
+            taskId: task.id,
+            runId: transitioned.run.id,
+            sequence,
+            type: 'status.changed',
+            taskStatus: transitioned.task.status,
+            runStatus: transitioned.run.status,
+            reason,
+            error: transitioned.run.error,
+            at,
+          };
+    const nextCheckpoint: Checkpoint | null = clearCheckpoint
+      ? null
+      : {
+          ...checkpoint,
+          continuationItems: continuationItems ?? checkpoint.continuationItems,
+        };
+    const run: TaskRun = {
+      ...transitioned.run,
+      checkpointId: nextCheckpoint?.id ?? null,
+    };
+    await this.#repository.saveTransition({
+      task,
+      run,
+      events: [event],
+      checkpoint: nextCheckpoint,
     });
-    const task: TaskRun = { ...transitioned, checkpointId, lease: null };
-    const sequence = latestEventSequence + 1;
-    const event: TaskEvent = {
-      id: this.#createId('event'),
-      taskId: task.id,
-      sequence,
-      type,
-      reason,
-      at,
-      error: null,
+    return {
+      task,
+      run,
+      checkpoint: nextCheckpoint,
+      events: [...snapshot.events, event],
+      toolResults: snapshot.toolResults,
     };
-    const checkpointBase = { ...snapshot.checkpoint };
-    if (clearModelInputTokens) delete checkpointBase.lastModelInputTokens;
-    const checkpoint: Checkpoint = {
-      ...checkpointBase,
-      id: checkpointId,
-      sequence,
-      taskStatus: task.status,
-      continuationItems,
-      pendingToolCall,
-      browserToolCallsInAttempt,
-      createdAt: at,
-    };
-
-    await this.#repository.saveTransition({ task, event, checkpoint });
-    return { task, checkpoint, events: [...snapshot.events, event] };
   }
 
-  /**
-   * Requests a nonblank stable identifier from the injected generator.
-   */
+  #requiredCheckpoint(snapshot: TaskSnapshot): Checkpoint {
+    if (snapshot.checkpoint === null) {
+      throw new TaskCommandError('CHECKPOINT_NOT_FOUND', 'Task recovery checkpoint is missing.');
+    }
+    return snapshot.checkpoint;
+  }
+
   #createId(prefix: string): string {
     const id = this.#ids.create(prefix).trim();
     if (id.length === 0) {
@@ -520,7 +580,6 @@ export class TaskCommandService implements TaskCommandPort, TaskSubmissionPort {
     return id;
   }
 
-  /** Validates one externally supplied durable message reference. */
   #readMessageId(value: MessageId): MessageId {
     const id = value.trim();
     if (id.length === 0) {

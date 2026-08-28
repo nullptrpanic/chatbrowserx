@@ -1,18 +1,19 @@
 import { describe, expect, it, vi } from 'vitest';
-import type { TaskRun } from '../../src/tasks/task-types';
+import type { Task, TaskStatus } from '../../src/tasks/task-types';
 import { RecoveryScanner } from '../../src/tasks/recovery-scanner';
 import { createTask } from '../../src/tasks/task-factory';
 
 /**
  * Builds a task record with a deterministic status for recovery tests.
  */
-function buildTask(id: string, status: TaskRun['status']): TaskRun {
+function buildTask(id: string, status: TaskStatus): Task {
   return {
     ...createTask(
       { conversationId: 'conv_1', tabId: 7, goal: id },
       { clock: { now: () => 1_000 }, ids: { create: () => id } },
     ),
     status,
+    latestRunId: `${id}_run`,
   };
 }
 
@@ -38,8 +39,8 @@ describe('RecoveryScanner', () => {
 
   it('coalesces concurrent scans so one task cannot be scheduled twice', async () => {
     const queued = buildTask('task_queued', 'queued');
-    let resolveTasks: ((tasks: TaskRun[]) => void) | undefined;
-    const pendingTasks = new Promise<TaskRun[]>((resolve) => {
+    let resolveTasks: ((tasks: Task[]) => void) | undefined;
+    const pendingTasks = new Promise<Task[]>((resolve) => {
       resolveTasks = resolve;
     });
     const repository = {

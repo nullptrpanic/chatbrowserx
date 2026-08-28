@@ -13,6 +13,7 @@ const statusKeys: Readonly<Record<PanelTaskStatus, MessageKey>> = {
 };
 
 const eventKeys: Readonly<Record<string, MessageKey>> = {
+  'task.queued': 'taskQueued',
   'planning.started': 'taskPlanning',
   'planning.retrying': 'taskPlanning',
   'reasoning.summary-recorded': 'taskReasoningSummaryRecorded',

@@ -3,17 +3,24 @@ import { describe, expect, it, vi } from 'vitest';
 import {
   browserToolContractForCheckpoint,
   browserToolDefinitionsForCheckpoint,
+  type BrowserToolState,
 } from '../../../src/agent/tools/browser-tool-availability';
 import { compactBrowserModelOutput } from '../../../src/browser/browser-model-output';
-import type { Checkpoint, CompletedToolResult } from '../../../src/tasks/checkpoint-types';
-import type { ContinuationItem } from '../../../src/tasks/continuation-types';
+import type { Checkpoint } from '../../../src/tasks/checkpoint-types';
+import type {
+  ContinuationItem,
+  MaterializedFunctionCallOutput,
+} from '../../../src/tasks/continuation-types';
+import type { MaterializedToolResult } from '../../../src/tasks/tool-result-types';
+
+type TestContinuationItem = ContinuationItem | MaterializedFunctionCallOutput;
 
 function pair(
   callId: string,
   name: string,
   arguments_: unknown,
   output: unknown,
-): readonly ContinuationItem[] {
+): readonly TestContinuationItem[] {
   return [
     {
       type: 'function_call',
@@ -25,29 +32,56 @@ function pair(
       type: 'function_call_output',
       callId,
       output: typeof output === 'string' ? output : JSON.stringify(output),
-      resultRef: `result_${callId}`,
+      resultId: `result_${callId}`,
       attachmentIds: [],
     },
   ];
 }
 
 function checkpoint(
-  continuationItems: readonly ContinuationItem[] = [],
-  completedToolResults: readonly CompletedToolResult[] = [],
-): Checkpoint {
-  return {
+  items: readonly TestContinuationItem[] = [],
+  toolResults: readonly MaterializedToolResult[] = [],
+): BrowserToolState {
+  const calls = new Map(
+    items.flatMap((item) => (item.type === 'function_call' ? [[item.callId, item] as const] : [])),
+  );
+  const generatedResults: MaterializedToolResult[] = [];
+  const continuationItems = items.map((item): ContinuationItem => {
+    if (item.type !== 'function_call_output') return item;
+    const call = calls.get(item.callId);
+    if (call === undefined) throw new Error('Tool result fixture is missing its call.');
+    generatedResults.push({
+      id: item.resultId,
+      taskId: 'task_1',
+      runId: 'run_1',
+      callId: item.callId,
+      toolName: call.name,
+      argumentsJson: call.argumentsJson,
+      output: item.output,
+      attachmentIds: item.attachmentIds ?? [],
+      createdAt: 1,
+    });
+    return {
+      type: 'function_call_output_ref',
+      callId: item.callId,
+      resultId: item.resultId,
+      attachmentIds: item.attachmentIds ?? [],
+    };
+  });
+  const checkpoint: Checkpoint = {
     id: 'checkpoint_1',
     taskId: 'task_1',
-    sequence: 1,
-    taskStatus: 'planning',
-    completedToolResults,
+    runId: 'run_1',
     continuationItems,
     pendingToolCall: null,
+    browserToolCallsInAttempt: 0,
+    browserTargetTabId: 7,
     createdAt: 1,
   };
+  return { checkpoint, toolResults: [...toolResults, ...generatedResults] };
 }
 
-function names(value: Checkpoint): readonly string[] {
+function names(value: BrowserToolState): readonly string[] {
   return browserToolDefinitionsForCheckpoint(value).map(({ name }) => name);
 }
 
@@ -159,7 +193,7 @@ describe('browserToolDefinitionsForCheckpoint', () => {
     });
   });
 
-  it('keeps a legacy current-tab call available only while replaying that work session', () => {
+  it('keeps a retained current-tab call available while replaying the current task', () => {
     const currentTab = pair(
       'current_tab',
       'browser_get_current_tab',
@@ -453,13 +487,16 @@ describe('browserToolDefinitionsForCheckpoint', () => {
   });
 
   it('enables image delivery from a durable task-owned attachment', () => {
-    const completed: CompletedToolResult = {
+    const completed: MaterializedToolResult = {
+      id: 'result_capture',
+      taskId: 'task_1',
+      runId: 'run_1',
       callId: 'capture',
       toolName: 'browser_capture_screenshot',
       argumentsJson: '{}',
       output: '{"ok":true}',
-      resultRef: 'result_capture',
       attachmentIds: ['attachment_1'],
+      createdAt: 1,
     };
 
     const definition = browserToolDefinitionsForCheckpoint(checkpoint([], [completed])).find(
@@ -905,6 +942,36 @@ describe('browserToolDefinitionsForCheckpoint', () => {
 
     expect(contract.toolChoice).toBeUndefined();
     expect(contract.scrollContinuation).toBeUndefined();
+    expect(contract.tools.map(({ name }) => name)).not.toContain('browser_inspect');
+    expect(contract.tools.map(({ name }) => name)).toContain('browser_scroll');
+  });
+
+  it('keeps inspection available when the embedded scroll evidence was truncated', () => {
+    const completedScroll = pair(
+      'completed_scroll_with_truncated_evidence',
+      'browser_scroll',
+      { tabId: 0, target: 'ref_history', deltaX: 0, deltaY: -600 },
+      {
+        ok: true,
+        data: {
+          action: 'scroll',
+          requestedDeltaApplied: true,
+          remainingDeltaX: 0,
+          remainingDeltaY: 0,
+          boundaryVerified: false,
+          verification: {
+            mode: 'interactive',
+            snapshot: 'snapshot_3',
+            base: 'snapshot_2',
+            truncated: true,
+          },
+        },
+      },
+    );
+
+    const contract = browserToolContractForCheckpoint(checkpoint(completedScroll));
+
+    expect(contract.tools.map(({ name }) => name)).toContain('browser_inspect');
   });
 
   it('requires inspection when a later internal scroll segment could not be observed', () => {

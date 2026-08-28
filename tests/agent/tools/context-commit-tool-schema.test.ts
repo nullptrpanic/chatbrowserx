@@ -10,15 +10,13 @@ function recorded(arguments_: object, overrides: Partial<{ callId: string; name:
 }
 
 describe('parseRecordedContextCommitToolCall', () => {
-  it('accepts current and cursorless legacy checkpoints for recovery only', () => {
+  it('accepts only the current cursor-bound record format', () => {
     expect(
       parseRecordedContextCommitToolCall(
         recorded({ state: 'Search completed.', throughCallId: 'call_search' }),
       ),
     ).toEqual({ state: 'Search completed.', throughCallId: 'call_search' });
-    expect(parseRecordedContextCommitToolCall(recorded({ state: 'Legacy state.' }))).toEqual({
-      state: 'Legacy state.',
-    });
+    expect(() => parseRecordedContextCommitToolCall(recorded({ state: 'Old state.' }))).toThrow();
   });
 
   it.each([

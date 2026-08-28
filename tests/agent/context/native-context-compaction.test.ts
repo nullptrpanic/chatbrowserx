@@ -8,6 +8,7 @@ import {
 import { CODEX_EFFECTIVE_CONTEXT_WINDOW_TOKENS } from '../../../src/providers/codex/codex-constants';
 import type { Checkpoint } from '../../../src/tasks/checkpoint-types';
 import type { ContinuationItem } from '../../../src/tasks/continuation-types';
+import type { MaterializedToolResult } from '../../../src/tasks/tool-result-types';
 
 function pair(index: number): readonly ContinuationItem[] {
   return [
@@ -18,27 +19,58 @@ function pair(index: number): readonly ContinuationItem[] {
       argumentsJson: '{}',
     },
     {
-      type: 'function_call_output',
+      type: 'function_call_output_ref',
       callId: `call_${index}`,
-      output: '{"ok":true}',
-      resultRef: `result_${index}`,
+      resultId: `result_${index}`,
     },
   ];
+}
+
+function toolResults(items: readonly ContinuationItem[]): MaterializedToolResult[] {
+  const calls = new Map(
+    items.flatMap((item) => (item.type === 'function_call' ? [[item.callId, item] as const] : [])),
+  );
+  return items.flatMap((item): MaterializedToolResult[] => {
+    if (item.type !== 'function_call_output_ref') return [];
+    const call = calls.get(item.callId);
+    if (call === undefined) throw new Error('Tool result fixture is missing its call.');
+    return [
+      {
+        id: item.resultId,
+        taskId: 'task_1',
+        runId: 'run_1',
+        callId: item.callId,
+        toolName: call.name,
+        argumentsJson: call.argumentsJson,
+        output: item.resultId.includes('rejected') ? '{"ok":false}' : '{"ok":true}',
+        attachmentIds: [],
+        createdAt: 100,
+      },
+    ];
+  });
 }
 
 function checkpoint(overrides: Partial<Checkpoint> = {}): Checkpoint {
   return {
     id: 'checkpoint_1',
     taskId: 'task_1',
-    sequence: 1,
-    taskStatus: 'planning',
-    completedToolResults: [],
+    runId: 'run_1',
     continuationItems: [{ type: 'message_ref', messageId: 'message_user' }, ...pair(1)],
     pendingToolCall: null,
     lastModelInputTokens: AUTO_COMPACT_INPUT_TOKEN_HIGH_WATER,
+    browserToolCallsInAttempt: 0,
+    browserTargetTabId: 7,
     createdAt: 100,
     ...overrides,
   };
+}
+
+function shouldCompact(value: Checkpoint, unmeasuredInputTokens = 0): boolean {
+  return shouldUseNativeContextCompaction(
+    value,
+    toolResults(value.continuationItems),
+    unmeasuredInputTokens,
+  );
 }
 
 describe('native context compaction', () => {
@@ -49,24 +81,22 @@ describe('native context compaction', () => {
 
   it('uses actual provider input tokens and requires completed compactable work', () => {
     expect(
-      shouldUseNativeContextCompaction(
-        checkpoint({ lastModelInputTokens: AUTO_COMPACT_INPUT_TOKEN_HIGH_WATER - 1 }),
-      ),
+      shouldCompact(checkpoint({ lastModelInputTokens: AUTO_COMPACT_INPUT_TOKEN_HIGH_WATER - 1 })),
     ).toBe(false);
-    expect(shouldUseNativeContextCompaction(checkpoint())).toBe(true);
+    expect(shouldCompact(checkpoint())).toBe(true);
     expect(
-      shouldUseNativeContextCompaction(
+      shouldCompact(
         checkpoint({ lastModelInputTokens: AUTO_COMPACT_INPUT_TOKEN_HIGH_WATER - 4_000 }),
         4_000,
       ),
     ).toBe(true);
     expect(
-      shouldUseNativeContextCompaction(
+      shouldCompact(
         checkpoint({ continuationItems: [{ type: 'message_ref', messageId: 'message_user' }] }),
       ),
     ).toBe(false);
     expect(
-      shouldUseNativeContextCompaction(
+      shouldCompact(
         checkpoint({
           pendingToolCall: {
             callId: 'call_1',
@@ -85,11 +115,9 @@ describe('native context compaction', () => {
       { type: 'compaction', itemId: 'cmp_previous', encryptedContent: 'opaque-previous' },
       ...pair(1),
     ];
-    expect(shouldUseNativeContextCompaction(checkpoint({ continuationItems: compacted }))).toBe(
-      false,
-    );
+    expect(shouldCompact(checkpoint({ continuationItems: compacted }))).toBe(false);
     expect(
-      shouldUseNativeContextCompaction(
+      shouldCompact(
         checkpoint({
           continuationItems: [
             ...compacted.slice(0, 2),
@@ -99,7 +127,7 @@ describe('native context compaction', () => {
       ),
     ).toBe(true);
     expect(
-      shouldUseNativeContextCompaction(
+      shouldCompact(
         checkpoint({
           lastModelInputTokens: AUTO_COMPACT_INPUT_TOKEN_HARD_WATER,
           continuationItems: compacted,
@@ -108,27 +136,24 @@ describe('native context compaction', () => {
     ).toBe(true);
   });
 
-  it('treats only a successful legacy commit as an existing compaction boundary', () => {
-    const rejectedLegacyCommit: ContinuationItem[] = [
+  it('treats only a successful context commit as an existing compaction boundary', () => {
+    const rejectedContextCommit: ContinuationItem[] = [
       { type: 'message_ref', messageId: 'message_user' },
       {
         type: 'function_call',
-        callId: 'call_legacy_commit',
+        callId: 'call_context_commit',
         name: 'commit_context',
-        argumentsJson: '{"state":"legacy"}',
+        argumentsJson: '{"state":"Current state.","throughCallId":"call_previous"}',
       },
       {
-        type: 'function_call_output',
-        callId: 'call_legacy_commit',
-        output: '{"ok":false}',
-        resultRef: 'result_legacy_commit',
+        type: 'function_call_output_ref',
+        callId: 'call_context_commit',
+        resultId: 'result_context_commit_rejected',
       },
       ...pair(1),
     ];
 
-    expect(
-      shouldUseNativeContextCompaction(checkpoint({ continuationItems: rejectedLegacyCommit })),
-    ).toBe(true);
+    expect(shouldCompact(checkpoint({ continuationItems: rejectedContextCommit }))).toBe(true);
   });
 
   it('retains ordered local message references and replaces opaque tool state once', () => {

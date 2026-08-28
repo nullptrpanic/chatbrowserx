@@ -6,7 +6,7 @@ import {
   type TaskSnapshot,
 } from '../../../src/tasks/task-command-service';
 import { createMessageRouter } from '../../../src/platform/chrome/message-router';
-import { createTask } from '../../../src/tasks/task-factory';
+import { createTaskRecords } from '../../../src/tasks/task-factory';
 import type { Checkpoint } from '../../../src/tasks/checkpoint-types';
 import type {
   PanelEditableSettings,
@@ -19,24 +19,31 @@ import type {
  * Builds a complete queued snapshot returned by command doubles.
  */
 function buildSnapshot(): TaskSnapshot {
+  let identifier = 0;
+  const records = createTaskRecords(
+    { conversationId: 'conv_1', tabId: 7, goal: 'Complete the page' },
+    {
+      clock: { now: () => 1_000 },
+      ids: { create: (prefix) => `${prefix}_${String(++identifier)}` },
+    },
+  );
   const task = {
-    ...createTask(
-      { conversationId: 'conv_1', tabId: 7, goal: 'Complete the page' },
-      { clock: { now: () => 1_000 }, ids: { create: () => 'task_1' } },
-    ),
-    checkpointId: 'checkpoint_1',
+    ...records.task,
+    latestRunId: records.run.id,
+    lastEventSequence: 1,
   };
+  const run = { ...records.run, checkpointId: 'checkpoint_1' };
   const checkpoint: Checkpoint = {
     id: 'checkpoint_1',
     taskId: task.id,
-    sequence: 0,
-    taskStatus: 'queued',
-    completedToolResults: [],
+    runId: run.id,
     continuationItems: [],
     pendingToolCall: null,
+    browserToolCallsInAttempt: 0,
+    browserTargetTabId: 7,
     createdAt: task.createdAt,
   };
-  return { task, checkpoint, events: [] };
+  return { task, run, checkpoint, events: [], toolResults: [] };
 }
 
 /**
@@ -44,7 +51,6 @@ function buildSnapshot(): TaskSnapshot {
  */
 function buildCommands(snapshot: TaskSnapshot): TaskCommandPort {
   return {
-    create: vi.fn(async () => snapshot),
     getSnapshot: vi.fn(async () => snapshot),
     pause: vi.fn(async () => snapshot),
     resume: vi.fn(async () => snapshot),
@@ -83,6 +89,7 @@ function buildPanel() {
     tavilyKey: 'saved-tavily-key',
   };
   const snapshot: PanelSnapshot = {
+    stateVersion: 7,
     generatedAt: 1_000,
     tab: {
       id: 7,
@@ -112,17 +119,27 @@ function buildPanel() {
       createdAt: 1_000,
       updatedAt: 2_000,
       sequence: 1,
+      completedToolCallCount: 0,
+      detailItemCount: 0,
+      contextCleared: false,
       lastError: null,
       events: [],
-      completedToolResults: [],
+      toolResults: [],
       supplements: [],
     })),
     submit: vi.fn(async () => buildSnapshot()),
-    supplement: vi.fn(async () => ({ accepted: true as const, id: 'supplement_1' })),
+    supplement: vi.fn(async () => ({
+      accepted: true as const,
+      id: 'supplement_1',
+    })),
     openImagePreview: vi.fn(async () => ({ opened: true as const })),
     clearConversation: vi.fn(async () => ({ deletedAttachments: 0 })),
     getSettings: vi.fn(async () => editableSettings),
-    saveSettings: vi.fn(async () => ({ ...settings, hasCodexToken: true, hasTavilyKey: true })),
+    saveSettings: vi.fn(async () => ({
+      ...settings,
+      hasCodexToken: true,
+      hasTavilyKey: true,
+    })),
   };
 }
 
@@ -141,7 +158,12 @@ describe('createMessageRouter', () => {
       version: PROTOCOL_VERSION,
       requestId: 'req_bad',
       type: 'task.create',
-      payload: { tabId: 7, conversationId: 'conv_1', goal: secret, extra: secret },
+      payload: {
+        tabId: 7,
+        conversationId: 'conv_1',
+        goal: secret,
+        extra: secret,
+      },
     });
 
     expect(response).toMatchObject({
@@ -221,7 +243,9 @@ describe('createMessageRouter', () => {
   });
 
   it('installs page features through the trusted background service', async () => {
-    const pageFeatures = { ensure: vi.fn(async () => ({ status: 'installed' })) };
+    const pageFeatures = {
+      ensure: vi.fn(async () => ({ status: 'installed' })),
+    };
     const router = createMessageRouter({
       commands: buildCommands(buildSnapshot()),
       panel: buildPanel(),
@@ -275,8 +299,14 @@ describe('createMessageRouter', () => {
       { senderTabId: 7 },
     );
 
-    expect(readResponse).toMatchObject({ ok: false, error: { code: 'INVALID_CONTEXT' } });
-    expect(saveResponse).toMatchObject({ ok: false, error: { code: 'INVALID_CONTEXT' } });
+    expect(readResponse).toMatchObject({
+      ok: false,
+      error: { code: 'INVALID_CONTEXT' },
+    });
+    expect(saveResponse).toMatchObject({
+      ok: false,
+      error: { code: 'INVALID_CONTEXT' },
+    });
     expect(JSON.stringify([readResponse, saveResponse])).not.toContain('must-not-be-stored');
     expect(panel.getSettings).not.toHaveBeenCalled();
     expect(panel.saveSettings).not.toHaveBeenCalled();
@@ -368,12 +398,18 @@ describe('createMessageRouter', () => {
       payload: { taskId: 'task_1' },
     });
 
-    expect(missing).toMatchObject({ ok: false, error: { code: 'TASK_NOT_FOUND' } });
+    expect(missing).toMatchObject({
+      ok: false,
+      error: { code: 'TASK_NOT_FOUND' },
+    });
     expect(unexpected).toEqual({
       version: PROTOCOL_VERSION,
       requestId: 'req_failed',
       ok: false,
-      error: { code: 'COMMAND_FAILED', message: 'Task command could not be completed.' },
+      error: {
+        code: 'COMMAND_FAILED',
+        message: 'Task command could not be completed.',
+      },
     });
     expect(JSON.stringify(unexpected)).not.toContain('private storage details');
   });
@@ -401,8 +437,14 @@ describe('createMessageRouter', () => {
       payload: { tabId: 7, mode: 'region' },
     });
 
-    expect(viewport).toMatchObject({ ok: true, data: { id: 'attachment_viewport' } });
-    expect(region).toMatchObject({ ok: true, data: { id: 'attachment_region' } });
+    expect(viewport).toMatchObject({
+      ok: true,
+      data: { id: 'attachment_viewport' },
+    });
+    expect(region).toMatchObject({
+      ok: true,
+      data: { id: 'attachment_region' },
+    });
     expect(screenshots.captureViewport).toHaveBeenCalledWith(7);
     expect(screenshots.captureRegion).toHaveBeenCalledWith(7);
   });
@@ -455,7 +497,11 @@ describe('createMessageRouter', () => {
       version: PROTOCOL_VERSION,
       requestId: 'req_supplement',
       type: 'chat.supplement',
-      payload: { taskId: 'task_1', text: 'Use official sources', attachmentIds: [] },
+      payload: {
+        taskId: 'task_1',
+        text: 'Use official sources',
+        attachmentIds: [],
+      },
     });
     await router({
       version: PROTOCOL_VERSION,
@@ -466,7 +512,11 @@ describe('createMessageRouter', () => {
 
     expect(panel.getSnapshot).toHaveBeenCalledWith(7, undefined);
     expect(panel.getTaskDetails).toHaveBeenCalledWith('task_1');
-    expect(panel.submit).toHaveBeenCalledWith({ tabId: 7, text: 'Do it', attachmentIds: [] });
+    expect(panel.submit).toHaveBeenCalledWith({
+      tabId: 7,
+      text: 'Do it',
+      attachmentIds: [],
+    });
     expect(panel.supplement).toHaveBeenCalledWith({
       taskId: 'task_1',
       text: 'Use official sources',

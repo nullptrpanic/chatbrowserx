@@ -18,7 +18,7 @@ export type MessageRouter = (
 ) => Promise<ExtensionResponse>;
 
 export interface MessageRouterDependencies {
-  readonly commands: Omit<TaskCommandPort, 'create'>;
+  readonly commands: TaskCommandPort;
   readonly panel: Pick<
     PanelService,
     | 'getSnapshot'

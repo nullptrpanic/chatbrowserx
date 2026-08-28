@@ -11,8 +11,9 @@ import type {
   MaterializedContinuationItem,
 } from '../../tasks/continuation-types';
 import type { MessageRecord } from '../../tasks/message-types';
-import type { TaskRun } from '../../tasks/task-types';
-import { loadWorkSessionView, type WorkSessionView } from '../work-session-view';
+import type { Task } from '../../tasks/task-types';
+import type { MaterializedToolResult } from '../../tasks/tool-result-types';
+import { loadConversationView, type ConversationView } from '../conversation-view';
 import {
   MAX_MODEL_IMAGE_BYTES,
   MAX_MODEL_IMAGE_COUNT,
@@ -24,20 +25,21 @@ export const RUNTIME_SUPPLEMENT_PREFIX =
   'Additional information supplied while the task was running:';
 
 export interface AgentContextInput {
-  readonly task: TaskRun;
+  readonly task: Task;
   readonly checkpoint: Checkpoint;
+  readonly toolResults: readonly MaterializedToolResult[];
   readonly customSystemPrompt: string;
   readonly historyMessageLimit: number;
 }
 
 interface AgentContextRepositoryDependencies {
   readonly conversations: Pick<ConversationRepository, 'listMessages'>;
-  readonly tasks: Pick<TaskRepository, 'listByConversation'>;
+  readonly tasks: Pick<TaskRepository, 'listByConversation' | 'readTaskMessageEvents'>;
   readonly attachments: Pick<AttachmentRepository, 'get'>;
 }
 
 interface AgentContextViewDependencies {
-  readonly workSession: WorkSessionView;
+  readonly conversationView: ConversationView;
   readonly attachments: Pick<AttachmentRepository, 'get'>;
 }
 
@@ -50,39 +52,28 @@ export interface AgentContext {
   readonly activeInput: readonly ModelInputItem[];
 }
 
-/** Selects the persisted ordinary user message that created one task. */
-function currentUserMessage(
-  messages: readonly MessageRecord[],
-  taskId: string,
-): MessageRecord | undefined {
-  return messages.findLast(
-    (message) =>
-      message.kind === 'conversation' &&
-      message.taskId === taskId &&
-      message.role === 'user' &&
-      message.status === 'complete',
-  );
-}
-
-/** Selects complete visible messages only from successful historical WorkSessions. */
+/** Selects complete visible messages only from successful historical tasks. */
 function selectedHistoryMessages(
   messages: readonly MessageRecord[],
-  tasks: readonly TaskRun[],
-  activeWorkSessionId: string,
+  tasks: readonly Task[],
+  historyMessageOrderById: ReadonlyMap<
+    string,
+    { readonly taskOrdinal: number; readonly eventSequence: number }
+  >,
+  activeTaskId: string,
   limit: number,
 ): readonly MessageRecord[] {
   if (!Number.isInteger(limit) || limit < 1 || limit > 50) {
     throw new Error('History message limit is invalid.');
   }
   const tasksById = new Map(tasks.map((task) => [task.id, task]));
-  const completedWorkSessions = new Set(
-    tasks.filter((task) => task.status === 'completed').map((task) => task.workSessionId),
+  const completedTaskIds = new Set(
+    tasks.filter((task) => task.status === 'completed').map((task) => task.id),
   );
   const selected = messages
     .filter((message) => {
       if (
         message.kind !== 'conversation' ||
-        message.taskId === null ||
         message.status !== 'complete' ||
         (message.role !== 'user' && message.role !== 'assistant')
       ) {
@@ -91,8 +82,20 @@ function selectedHistoryMessages(
       const owner = tasksById.get(message.taskId);
       return (
         owner !== undefined &&
-        owner.workSessionId !== activeWorkSessionId &&
-        completedWorkSessions.has(owner.workSessionId)
+        owner.id !== activeTaskId &&
+        completedTaskIds.has(owner.id) &&
+        historyMessageOrderById.has(message.id)
+      );
+    })
+    .sort((left, right) => {
+      const leftOrder = historyMessageOrderById.get(left.id);
+      const rightOrder = historyMessageOrderById.get(right.id);
+      if (leftOrder === undefined || rightOrder === undefined) {
+        throw new Error('Conversation message event association is invalid.');
+      }
+      return (
+        leftOrder.taskOrdinal - rightOrder.taskOrdinal ||
+        leftOrder.eventSequence - rightOrder.eventSequence
       );
     })
     .slice(-limit);
@@ -195,7 +198,7 @@ async function resolveFunctionOutputImages(
     if (ids.length > budget.remainingCount) continue;
     const batch = await loadImageBatch(ids, attachments);
     if (batch.bytes > budget.remainingBytes) continue;
-    images.set(item.resultRef, await Promise.all(batch.records.map(attachmentDataUrl)));
+    images.set(item.resultId, await Promise.all(batch.records.map(attachmentDataUrl)));
     budget.remainingCount -= batch.records.length;
     budget.remainingBytes -= batch.bytes;
   }
@@ -240,51 +243,13 @@ function modelMessage(
   return { type: 'message', role: message.role, content };
 }
 
-/** Adds the legacy current user and completed tools when an old checkpoint lacks ordered items. */
-function continuationItems(
-  checkpoint: Checkpoint,
-  messages: readonly MessageRecord[],
-  task: TaskRun,
-): readonly ContinuationItem[] {
-  const items = [...checkpoint.continuationItems];
-  if (!items.some((item) => item.type === 'message_ref')) {
-    const userMessage = currentUserMessage(messages, task.id);
-    if (userMessage === undefined) {
-      throw new Error('Current task user message is missing.');
-    }
-    items.unshift({ type: 'message_ref', messageId: userMessage.id });
-  }
-  if (
-    checkpoint.completedToolResults.length > 0 &&
-    !items.some((item) => item.type === 'function_call' || item.type === 'compaction')
-  ) {
-    for (const result of checkpoint.completedToolResults) {
-      items.push(
-        {
-          type: 'function_call',
-          callId: result.callId,
-          name: result.toolName,
-          argumentsJson: result.argumentsJson,
-        },
-        {
-          type: 'function_call_output_ref',
-          callId: result.callId,
-          resultRef: result.resultRef,
-          attachmentIds: result.attachmentIds ?? [],
-        },
-      );
-    }
-  }
-  return items;
-}
-
 /** Validates message ownership and function-call ordering before provider materialization. */
 function validateContinuation(
   items: readonly MaterializedContinuationItem[],
   checkpoint: Checkpoint,
-  task: TaskRun,
+  task: Task,
   messagesById: ReadonlyMap<string, MessageRecord>,
-  tasksById: ReadonlyMap<string, TaskRun>,
+  tasksById: ReadonlyMap<string, Task>,
 ): readonly MessageRecord[] {
   const activeMessages: MessageRecord[] = [];
   const seenMessages = new Set<string>();
@@ -296,10 +261,10 @@ function validateContinuation(
   for (const item of items) {
     if (item.type === 'message_ref') {
       if (unresolvedCall !== null || seenMessages.has(item.messageId)) {
-        throw new Error('WorkSession continuation order is invalid.');
+        throw new Error('Task continuation order is invalid.');
       }
       const message = messagesById.get(item.messageId);
-      const owner = message?.taskId === null ? undefined : tasksById.get(message?.taskId ?? '');
+      const owner = message === undefined ? undefined : tasksById.get(message.taskId);
       const validConversationMessage =
         message?.kind === 'conversation' &&
         ((message.role === 'user' && message.status === 'complete') ||
@@ -311,10 +276,10 @@ function validateContinuation(
         message === undefined ||
         owner === undefined ||
         message.conversationId !== task.conversationId ||
-        owner.workSessionId !== task.workSessionId ||
+        owner.id !== task.id ||
         (!validConversationMessage && !validSupplement)
       ) {
-        throw new Error('WorkSession message reference is invalid.');
+        throw new Error('Task message reference is invalid.');
       }
       seenMessages.add(item.messageId);
       activeMessages.push(message);
@@ -322,7 +287,7 @@ function validateContinuation(
     }
     if (item.type === 'function_call') {
       if (unresolvedCall !== null || seenCalls.has(item.callId)) {
-        throw new Error('WorkSession tool order is invalid.');
+        throw new Error('Task tool order is invalid.');
       }
       for (const outputItem of item.modelOutputItems ?? []) {
         if (outputItem.type === 'reasoning') {
@@ -331,16 +296,16 @@ function validateContinuation(
             outputItem.encryptedContent.length === 0 ||
             seenReasoningItems.has(outputItem.itemId)
           ) {
-            throw new Error('WorkSession model output is invalid.');
+            throw new Error('Task model output is invalid.');
           }
           seenReasoningItems.add(outputItem.itemId);
           continue;
         }
         if (seenMessages.has(outputItem.messageId)) {
-          throw new Error('WorkSession model output is invalid.');
+          throw new Error('Task model output is invalid.');
         }
         const message = messagesById.get(outputItem.messageId);
-        const owner = message?.taskId === null ? undefined : tasksById.get(message?.taskId ?? '');
+        const owner = message === undefined ? undefined : tasksById.get(message.taskId);
         if (
           message === undefined ||
           owner === undefined ||
@@ -348,9 +313,9 @@ function validateContinuation(
           message.role !== 'assistant' ||
           (message.status !== 'complete' && message.status !== 'interrupted') ||
           message.conversationId !== task.conversationId ||
-          owner.workSessionId !== task.workSessionId
+          owner.id !== task.id
         ) {
-          throw new Error('WorkSession model output is invalid.');
+          throw new Error('Task model output is invalid.');
         }
         seenMessages.add(outputItem.messageId);
         activeMessages.push(message);
@@ -367,13 +332,13 @@ function validateContinuation(
         item.itemId.length > 256 ||
         item.encryptedContent.length === 0
       ) {
-        throw new Error('WorkSession compaction is invalid.');
+        throw new Error('Task compaction is invalid.');
       }
       seenCompaction = true;
       continue;
     }
     if (unresolvedCall === null || unresolvedCall.callId !== item.callId) {
-      throw new Error('WorkSession tool output is invalid.');
+      throw new Error('Task tool output is invalid.');
     }
     unresolvedCall = null;
   }
@@ -389,29 +354,35 @@ function validateContinuation(
   ) {
     throw new Error('Pending tool checkpoint is invalid.');
   }
+  if (
+    !seenCompaction &&
+    !activeMessages.some((message) => message.kind === 'conversation' && message.role === 'user')
+  ) {
+    throw new Error('Current task user message is missing.');
+  }
   return activeMessages;
 }
 
-/** Builds Provider input from successful history and the exact active WorkSession checkpoint. */
+/** Builds Provider input from successful history and the exact active task checkpoint. */
 export async function buildAgentContext(
   context: AgentContextInput,
   dependencies: AgentContextDependencies,
 ): Promise<AgentContext> {
-  const workSession =
-    'workSession' in dependencies
-      ? dependencies.workSession
-      : await loadWorkSessionView(context.task.conversationId, dependencies);
-  const { messages, tasks, messagesById, tasksById } = workSession;
+  const conversationView =
+    'conversationView' in dependencies
+      ? dependencies.conversationView
+      : await loadConversationView(context.task.conversationId, dependencies);
+  const { messages, tasks, messagesById, tasksById, historyMessageOrderById } = conversationView;
   const history = selectedHistoryMessages(
     messages,
     tasks,
-    context.task.workSessionId,
+    historyMessageOrderById,
+    context.task.id,
     context.historyMessageLimit,
   );
-  const storedItems = continuationItems(context.checkpoint, messages, context.task);
   const orderedItems = materializeContinuationItems({
-    completedToolResults: context.checkpoint.completedToolResults,
-    continuationItems: storedItems,
+    toolResults: context.toolResults,
+    continuationItems: context.checkpoint.continuationItems,
   });
   const activeMessages = validateContinuation(
     orderedItems,
@@ -442,7 +413,7 @@ export async function buildAgentContext(
   for (const item of orderedItems) {
     if (item.type === 'message_ref') {
       const message = messagesById.get(item.messageId);
-      if (message === undefined) throw new Error('WorkSession message reference is invalid.');
+      if (message === undefined) throw new Error('Task message reference is invalid.');
       const modelItem = modelMessage(message, images.get(message.id), true);
       if (modelItem) activeInput.push(modelItem);
     } else if (item.type === 'function_call') {
@@ -458,11 +429,11 @@ export async function buildAgentContext(
         }
         const message = messagesById.get(outputItem.messageId);
         if (message === undefined) {
-          throw new Error('WorkSession model output is invalid.');
+          throw new Error('Task model output is invalid.');
         }
         const modelItem = modelMessage(message, images.get(message.id));
         if (modelItem === undefined) {
-          throw new Error('WorkSession model output is invalid.');
+          throw new Error('Task model output is invalid.');
         }
         activeInput.push(modelItem);
       }
@@ -473,7 +444,7 @@ export async function buildAgentContext(
         argumentsJson: item.argumentsJson,
       });
     } else if (item.type === 'function_call_output') {
-      const imageUrls = functionOutputImages.get(item.resultRef) ?? [];
+      const imageUrls = functionOutputImages.get(item.resultId) ?? [];
       activeInput.push({
         type: 'function_call_output',
         callId: item.callId,

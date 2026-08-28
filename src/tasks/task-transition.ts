@@ -1,6 +1,30 @@
-import type { TaskEventType, TaskRun, TaskStatus, TaskTransitionEvent } from './task-types';
+import type { TaskError } from './task-errors';
+import type { Task, TaskRun, TaskStatus } from './task-types';
 
-const eventTargetStatus: Readonly<Record<TaskEventType, TaskStatus>> = {
+export type TaskTransitionType =
+  | 'planning.started'
+  | 'planning.retrying'
+  | 'reasoning.summary-recorded'
+  | 'tool.call-recorded'
+  | 'tool.execution-started'
+  | 'tool.result-recorded'
+  | 'task.supplements-applied'
+  | 'task.context-compacted'
+  | 'task.context-cleared'
+  | 'task.auth-required'
+  | 'task.paused'
+  | 'task.completed'
+  | 'task.failed'
+  | 'task.cancelled';
+
+export interface TaskTransition {
+  readonly type: TaskTransitionType;
+  readonly at: number;
+  readonly reason: string;
+  readonly error?: TaskError;
+}
+
+const targetStatus: Readonly<Record<TaskTransitionType, TaskStatus>> = {
   'planning.started': 'planning',
   'planning.retrying': 'planning',
   'reasoning.summary-recorded': 'planning',
@@ -12,21 +36,18 @@ const eventTargetStatus: Readonly<Record<TaskEventType, TaskStatus>> = {
   'task.context-cleared': 'cancelled',
   'task.auth-required': 'waiting_for_auth',
   'task.paused': 'paused',
-  'task.resumed': 'queued',
-  'task.retried': 'queued',
   'task.completed': 'completed',
   'task.failed': 'failed',
   'task.cancelled': 'cancelled',
 };
 
-const waitingEvents = new Set<TaskEventType>([
+const waitingEvents = new Set<TaskTransitionType>([
   'task.auth-required',
   'task.paused',
   'task.failed',
   'task.cancelled',
 ]);
-
-const allowedEvents: Readonly<Record<TaskStatus, ReadonlySet<TaskEventType>>> = {
+const allowed: Readonly<Record<TaskStatus, ReadonlySet<TaskTransitionType>>> = {
   queued: new Set(['planning.started', ...waitingEvents]),
   planning: new Set([
     'planning.retrying',
@@ -39,42 +60,50 @@ const allowedEvents: Readonly<Record<TaskStatus, ReadonlySet<TaskEventType>>> = 
     'task.completed',
     ...waitingEvents,
   ]),
-  waiting_for_auth: new Set(['task.resumed', 'task.failed', 'task.cancelled']),
-  paused: new Set(['task.resumed', 'task.failed', 'task.cancelled']),
+  waiting_for_auth: new Set(['task.cancelled']),
+  paused: new Set(['task.cancelled']),
   completed: new Set(),
-  failed: new Set(['task.retried']),
+  failed: new Set(),
   cancelled: new Set(['task.context-cleared']),
 };
 
-/**
- * Applies one legal task event as an immutable status update and rejects stale or skipped states.
- */
-export function transitionTask(task: TaskRun, event: TaskTransitionEvent): TaskRun {
-  if (!allowedEvents[task.status].has(event.type)) {
-    throw new Error(`Illegal task transition from ${task.status} with ${event.type}.`);
-  }
+export interface TransitionedTaskRecords {
+  readonly task: Task;
+  readonly run: TaskRun;
+}
 
-  if (event.at < task.updatedAt) {
-    throw new Error('Task transition timestamp cannot be earlier than the current task.');
+/** Applies one in-attempt state transition to the logical task and current run together. */
+export function transitionTask(
+  task: Task,
+  run: TaskRun,
+  transition: TaskTransition,
+): TransitionedTaskRecords {
+  if (task.latestRunId !== run.id || run.taskId !== task.id) {
+    throw new Error('Task transition does not target the latest run.');
   }
-
-  if (event.reason.trim().length === 0) {
+  if (!allowed[run.status].has(transition.type)) {
+    throw new Error(`Illegal task transition from ${run.status} with ${transition.type}.`);
+  }
+  if (transition.at < task.updatedAt || transition.at < run.startedAt) {
+    throw new Error('Task transition timestamp cannot move backwards.');
+  }
+  if (transition.reason.trim().length === 0) {
     throw new Error('Task transition reason is required.');
   }
-
-  if (event.type === 'task.failed' && event.error === undefined) {
+  if (transition.type === 'task.failed' && transition.error === undefined) {
     throw new Error('Failed task transitions require a normalized error.');
   }
 
-  const lastError =
-    event.type === 'task.resumed' || event.type === 'task.retried'
-      ? null
-      : (event.error ?? task.lastError);
-
+  const status = targetStatus[transition.type];
+  const attemptEnded = status !== 'queued' && status !== 'planning';
   return {
-    ...task,
-    status: eventTargetStatus[event.type],
-    updatedAt: event.at,
-    lastError,
+    task: { ...task, status, updatedAt: transition.at },
+    run: {
+      ...run,
+      status,
+      error: transition.error ?? null,
+      lease: attemptEnded ? null : run.lease,
+      endedAt: attemptEnded ? (run.endedAt ?? transition.at) : null,
+    },
   };
 }

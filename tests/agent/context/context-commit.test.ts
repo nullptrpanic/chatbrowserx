@@ -1,39 +1,48 @@
 import { describe, expect, it } from 'vitest';
-import { compactContextAtCommit } from '../../../src/agent/context/context-commit';
-import type { ContinuationItem, PendingToolCall } from '../../../src/tasks/continuation-types';
+import {
+  compactContextAtCommit,
+  contextCommitCandidateCallIds,
+} from '../../../src/agent/context/context-commit';
+import type {
+  MaterializedContinuationItem,
+  PendingToolCall,
+} from '../../../src/tasks/continuation-types';
 
-const userMessage: ContinuationItem = {
+const userMessage: MaterializedContinuationItem = {
   type: 'message_ref',
   messageId: 'message_user',
 };
-const supplement: ContinuationItem = {
+const supplement: MaterializedContinuationItem = {
   type: 'message_ref',
   messageId: 'message_supplement',
 };
-const commitCall: ContinuationItem = {
+const commitCall: MaterializedContinuationItem = {
   type: 'function_call',
   callId: 'call_old_commit',
   name: 'commit_context',
-  argumentsJson: 'old-state',
+  argumentsJson: JSON.stringify({
+    state: 'Continue from the prior compacted boundary.',
+    throughCallId: 'call_prior',
+  }),
 };
-const commitOutput: ContinuationItem = {
+const commitOutput: MaterializedContinuationItem = {
   type: 'function_call_output',
   callId: 'call_old_commit',
-  output: 'old-ack',
-  resultRef: 'result_old_commit',
+  output: '{"ok":true,"compactedCalls":1,"releasedTextChars":100,"releasedImages":0}',
+  resultId: 'result_old_commit',
   attachmentIds: [],
 };
-const shortCall: ContinuationItem = {
+const shortCall: MaterializedContinuationItem = {
   type: 'function_call',
   callId: 'call_short',
   name: 'browser_get_current_tab',
   argumentsJson: '{}',
 };
-const shortOutput: ContinuationItem = {
+const shortOutput: MaterializedContinuationItem = {
   type: 'function_call_output',
   callId: 'call_short',
   output: '{}',
-  resultRef: 'result_short',
+  resultId: 'result_short',
   attachmentIds: [],
 };
 
@@ -41,7 +50,7 @@ function currentCommit(
   throughCallId: string,
   state = 'Goal: continue from the saved state.',
 ): {
-  readonly call: Extract<ContinuationItem, { readonly type: 'function_call' }>;
+  readonly call: Extract<MaterializedContinuationItem, { readonly type: 'function_call' }>;
   readonly pending: PendingToolCall;
 } {
   const argumentsJson = JSON.stringify({
@@ -67,7 +76,7 @@ function currentCommit(
 describe('compactContextAtCommit', () => {
   it('releases encrypted reasoning with its compacted tool pair', () => {
     const current = currentCommit('call_short');
-    const callWithReasoning: ContinuationItem = {
+    const callWithReasoning: MaterializedContinuationItem = {
       ...shortCall,
       modelOutputItems: [
         {
@@ -91,7 +100,7 @@ describe('compactContextAtCommit', () => {
 
   it('replaces prior tool pairs with the current commit while retaining every message ref', () => {
     const current = currentCommit('call_click');
-    const items: ContinuationItem[] = [
+    const items: MaterializedContinuationItem[] = [
       userMessage,
       {
         type: 'function_call',
@@ -103,7 +112,7 @@ describe('compactContextAtCommit', () => {
         type: 'function_call_output',
         callId: 'call_inspect',
         output: 'BC',
-        resultRef: 'result_inspect',
+        resultId: 'result_inspect',
         attachmentIds: ['image_1', 'image_2'],
       },
       supplement,
@@ -117,7 +126,7 @@ describe('compactContextAtCommit', () => {
         type: 'function_call_output',
         callId: 'call_click',
         output: 'G',
-        resultRef: 'result_click',
+        resultId: 'result_click',
         attachmentIds: ['image_2'],
       },
       current.call,
@@ -141,7 +150,7 @@ describe('compactContextAtCommit', () => {
         type: 'function_call_output',
         callId: 'call_commit',
         output: '{"ok":true,"compactedCalls":2,"releasedTextChars":7,"releasedImages":2}',
-        resultRef: 'result_commit',
+        resultId: 'result_commit',
         attachmentIds: [],
       },
     ]);
@@ -149,24 +158,24 @@ describe('compactContextAtCommit', () => {
 
   it('compacts through the cursor and keeps later tool pairs after the commit boundary', () => {
     const current = currentCommit('call_inspect');
-    const laterCall: ContinuationItem = {
+    const laterCall: MaterializedContinuationItem = {
       type: 'function_call',
       callId: 'call_click',
       name: 'browser_click',
       argumentsJson: 'DEF',
     };
-    const laterOutput: ContinuationItem = {
+    const laterOutput: MaterializedContinuationItem = {
       type: 'function_call_output',
       callId: 'call_click',
       output: 'G',
-      resultRef: 'result_click',
+      resultId: 'result_click',
       attachmentIds: ['image_2'],
     };
-    const afterCursorMessage: ContinuationItem = {
+    const afterCursorMessage: MaterializedContinuationItem = {
       type: 'message_ref',
       messageId: 'message_after_cursor',
     };
-    const items: ContinuationItem[] = [
+    const items: MaterializedContinuationItem[] = [
       userMessage,
       {
         type: 'function_call',
@@ -178,7 +187,7 @@ describe('compactContextAtCommit', () => {
         type: 'function_call_output',
         callId: 'call_inspect',
         output: 'BC',
-        resultRef: 'result_inspect',
+        resultId: 'result_inspect',
         attachmentIds: ['image_1'],
       },
       supplement,
@@ -202,7 +211,7 @@ describe('compactContextAtCommit', () => {
         type: 'function_call_output',
         callId: 'call_commit',
         output: '{"ok":true,"compactedCalls":1,"releasedTextChars":3,"releasedImages":1}',
-        resultRef: 'result_commit',
+        resultId: 'result_commit',
         attachmentIds: [],
       },
       supplement,
@@ -222,7 +231,7 @@ describe('compactContextAtCommit', () => {
 
     expect(compacted.stats).toEqual({
       compactedCalls: 2,
-      releasedTextChars: 20,
+      releasedTextChars: commitCall.argumentsJson.length + commitOutput.output.length + 4,
       releasedImages: 0,
     });
     expect(compacted.continuationItems.map((item) => item.type)).toEqual([
@@ -230,6 +239,12 @@ describe('compactContextAtCommit', () => {
       'function_call',
       'function_call_output',
     ]);
+  });
+
+  it('rejects a malformed prior context-commit output', () => {
+    expect(() =>
+      contextCommitCandidateCallIds([commitCall, { ...commitOutput, output: 'not-json' }]),
+    ).toThrow('Context continuation is invalid.');
   });
 
   it('expires browser refs and snapshot ids in the active committed state', () => {

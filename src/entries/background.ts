@@ -41,7 +41,7 @@ import { TaskCoordinator } from '../tasks/task-coordinator';
 import { PanelService } from '../tasks/panel-service';
 import { PanelChangeNotifier } from '../tasks/panel-change-notifier';
 import { ScreenshotController } from '../tasks/screenshot-controller';
-import { HistoricalToolResultService } from '../tasks/historical-tool-results';
+import { TaskHistoryReader } from '../tasks/task-history-reader';
 
 interface BackgroundServices {
   readonly router: MessageRouter;
@@ -75,9 +75,8 @@ async function createBackgroundServices(
     },
   });
   const repository = new IndexedDbTaskRepository(database, () => panelChanges.changed());
-  await repository.pruneObsoleteCheckpoints();
-  const historicalResults = new HistoricalToolResultService(repository);
   const conversations = new IndexedDbConversationRepository(database, () => panelChanges.changed());
+  const history = new TaskHistoryReader({ tasks: repository, conversations });
   const attachments = new IndexedDbAttachmentRepository(database);
   const attachmentService = new AttachmentService(attachments, {
     clock: systemClock,
@@ -165,7 +164,6 @@ async function createBackgroundServices(
     settings,
     conversations,
     tasks: repository,
-    historicalResults,
     attachments,
     ids: cryptoIds,
     clock: systemClock,
@@ -176,9 +174,8 @@ async function createBackgroundServices(
     planner,
     tavily,
     sandbox,
-    historicalResults,
+    history,
     browser,
-    attachments: attachmentService,
     clock: systemClock,
     ids: cryptoIds,
   });

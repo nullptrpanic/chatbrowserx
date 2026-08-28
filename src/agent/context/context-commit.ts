@@ -1,4 +1,4 @@
-import type { ContinuationItem, PendingToolCall } from '../../tasks/continuation-types';
+import type { MaterializedContinuationItem, PendingToolCall } from '../../tasks/continuation-types';
 import {
   CONTEXT_COMMIT_TOOL_NAME,
   parseRecordedContextCommitToolCall,
@@ -12,7 +12,7 @@ export interface ContextCommitStats {
 }
 
 export interface ContextCommitCompaction {
-  readonly continuationItems: readonly ContinuationItem[];
+  readonly continuationItems: readonly MaterializedContinuationItem[];
   readonly output: string;
   readonly stats: ContextCommitStats;
 }
@@ -55,7 +55,7 @@ function invalidContinuation(): never {
 
 /** Counts opaque and summarized model output that disappears with one compacted call. */
 function modelOutputCharacters(
-  call: Extract<ContinuationItem, { readonly type: 'function_call' }>,
+  call: Extract<MaterializedContinuationItem, { readonly type: 'function_call' }>,
 ): number {
   return (call.modelOutputItems ?? []).reduce((total, item) => {
     if (item.type !== 'reasoning') return total;
@@ -79,28 +79,61 @@ function parsePendingCommit(pending: PendingToolCall): RecordedContextCommitTool
   }
 }
 
-/** Identifies the model-visible rejection emitted for an invalid commit cursor. */
-function isRejectedContextCommitOutput(output: string): boolean {
+type ContextCommitOutcome = 'succeeded' | 'rejected';
+
+/** Parses the only two durable output shapes produced by the current commit executor. */
+function contextCommitOutcome(output: string): ContextCommitOutcome {
   try {
     const value: unknown = JSON.parse(output);
-    return (
-      typeof value === 'object' &&
-      value !== null &&
-      'ok' in value &&
-      value.ok === false &&
-      'code' in value &&
-      value.code === INVALID_CONTEXT_COMMIT_CURSOR
-    );
+    if (typeof value !== 'object' || value === null || !('ok' in value)) {
+      return invalidContinuation();
+    }
+    if (value.ok === false && 'code' in value && value.code === INVALID_CONTEXT_COMMIT_CURSOR) {
+      return 'rejected';
+    }
+    if (
+      value.ok === true &&
+      'compactedCalls' in value &&
+      Number.isInteger(value.compactedCalls) &&
+      Number(value.compactedCalls) >= 0 &&
+      'releasedTextChars' in value &&
+      Number.isInteger(value.releasedTextChars) &&
+      Number(value.releasedTextChars) >= 0 &&
+      'releasedImages' in value &&
+      Number.isInteger(value.releasedImages) &&
+      Number(value.releasedImages) >= 0
+    ) {
+      return 'succeeded';
+    }
   } catch {
-    return false;
+    return invalidContinuation();
   }
+  return invalidContinuation();
+}
+
+/** Validates one persisted commit pair before using it as a compaction boundary. */
+function recordedCommitOutcome(
+  call: Extract<MaterializedContinuationItem, { readonly type: 'function_call' }>,
+  output: Extract<MaterializedContinuationItem, { readonly type: 'function_call_output' }>,
+): ContextCommitOutcome {
+  try {
+    parseRecordedContextCommitToolCall({
+      callId: call.callId,
+      name: call.name,
+      argumentsJson: call.argumentsJson,
+    });
+  } catch {
+    return invalidContinuation();
+  }
+  return contextCommitOutcome(output.output);
 }
 
 /** Returns current completed non-commit call IDs after the latest successful commit. */
 export function contextCommitCandidateCallIds(
-  items: readonly ContinuationItem[],
+  items: readonly MaterializedContinuationItem[],
 ): readonly string[] {
-  let pendingCall: Extract<ContinuationItem, { readonly type: 'function_call' }> | undefined;
+  let pendingCall:
+    Extract<MaterializedContinuationItem, { readonly type: 'function_call' }> | undefined;
   let callIds: string[] = [];
 
   for (const item of items) {
@@ -126,7 +159,7 @@ export function contextCommitCandidateCallIds(
       invalidContinuation();
     }
     if (pendingCall.name === CONTEXT_COMMIT_TOOL_NAME) {
-      if (!isRejectedContextCommitOutput(item.output)) callIds = [];
+      if (recordedCommitOutcome(pendingCall, item) === 'succeeded') callIds = [];
     } else {
       callIds.push(pendingCall.callId);
     }
@@ -139,15 +172,15 @@ export function contextCommitCandidateCallIds(
 
 /** Replaces completed tool pairs through the requested cursor with one durable boundary. */
 export function compactContextAtCommit(
-  items: readonly ContinuationItem[],
+  items: readonly MaterializedContinuationItem[],
   pending: PendingToolCall,
-  resultRef: string,
+  resultId: string,
 ): ContextCommitCompaction {
   const commitArguments = parsePendingCommit(pending);
   if (!commitArguments) {
     throw new Error('Pending context commit is invalid.');
   }
-  if (resultRef.trim().length === 0) {
+  if (resultId.trim().length === 0) {
     throw new Error('Context commit result reference is invalid.');
   }
 
@@ -162,10 +195,13 @@ export function compactContextAtCommit(
     throw new Error('Pending context commit is invalid.');
   }
 
-  type FunctionCallItem = Extract<ContinuationItem, { readonly type: 'function_call' }>;
-  type FunctionOutputItem = Extract<ContinuationItem, { readonly type: 'function_call_output' }>;
+  type FunctionCallItem = Extract<MaterializedContinuationItem, { readonly type: 'function_call' }>;
+  type FunctionOutputItem = Extract<
+    MaterializedContinuationItem,
+    { readonly type: 'function_call_output' }
+  >;
   type ContinuationUnit =
-    | { readonly type: 'message'; readonly item: ContinuationItem }
+    | { readonly type: 'message'; readonly item: MaterializedContinuationItem }
     | {
         readonly type: 'tool_pair';
         readonly call: FunctionCallItem;
@@ -201,29 +237,19 @@ export function compactContextAtCommit(
 
   let cursorIndex = -1;
   let latestCommitIndex = -1;
-  let latestCandidateIndex = -1;
   for (const [index, unit] of units.entries()) {
     if (unit.type !== 'tool_pair') continue;
     if (unit.call.name === CONTEXT_COMMIT_TOOL_NAME) {
-      if (!isRejectedContextCommitOutput(unit.output.output)) {
+      if (recordedCommitOutcome(unit.call, unit.output) === 'succeeded') {
         latestCommitIndex = index;
-        latestCandidateIndex = -1;
       }
-    } else {
-      latestCandidateIndex = index;
     }
-    if (
-      commitArguments.throughCallId !== undefined &&
-      unit.call.callId === commitArguments.throughCallId
-    ) {
+    if (unit.call.callId === commitArguments.throughCallId) {
       if (cursorIndex !== -1) {
         invalidContinuation();
       }
       cursorIndex = index;
     }
-  }
-  if (commitArguments.throughCallId === undefined) {
-    cursorIndex = latestCandidateIndex;
   }
   const cursorUnit = units[cursorIndex];
   if (
@@ -235,8 +261,8 @@ export function compactContextAtCommit(
     throw new ContextCommitCursorError();
   }
 
-  const beforeBoundary: ContinuationItem[] = [];
-  const afterBoundary: ContinuationItem[] = [];
+  const beforeBoundary: MaterializedContinuationItem[] = [];
+  const afterBoundary: MaterializedContinuationItem[] = [];
   const releasedAttachmentIds = new Set<string>();
   let compactedCalls = 0;
   let releasedTextChars = 0;
@@ -248,7 +274,7 @@ export function compactContextAtCommit(
     }
     if (
       unit.call.name === CONTEXT_COMMIT_TOOL_NAME &&
-      isRejectedContextCommitOutput(unit.output.output)
+      recordedCommitOutcome(unit.call, unit.output) === 'rejected'
     ) {
       continue;
     }
@@ -278,19 +304,17 @@ export function compactContextAtCommit(
           ...currentCommit,
           argumentsJson: JSON.stringify({
             state: durableState,
-            ...(commitArguments.throughCallId === undefined
-              ? {}
-              : { throughCallId: commitArguments.throughCallId }),
+            throughCallId: commitArguments.throughCallId,
           }),
         };
-  const continuationItems: readonly ContinuationItem[] = [
+  const continuationItems: readonly MaterializedContinuationItem[] = [
     ...beforeBoundary,
     durableCommit,
     {
       type: 'function_call_output',
       callId: currentCommit.callId,
       output,
-      resultRef,
+      resultId,
       attachmentIds: [],
     },
     ...afterBoundary,

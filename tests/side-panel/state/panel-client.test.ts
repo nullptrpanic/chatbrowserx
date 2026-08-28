@@ -14,18 +14,23 @@ import { parsePanelSettings, parsePanelSnapshot } from '../../../src/side-panel/
 function snapshot(sequence = 1): PanelSnapshot {
   const task = {
     id: 'task_1',
+    detailLevel: 'summary' as const,
     status: 'planning' as const,
     goal: 'Task',
     tabId: 7,
     createdAt: 1_000,
     updatedAt: 1_000,
     sequence,
+    completedToolCallCount: 0,
+    detailItemCount: 0,
+    contextCleared: false,
     lastError: null,
     events: [],
-    completedToolResults: [],
+    toolResults: [],
     supplements: [],
   };
   return {
+    stateVersion: sequence,
     generatedAt: 1_000 + sequence,
     tab: {
       id: 7,
@@ -184,7 +189,9 @@ describe('PanelClient', () => {
       expect(client.getSnapshot().sandboxConsoleUrl).toBe(
         'http://127.0.0.1:43130/#token=viewer-token',
       );
-      expect(client.getSnapshot()).toMatchObject({ sandboxConsoleStatus: 'connected' });
+      expect(client.getSnapshot()).toMatchObject({
+        sandboxConsoleStatus: 'connected',
+      });
     });
     await client.openSandboxConsole();
 
@@ -199,7 +206,10 @@ describe('PanelClient', () => {
             version: 1,
             requestId: message.requestId,
             ok: false,
-            error: { code: 'SANDBOX_UNAVAILABLE', message: 'Sandbox is unavailable.' },
+            error: {
+              code: 'SANDBOX_UNAVAILABLE',
+              message: 'Sandbox is unavailable.',
+            },
           }
         : {
             version: 1,
@@ -326,7 +336,7 @@ describe('PanelClient', () => {
     });
   });
 
-  it('accepts the projected WorkSession application state on a user supplement', () => {
+  it('accepts the projected task application state on a user supplement', () => {
     const base = snapshot();
     const task = {
       ...base.tasks[0],
@@ -337,6 +347,7 @@ describe('PanelClient', () => {
           attachmentIds: [],
           createdAt: 1_100,
           applicationState: 'pending' as const,
+          detailIndex: 1,
         },
       ],
     };
@@ -348,6 +359,25 @@ describe('PanelClient', () => {
         task,
       }).task?.supplements[0]?.applicationState,
     ).toBe('pending');
+  });
+
+  it('rejects incomplete panel records instead of repairing an older projection', () => {
+    const base = snapshot();
+    const withoutStateVersion: Record<string, unknown> = { ...base };
+    Reflect.deleteProperty(withoutStateVersion, 'stateVersion');
+    expect(() => parsePanelSnapshot(withoutStateVersion)).toThrow();
+
+    const task = base.task;
+    if (task === null) throw new Error('Task fixture is incomplete.');
+    const incompleteTask: Record<string, unknown> = { ...task };
+    Reflect.deleteProperty(incompleteTask, 'detailItemCount');
+    expect(() =>
+      parsePanelSnapshot({
+        ...base,
+        tasks: [incompleteTask],
+        task: incompleteTask,
+      }),
+    ).toThrow();
   });
 
   it('defaults an older settings projection to 50 history messages', () => {
@@ -445,12 +475,13 @@ describe('PanelClient', () => {
         reason: index === 99 ? 'done' : 'progress',
         at: 1_342 + index,
       })),
-      completedToolResults: Array.from({ length: 22 }, (_, index) => ({
+      toolResults: Array.from({ length: 22 }, (_, index) => ({
         callId: `call_${index}`,
         toolName: 'browser_inspect',
         argumentsJson: '{}',
         output: `output_${index}`,
-        resultRef: `result_${index}`,
+        resultId: `result_${index}`,
+        detailIndex: 1,
         attachmentIds: [],
       })),
     };
@@ -482,7 +513,7 @@ describe('PanelClient', () => {
     });
     expect(client.getSnapshot().snapshot?.task?.events).toHaveLength(100);
     expect(client.getSnapshot().snapshot?.task?.events[0]?.sequence).toBe(343);
-    expect(client.getSnapshot().snapshot?.task?.completedToolResults).toHaveLength(22);
+    expect(client.getSnapshot().snapshot?.task?.toolResults).toHaveLength(22);
     expect(send).toHaveBeenCalledWith(
       expect.objectContaining({
         type: 'panel.getTaskDetails',
@@ -507,13 +538,14 @@ describe('PanelClient', () => {
           at: 1_000,
         },
       ],
-      completedToolResults: [
+      toolResults: [
         {
           callId: 'call_1',
           toolName: 'browser_inspect',
           argumentsJson: '{"tabId":7}',
           output: '{"ok":true}',
-          resultRef: 'result_1',
+          resultId: 'result_1',
+          detailIndex: 1,
           attachmentIds: [],
         },
       ],
@@ -551,7 +583,7 @@ describe('PanelClient', () => {
       detailLevel: 'summary',
       sequence: 2,
       completedToolCallCount: 2,
-      completedToolResults: [{ callId: 'call_1' }],
+      toolResults: [{ callId: 'call_1' }],
     });
 
     detailedTask = {
@@ -567,14 +599,15 @@ describe('PanelClient', () => {
           at: 1_100,
         },
       ],
-      completedToolResults: [
-        ...detailedTask.completedToolResults,
+      toolResults: [
+        ...detailedTask.toolResults,
         {
           callId: 'call_2',
           toolName: 'browser_click',
           argumentsJson: '{"tabId":7,"ref":"e2"}',
           output: '{"ok":true}',
-          resultRef: 'result_2',
+          resultId: 'result_2',
+          detailIndex: 1,
           attachmentIds: [],
         },
       ],
@@ -584,7 +617,7 @@ describe('PanelClient', () => {
     expect(client.getSnapshot().snapshot?.task).toMatchObject({
       detailLevel: 'full',
       sequence: 2,
-      completedToolResults: [{ callId: 'call_1' }, { callId: 'call_2' }],
+      toolResults: [{ callId: 'call_1' }, { callId: 'call_2' }],
     });
     client.dispose();
   });
@@ -611,12 +644,13 @@ describe('PanelClient', () => {
           data: {
             ...current,
             detailLevel: 'full',
-            completedToolResults: Array.from({ length: current.sequence }, (_, index) => ({
+            toolResults: Array.from({ length: current.sequence }, (_, index) => ({
               callId: `call_${String(index + 1)}`,
               toolName: 'browser_inspect',
               argumentsJson: '{}',
               output: '{"ok":true}',
-              resultRef: `result_${String(index + 1)}`,
+              resultId: `result_${String(index + 1)}`,
+              detailIndex: 1,
               attachmentIds: [],
             })),
           },
@@ -648,7 +682,7 @@ describe('PanelClient', () => {
     expect(client.getSnapshot().snapshot?.task).toMatchObject({
       detailLevel: 'full',
       sequence: 2,
-      completedToolResults: [{ callId: 'call_1' }, { callId: 'call_2' }],
+      toolResults: [{ callId: 'call_1' }, { callId: 'call_2' }],
     });
     client.dispose();
   });
@@ -812,7 +846,10 @@ describe('PanelClient', () => {
 
   it('keeps an explicitly selected global conversation when the active tab changes', async () => {
     let activeTabId = 7;
-    const sentSnapshots: Array<{ tabId: number; conversationId?: string | undefined }> = [];
+    const sentSnapshots: Array<{
+      tabId: number;
+      conversationId?: string | undefined;
+    }> = [];
     const send = vi.fn<RuntimePort['send']>(async (message) => {
       if (message.type === 'panel.getSnapshot') {
         sentSnapshots.push(message.payload);
@@ -839,17 +876,26 @@ describe('PanelClient', () => {
     activeTabId = 9;
     await client.refresh();
 
-    expect(sentSnapshots.at(-1)).toEqual({ tabId: 9, conversationId: 'conversation_1' });
+    expect(sentSnapshots.at(-1)).toEqual({
+      tabId: 9,
+      conversationId: 'conversation_1',
+    });
     expect(client.getSnapshot()).toMatchObject({
       activeConversationId: 'conversation_1',
-      snapshot: { conversation: { id: 'conversation_1' }, task: { id: 'task_1' } },
+      snapshot: {
+        conversation: { id: 'conversation_1' },
+        task: { id: 'task_1' },
+      },
     });
     client.dispose();
   });
 
   it('keeps an implicit panel selection following the globally latest conversation', async () => {
     let conversationId = 'conversation_1';
-    const snapshotPayloads: Array<{ tabId: number; conversationId?: string | undefined }> = [];
+    const snapshotPayloads: Array<{
+      tabId: number;
+      conversationId?: string | undefined;
+    }> = [];
     const send = vi.fn<RuntimePort['send']>(async (message) => {
       if (message.type === 'panel.getSnapshot') {
         snapshotPayloads.push(message.payload);

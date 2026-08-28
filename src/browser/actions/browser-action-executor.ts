@@ -30,6 +30,8 @@ const SELECTION_SETTLE_TIMEOUT_MS = 1_500;
 const SELECTION_POLL_INTERVAL_MS = 75;
 const SCROLL_SETTLE_TIMEOUT_MS = 1_500;
 const SCROLL_POLL_INTERVAL_MS = 75;
+// CSSOM scroll offsets may be fractional while scrollWidth/scrollHeight are rounded integers.
+const SCROLL_BOUNDARY_EPSILON_CSS_PX = 1;
 const IMAGE_PASTE_SETTLE_TIMEOUT_MS = 5_000;
 const IMAGE_PASTE_POLL_INTERVAL_MS = 100;
 
@@ -2982,10 +2984,10 @@ export class BrowserActionExecutor implements BrowserActionPort {
 
   #atRequestedScrollBoundary(state: ElementScrollState, deltaX: number, deltaY: number): boolean {
     return (
-      (deltaX < 0 && state.x <= 0) ||
-      (deltaX > 0 && state.x >= state.maxX) ||
-      (deltaY < 0 && state.y <= 0) ||
-      (deltaY > 0 && state.y >= state.maxY)
+      (deltaX < 0 && state.x <= SCROLL_BOUNDARY_EPSILON_CSS_PX) ||
+      (deltaX > 0 && state.x >= state.maxX - SCROLL_BOUNDARY_EPSILON_CSS_PX) ||
+      (deltaY < 0 && state.y <= SCROLL_BOUNDARY_EPSILON_CSS_PX) ||
+      (deltaY > 0 && state.y >= state.maxY - SCROLL_BOUNDARY_EPSILON_CSS_PX)
     );
   }
 
@@ -3490,10 +3492,10 @@ export class BrowserActionExecutor implements BrowserActionPort {
   #atRequestedViewportBoundary(state: ViewportState, deltaX: number, deltaY: number): boolean {
     return (
       state.extentKnown &&
-      ((deltaX < 0 && state.pageX <= 0) ||
-        (deltaX > 0 && state.pageX >= state.maxX) ||
-        (deltaY < 0 && state.pageY <= 0) ||
-        (deltaY > 0 && state.pageY >= state.maxY))
+      ((deltaX < 0 && state.pageX <= SCROLL_BOUNDARY_EPSILON_CSS_PX) ||
+        (deltaX > 0 && state.pageX >= state.maxX - SCROLL_BOUNDARY_EPSILON_CSS_PX) ||
+        (deltaY < 0 && state.pageY <= SCROLL_BOUNDARY_EPSILON_CSS_PX) ||
+        (deltaY > 0 && state.pageY >= state.maxY - SCROLL_BOUNDARY_EPSILON_CSS_PX))
     );
   }
 
