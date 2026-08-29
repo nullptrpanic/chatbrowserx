@@ -46,6 +46,41 @@ function completedTask(id: string, goal: string, updatedAt: number): PanelTask {
 }
 
 describe('ConversationView answer execution details', () => {
+  it('forwards Reply from the visible assistant answer', async () => {
+    const user = userEvent.setup();
+    const onReply = vi.fn();
+    const task = completedTask('task_reply', 'Reply target', 1_300);
+    const message: PanelMessage = {
+      id: 'assistant_reply',
+      taskId: task.id,
+      role: 'assistant',
+      status: 'complete',
+      text: 'Reply to this answer',
+      attachmentIds: [],
+      createdAt: 1_300,
+      updatedAt: 1_300,
+    };
+
+    render(
+      <ConversationView
+        messages={[message]}
+        tasks={[task]}
+        task={task}
+        attachments={attachments}
+        t={t}
+        onSuggestion={vi.fn()}
+        onReply={onReply}
+        onPause={vi.fn()}
+        onResume={vi.fn()}
+        onRetry={vi.fn()}
+        onCancel={vi.fn()}
+      />,
+    );
+
+    await user.click(screen.getByRole('button', { name: '回复' }));
+    expect(onReply).toHaveBeenCalledWith(message);
+  });
+
   it('does not rewrite the scroll position for an unchanged polling snapshot', () => {
     const task = completedTask('task_poll', 'Polling task', 1_300);
     const message: PanelMessage = {

@@ -345,7 +345,11 @@ export class CodexAgentPlanner implements AgentPlanner {
           yield { type: 'sandbox.call', call, modelTurn, modelOutputItems };
           return;
         }
-        if (state.tool.name === 'history_read' || state.tool.name === 'result_read') {
+        if (
+          state.tool.name === 'history_read' ||
+          state.tool.name === 'history_read_task' ||
+          state.tool.name === 'result_read'
+        ) {
           let call: ReturnType<typeof parseHistoryToolCall>;
           try {
             call = parseHistoryToolCall(source);

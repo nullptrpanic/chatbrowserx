@@ -91,6 +91,7 @@ export interface SubmitPanelMessageInput {
   readonly conversationId?: string | undefined;
   readonly text: string;
   readonly attachmentIds: readonly string[];
+  readonly replyTo?: { readonly messageId: string; readonly taskId: string } | undefined;
 }
 
 export interface SupplementPanelMessageInput {
@@ -337,6 +338,7 @@ export class PanelService {
           text: message.text,
           attachmentIds: [...message.attachmentIds],
           ...(sourcePage === undefined ? {} : { sourcePage }),
+          ...(message.replyTo === undefined ? {} : { replyTo: { ...message.replyTo } }),
           createdAt: message.createdAt,
           updatedAt: message.updatedAt,
         };
@@ -404,6 +406,10 @@ export class PanelService {
     if (conversation === undefined) {
       throw new Error('Conversation is unavailable.');
     }
+    const replyTo =
+      input.replyTo === undefined
+        ? undefined
+        : await this.#readReplyReference(conversation.id, input.replyTo);
     if (input.conversationId !== undefined) {
       latestTask = (await this.#dependencies.tasks.listByConversation(conversation.id)).at(-1);
     }
@@ -416,6 +422,7 @@ export class PanelService {
       text,
       attachmentIds,
       ...(sourcePage === undefined ? {} : { sourcePage }),
+      ...(replyTo === undefined ? {} : { replyTo }),
       createdAt: now,
       updatedAt: now,
     };
@@ -441,6 +448,44 @@ export class PanelService {
           });
     await this.#dependencies.scheduleTask(snapshot.task.id);
     return snapshot;
+  }
+
+  /** Resolves one client-supplied lookup hint to a bounded canonical assistant reply reference. */
+  async #readReplyReference(
+    conversationId: string,
+    input: { readonly messageId: string; readonly taskId: string },
+  ): Promise<NonNullable<MessageRecord['replyTo']>> {
+    const messageId = input.messageId.trim();
+    const taskId = input.taskId.trim();
+    if (
+      messageId.length === 0 ||
+      messageId.length > 256 ||
+      taskId.length === 0 ||
+      taskId.length > 256
+    ) {
+      throw new Error('Reply target is invalid.');
+    }
+    const target = (await this.#dependencies.conversations.listTaskMessages(taskId)).find(
+      (message) => message.id === messageId,
+    );
+    if (
+      target === undefined ||
+      target.taskId !== taskId ||
+      target.conversationId !== conversationId ||
+      target.kind !== 'conversation' ||
+      target.role !== 'assistant' ||
+      target.status === 'streaming' ||
+      (target.text.length === 0 && target.attachmentIds.length === 0)
+    ) {
+      throw new Error('Reply target is unavailable.');
+    }
+    return {
+      messageId: target.id,
+      taskId: target.taskId,
+      excerpt: target.text.slice(0, 1_000),
+      attachmentCount: target.attachmentIds.length,
+      createdAt: target.createdAt,
+    };
   }
 
   /** Persists additional text or images for the next safe loop boundary of a running task. */

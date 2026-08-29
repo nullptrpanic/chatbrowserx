@@ -734,6 +734,49 @@ describe('PanelClient', () => {
     client.dispose();
   });
 
+  it('includes a stable reply target in chat.submit', async () => {
+    const submitted: unknown[] = [];
+    const send = vi.fn<RuntimePort['send']>(async (message) => {
+      if (message.type === 'panel.getSnapshot') {
+        return {
+          version: 1,
+          requestId: message.requestId,
+          ok: true,
+          data: snapshot(),
+        };
+      }
+      if (message.type === 'chat.submit') {
+        submitted.push(message.payload);
+        return {
+          version: 1,
+          requestId: message.requestId,
+          ok: true,
+          data: { task: { conversationId: 'conversation_1' } },
+        };
+      }
+      return { version: 1, requestId: message.requestId, ok: true, data: {} };
+    });
+    const client = new PanelClient(
+      { send },
+      { getActiveTab: vi.fn(async () => ({ id: 7 })) },
+      { pollIntervalMs: 60_000 },
+    );
+    await client.connect();
+
+    await client.submit('Explain this further', [], {
+      messageId: 'assistant_target',
+      taskId: 'task_target',
+    });
+
+    expect(submitted).toEqual([
+      expect.objectContaining({
+        text: 'Explain this further',
+        replyTo: { messageId: 'assistant_target', taskId: 'task_target' },
+      }),
+    ]);
+    client.dispose();
+  });
+
   it('uses the active tab at send time when the user switches before the next poll', async () => {
     let activeTabId = 7;
     const submittedTabIds: number[] = [];

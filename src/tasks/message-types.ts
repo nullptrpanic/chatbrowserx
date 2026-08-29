@@ -10,6 +10,14 @@ export interface MessageSourcePage {
   readonly favIconUrl: string | null;
 }
 
+export interface MessageReplyReference {
+  readonly messageId: MessageId;
+  readonly taskId: TaskId;
+  readonly excerpt: string;
+  readonly attachmentCount: number;
+  readonly createdAt: number;
+}
+
 export interface MessageRecord {
   readonly id: MessageId;
   readonly kind: MessageKind;
@@ -20,6 +28,7 @@ export interface MessageRecord {
   readonly text: string;
   readonly attachmentIds: readonly AttachmentId[];
   readonly sourcePage?: MessageSourcePage | undefined;
+  readonly replyTo?: MessageReplyReference | undefined;
   readonly createdAt: number;
   readonly updatedAt: number;
 }

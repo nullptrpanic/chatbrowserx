@@ -45,6 +45,88 @@ const attachments = {
 };
 
 describe('App background connection', () => {
+  it('selects an assistant answer for reply and submits its stable identifiers', async () => {
+    const base = buildSnapshot();
+    const task = {
+      id: 'task_reply_target',
+      detailLevel: 'summary' as const,
+      status: 'completed' as const,
+      goal: 'Original question',
+      tabId: 7,
+      createdAt: 900,
+      updatedAt: 1_000,
+      sequence: 0,
+      completedToolCallCount: 0,
+      detailItemCount: 0,
+      contextCleared: false,
+      lastError: null,
+      events: [],
+      toolResults: [],
+      supplements: [],
+    };
+    const current: PanelSnapshot = {
+      ...base,
+      conversation: {
+        id: 'conversation_reply',
+        title: 'Original question',
+        tabId: 7,
+        createdAt: 900,
+        updatedAt: 1_000,
+        taskStatus: 'completed',
+      },
+      messages: [
+        {
+          id: 'assistant_reply_target',
+          taskId: task.id,
+          role: 'assistant',
+          status: 'complete',
+          text: 'Original full answer',
+          attachmentIds: [],
+          createdAt: 1_000,
+          updatedAt: 1_000,
+        },
+      ],
+      tasks: [task],
+      task,
+    };
+    const submitted: unknown[] = [];
+    const send = vi.fn<RuntimePort['send']>(async (message) => {
+      if (message.type === 'chat.submit') {
+        submitted.push(message.payload);
+        return {
+          version: 1,
+          requestId: message.requestId,
+          ok: true,
+          data: { task: { conversationId: 'conversation_reply' } },
+        };
+      }
+      return {
+        version: 1,
+        requestId: message.requestId,
+        ok: true,
+        data: message.type === 'panel.getSnapshot' ? current : { connected: true },
+      };
+    });
+    const user = userEvent.setup();
+
+    render(<App runtimePort={{ send }} environment={environment} attachmentClient={attachments} />);
+    await user.click(await screen.findByRole('button', { name: '回复' }));
+    expect(screen.getByText('回复 ChatBrowserX')).toBeVisible();
+    await user.type(screen.getByRole('textbox'), 'Follow-up question');
+    await user.click(screen.getByRole('button', { name: '发送' }));
+
+    expect(submitted).toEqual([
+      expect.objectContaining({
+        text: 'Follow-up question',
+        replyTo: {
+          messageId: 'assistant_reply_target',
+          taskId: 'task_reply_target',
+        },
+      }),
+    ]);
+    expect(screen.queryByText('回复 ChatBrowserX')).not.toBeInTheDocument();
+  });
+
   it('edits and saves the model history message limit', async () => {
     const send = vi.fn<RuntimePort['send']>(async (message) => {
       const settings = {

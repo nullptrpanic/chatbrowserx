@@ -25,6 +25,14 @@ export interface PanelMessageSourcePage {
   readonly favIconUrl: string | null;
 }
 
+export interface PanelMessageReplyReference {
+  readonly messageId: string;
+  readonly taskId: string;
+  readonly excerpt: string;
+  readonly attachmentCount: number;
+  readonly createdAt: number;
+}
+
 export interface PanelMessage {
   readonly id: string;
   readonly taskId: string;
@@ -33,6 +41,7 @@ export interface PanelMessage {
   readonly text: string;
   readonly attachmentIds: readonly string[];
   readonly sourcePage?: PanelMessageSourcePage | undefined;
+  readonly replyTo?: PanelMessageReplyReference | undefined;
   readonly createdAt: number;
   readonly updatedAt: number;
 }

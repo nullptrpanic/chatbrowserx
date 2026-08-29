@@ -56,6 +56,10 @@ const chatSubmitSchema = z
         conversationId: identifierSchema.optional(),
         text: z.string().max(20_000),
         attachmentIds: z.array(identifierSchema).max(8),
+        replyTo: z
+          .object({ messageId: identifierSchema, taskId: identifierSchema })
+          .strict()
+          .optional(),
       })
       .strict()
       .refine((value) => value.text.trim().length > 0 || value.attachmentIds.length > 0),

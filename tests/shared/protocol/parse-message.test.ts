@@ -5,6 +5,28 @@ import {
 } from '../../../src/shared/protocol/parse-message';
 
 describe('parseExtensionMessage', () => {
+  it('accepts a bounded assistant reply target on a chat submission', () => {
+    expect(
+      parseExtensionMessage({
+        version: 1,
+        requestId: 'req_reply',
+        type: 'chat.submit',
+        payload: {
+          tabId: 7,
+          conversationId: 'conversation_1',
+          text: 'Why does the second point work that way?',
+          attachmentIds: [],
+          replyTo: { messageId: 'message_assistant_1', taskId: 'task_older_1' },
+        },
+      }),
+    ).toMatchObject({
+      type: 'chat.submit',
+      payload: {
+        replyTo: { messageId: 'message_assistant_1', taskId: 'task_older_1' },
+      },
+    });
+  });
+
   it('defaults an older settings save payload to 50 history messages', () => {
     expect(
       parseExtensionMessage({
@@ -105,7 +127,11 @@ describe('parseExtensionMessage', () => {
         version: 1,
         requestId: 'req_supplement',
         type: 'chat.supplement',
-        payload: { taskId: 'task_1', text: '', attachmentIds: ['attachment_1'] },
+        payload: {
+          taskId: 'task_1',
+          text: '',
+          attachmentIds: ['attachment_1'],
+        },
       }),
     ).toMatchObject({
       type: 'chat.supplement',
@@ -131,7 +157,12 @@ describe('parseExtensionMessage', () => {
     ['image.preview.open', { tabId: 7, attachmentId: 'attachment_1' }],
   ])('accepts the supported %s command', (type, payload) => {
     expect(
-      parseExtensionMessage({ version: 1, requestId: 'req_supported', type, payload }),
+      parseExtensionMessage({
+        version: 1,
+        requestId: 'req_supported',
+        type,
+        payload,
+      }),
     ).toMatchObject({ type, payload });
   });
 
@@ -228,7 +259,12 @@ describe('parseExtensionMessage', () => {
 describe('parsePageCommand', () => {
   it('accepts only the remaining page feature commands', () => {
     expect(
-      parsePageCommand({ version: 1, requestId: 'req_ping', type: 'page.ping', payload: {} }),
+      parsePageCommand({
+        version: 1,
+        requestId: 'req_ping',
+        type: 'page.ping',
+        payload: {},
+      }),
     ).toMatchObject({ type: 'page.ping' });
     expect(
       parsePageCommand({
@@ -281,7 +317,14 @@ describe('parsePageCommand', () => {
         version: 1,
         requestId: 'req_pointer_invalid',
         type: 'page.pointer.show',
-        payload: { x: -1, y: 80, fromX: 10, fromY: 20, effect: 'click', javascript: 'x' },
+        payload: {
+          x: -1,
+          y: 80,
+          fromX: 10,
+          fromY: 20,
+          effect: 'click',
+          javascript: 'x',
+        },
       }),
     ).toThrow(/invalid page command/i);
     expect(() =>

@@ -98,7 +98,10 @@ function requestId(): string {
 export function createChromePanelEnvironment(): PanelEnvironment {
   return {
     async getActiveTab() {
-      const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
+      const [tab] = await chrome.tabs.query({
+        active: true,
+        currentWindow: true,
+      });
       return tab?.id === undefined ? null : { id: tab.id };
     },
     async openSourcePage(source) {
@@ -227,7 +230,11 @@ export class PanelClient {
       }
     } catch {
       if (this.#disposed || generation !== this.#generation) return;
-      this.#setState({ ...this.#state, status: 'error', error: 'PANEL_UNAVAILABLE' });
+      this.#setState({
+        ...this.#state,
+        status: 'error',
+        error: 'PANEL_UNAVAILABLE',
+      });
     }
   }
 
@@ -278,7 +285,11 @@ export class PanelClient {
   }
 
   /** Submits one text/image goal and activates the newly created durable conversation if needed. */
-  async submit(text: string, attachmentIds: readonly string[]): Promise<void> {
+  async submit(
+    text: string,
+    attachmentIds: readonly string[],
+    replyTo?: { readonly messageId: string; readonly taskId: string },
+  ): Promise<void> {
     const activeTab = await this.#environment.getActiveTab();
     if (activeTab === null) throw new Error('No active browser tab is available.');
     const tabId = activeTab.id;
@@ -299,6 +310,7 @@ export class PanelClient {
           : {}),
         text,
         attachmentIds,
+        ...(replyTo === undefined ? {} : { replyTo }),
       },
     });
     if (
@@ -310,7 +322,10 @@ export class PanelClient {
       'conversationId' in data.task &&
       typeof data.task.conversationId === 'string'
     ) {
-      this.#state = { ...this.#state, activeConversationId: data.task.conversationId };
+      this.#state = {
+        ...this.#state,
+        activeConversationId: data.task.conversationId,
+      };
     }
     await this.refresh();
   }
@@ -523,7 +538,11 @@ export class PanelClient {
     ) {
       return;
     }
-    this.#setState({ ...this.#state, sandboxConsoleUrl: url, sandboxConsoleStatus });
+    this.#setState({
+      ...this.#state,
+      sandboxConsoleUrl: url,
+      sandboxConsoleStatus,
+    });
   }
 
   /** Repeats a local detail read when an in-flight response predates a newer requested boundary. */

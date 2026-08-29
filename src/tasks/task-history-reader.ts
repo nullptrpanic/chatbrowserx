@@ -2,6 +2,7 @@ import type { ConversationRepository } from '../persistence/conversation-reposit
 import type { TaskRepository } from '../persistence/task-repository';
 import type { ConversationId, TaskId } from '../shared/ids';
 import type { MessageRecord } from './message-types';
+import { isHistoricalTask, orderedHistoricalTasks } from './task-history-order';
 import type { Task, TaskEvent, TaskStatus } from './task-types';
 import type { ToolResult } from './tool-result-types';
 
@@ -12,6 +13,12 @@ export interface TaskHistoryContext {
 
 export interface HistoryReadInput {
   readonly offset: number;
+  readonly cursor: string;
+  readonly limit: number;
+}
+
+export interface TaskHistoryReadInput {
+  readonly taskId: TaskId;
   readonly cursor: string;
   readonly limit: number;
 }
@@ -28,11 +35,16 @@ export type HistoryItem =
       readonly at: number;
       readonly runId: string;
       readonly type: 'message' | 'supplement';
+      readonly messageId: string;
       readonly role: MessageRecord['role'];
       readonly status: MessageRecord['status'];
       readonly text: string;
       readonly attachmentCount: number;
       readonly applied?: boolean;
+      readonly replyTo?: {
+        readonly messageId: string;
+        readonly taskId: TaskId;
+      };
     }
   | {
       readonly sequence: number;
@@ -113,17 +125,19 @@ export type ResultReadResponse =
 
 export interface TaskHistoryReaderPort {
   readHistory(context: TaskHistoryContext, input: HistoryReadInput): Promise<HistoryReadResponse>;
+  readTaskHistory(
+    context: TaskHistoryContext,
+    input: TaskHistoryReadInput,
+  ): Promise<HistoryReadResponse>;
   readResult(context: TaskHistoryContext, input: ResultReadInput): Promise<ResultReadResponse>;
 }
 
 interface CursorPayload {
   readonly version: 1;
   readonly taskId: TaskId;
-  readonly offset: number;
   readonly lastSequence: number;
 }
 
-const terminalStatuses = new Set<TaskStatus>(['completed', 'failed', 'cancelled']);
 const HISTORY_PROJECTION_VERSION = 1;
 const TOOL_RESULT_PREVIEW_CHARACTERS = 1_000;
 
@@ -140,7 +154,7 @@ function invalidCursor(): HistoryReadError {
   return {
     ok: false,
     code: 'INVALID_CURSOR',
-    message: 'The history cursor is invalid for the requested task offset.',
+    message: 'The history cursor is invalid for the requested task.',
     retryable: false,
   };
 }
@@ -177,8 +191,6 @@ function decodeCursor(value: string): CursorPayload | null {
       parsed.version !== HISTORY_PROJECTION_VERSION ||
       !('taskId' in parsed) ||
       typeof parsed.taskId !== 'string' ||
-      !('offset' in parsed) ||
-      !Number.isSafeInteger(parsed.offset) ||
       !('lastSequence' in parsed) ||
       !Number.isSafeInteger(parsed.lastSequence)
     ) {
@@ -188,25 +200,6 @@ function decodeCursor(value: string): CursorPayload | null {
   } catch {
     return null;
   }
-}
-
-function orderedHistoricalTasks(
-  tasks: readonly Task[],
-  context: TaskHistoryContext,
-): readonly Task[] {
-  return tasks
-    .filter(
-      (task) =>
-        task.conversationId === context.conversationId &&
-        task.id !== context.currentTaskId &&
-        terminalStatuses.has(task.status),
-    )
-    .sort(
-      (left, right) =>
-        right.ordinal - left.ordinal ||
-        right.createdAt - left.createdAt ||
-        right.id.localeCompare(left.id),
-    );
 }
 
 function messageItem(
@@ -222,11 +215,20 @@ function messageItem(
     at: event.at,
     runId: event.runId,
     type: supplement ? 'supplement' : 'message',
+    messageId: message.id,
     role: message.role,
     status: message.status,
     text: message.text,
     attachmentCount: message.attachmentIds.length,
     ...(supplement ? { applied: appliedSupplements.has(message.id) } : {}),
+    ...(message.replyTo === undefined
+      ? {}
+      : {
+          replyTo: {
+            messageId: message.replyTo.messageId,
+            taskId: message.replyTo.taskId,
+          },
+        }),
   };
 }
 
@@ -410,12 +412,24 @@ export class TaskHistoryReader implements TaskHistoryReaderPort {
       context,
     )[input.offset - 1];
     if (selected === undefined) return historyNotFound();
+    return this.#readSelectedHistory(selected, input);
+  }
 
+  async readTaskHistory(
+    context: TaskHistoryContext,
+    input: TaskHistoryReadInput,
+  ): Promise<HistoryReadResponse> {
+    const selected = await this.#tasks.get(input.taskId);
+    if (selected === undefined || !isHistoricalTask(selected, context)) return historyNotFound();
+    return this.#readSelectedHistory(selected, input);
+  }
+
+  async #readSelectedHistory(
+    selected: Task,
+    input: Pick<HistoryReadInput, 'cursor' | 'limit'>,
+  ): Promise<HistoryReadResponse> {
     const cursor = input.cursor === '' ? null : decodeCursor(input.cursor);
-    if (
-      input.cursor !== '' &&
-      (cursor === null || cursor.taskId !== selected.id || cursor.offset !== input.offset)
-    ) {
+    if (input.cursor !== '' && (cursor === null || cursor.taskId !== selected.id)) {
       return invalidCursor();
     }
 
@@ -478,7 +492,6 @@ export class TaskHistoryReader implements TaskHistoryReaderPort {
           ? encodeCursor({
               version: HISTORY_PROJECTION_VERSION,
               taskId: selected.id,
-              offset: input.offset,
               lastSequence,
             })
           : null,
@@ -497,7 +510,7 @@ export class TaskHistoryReader implements TaskHistoryReaderPort {
       task === undefined ||
       task.conversationId !== context.conversationId ||
       task.id === context.currentTaskId ||
-      !terminalStatuses.has(task.status)
+      !isHistoricalTask(task, context)
     ) {
       return resultNotFound();
     }

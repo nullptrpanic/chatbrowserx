@@ -186,6 +186,113 @@ describe('TaskHistoryReader', () => {
     });
   });
 
+  it('projects chained reply references with stable task and message identifiers', async () => {
+    const previous = { ...task('task_2', 2), lastEventSequence: 1 };
+    const replyMessage: MessageRecord = {
+      id: 'message_reply_chain',
+      kind: 'conversation',
+      conversationId,
+      taskId: previous.id,
+      role: 'user',
+      status: 'complete',
+      text: 'Follow up on the older answer',
+      attachmentIds: [],
+      replyTo: {
+        messageId: 'assistant_task_1',
+        taskId: 'task_1',
+        excerpt: 'Older answer',
+        attachmentCount: 0,
+        createdAt: 100,
+      },
+      createdAt: 200,
+      updatedAt: 200,
+    };
+
+    await expect(
+      reader({
+        tasks: [task('task_1', 1), previous, task('task_3', 3)],
+        archiveTask: previous,
+        archiveEvents: [
+          {
+            id: 'event_reply_chain',
+            taskId: previous.id,
+            runId: 'run_2',
+            sequence: 1,
+            at: 200,
+            type: 'message.recorded',
+            messageId: replyMessage.id,
+          },
+        ],
+        archiveResults: [],
+        messages: [replyMessage],
+      }).readHistory({ conversationId, currentTaskId }, { offset: 1, cursor: '', limit: 20 }),
+    ).resolves.toMatchObject({
+      ok: true,
+      items: [
+        {
+          type: 'message',
+          messageId: replyMessage.id,
+          replyTo: { messageId: 'assistant_task_1', taskId: 'task_1' },
+        },
+      ],
+    });
+  });
+
+  it('reads an exact historical task by its stable task identifier', async () => {
+    const history = reader();
+
+    const first = await history.readTaskHistory(
+      { conversationId, currentTaskId },
+      { taskId: 'task_2', cursor: '', limit: 2 },
+    );
+    expect(first).toMatchObject({
+      ok: true,
+      task: { id: 'task_2', ordinal: 2 },
+      returnedCount: 2,
+      hasMore: true,
+    });
+    if (!first.ok || first.nextCursor === null) throw new Error('Expected another page.');
+
+    await expect(
+      history.readTaskHistory(
+        { conversationId, currentTaskId },
+        { taskId: 'task_2', cursor: first.nextCursor, limit: 2 },
+      ),
+    ).resolves.toMatchObject({
+      ok: true,
+      task: { id: 'task_2' },
+      returnedCount: 2,
+      hasMore: false,
+    });
+  });
+
+  it('does not expose a current, non-terminal, or foreign task through an absolute read', async () => {
+    const foreignTask = { ...task('task_foreign', 1), conversationId: 'conversation_foreign' };
+    const pendingTask = { ...task('task_pending', 2), status: 'planning' as const };
+    const history = reader({
+      tasks: [task('task_1', 1), pendingTask, task('task_3', 3), foreignTask],
+    });
+
+    await expect(
+      history.readTaskHistory(
+        { conversationId, currentTaskId },
+        { taskId: currentTaskId, cursor: '', limit: 20 },
+      ),
+    ).resolves.toMatchObject({ ok: false, code: 'HISTORY_NOT_FOUND' });
+    await expect(
+      history.readTaskHistory(
+        { conversationId, currentTaskId },
+        { taskId: pendingTask.id, cursor: '', limit: 20 },
+      ),
+    ).resolves.toMatchObject({ ok: false, code: 'HISTORY_NOT_FOUND' });
+    await expect(
+      history.readTaskHistory(
+        { conversationId, currentTaskId },
+        { taskId: foreignTask.id, cursor: '', limit: 20 },
+      ),
+    ).resolves.toMatchObject({ ok: false, code: 'HISTORY_NOT_FOUND' });
+  });
+
   it('loads tool-result bodies only for the current history page', async () => {
     const getToolResult = vi.fn(async (resultId: string) =>
       results.find(({ id }) => id === resultId),

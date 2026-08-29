@@ -148,6 +148,16 @@ export const panelSnapshotSchema: z.ZodType<PanelSnapshot> = z
             text: z.string().max(1_000_000),
             attachmentIds: z.array(idSchema).max(64),
             sourcePage: messageSourcePageSchema.optional(),
+            replyTo: z
+              .object({
+                messageId: idSchema,
+                taskId: idSchema,
+                excerpt: z.string().max(1_000),
+                attachmentCount: z.number().int().nonnegative().max(64),
+                createdAt: timestampSchema,
+              })
+              .strict()
+              .optional(),
             createdAt: timestampSchema,
             updatedAt: timestampSchema,
           })

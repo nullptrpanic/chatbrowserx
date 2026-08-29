@@ -1,7 +1,8 @@
 import { AlertCircle, KeyRound, RotateCcw } from 'lucide-react';
-import { useCallback, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useState } from 'react';
 import { ChromeRuntimePort, type RuntimePort } from '../platform/chrome/runtime-port';
 import { createTranslator, resolveLanguage } from '../shared/i18n/i18n';
+import type { PanelMessage } from '../shared/protocol/panel-types';
 import { ChatComposer } from './chat/ChatComposer';
 import { ConversationView } from './chat/ConversationView';
 import {
@@ -47,6 +48,7 @@ export function App({ runtimePort, environment, panelClient, attachmentClient }:
   const state = usePanelStore(client);
   const [view, setView] = useState<PanelView>('conversation');
   const [draftText, setDraftText] = useState('');
+  const [replyTarget, setReplyTarget] = useState<PanelMessage | null>(null);
   const snapshot = state.snapshot;
   const language = resolveLanguage(snapshot?.settings.language ?? 'system', navigator.language);
   const t = useMemo(() => createTranslator(language), [language]);
@@ -66,10 +68,15 @@ export function App({ runtimePort, environment, panelClient, attachmentClient }:
   const loadSettings = useCallback(() => client.getSettings(), [client]);
   const sandboxConfigured = (snapshot?.settings.sandboxServer?.trim().length ?? 0) > 0;
 
+  useEffect(() => {
+    if (taskLocked) setReplyTarget(null);
+  }, [taskLocked]);
+
   /** Starts a clean local conversation draft and returns to the main conversation view. */
   function newTask(): void {
     client.newConversation();
     setDraftText('');
+    setReplyTarget(null);
     setView('conversation');
   }
 
@@ -85,7 +92,10 @@ export function App({ runtimePort, environment, panelClient, attachmentClient }:
       sandboxConsoleStatus={sandboxConfigured ? state.sandboxConsoleStatus : 'hidden'}
       onOpenSandboxConsole={() => client.openSandboxConsole()}
       canClearConversation={snapshot?.conversation !== null && snapshot?.conversation !== undefined}
-      onClearConversation={() => client.clearActiveConversation()}
+      onClearConversation={() => {
+        setReplyTarget(null);
+        return client.clearActiveConversation();
+      }}
       onViewChange={setView}
     >
       {state.status === 'loading' && snapshot === null ? (
@@ -138,6 +148,7 @@ export function App({ runtimePort, environment, panelClient, attachmentClient }:
               onRetry={() => void client.retryTask()}
               onCancel={() => void client.cancelTask()}
               onClearTaskContext={(taskId) => client.clearTaskContext(taskId)}
+              onReply={taskLocked ? undefined : setReplyTarget}
             />
           </div>
           <ChatComposer
@@ -149,6 +160,8 @@ export function App({ runtimePort, environment, panelClient, attachmentClient }:
             hasToken={snapshot.settings.hasCodexToken}
             t={t}
             onTextChange={setDraftText}
+            replyTarget={replyTarget}
+            onCancelReply={() => setReplyTarget(null)}
             onOpenSettings={() => setView('settings')}
           />
         </div>
@@ -159,10 +172,14 @@ export function App({ runtimePort, environment, panelClient, attachmentClient }:
           activeId={snapshot.conversation?.id ?? null}
           t={t}
           onSelect={(id) => {
+            setReplyTarget(null);
             void client.selectConversation(id).then(() => setView('conversation'));
           }}
           onNew={newTask}
-          onClear={() => client.clearActiveConversation()}
+          onClear={() => {
+            setReplyTarget(null);
+            return client.clearActiveConversation();
+          }}
           onDelete={(id) => client.deleteConversation(id)}
         />
       ) : null}

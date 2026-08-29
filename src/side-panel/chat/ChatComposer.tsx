@@ -1,6 +1,7 @@
-import { Camera, ChevronDown, ImagePlus, Send, Square } from 'lucide-react';
+import { Camera, ChevronDown, ImagePlus, Send, Square, X } from 'lucide-react';
 import { useLayoutEffect, useRef, useState } from 'react';
 import type { Translator } from '../../shared/i18n/i18n';
+import type { PanelMessage } from '../../shared/protocol/panel-types';
 import type { PanelClient } from '../state/panel-client';
 import { ImageAttachmentStrip } from './ImageAttachmentStrip';
 import { useImageDraft, type AttachmentDraftClient } from './use-image-draft';
@@ -14,6 +15,8 @@ export interface ChatComposerProps {
   readonly hasToken: boolean;
   readonly t: Translator;
   readonly onTextChange: (value: string) => void;
+  readonly replyTarget?: PanelMessage | null;
+  readonly onCancelReply?: () => void;
   readonly onOpenSettings: () => void;
 }
 
@@ -32,6 +35,8 @@ export function ChatComposer({
   hasToken,
   t,
   onTextChange,
+  replyTarget = null,
+  onCancelReply = noop,
   onOpenSettings,
 }: ChatComposerProps) {
   const draft = useImageDraft({ client: attachments });
@@ -50,6 +55,10 @@ export function ChatComposer({
     if (element !== null) resizeComposerInput(element);
   }, [text]);
 
+  useLayoutEffect(() => {
+    if (replyTarget !== null) textInput.current?.focus();
+  }, [replyTarget]);
+
   /** Sends the current draft only after authentication and preserves it after any failure. */
   async function submit(): Promise<void> {
     if (!canSend || busy || inputLocked) return;
@@ -63,7 +72,14 @@ export function ChatComposer({
       if (running) {
         await client.supplement(text, draft.attachmentIds);
       } else {
-        await client.submit(text, draft.attachmentIds);
+        await client.submit(
+          text,
+          draft.attachmentIds,
+          replyTarget === null
+            ? undefined
+            : { messageId: replyTarget.id, taskId: replyTarget.taskId },
+        );
+        onCancelReply();
       }
       onTextChange('');
       draft.clear();
@@ -100,6 +116,28 @@ export function ChatComposer({
       <div
         className={`composer-input-surface${inputLocked ? ' composer-input-surface-disabled' : ''}`}
       >
+        {replyTarget === null ? null : (
+          <div className="composer-reply-reference">
+            <div>
+              <span>{t('replyingTo')}</span>
+              <p>
+                {replyTarget.text.length > 0
+                  ? replyTarget.text
+                  : t('replyImageCount', {
+                      count: replyTarget.attachmentIds.length,
+                    })}
+              </p>
+            </div>
+            <button
+              type="button"
+              aria-label={t('cancelReply')}
+              title={t('cancelReply')}
+              onClick={onCancelReply}
+            >
+              <X size={14} />
+            </button>
+          </div>
+        )}
         <ImageAttachmentStrip
           items={draft.items}
           onRemove={draft.remove}
@@ -211,3 +249,5 @@ export function ChatComposer({
     </section>
   );
 }
+
+function noop(): void {}

@@ -341,7 +341,10 @@ describe('PanelService', () => {
 
     const snapshot = await service.getSnapshot(9, fixture.conversation.id);
 
-    expect(snapshot.tab).toMatchObject({ id: 9, origin: 'https://other.example' });
+    expect(snapshot.tab).toMatchObject({
+      id: 9,
+      origin: 'https://other.example',
+    });
     expect(snapshot.conversation?.id).toBe(fixture.conversation.id);
     expect(snapshot.conversations.map(({ id }) => id)).toEqual([
       otherConversation.id,
@@ -399,6 +402,47 @@ describe('PanelService', () => {
             title: 'Median of Two Sorted Arrays',
             url: 'https://leetcode.com/problems/median-of-two-sorted-arrays/description/',
             favIconUrl: 'https://leetcode.com/favicon.ico',
+          },
+        }),
+      }),
+    );
+  });
+
+  it('persists a validated assistant reply reference without depending on recent-history limits', async () => {
+    const fixture = buildFixture();
+    const target: MessageRecord = {
+      id: 'message_assistant_old',
+      kind: 'conversation',
+      conversationId: fixture.conversation.id,
+      taskId: fixture.task.id,
+      role: 'assistant',
+      status: 'complete',
+      text: 'The complete historical answer that the user selected.',
+      attachmentIds: ['attachment_reply_image'],
+      createdAt: 1_100,
+      updatedAt: 1_100,
+    };
+    fixture.dependencies.conversations.listTaskMessages.mockResolvedValue([target]);
+    const service = new PanelService(fixture.dependencies);
+
+    await service.submit({
+      tabId: 9,
+      conversationId: fixture.conversation.id,
+      text: 'Please explain the second point.',
+      attachmentIds: [],
+      replyTo: { messageId: target.id, taskId: target.taskId },
+    });
+
+    expect(fixture.dependencies.conversations.listTaskMessages).toHaveBeenCalledWith(target.taskId);
+    expect(fixture.dependencies.commands.createSubmission).toHaveBeenCalledWith(
+      expect.objectContaining({
+        message: expect.objectContaining({
+          replyTo: {
+            messageId: target.id,
+            taskId: target.taskId,
+            excerpt: target.text,
+            attachmentCount: 1,
+            createdAt: target.createdAt,
           },
         }),
       }),
@@ -553,7 +597,12 @@ describe('PanelService', () => {
     const snapshot = await service.getSnapshot(7);
 
     expect(snapshot).toMatchObject({
-      tab: { id: 7, origin: 'https://example.com', supported: true, hasPermission: true },
+      tab: {
+        id: 7,
+        origin: 'https://example.com',
+        supported: true,
+        hasPermission: true,
+      },
       conversation: { id: fixture.conversation.id, taskStatus: 'completed' },
       task: { id: fixture.task.id, sequence: 1 },
       settings: { hasCodexToken: true, hasTavilyKey: true },
@@ -732,7 +781,10 @@ describe('PanelService', () => {
 
     expect(snapshot.task?.supplements).toEqual([]);
     expect(details.supplements).toEqual([
-      expect.objectContaining({ id: 'supplement_pending', applicationState: 'pending' }),
+      expect.objectContaining({
+        id: 'supplement_pending',
+        applicationState: 'pending',
+      }),
     ]);
   });
 
@@ -1194,12 +1246,18 @@ describe('PanelService', () => {
   it('rejects a new task when any other global conversation has unfinished work', async () => {
     const fixture = buildFixture();
     fixture.dependencies.commands.createSubmission.mockRejectedValueOnce(
-      Object.assign(new Error('已有任务运行中'), { code: 'TASK_ALREADY_RUNNING' }),
+      Object.assign(new Error('已有任务运行中'), {
+        code: 'TASK_ALREADY_RUNNING',
+      }),
     );
     const service = new PanelService(fixture.dependencies);
 
     await expect(
-      service.submit({ tabId: 7, text: 'Start a parallel task', attachmentIds: [] }),
+      service.submit({
+        tabId: 7,
+        text: 'Start a parallel task',
+        attachmentIds: [],
+      }),
     ).rejects.toMatchObject({
       code: 'TASK_ALREADY_RUNNING',
       message: '已有任务运行中',
@@ -1262,7 +1320,9 @@ describe('PanelService', () => {
     });
 
     expect(fixture.dependencies.settings.save).toHaveBeenCalledWith(
-      expect.objectContaining({ sandboxServer: 'https://new-sandbox.example.com/root' }),
+      expect.objectContaining({
+        sandboxServer: 'https://new-sandbox.example.com/root',
+      }),
     );
     expect(fixture.dependencies.credentials.setSandboxToken).toHaveBeenCalledWith(
       'new-sandbox-token',
@@ -1279,7 +1339,9 @@ describe('PanelService', () => {
       order.push('cancel');
       return {
         task: { ...runningTask, status: 'cancelled' },
-        checkpoint: { ...(await fixture.dependencies.tasks.getCheckpoint('checkpoint_1')) },
+        checkpoint: {
+          ...(await fixture.dependencies.tasks.getCheckpoint('checkpoint_1')),
+        },
         events: [],
       } as never;
     });

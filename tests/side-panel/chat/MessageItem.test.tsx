@@ -46,6 +46,60 @@ function requireBlob(value: ClipboardItemData | undefined): Blob {
 }
 
 describe('MessageItem', () => {
+  it('offers Reply beside Copy for a completed assistant answer', async () => {
+    const user = userEvent.setup();
+    const onReply = vi.fn();
+    const message = {
+      id: 'assistant_reply_target',
+      taskId: 'task_reply_target',
+      role: 'assistant' as const,
+      status: 'complete' as const,
+      text: '这是需要继续追问的完整回答。',
+      attachmentIds: [],
+      createdAt: 1_000,
+      updatedAt: 1_000,
+    };
+
+    render(<MessageItem message={message} attachments={attachments} t={t} onReply={onReply} />);
+
+    const actions = screen.getByRole('button', { name: '复制' }).parentElement;
+    expect(actions).not.toBeNull();
+    expect(within(actions as HTMLElement).getByRole('button', { name: '回复' })).toBeVisible();
+
+    await user.click(screen.getByRole('button', { name: '回复' }));
+    expect(onReply).toHaveBeenCalledWith(message);
+  });
+
+  it('renders the replied answer snapshot inside the sent user bubble', () => {
+    render(
+      <MessageItem
+        message={{
+          id: 'user_reply',
+          taskId: 'task_reply',
+          role: 'user',
+          status: 'complete',
+          text: '这里能再解释一下吗？',
+          attachmentIds: [],
+          replyTo: {
+            messageId: 'assistant_older',
+            taskId: 'task_older',
+            excerpt: '这是之前回答中需要继续讨论的部分。',
+            attachmentCount: 0,
+            createdAt: 900,
+          },
+          createdAt: 1_000,
+          updatedAt: 1_000,
+        }}
+        attachments={attachments}
+        t={t}
+      />,
+    );
+
+    const quote = screen.getByText('这是之前回答中需要继续讨论的部分。');
+    expect(quote.closest('.message-reply-reference')).not.toBeNull();
+    expect(quote.closest('.message-bubble')).not.toBeNull();
+  });
+
   it('renders assistant content inside a left-aligned message bubble', () => {
     render(
       <MessageItem

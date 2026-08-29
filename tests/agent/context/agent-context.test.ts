@@ -646,7 +646,12 @@ describe('buildAgentContext', () => {
       {
         type: 'message',
         role: 'assistant',
-        content: [{ type: 'output_text', text: 'I found the target and will inspect it.' }],
+        content: [
+          {
+            type: 'output_text',
+            text: 'I found the target and will inspect it.',
+          },
+        ],
       },
       {
         type: 'function_call',
@@ -1427,7 +1432,12 @@ describe('buildAgentContext', () => {
         role: 'assistant',
         text: 'Earlier answer',
       }),
-      message({ id: 'active_user', taskId: TASK.id, role: 'user', text: 'Continue current work' }),
+      message({
+        id: 'active_user',
+        taskId: TASK.id,
+        role: 'user',
+        text: 'Continue current work',
+      }),
     ];
     const historyTask: Task = {
       ...TASK,
@@ -1475,5 +1485,107 @@ describe('buildAgentContext', () => {
         encryptedContent: 'opaque-compacted-context',
       },
     ]);
+  });
+
+  it('projects the full reply target outside the ordinary history limit with stable identifiers', async () => {
+    const targetTask: Task = {
+      ...TASK,
+      id: 'task_reply_target',
+      ordinal: 1,
+      status: 'completed',
+      latestRunId: 'run_reply_target',
+    };
+    const recentTask: Task = {
+      ...TASK,
+      id: 'task_recent',
+      ordinal: 2,
+      status: 'completed',
+      latestRunId: 'run_recent',
+    };
+    const activeTask: Task = { ...TASK, ordinal: 3 };
+    const targetAnswer = 'FULL TARGET ANSWER OUTSIDE THE TWO-MESSAGE HISTORY WINDOW';
+    const target = message({
+      id: 'reply_target',
+      taskId: targetTask.id,
+      role: 'assistant',
+      text: targetAnswer,
+      createdAt: 20,
+    });
+    const current = {
+      ...message({
+        id: 'current_reply',
+        taskId: activeTask.id,
+        role: 'user',
+        text: 'Why is the second point necessary?',
+        createdAt: 60,
+      }),
+      replyTo: {
+        messageId: target.id,
+        taskId: target.taskId,
+        excerpt: target.text,
+        attachmentCount: 0,
+        createdAt: target.createdAt,
+      },
+    } as MessageRecord;
+    const messages = [
+      message({
+        id: 'target_question',
+        taskId: targetTask.id,
+        role: 'user',
+        text: 'Old question',
+        createdAt: 10,
+      }),
+      target,
+      message({
+        id: 'recent_question',
+        taskId: recentTask.id,
+        role: 'user',
+        text: 'Recent question',
+        createdAt: 30,
+      }),
+      message({
+        id: 'recent_answer',
+        taskId: recentTask.id,
+        role: 'assistant',
+        text: 'Recent answer',
+        createdAt: 40,
+      }),
+      current,
+    ];
+    const context = await buildAgentContext(
+      {
+        task: activeTask,
+        checkpoint: {
+          ...CHECKPOINT,
+          continuationItems: [{ type: 'message_ref', messageId: current.id }],
+        },
+        toolResults: [],
+        customSystemPrompt: '',
+        historyMessageLimit: 2,
+      },
+      contextDependencies(
+        messages,
+        { get: vi.fn(async () => undefined) },
+        {
+          listByConversation: vi.fn(async () => [targetTask, recentTask, activeTask]),
+          readTaskMessageEvents: vi.fn(async (taskIds) => taskEvents(messages, taskIds)),
+        },
+      ),
+    );
+
+    const activeMessage = context.activeInput[0];
+    expect(activeMessage).toMatchObject({ type: 'message', role: 'user' });
+    if (activeMessage?.type !== 'message') throw new Error('Active reply message is missing.');
+    const projectedText = activeMessage.content
+      .filter((item) => item.type === 'input_text')
+      .map((item) => item.text)
+      .join('\n');
+    expect(projectedText).toContain(targetAnswer);
+    expect(projectedText).toContain(`"targetTaskId":"${targetTask.id}"`);
+    expect(projectedText).toContain(`"targetMessageId":"${target.id}"`);
+    expect(projectedText).not.toContain('historyTaskOffset');
+    expect(projectedText).not.toContain('availableHistoryTaskCount');
+    expect(projectedText).toContain('Why is the second point necessary?');
+    expect(JSON.stringify(context.input).match(new RegExp(targetAnswer, 'g'))).toHaveLength(1);
   });
 });

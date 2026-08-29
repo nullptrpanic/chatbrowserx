@@ -451,9 +451,47 @@ describe('CodexAgentPlanner', () => {
 
     await collect(planner);
 
-    expect(model.requests[0]?.tools.map(({ name }) => name).slice(-2)).toEqual([
+    expect(model.requests[0]?.tools.map(({ name }) => name).slice(-3)).toEqual([
       'history_read',
+      'history_read_task',
       'result_read',
+    ]);
+  });
+
+  it('parses exact task history calls using a stable task identifier', async () => {
+    const arguments_ = { taskId: 'task_historical', cursor: '', limit: 50 };
+    const model = provider(async function* () {
+      yield { type: 'response.started', responseId: 'resp_task_history' };
+      yield { type: 'tool.started', callId: 'call_task_history', name: 'history_read_task' };
+      yield {
+        type: 'tool.completed',
+        callId: 'call_task_history',
+        name: 'history_read_task',
+        argumentsJson: JSON.stringify(arguments_),
+      };
+      yield { type: 'response.completed', responseId: 'resp_task_history', usage: null };
+    });
+    const storage = repositories([], [HISTORICAL_TASK]);
+    const planner = new CodexAgentPlanner({
+      provider: model.instance,
+      tavilyAvailability: { isConfigured: vi.fn(async () => false) },
+      settings: settings(),
+      conversations: storage.conversations,
+      tasks: storage.tasks,
+      attachments: storage.attachments,
+      ids: { create: (prefix) => `${prefix}_task_history` },
+      clock: { now: () => 500 },
+    });
+
+    await expect(collect(planner)).resolves.toMatchObject([
+      {
+        type: 'history.call',
+        call: {
+          operation: 'history_task',
+          name: 'history_read_task',
+          arguments: arguments_,
+        },
+      },
     ]);
   });
 
@@ -495,8 +533,9 @@ describe('CodexAgentPlanner', () => {
         },
       },
     ]);
-    expect(model.requests[0]?.tools.map(({ name }) => name).slice(-2)).toEqual([
+    expect(model.requests[0]?.tools.map(({ name }) => name).slice(-3)).toEqual([
       'history_read',
+      'history_read_task',
       'result_read',
     ]);
   });

@@ -6,6 +6,98 @@ import { ChatComposer } from '../../../src/side-panel/chat/ChatComposer';
 import type { PanelClient } from '../../../src/side-panel/state/panel-client';
 
 describe('ChatComposer', () => {
+  it('sends a stable reply reference and clears it only after a successful submit', async () => {
+    const submit = vi.fn(async () => undefined);
+    const onCancelReply = vi.fn();
+    const client = {
+      submit,
+      captureScreenshot: vi.fn(async () => null),
+      cancelTask: vi.fn(async () => undefined),
+    } as unknown as PanelClient;
+    const user = userEvent.setup();
+
+    render(
+      <ChatComposer
+        client={client}
+        attachments={{
+          addFiles: vi.fn(async () => []),
+          get: vi.fn(async () => undefined),
+        }}
+        text="请继续解释"
+        running={false}
+        taskLocked={false}
+        hasToken
+        replyTarget={{
+          id: 'assistant_target',
+          taskId: 'task_target',
+          role: 'assistant',
+          status: 'complete',
+          text: '目标回答的完整内容',
+          attachmentIds: [],
+          createdAt: 1_000,
+          updatedAt: 1_000,
+        }}
+        t={createTranslator('zh-CN')}
+        onTextChange={vi.fn()}
+        onCancelReply={onCancelReply}
+        onOpenSettings={vi.fn()}
+      />,
+    );
+
+    expect(screen.getByText('目标回答的完整内容')).toBeVisible();
+    await user.click(screen.getByRole('button', { name: '发送' }));
+
+    expect(submit).toHaveBeenCalledWith('请继续解释', [], {
+      messageId: 'assistant_target',
+      taskId: 'task_target',
+    });
+    expect(onCancelReply).toHaveBeenCalledOnce();
+  });
+
+  it('keeps the reply selection when sending fails', async () => {
+    const onCancelReply = vi.fn();
+    const client = {
+      submit: vi.fn(async () => Promise.reject(new Error('send failed'))),
+      captureScreenshot: vi.fn(async () => null),
+      cancelTask: vi.fn(async () => undefined),
+    } as unknown as PanelClient;
+    const user = userEvent.setup();
+
+    render(
+      <ChatComposer
+        client={client}
+        attachments={{
+          addFiles: vi.fn(async () => []),
+          get: vi.fn(async () => undefined),
+        }}
+        text="保留草稿"
+        running={false}
+        taskLocked={false}
+        hasToken
+        replyTarget={{
+          id: 'assistant_target',
+          taskId: 'task_target',
+          role: 'assistant',
+          status: 'complete',
+          text: '仍需保留的目标回答',
+          attachmentIds: [],
+          createdAt: 1_000,
+          updatedAt: 1_000,
+        }}
+        t={createTranslator('zh-CN')}
+        onTextChange={vi.fn()}
+        onCancelReply={onCancelReply}
+        onOpenSettings={vi.fn()}
+      />,
+    );
+
+    await user.click(screen.getByRole('button', { name: '发送' }));
+
+    expect(await screen.findByRole('alert')).toHaveTextContent('发送失败');
+    expect(screen.getByText('仍需保留的目标回答')).toBeVisible();
+    expect(onCancelReply).not.toHaveBeenCalled();
+  });
+
   it('shrinks the textarea when a controlled draft is cleared after expanding', () => {
     const client = {
       submit: vi.fn(async () => undefined),
@@ -14,7 +106,10 @@ describe('ChatComposer', () => {
     } as unknown as PanelClient;
     const props = {
       client,
-      attachments: { addFiles: vi.fn(async () => []), get: vi.fn(async () => undefined) },
+      attachments: {
+        addFiles: vi.fn(async () => []),
+        get: vi.fn(async () => undefined),
+      },
       running: false,
       taskLocked: false,
       hasToken: true,
@@ -99,7 +194,10 @@ describe('ChatComposer', () => {
     render(
       <ChatComposer
         client={client}
-        attachments={{ addFiles: vi.fn(async () => []), get: vi.fn(async () => undefined) }}
+        attachments={{
+          addFiles: vi.fn(async () => []),
+          get: vi.fn(async () => undefined),
+        }}
         text="Please also compare the mobile layout"
         running
         taskLocked
@@ -189,7 +287,10 @@ describe('ChatComposer', () => {
     render(
       <ChatComposer
         client={client}
-        attachments={{ addFiles: vi.fn(async () => []), get: vi.fn(async () => undefined) }}
+        attachments={{
+          addFiles: vi.fn(async () => []),
+          get: vi.fn(async () => undefined),
+        }}
         text="Keep this draft"
         running
         taskLocked
@@ -218,7 +319,10 @@ describe('ChatComposer', () => {
     render(
       <ChatComposer
         client={client}
-        attachments={{ addFiles: vi.fn(async () => []), get: vi.fn(async () => undefined) }}
+        attachments={{
+          addFiles: vi.fn(async () => []),
+          get: vi.fn(async () => undefined),
+        }}
         text="Keep this draft"
         running={false}
         taskLocked={false}

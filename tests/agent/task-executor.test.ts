@@ -6,6 +6,7 @@ import { TaskExecutor } from '../../src/agent/task-executor';
 import type { AgentEvent, AgentPlanInput } from '../../src/agent/execution-types';
 import { parseBrowserToolCall } from '../../src/agent/tools/browser-tool-schema';
 import { parseContextCommitToolCall } from '../../src/agent/tools/context-commit-tool-schema';
+import { parseHistoryToolCall } from '../../src/agent/tools/history-tool-schema';
 import { parseSandboxToolCall } from '../../src/agent/tools/sandbox-tool-schema';
 import type { BrowserExecutionPort } from '../../src/browser/browser-execution-types';
 import { openChatBrowserDatabase } from '../../src/persistence/open-database';
@@ -265,6 +266,73 @@ async function runBrowserProgressScenario(
 }
 
 describe('TaskExecutor', () => {
+  it('executes an exact task history read by stable task identifier', async () => {
+    const database = await openChatBrowserDatabase(createTestDatabaseName('exact-history-read'));
+    const repository = new IndexedDbTaskRepository(database);
+    const dependencies = sources();
+    const commands = new TaskCommandService(
+      repository,
+      dependencies.clock,
+      dependencies.ids,
+      dependencies.conversations,
+    );
+    const created = await commands.create({
+      conversationId: 'conversation_1',
+      tabId: 7,
+      goal: 'Follow an exact reply reference',
+    });
+    const readTaskHistory = vi.fn(async () => ({
+      ok: false as const,
+      code: 'HISTORY_NOT_FOUND' as const,
+      message: 'not found',
+      retryable: false as const,
+    }));
+    let turn = 0;
+    const executor = new TaskExecutor({
+      repository,
+      conversations: dependencies.conversations,
+      planner: {
+        plan: () =>
+          (async function* () {
+            if (turn++ === 0) {
+              yield {
+                type: 'history.call',
+                call: parseHistoryToolCall({
+                  callId: 'call_exact_history',
+                  name: 'history_read_task',
+                  argumentsJson: '{"taskId":"task_old","cursor":"","limit":50}',
+                }),
+              } as const;
+              return;
+            }
+            yield {
+              type: 'task.completed',
+              reason: 'model_response_completed',
+              messageId: 'message_answer',
+            } as const;
+          })(),
+      },
+      tavily: tavilyPort(),
+      browser: browserPort(),
+      history: {
+        readHistory: vi.fn(),
+        readTaskHistory,
+        readResult: vi.fn(),
+      },
+      clock: dependencies.clock,
+      ids: dependencies.ids,
+    });
+
+    await expect(
+      executor.run(created.task.id, new AbortController().signal),
+    ).resolves.toMatchObject({ task: { status: 'completed' } });
+    expect(readTaskHistory).toHaveBeenCalledWith(
+      { conversationId: 'conversation_1', currentTaskId: created.task.id },
+      { taskId: 'task_old', cursor: '', limit: 50 },
+    );
+    database.close();
+  });
+
   it('loads the full runtime snapshot only once during a text-only execution', async () => {
     const database = await openChatBrowserDatabase(createTestDatabaseName('runtime-delta-loop'));
     const repository = new IndexedDbTaskRepository(database);

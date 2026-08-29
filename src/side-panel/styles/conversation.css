@@ -139,6 +139,34 @@
   background: var(--cbx-subtle);
 }
 
+.message-reply-reference {
+  margin: 6px 0 8px;
+  padding: 6px 8px;
+  overflow: hidden;
+  border-left: 2px solid color-mix(in srgb, var(--cbx-accent) 55%, var(--cbx-divider));
+  border-radius: 0 6px 6px 0;
+  color: var(--cbx-muted);
+  background: color-mix(in srgb, var(--cbx-subtle) 72%, transparent);
+}
+
+.message-reply-reference span,
+.message-reply-reference small {
+  display: block;
+  color: var(--cbx-faint);
+  font-size: 9px;
+}
+
+.message-reply-reference p {
+  display: -webkit-box;
+  margin: 2px 0 0;
+  overflow: hidden;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 3;
+  font-size: 10px;
+  line-height: 1.4;
+  overflow-wrap: anywhere;
+}
+
 .message-meta {
   display: flex;
   align-items: center;

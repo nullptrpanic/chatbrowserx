@@ -19,6 +19,7 @@ export type ExtensionMessage =
         conversationId?: string | undefined;
         text: string;
         attachmentIds: readonly string[];
+        replyTo?: { readonly messageId: string; readonly taskId: string } | undefined;
       }
     >
   | Message<'chat.supplement', { taskId: string; text: string; attachmentIds: readonly string[] }>
@@ -59,8 +60,19 @@ export type PageCommand =
   | Message<'page.content.read', Record<string, never>>
   | Message<
       'page.action.perform',
-      | { action: 'click'; ref: string; button: 'left' | 'right' | 'middle'; count: 1 | 2 }
-      | { action: 'type'; ref: string; text: string; replace: boolean; submit: boolean }
+      | {
+          action: 'click';
+          ref: string;
+          button: 'left' | 'right' | 'middle';
+          count: 1 | 2;
+        }
+      | {
+          action: 'type';
+          ref: string;
+          text: string;
+          replace: boolean;
+          submit: boolean;
+        }
       | { action: 'scroll'; target: string; deltaX: number; deltaY: number }
       | { action: 'select'; ref: string; value: string }
     >
