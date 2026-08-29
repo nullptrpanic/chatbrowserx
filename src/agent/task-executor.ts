@@ -95,7 +95,8 @@ const SANDBOX_TOOL_CALL_LIMIT = 128;
 /** Number of retries after the initial request for transient Provider failures. */
 const MODEL_TRANSIENT_RETRY_LIMIT = 3;
 const MODEL_TRANSIENT_RETRY_DELAYS_MS = Object.freeze([500, 1_500, 3_000] as const);
-const MODEL_INVALID_RESPONSE_RETRY_LIMIT = 1;
+/** Number of retries after invalid model responses within one planning attempt. */
+const MODEL_INVALID_RESPONSE_RETRY_LIMIT = 3;
 const tavilyToolNames = new Set(['tavily_search', 'tavily_extract', 'tavily_crawl']);
 const sandboxToolNames = new Set(['sandbox_read', 'sandbox_exec']);
 const readOnlyBrowserToolNames = new Set([

@@ -3604,7 +3604,7 @@ describe('TaskExecutor', () => {
     await expect(
       executor.run(created.task.id, new AbortController().signal),
     ).resolves.toMatchObject({ task: { status: 'failed' } });
-    expect(attempts).toBe(2);
+    expect(attempts).toBe(4);
     expect(
       dependencies.conversations.appendMessage.mock.calls
         .map(([message]) => message)
@@ -3673,7 +3673,7 @@ describe('TaskExecutor', () => {
     database.close();
   });
 
-  it('fails after one invalid-response retry and exposes only the safe stage', async () => {
+  it('fails after three invalid-response retries and exposes only the safe stage', async () => {
     const database = await openChatBrowserDatabase(
       createTestDatabaseName('invalid-model-retry-exhausted'),
     );
@@ -3713,7 +3713,14 @@ describe('TaskExecutor', () => {
 
     const result = await executor.run(created.task.id, new AbortController().signal);
 
-    expect(attempts).toBe(2);
+    expect(attempts).toBe(4);
+    expect(
+      result.events.filter(
+        (event) =>
+          event.type === 'status.changed' &&
+          event.reason === 'invalid_model_response_retry:tool_call',
+      ),
+    ).toHaveLength(3);
     expect(result.task.status).toBe('failed');
     expect(result.run.error).toMatchObject({
       code: 'InvalidProviderResponse',
