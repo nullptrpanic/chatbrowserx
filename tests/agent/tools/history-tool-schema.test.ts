@@ -5,10 +5,9 @@ import {
 } from '../../../src/agent/tools/history-tool-schema';
 
 describe('history tool contracts', () => {
-  it('separates relative history discovery from stable task reads', () => {
+  it('uses one strict history tool for relative and stable task reads', () => {
     expect(HISTORY_TOOL_DEFINITIONS.map(({ name }) => name)).toEqual([
       'history_read',
-      'history_read_task',
       'result_read',
     ]);
     for (const definition of HISTORY_TOOL_DEFINITIONS) {
@@ -19,35 +18,35 @@ describe('history tool contracts', () => {
       expect(definition.strict).toBe(true);
       expect(parameters.required).toEqual(Object.keys(parameters.properties));
     }
-    expect(HISTORY_TOOL_DEFINITIONS[0]?.description.toLowerCase()).toContain('discover');
-    expect(HISTORY_TOOL_DEFINITIONS[1]?.description).toContain('stable taskId');
-    expect(HISTORY_TOOL_DEFINITIONS[1]?.description).toContain('replyTo.taskId');
-    expect(HISTORY_TOOL_DEFINITIONS[2]?.description).toContain('history_read_task');
+    expect(HISTORY_TOOL_DEFINITIONS[0]?.description).toContain('taskId');
+    expect(HISTORY_TOOL_DEFINITIONS[0]?.description).toContain('offset');
+    expect(HISTORY_TOOL_DEFINITIONS[1]?.description).toContain('history_read');
   });
 
-  it('parses both bounded operations', () => {
+  it('parses relative and exact task selectors through history_read', () => {
     expect(
       parseHistoryToolCall({
         callId: 'call_history',
         name: 'history_read',
-        argumentsJson: '{"offset":1,"cursor":"","limit":50}',
+        argumentsJson: '{"taskId":null,"offset":1,"cursor":"","limit":50}',
       }),
     ).toMatchObject({
       family: 'history',
       operation: 'history',
       name: 'history_read',
+      arguments: { taskId: null, offset: 1, cursor: '', limit: 50 },
     });
     expect(
       parseHistoryToolCall({
         callId: 'call_task_history',
-        name: 'history_read_task',
-        argumentsJson: '{"taskId":"task_1","cursor":"","limit":50}',
+        name: 'history_read',
+        argumentsJson: '{"taskId":"task_1","offset":null,"cursor":"","limit":50}',
       }),
     ).toMatchObject({
       family: 'history',
-      operation: 'history_task',
-      name: 'history_read_task',
-      arguments: { taskId: 'task_1', cursor: '', limit: 50 },
+      operation: 'history',
+      name: 'history_read',
+      arguments: { taskId: 'task_1', offset: null, cursor: '', limit: 50 },
     });
     expect(
       parseHistoryToolCall({
@@ -62,19 +61,26 @@ describe('history tool contracts', () => {
     });
   });
 
-  it('rejects search fields and invalid bounds', () => {
+  it('rejects ambiguous selectors, search fields, and invalid bounds', () => {
     expect(() =>
       parseHistoryToolCall({
         callId: 'call_bad',
         name: 'history_read',
-        argumentsJson: '{"offset":0,"cursor":"","limit":101}',
+        argumentsJson: '{"taskId":null,"offset":0,"cursor":"","limit":101}',
       }),
     ).toThrow();
     expect(() =>
       parseHistoryToolCall({
         callId: 'call_bad',
-        name: 'history_read_task',
-        argumentsJson: '{"taskId":"","cursor":"","limit":50}',
+        name: 'history_read',
+        argumentsJson: '{"taskId":"task_1","offset":1,"cursor":"","limit":50}',
+      }),
+    ).toThrow();
+    expect(() =>
+      parseHistoryToolCall({
+        callId: 'call_bad',
+        name: 'history_read',
+        argumentsJson: '{"taskId":null,"offset":null,"cursor":"","limit":50}',
       }),
     ).toThrow();
     expect(() =>

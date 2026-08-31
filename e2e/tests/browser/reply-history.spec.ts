@@ -189,8 +189,8 @@ extensionTest(
             "resp_exact_history",
             "item_exact_history",
             "call_exact_history",
-            "history_read_task",
-            { taskId: targetTaskId, cursor: "", limit: 100 },
+            "history_read",
+            { taskId: targetTaskId, offset: null, cursor: "", limit: 100 },
           );
         } else {
           const output = functionOutputs(body).at(-1);
@@ -317,7 +317,8 @@ extensionTest(
     expect(replyInputText).not.toContain(targetQuestion);
     expect(serializedReplyRequest).not.toContain("historyTaskOffset");
     expect(serializedReplyRequest).not.toContain("availableHistoryTaskCount");
-    expect(serializedReplyRequest).toContain("history_read_task");
+    expect(serializedReplyRequest).toContain('"history_read"');
+    expect(serializedReplyRequest).not.toContain("history_read_task");
     expect(exactHistoryOutput).toMatchObject({
       ok: true,
       task: { id: targetTaskId },

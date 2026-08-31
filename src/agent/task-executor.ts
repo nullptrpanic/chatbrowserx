@@ -1088,11 +1088,7 @@ export class TaskExecutor {
     if (pending.name.startsWith('sandbox_')) {
       return this.#executePendingSandboxTool(snapshot, ownerId, signal, pending);
     }
-    if (
-      pending.name === 'history_read' ||
-      pending.name === 'history_read_task' ||
-      pending.name === 'result_read'
-    ) {
+    if (pending.name === 'history_read' || pending.name === 'result_read') {
       return this.#executePendingHistoryTool(snapshot, ownerId, signal, pending);
     }
 
@@ -1145,9 +1141,7 @@ export class TaskExecutor {
       const result =
         call.operation === 'history'
           ? await history.readHistory(context, call.arguments)
-          : call.operation === 'history_task'
-            ? await history.readTaskHistory(context, call.arguments)
-            : await history.readResult(context, call.arguments);
+          : await history.readResult(context, call.arguments);
       return this.#recordToolResult(snapshot, ownerId, signal, pending, JSON.stringify(result));
     } catch (error) {
       return this.#handleFailure(snapshot, ownerId, signal, error, 'model');

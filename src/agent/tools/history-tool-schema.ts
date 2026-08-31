@@ -1,10 +1,6 @@
 import { z } from 'zod';
 import { providerErrorFromCode } from '../../providers/provider-errors';
-import type {
-  HistoryReadInput,
-  ResultReadInput,
-  TaskHistoryReadInput,
-} from '../../tasks/task-history-reader';
+import type { HistoryReadInput, ResultReadInput } from '../../tasks/task-history-reader';
 import { strictFunctionTool } from '../../tools/contracts/model-tool';
 import {
   parseToolCallArguments,
@@ -18,19 +14,13 @@ const MAX_RESULT_CHARACTERS = 20_000;
 
 export const historyReadSchema = z
   .object({
-    offset: z.number().int().min(1).max(Number.MAX_SAFE_INTEGER),
+    taskId: z.string().min(1).max(MAX_IDENTIFIER_CHARACTERS).nullable(),
+    offset: z.number().int().min(1).max(Number.MAX_SAFE_INTEGER).nullable(),
     cursor: z.string().max(MAX_CURSOR_CHARACTERS),
     limit: z.number().int().min(1).max(MAX_HISTORY_ITEMS),
   })
-  .strict();
-
-export const taskHistoryReadSchema = z
-  .object({
-    taskId: z.string().min(1).max(MAX_IDENTIFIER_CHARACTERS),
-    cursor: z.string().max(MAX_CURSOR_CHARACTERS),
-    limit: z.number().int().min(1).max(MAX_HISTORY_ITEMS),
-  })
-  .strict();
+  .strict()
+  .refine(({ taskId, offset }) => (taskId === null) !== (offset === null));
 
 export const resultReadSchema = z
   .object({
@@ -52,15 +42,6 @@ export type ParsedHistoryToolCall =
     }
   | {
       readonly family: 'history';
-      readonly operation: 'history_task';
-      readonly replay: 'safe';
-      readonly callId: string;
-      readonly name: 'history_read_task';
-      readonly argumentsJson: string;
-      readonly arguments: TaskHistoryReadInput;
-    }
-  | {
-      readonly family: 'history';
       readonly operation: 'result';
       readonly replay: 'safe';
       readonly callId: string;
@@ -72,21 +53,17 @@ export type ParsedHistoryToolCall =
 export const HISTORY_TOOL_DEFINITIONS = [
   strictFunctionTool(
     'history_read',
-    'Discover and read one bounded page from a previous logical task by relative position. offset 1 is the immediately previous task. Use this only when no stable taskId is already available. The response supplies task.id for exact later reads. Start with an empty cursor.',
-    {
-      offset: { type: 'integer', minimum: 1, maximum: Number.MAX_SAFE_INTEGER },
-      cursor: { type: 'string', maxLength: MAX_CURSOR_CHARACTERS },
-      limit: { type: 'integer', minimum: 1, maximum: MAX_HISTORY_ITEMS },
-    },
-  ),
-  strictFunctionTool(
-    'history_read_task',
-    'Read one bounded page from an exact previous logical task using its stable taskId. Use this whenever reply context supplies targetTaskId, when a history response supplies task.id, or when traversing replyTo.taskId and replyTo.messageId. Start with an empty cursor and continue with nextCursor while hasMore is true.',
+    'Read one bounded page from a previous logical task. Set taskId to a stable task identifier and offset to null for an exact read. Set taskId to null and offset to a one-based relative position when no stable identifier is available; offset 1 is the immediately previous task. Exactly one selector must be non-null. Start with an empty cursor and continue with nextCursor while hasMore is true.',
     {
       taskId: {
-        type: 'string',
+        type: ['string', 'null'],
         minLength: 1,
         maxLength: MAX_IDENTIFIER_CHARACTERS,
+      },
+      offset: {
+        type: ['integer', 'null'],
+        minimum: 1,
+        maximum: Number.MAX_SAFE_INTEGER,
       },
       cursor: { type: 'string', maxLength: MAX_CURSOR_CHARACTERS },
       limit: { type: 'integer', minimum: 1, maximum: MAX_HISTORY_ITEMS },
@@ -94,7 +71,7 @@ export const HISTORY_TOOL_DEFINITIONS = [
   ),
   strictFunctionTool(
     'result_read',
-    'Read an exact bounded character range from a tool result referenced by history_read or history_read_task. Continue from nextOffset while hasMore is true.',
+    'Read an exact bounded character range from a tool result referenced by history_read. Continue from nextOffset while hasMore is true.',
     {
       resultId: {
         type: 'string',
@@ -119,17 +96,6 @@ export function parseHistoryToolCall(input: ModelToolCallSource): ParsedHistoryT
         name: 'history_read',
         argumentsJson: input.argumentsJson,
         arguments: historyReadSchema.parse(value),
-      };
-    }
-    if (input.name === 'history_read_task') {
-      return {
-        family: 'history',
-        operation: 'history_task',
-        replay: 'safe',
-        callId: input.callId,
-        name: 'history_read_task',
-        argumentsJson: input.argumentsJson,
-        arguments: taskHistoryReadSchema.parse(value),
       };
     }
     if (input.name === 'result_read') {

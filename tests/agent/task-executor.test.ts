@@ -266,7 +266,7 @@ async function runBrowserProgressScenario(
 }
 
 describe('TaskExecutor', () => {
-  it('executes an exact task history read by stable task identifier', async () => {
+  it('executes an exact task selector through the unified history reader', async () => {
     const database = await openChatBrowserDatabase(createTestDatabaseName('exact-history-read'));
     const repository = new IndexedDbTaskRepository(database);
     const dependencies = sources();
@@ -281,7 +281,7 @@ describe('TaskExecutor', () => {
       tabId: 7,
       goal: 'Follow an exact reply reference',
     });
-    const readTaskHistory = vi.fn(async () => ({
+    const readHistory = vi.fn(async () => ({
       ok: false as const,
       code: 'HISTORY_NOT_FOUND' as const,
       message: 'not found',
@@ -299,8 +299,8 @@ describe('TaskExecutor', () => {
                 type: 'history.call',
                 call: parseHistoryToolCall({
                   callId: 'call_exact_history',
-                  name: 'history_read_task',
-                  argumentsJson: '{"taskId":"task_old","cursor":"","limit":50}',
+                  name: 'history_read',
+                  argumentsJson: '{"taskId":"task_old","offset":null,"cursor":"","limit":50}',
                 }),
               } as const;
               return;
@@ -315,8 +315,7 @@ describe('TaskExecutor', () => {
       tavily: tavilyPort(),
       browser: browserPort(),
       history: {
-        readHistory: vi.fn(),
-        readTaskHistory,
+        readHistory,
         readResult: vi.fn(),
       },
       clock: dependencies.clock,
@@ -326,9 +325,9 @@ describe('TaskExecutor', () => {
     await expect(
       executor.run(created.task.id, new AbortController().signal),
     ).resolves.toMatchObject({ task: { status: 'completed' } });
-    expect(readTaskHistory).toHaveBeenCalledWith(
+    expect(readHistory).toHaveBeenCalledWith(
       { conversationId: 'conversation_1', currentTaskId: created.task.id },
-      { taskId: 'task_old', cursor: '', limit: 50 },
+      { taskId: 'task_old', offset: null, cursor: '', limit: 50 },
     );
     database.close();
   });

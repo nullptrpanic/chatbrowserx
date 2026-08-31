@@ -141,7 +141,7 @@ describe('TaskHistoryReader', () => {
   it('reads the previous logical task in stable event order with cursor counts', async () => {
     const first = await reader().readHistory(
       { conversationId, currentTaskId },
-      { offset: 1, cursor: '', limit: 2 },
+      { taskId: null, offset: 1, cursor: '', limit: 2 },
     );
     expect(first).toMatchObject({
       ok: true,
@@ -164,7 +164,7 @@ describe('TaskHistoryReader', () => {
 
     const second = await reader().readHistory(
       { conversationId, currentTaskId },
-      { offset: 1, cursor: first.nextCursor, limit: 2 },
+      { taskId: null, offset: 1, cursor: first.nextCursor, limit: 2 },
     );
     expect(second).toMatchObject({
       ok: true,
@@ -225,7 +225,10 @@ describe('TaskHistoryReader', () => {
         ],
         archiveResults: [],
         messages: [replyMessage],
-      }).readHistory({ conversationId, currentTaskId }, { offset: 1, cursor: '', limit: 20 }),
+      }).readHistory(
+        { conversationId, currentTaskId },
+        { taskId: null, offset: 1, cursor: '', limit: 20 },
+      ),
     ).resolves.toMatchObject({
       ok: true,
       items: [
@@ -241,9 +244,9 @@ describe('TaskHistoryReader', () => {
   it('reads an exact historical task by its stable task identifier', async () => {
     const history = reader();
 
-    const first = await history.readTaskHistory(
+    const first = await history.readHistory(
       { conversationId, currentTaskId },
-      { taskId: 'task_2', cursor: '', limit: 2 },
+      { taskId: 'task_2', offset: null, cursor: '', limit: 2 },
     );
     expect(first).toMatchObject({
       ok: true,
@@ -254,9 +257,9 @@ describe('TaskHistoryReader', () => {
     if (!first.ok || first.nextCursor === null) throw new Error('Expected another page.');
 
     await expect(
-      history.readTaskHistory(
+      history.readHistory(
         { conversationId, currentTaskId },
-        { taskId: 'task_2', cursor: first.nextCursor, limit: 2 },
+        { taskId: 'task_2', offset: null, cursor: first.nextCursor, limit: 2 },
       ),
     ).resolves.toMatchObject({
       ok: true,
@@ -274,23 +277,39 @@ describe('TaskHistoryReader', () => {
     });
 
     await expect(
-      history.readTaskHistory(
+      history.readHistory(
         { conversationId, currentTaskId },
-        { taskId: currentTaskId, cursor: '', limit: 20 },
+        { taskId: currentTaskId, offset: null, cursor: '', limit: 20 },
       ),
     ).resolves.toMatchObject({ ok: false, code: 'HISTORY_NOT_FOUND' });
     await expect(
-      history.readTaskHistory(
+      history.readHistory(
         { conversationId, currentTaskId },
-        { taskId: pendingTask.id, cursor: '', limit: 20 },
+        { taskId: pendingTask.id, offset: null, cursor: '', limit: 20 },
       ),
     ).resolves.toMatchObject({ ok: false, code: 'HISTORY_NOT_FOUND' });
     await expect(
-      history.readTaskHistory(
+      history.readHistory(
         { conversationId, currentTaskId },
-        { taskId: foreignTask.id, cursor: '', limit: 20 },
+        { taskId: foreignTask.id, offset: null, cursor: '', limit: 20 },
       ),
     ).resolves.toMatchObject({ ok: false, code: 'HISTORY_NOT_FOUND' });
+  });
+
+  it('rejects history reads with both or neither selector', async () => {
+    const history = reader();
+    await expect(
+      history.readHistory(
+        { conversationId, currentTaskId },
+        { taskId: 'task_2', offset: 1, cursor: '', limit: 20 },
+      ),
+    ).rejects.toThrow('Task history selector is invalid.');
+    await expect(
+      history.readHistory(
+        { conversationId, currentTaskId },
+        { taskId: null, offset: null, cursor: '', limit: 20 },
+      ),
+    ).rejects.toThrow('Task history selector is invalid.');
   });
 
   it('loads tool-result bodies only for the current history page', async () => {
@@ -301,7 +320,7 @@ describe('TaskHistoryReader', () => {
 
     const first = await history.readHistory(
       { conversationId, currentTaskId },
-      { offset: 1, cursor: '', limit: 2 },
+      { taskId: null, offset: 1, cursor: '', limit: 2 },
     );
     expect(first).toMatchObject({ ok: true, returnedCount: 2, hasMore: true });
     expect(getToolResult).not.toHaveBeenCalled();
@@ -309,7 +328,7 @@ describe('TaskHistoryReader', () => {
 
     await history.readHistory(
       { conversationId, currentTaskId },
-      { offset: 1, cursor: first.nextCursor, limit: 2 },
+      { taskId: null, offset: 1, cursor: first.nextCursor, limit: 2 },
     );
     expect(getToolResult).toHaveBeenCalledOnce();
     expect(getToolResult).toHaveBeenCalledWith('result_2');
@@ -318,13 +337,13 @@ describe('TaskHistoryReader', () => {
   it('rejects a cursor used with a different offset', async () => {
     const first = await reader().readHistory(
       { conversationId, currentTaskId },
-      { offset: 1, cursor: '', limit: 1 },
+      { taskId: null, offset: 1, cursor: '', limit: 1 },
     );
     if (!first.ok || first.nextCursor === null) throw new Error('Expected another page.');
     await expect(
       reader().readHistory(
         { conversationId, currentTaskId },
-        { offset: 2, cursor: first.nextCursor, limit: 1 },
+        { taskId: null, offset: 2, cursor: first.nextCursor, limit: 1 },
       ),
     ).resolves.toMatchObject({
       ok: false,
@@ -384,7 +403,10 @@ describe('TaskHistoryReader', () => {
         archiveEvents: hiddenEvents,
         archiveResults: [],
         messages: [],
-      }).readHistory({ conversationId, currentTaskId }, { offset: 1, cursor: '', limit: 50 }),
+      }).readHistory(
+        { conversationId, currentTaskId },
+        { taskId: null, offset: 1, cursor: '', limit: 50 },
+      ),
     ).resolves.toMatchObject({
       ok: true,
       items: [],
@@ -416,7 +438,7 @@ describe('TaskHistoryReader', () => {
     });
     const first = await history.readHistory(
       { conversationId, currentTaskId },
-      { offset: 1, cursor: '', limit: 100 },
+      { taskId: null, offset: 1, cursor: '', limit: 100 },
     );
     expect(first).toMatchObject({
       ok: true,
@@ -430,7 +452,7 @@ describe('TaskHistoryReader', () => {
     await expect(
       history.readHistory(
         { conversationId, currentTaskId },
-        { offset: 1, cursor: first.nextCursor, limit: 100 },
+        { taskId: null, offset: 1, cursor: first.nextCursor, limit: 100 },
       ),
     ).resolves.toMatchObject({
       ok: true,
@@ -453,7 +475,10 @@ describe('TaskHistoryReader', () => {
         archiveEvents: [],
         archiveResults: [],
         messages: [],
-      }).readHistory({ conversationId, currentTaskId }, { offset: 1, cursor: '', limit: 50 }),
+      }).readHistory(
+        { conversationId, currentTaskId },
+        { taskId: null, offset: 1, cursor: '', limit: 50 },
+      ),
     ).resolves.toMatchObject({ ok: true, task: { id: older.id, ordinal: 1 } });
   });
 
@@ -505,7 +530,7 @@ describe('TaskHistoryReader', () => {
     await expect(
       reader({ messages: [...messages, orphan] }).readHistory(
         { conversationId, currentTaskId },
-        { offset: 1, cursor: '', limit: 50 },
+        { taskId: null, offset: 1, cursor: '', limit: 50 },
       ),
     ).rejects.toThrow('Task history record association is invalid.');
   });

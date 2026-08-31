@@ -347,7 +347,6 @@ export class CodexAgentPlanner implements AgentPlanner {
         }
         if (
           state.tool.name === 'history_read' ||
-          state.tool.name === 'history_read_task' ||
           state.tool.name === 'result_read'
         ) {
           let call: ReturnType<typeof parseHistoryToolCall>;

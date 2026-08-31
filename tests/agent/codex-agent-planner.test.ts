@@ -451,22 +451,21 @@ describe('CodexAgentPlanner', () => {
 
     await collect(planner);
 
-    expect(model.requests[0]?.tools.map(({ name }) => name).slice(-3)).toEqual([
+    expect(model.requests[0]?.tools.map(({ name }) => name).slice(-2)).toEqual([
       'history_read',
-      'history_read_task',
       'result_read',
     ]);
   });
 
-  it('parses exact task history calls using a stable task identifier', async () => {
-    const arguments_ = { taskId: 'task_historical', cursor: '', limit: 50 };
+  it('parses exact task history selectors using a stable task identifier', async () => {
+    const arguments_ = { taskId: 'task_historical', offset: null, cursor: '', limit: 50 };
     const model = provider(async function* () {
       yield { type: 'response.started', responseId: 'resp_task_history' };
-      yield { type: 'tool.started', callId: 'call_task_history', name: 'history_read_task' };
+      yield { type: 'tool.started', callId: 'call_task_history', name: 'history_read' };
       yield {
         type: 'tool.completed',
         callId: 'call_task_history',
-        name: 'history_read_task',
+        name: 'history_read',
         argumentsJson: JSON.stringify(arguments_),
       };
       yield { type: 'response.completed', responseId: 'resp_task_history', usage: null };
@@ -487,8 +486,8 @@ describe('CodexAgentPlanner', () => {
       {
         type: 'history.call',
         call: {
-          operation: 'history_task',
-          name: 'history_read_task',
+          operation: 'history',
+          name: 'history_read',
           arguments: arguments_,
         },
       },
@@ -533,9 +532,8 @@ describe('CodexAgentPlanner', () => {
         },
       },
     ]);
-    expect(model.requests[0]?.tools.map(({ name }) => name).slice(-3)).toEqual([
+    expect(model.requests[0]?.tools.map(({ name }) => name).slice(-2)).toEqual([
       'history_read',
-      'history_read_task',
       'result_read',
     ]);
   });

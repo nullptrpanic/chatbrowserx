@@ -12,13 +12,8 @@ export interface TaskHistoryContext {
 }
 
 export interface HistoryReadInput {
-  readonly offset: number;
-  readonly cursor: string;
-  readonly limit: number;
-}
-
-export interface TaskHistoryReadInput {
-  readonly taskId: TaskId;
+  readonly taskId: TaskId | null;
+  readonly offset: number | null;
   readonly cursor: string;
   readonly limit: number;
 }
@@ -125,10 +120,6 @@ export type ResultReadResponse =
 
 export interface TaskHistoryReaderPort {
   readHistory(context: TaskHistoryContext, input: HistoryReadInput): Promise<HistoryReadResponse>;
-  readTaskHistory(
-    context: TaskHistoryContext,
-    input: TaskHistoryReadInput,
-  ): Promise<HistoryReadResponse>;
   readResult(context: TaskHistoryContext, input: ResultReadInput): Promise<ResultReadResponse>;
 }
 
@@ -407,19 +398,17 @@ export class TaskHistoryReader implements TaskHistoryReaderPort {
     context: TaskHistoryContext,
     input: HistoryReadInput,
   ): Promise<HistoryReadResponse> {
-    const selected = orderedHistoricalTasks(
-      await this.#tasks.listByConversation(context.conversationId),
-      context,
-    )[input.offset - 1];
-    if (selected === undefined) return historyNotFound();
-    return this.#readSelectedHistory(selected, input);
-  }
-
-  async readTaskHistory(
-    context: TaskHistoryContext,
-    input: TaskHistoryReadInput,
-  ): Promise<HistoryReadResponse> {
-    const selected = await this.#tasks.get(input.taskId);
+    let selected: Task | undefined;
+    if (input.taskId === null) {
+      if (input.offset === null) throw new Error('Task history selector is invalid.');
+      selected = orderedHistoricalTasks(
+        await this.#tasks.listByConversation(context.conversationId),
+        context,
+      )[input.offset - 1];
+    } else {
+      if (input.offset !== null) throw new Error('Task history selector is invalid.');
+      selected = await this.#tasks.get(input.taskId);
+    }
     if (selected === undefined || !isHistoricalTask(selected, context)) return historyNotFound();
     return this.#readSelectedHistory(selected, input);
   }
