@@ -16,3 +16,4 @@ spec
 sandbox/target/
 sandbox/config.json
 /workdir/
+/docs/
