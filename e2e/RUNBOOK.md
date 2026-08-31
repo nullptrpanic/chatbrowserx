@@ -18,10 +18,12 @@ e2e/
 ├── samples/                   # Ignored; transported outside Git
 │   └── <sample-id>/
 │       ├── sample.json
-│       └── results/
+│       ├── results/
+│       │   └── <UTC-batch-timestamp>/01.json
+│       └── benchmark/
+│           └── <UTC-batch-timestamp>/01.json ...
 └── .runtime/                  # Ignored machine-local state
     ├── profile/
-    ├── live-results/
     └── playwright/
 ```
 
@@ -53,6 +55,7 @@ npm run e2e:env:doctor
 # Receive or create:
 # e2e/samples/<sample-id>/sample.json
 # e2e/samples/<sample-id>/results/
+# e2e/samples/<sample-id>/benchmark/  # optional until the first formal batch
 
 npm run e2e:catalog:validate
 npm run e2e:live:setup -- <sample-id>
@@ -82,15 +85,18 @@ npm run e2e:live:benchmark -- <sample-id> <required-runs>
 ```
 
 ```bash
-npm run --silent e2e:results:compare -- <sample-id> <left-revision> <right-revision> [runs]
+npm run --silent e2e:benchmark:compare -- <sample-id> <left-revision> <right-revision> [runs]
 ```
 
 ```bash
 npm run e2e:live:provider-diagnose -- <sample-id>
 ```
 
-The benchmark stops on its first failure. Every attempt writes one standard result and one raw
-machine-local report. Comparison and benchmark summaries are printed, not persisted.
+The benchmark stops on its first failure. An ordinary run creates one timestamped directory below
+`results/`. A benchmark creates one timestamped directory below `benchmark/` and writes its
+completed attempts as `01.json`, `02.json`, and so on. Each file is one complete bounded and
+redacted report containing its run ID; no second raw-report copy is written. Summaries are printed,
+not persisted.
 
 ## Reproducible Baselines
 
@@ -110,7 +116,7 @@ npm run e2e:live:seed-product
 
 CHATBROWSERX_LIVE_EXTENSION_PATH="$BASELINE_DIR/dist" \
 CHATBROWSERX_LIVE_PRODUCT_REVISION="$BASELINE_REVISION+baseline" \
-npm run e2e:live:run -- <sample-id>
+npm run e2e:live:benchmark -- <sample-id> <required-runs>
 ```
 
 Run the same frozen contract and count for the candidate, then compare the labels under

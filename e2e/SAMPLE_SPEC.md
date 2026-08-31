@@ -1,24 +1,31 @@
 # ChatBrowserX E2E Sample and Result Specification
 
 This is the canonical format definition. It describes the portable sample contract and one
-immutable result per attempt; it does not describe a particular sample.
+immutable report per attempt; it does not describe a particular sample.
 
 ## Storage and Transport
 
 ```text
 e2e/samples/<sample-id>/
 ├── sample.json
-└── results/
-    └── <UTC-timestamp>__<run-id>.json
+├── results/
+│   └── <UTC-batch-timestamp>/
+│       └── 01.json
+└── benchmark/
+    └── <UTC-batch-timestamp>/
+        ├── 01.json
+        └── ...
 ```
 
 The directory name and sample.json id must be identical lowercase kebab-case values. Do not add a
 per-sample README or code-owned scenario registry.
 
 A sample can be created, generated, or delivered through any controlled channel outside Git.
-Transfer sample.json plus an empty results directory for a new history, or the complete sample
-directory to preserve history. Never overwrite a result with different bytes. After creation or
-import, run npm run e2e:catalog:validate, then follow RUNBOOK.md for environment setup and execution.
+Transfer `sample.json` plus an empty `results/` directory for a new history, or the complete sample
+directory to preserve history. `benchmark/` is created by the first formal batch. A normal live run
+writes one report below `results/`; one benchmark command writes all of its ordered attempts below
+one timestamped `benchmark/` directory. Never overwrite a report with different bytes. After
+creation or import, run `npm run e2e:catalog:validate`, then follow `RUNBOOK.md`.
 
 ## Sample Schema Version 3
 
@@ -167,14 +174,17 @@ acceptance checks, and product safety rules.
 }
 ```
 
-## Standard Result Schema Version 3
+## Evaluation Report Schema Version 4
 
 All fields below are required. failure is null for a pass and an object for a failure.
 
 | Field                                             | Meaning                                                                                             |
 | ------------------------------------------------- | --------------------------------------------------------------------------------------------------- |
-| schemaVersion                                     | Exactly 3.                                                                                          |
+| schemaVersion                                     | Exactly 4.                                                                                          |
 | sampleId / runId                                  | Sample identity and unique attempt identity.                                                        |
+| batch.collection                                  | `results` for ordinary runs or `benchmark` for formal batches.                                      |
+| batch.id / startedAt                              | Batch directory name and its ISO UTC creation time.                                                 |
+| batch.requestedRuns / attempt                     | Declared batch size and this report's one-based attempt number.                                     |
 | productRevision                                   | Product revision or explicit isolated-build label.                                                  |
 | scenarioContractVersion                           | Contract version used by the attempt.                                                               |
 | startedAt / endedAt / elapsedMs                   | UTC boundaries and wall-clock duration.                                                             |
@@ -190,8 +200,10 @@ All fields below are required. failure is null for a pass and an object for a fa
 | execution.firstEventMs / firstTextMs              | First turn event latency and first text-producing turn latency; zero when unavailable.              |
 | execution.providerRetries / providerRetryCounts   | Total retries and counts by persisted reason.                                                       |
 | execution.toolCalls / toolCounts                  | Total Tool Calls and counts by tool name.                                                           |
+| execution.fullInteractiveObservations             | Full interactive browser observations.                                                              |
 | execution.providerRequests / compactionRequests   | Provider requests and unsupported compact calls.                                                    |
 | execution.traversalSegments / screenshotFallbacks | Structured traversal and screenshot fallback counts.                                                |
+| execution.screenshotFallbackReasons               | Screenshot fallback counts grouped by reason.                                                       |
 | execution.staleRefs / stateMismatches             | Stale semantic references and post-action mismatches.                                               |
 | execution.repeatedFingerprints / noProgressBlocks | Repeated actions and no-progress blocks.                                                            |
 | execution.verifiedMutations / ambiguousMutations  | Verified and ambiguous mutation counts.                                                             |
@@ -200,20 +212,28 @@ All fields below are required. failure is null for a pass and an object for a fa
 | execution.modelOutputReductionCharacters          | Audit characters minus model-visible characters.                                                    |
 | execution.toolDefinitionCharactersTotal / Max     | Repeated tool-contract size across Provider requests and its per-request maximum.                   |
 | execution.toolDefinitionSchemaChanges / Variants  | Ordered tool-contract changes and distinct contract fingerprints.                                   |
+| execution.enabledToolsets                         | Optional toolsets exposed during the attempt.                                                       |
+| execution.skillCatalogDisclosureCount             | Skill catalog entries exposed to the model.                                                         |
+| execution.exactReads                              | Exact historical result reads.                                                                      |
 | execution.auditOutputCharactersByTool             | Audit-output characters grouped by tool name.                                                       |
 | execution.modelOutputCharactersByTool             | Model-visible output characters grouped by tool name.                                               |
 | acceptance.passed / acceptance.checks             | Overall machine decision and each named check.                                                      |
 | failure.taskError / harnessError / failedChecks   | Product task error, harness error, and failed checks; evidence defects use `E2E_EVIDENCE_MISMATCH`. |
-| sourceReport                                      | Relative pointer to the machine-local raw report.                                                   |
+| evidence.taskId / conversationId                  | Opaque execution identifiers, or `null` when preflight failed before creation.                      |
+| evidence.toolResults                              | Complete bounded and redacted tool arguments, results, and attachment references.                   |
+| evidence.providerTrace                            | Bounded structural Provider request and response evidence.                                          |
 
-The filename is derived from startedAt and runId, for example:
+The directory identifies the batch and filenames identify attempt order:
 
 ```text
-20260827T123346.514Z__live_1f11acdc-79f6-4fc8-bbd8-65aa5a12f4cd.json
+results/20260827T123346.514Z/01.json
+benchmark/20260827T130000.000Z/01.json
+benchmark/20260827T130000.000Z/02.json
 ```
 
-Writers use exclusive creation. Result history is sufficient for portable comparison;
-`sourceReport` may point to diagnostics that were not transported. The catalog indexes only schema
-version 3; other formats are outside the current contract. Current writers always emit
-`failure.taskError`; the parser treats its absence in earlier version 3 results as `null` so
-immutable results created before the failure split remain readable.
+Every report contains its `runId`; run IDs are never directory names. Attempt files are contiguous
+from `01.json`, use exclusive creation, and share collection, batch, contract, revision, and
+requested-run metadata. A stopped benchmark may contain fewer files than `requestedRuns`, but it
+cannot contain a gap. The report is the complete portable comparison and diagnostic record, so no
+second raw-report file or `sourceReport` pointer exists. Flat files and older schemas are rejected;
+the harness has one current layout and one current report contract.

@@ -18,7 +18,7 @@
     "test:e2e": "npm run build && playwright test --config e2e/playwright.config.ts",
     "e2e:catalog:validate": "tsx e2e/runner/validate.ts",
     "e2e:env:doctor": "npm run build && tsx e2e/runner/doctor.ts",
-    "e2e:results:compare": "tsx e2e/runner/compare.ts",
+    "e2e:benchmark:compare": "tsx e2e/runner/compare.ts",
     "e2e:live:setup": "npm run build && tsx e2e/runner/setup.ts",
     "e2e:live:verify": "npm run build && tsx e2e/runner/verify.ts",
     "e2e:live:seed-product": "npm run build && tsx e2e/runner/seed-product-settings.ts",

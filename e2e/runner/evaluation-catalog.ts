@@ -1,3 +1,4 @@
+import { stat } from 'node:fs/promises';
 import { join } from 'node:path';
 import type { LiveScenario } from './live-types';
 import { loadEvaluationResults } from './evaluation-result-loader';
@@ -8,17 +9,22 @@ export type { EvaluationSampleDefinition } from './sample-loader';
 export interface EvaluationSampleSummary extends EvaluationSampleDefinition {
   readonly directory: string;
   readonly scenario: LiveScenario;
-  readonly resultCount: number;
-  readonly passedResultCount: number;
-  readonly currentContractResultCount: number;
-  readonly currentContractPassedResultCount: number;
-  readonly currentContractRevisionBatches: readonly EvaluationRevisionBatch[];
+  readonly results: EvaluationCollectionSummary;
+  readonly benchmark: EvaluationCollectionSummary;
 }
 
 export interface EvaluationRevisionBatch {
   readonly productRevision: string;
-  readonly resultCount: number;
-  readonly passedResultCount: number;
+  readonly attempts: number;
+  readonly passed: number;
+}
+
+export interface EvaluationCollectionSummary {
+  readonly attempts: number;
+  readonly passed: number;
+  readonly currentContractAttempts: number;
+  readonly currentContractPassed: number;
+  readonly revisionBatches: readonly EvaluationRevisionBatch[];
 }
 
 export interface EvaluationCatalog {
@@ -29,46 +35,58 @@ async function validateResults(
   directory: string,
   sampleId: string,
   currentContractVersion: number,
-): Promise<{
-  readonly resultCount: number;
-  readonly passedResultCount: number;
-  readonly currentContractResultCount: number;
-  readonly currentContractPassedResultCount: number;
-  readonly currentContractRevisionBatches: readonly EvaluationRevisionBatch[];
-}> {
+): Promise<EvaluationCollectionSummary> {
   const results = await loadEvaluationResults(directory, sampleId);
-  let resultCount = 0;
-  let passedResultCount = 0;
-  let currentContractResultCount = 0;
+  let passed = 0;
+  let currentContractAttempts = 0;
   let currentContractPassedResultCount = 0;
-  const currentBatches = new Map<string, { resultCount: number; passedResultCount: number }>();
+  const currentBatches = new Map<string, { attempts: number; passed: number }>();
   for (const input of results) {
     const contractVersion = input.scenarioContractVersion;
     const productRevision = input.productRevision;
-    resultCount += 1;
-    if (input.success) passedResultCount += 1;
+    if (input.success) passed += 1;
     if (contractVersion === currentContractVersion) {
-      currentContractResultCount += 1;
+      currentContractAttempts += 1;
       if (input.success) currentContractPassedResultCount += 1;
       const batch = currentBatches.get(productRevision) ?? {
-        resultCount: 0,
-        passedResultCount: 0,
+        attempts: 0,
+        passed: 0,
       };
       currentBatches.set(productRevision, {
-        resultCount: batch.resultCount + 1,
-        passedResultCount: batch.passedResultCount + (input.success ? 1 : 0),
+        attempts: batch.attempts + 1,
+        passed: batch.passed + (input.success ? 1 : 0),
       });
     }
   }
   return {
-    resultCount,
-    passedResultCount,
-    currentContractResultCount,
-    currentContractPassedResultCount,
-    currentContractRevisionBatches: [...currentBatches]
+    attempts: results.length,
+    passed,
+    currentContractAttempts,
+    currentContractPassed: currentContractPassedResultCount,
+    revisionBatches: [...currentBatches]
       .map(([productRevision, counts]) => ({ productRevision, ...counts }))
       .sort((left, right) => left.productRevision.localeCompare(right.productRevision)),
   };
+}
+
+const EMPTY_COLLECTION: EvaluationCollectionSummary = {
+  attempts: 0,
+  passed: 0,
+  currentContractAttempts: 0,
+  currentContractPassed: 0,
+  revisionBatches: [],
+};
+
+async function validateOptionalBenchmark(
+  directory: string,
+  sampleId: string,
+  currentContractVersion: number,
+): Promise<EvaluationCollectionSummary> {
+  const exists = await stat(directory)
+    .then((entry) => entry.isDirectory())
+    .catch(() => false);
+  if (!exists) return EMPTY_COLLECTION;
+  return validateResults(directory, sampleId, currentContractVersion);
 }
 
 /** Validates the complete local sample catalog without a code-owned scenario registry. */
@@ -77,16 +95,23 @@ export async function validateEvaluationCatalog(
 ): Promise<EvaluationCatalog> {
   const loaded = await listEvaluationSamples(repositoryRoot);
   const samples = await Promise.all(
-    loaded.map(async ({ directory, definition, scenario }) => ({
-      ...definition,
-      directory,
-      scenario,
-      ...(await validateResults(
-        join(directory, 'results'),
-        definition.id,
-        definition.contractVersion,
-      )),
-    })),
+    loaded.map(async ({ directory, definition, scenario }) => {
+      const [results, benchmark] = await Promise.all([
+        validateResults(join(directory, 'results'), definition.id, definition.contractVersion),
+        validateOptionalBenchmark(
+          join(directory, 'benchmark'),
+          definition.id,
+          definition.contractVersion,
+        ),
+      ]);
+      return {
+        ...definition,
+        directory,
+        scenario,
+        results,
+        benchmark,
+      };
+    }),
   );
   samples.sort((left, right) => left.id.localeCompare(right.id));
   return { samples };

@@ -1,13 +1,14 @@
-import { mkdir, writeFile } from 'node:fs/promises';
+import { mkdir, stat, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { z } from 'zod';
 import { parseJsonContract } from './json-contract';
 import type { LiveRunReport, LiveScenario } from './live-types';
 
 const SAFE_ID = /^[a-zA-Z0-9][a-zA-Z0-9_-]*$/;
-const nonEmptyString = z
-  .string()
-  .refine((value) => value.trim().length > 0, { message: 'must be a non-empty string.' });
+const BATCH_ID = /^\d{8}T\d{6}\.\d{3}Z$/;
+const nonEmptyString = z.string().refine((value) => value.trim().length > 0, {
+  message: 'must be a non-empty string.',
+});
 const nonNegativeInteger = z.number().refine((value) => Number.isSafeInteger(value) && value >= 0, {
   message: 'must be a non-negative safe integer.',
 });
@@ -19,11 +20,43 @@ const acceptanceCheckSchema = z
   .object({ name: nonEmptyString, passed: z.boolean(), detail: nonEmptyString })
   .strict();
 const failureCheckSchema = z.object({ name: nonEmptyString, detail: nonEmptyString }).strict();
+const positiveInteger = z.number().refine((value) => Number.isSafeInteger(value) && value >= 1, {
+  message: 'must be a positive safe integer.',
+});
+const evaluationCollectionSchema = z.enum(['results', 'benchmark']);
+const batchSchema = z
+  .object({
+    collection: evaluationCollectionSchema,
+    id: z.string().regex(BATCH_ID, { message: 'must be a sortable UTC timestamp.' }),
+    startedAt: nonEmptyString,
+    requestedRuns: positiveInteger,
+    attempt: positiveInteger,
+  })
+  .strict();
+const toolResultSchema = z
+  .object({
+    toolName: nonEmptyString,
+    argumentsJson: z.string(),
+    output: z.string(),
+    attachmentIds: z.array(z.string()),
+    auditOutputCharacters: nonNegativeInteger.optional(),
+    modelOutputCharacters: nonNegativeInteger.optional(),
+  })
+  .strict();
+const providerTraceSchema = z
+  .object({
+    requestCount: nonNegativeInteger,
+    requests: z.array(z.unknown()),
+    compactionRequestCount: nonNegativeInteger.optional(),
+    compactionRequests: z.array(z.unknown()).optional(),
+  })
+  .strict();
 
 const evaluationResultSchema = z
   .object({
-    schemaVersion: z.literal(3, { error: 'must equal 3.' }),
+    schemaVersion: z.literal(4, { error: 'must equal 4.' }),
     sampleId: nonEmptyString,
+    batch: batchSchema,
     runId: nonEmptyString,
     productRevision: nonEmptyString,
     scenarioContractVersion: z
@@ -58,10 +91,12 @@ const evaluationResultSchema = z
         providerRetryCounts: countsSchema,
         toolCalls: nonNegativeInteger,
         toolCounts: countsSchema,
+        fullInteractiveObservations: nonNegativeInteger,
         providerRequests: nonNegativeInteger,
         compactionRequests: nonNegativeInteger,
         traversalSegments: nonNegativeInteger,
         screenshotFallbacks: nonNegativeInteger,
+        screenshotFallbackReasons: countsSchema,
         staleRefs: nonNegativeInteger,
         stateMismatches: nonNegativeInteger,
         repeatedFingerprints: nonNegativeInteger,
@@ -75,6 +110,9 @@ const evaluationResultSchema = z
         toolDefinitionCharactersMax: nonNegativeInteger,
         toolDefinitionSchemaChanges: nonNegativeInteger,
         toolDefinitionSchemaVariants: nonNegativeInteger,
+        enabledToolsets: z.array(nonEmptyString),
+        skillCatalogDisclosureCount: nonNegativeInteger,
+        exactReads: nonNegativeInteger,
         auditOutputCharactersByTool: countsSchema,
         modelOutputCharactersByTool: countsSchema,
       })
@@ -82,25 +120,41 @@ const evaluationResultSchema = z
     acceptance: z.object({ passed: z.boolean(), checks: z.array(acceptanceCheckSchema) }).strict(),
     failure: z
       .object({
-        taskError: z.string().nullable().default(null),
+        taskError: z.string().nullable(),
         harnessError: z.string().nullable(),
         failedChecks: z.array(failureCheckSchema),
       })
       .strict()
       .nullable(),
-    sourceReport: nonEmptyString,
+    evidence: z
+      .object({
+        taskId: nonEmptyString.nullable(),
+        conversationId: nonEmptyString.nullable(),
+        toolResults: z.array(toolResultSchema),
+        providerTrace: providerTraceSchema,
+      })
+      .strict(),
   })
   .strict();
 
 export type EvaluationResult = z.infer<typeof evaluationResultSchema>;
+export type EvaluationCollection = z.infer<typeof evaluationCollectionSchema>;
+
+export interface EvaluationBatch {
+  readonly collection: EvaluationCollection;
+  readonly id: string;
+  readonly startedAt: string;
+  readonly requestedRuns: number;
+}
 
 /** Parses the strict current portable result contract. */
 export function parseEvaluationResult(
   value: unknown,
   sampleId: string,
+  batchId: string,
   filename: string,
 ): EvaluationResult {
-  const owner = `Sample "${sampleId}" result "${filename}"`;
+  const owner = `Sample "${sampleId}" result "${batchId}/${filename}"`;
   const result = parseJsonContract(evaluationResultSchema, value, owner);
   if (
     !Number.isFinite(Date.parse(result.startedAt)) ||
@@ -111,17 +165,26 @@ export function parseEvaluationResult(
   if (result.sampleId !== sampleId) {
     throw new Error(`${owner} sampleId must match its sample directory.`);
   }
-  if (filename !== evaluationResultFilename(result)) {
-    throw new Error(`${owner} filename must match its timestamp and run ID.`);
+  if (result.batch.id !== batchId) {
+    throw new Error(`${owner} batch.id must match its batch directory.`);
+  }
+  if (
+    !Number.isFinite(Date.parse(result.batch.startedAt)) ||
+    evaluationTimestamp(result.batch.startedAt) !== result.batch.id
+  ) {
+    throw new Error(`${owner} batch timestamp must match its batch ID.`);
+  }
+  if (result.batch.attempt > result.batch.requestedRuns) {
+    throw new Error(`${owner} batch.attempt cannot exceed batch.requestedRuns.`);
+  }
+  if (filename !== evaluationResultFilename(result.batch.attempt)) {
+    throw new Error(`${owner} filename must match its attempt number.`);
   }
   if (result.success && !result.acceptance.passed) {
     throw new Error(`${owner} acceptance.passed must be true on success.`);
   }
   if (result.success !== (result.failure === null)) {
     throw new Error(`${owner} failure must be null exactly when success is true.`);
-  }
-  if (result.sourceReport !== `e2e/.runtime/live-results/${result.runId}/report.json`) {
-    throw new Error(`${owner} sourceReport must identify its raw report.`);
   }
   return result;
 }
@@ -141,17 +204,35 @@ export function evaluationTimestamp(value: string): string {
   return timestamp.toISOString().replaceAll('-', '').replaceAll(':', '');
 }
 
-/** Returns the immutable one-attempt result filename. */
-export function evaluationResultFilename(
-  report: Pick<LiveRunReport, 'runId' | 'startedAt'>,
-): string {
-  assertSafeId(report.runId, 'Run ID');
-  return `${evaluationTimestamp(report.startedAt)}__${report.runId}.json`;
+export function createEvaluationBatch(
+  collection: EvaluationCollection,
+  startedAt: string,
+  requestedRuns: number,
+): EvaluationBatch {
+  if (!Number.isSafeInteger(requestedRuns) || requestedRuns < 1 || requestedRuns > 20) {
+    throw new RangeError('Evaluation batch runs must be an integer between 1 and 20.');
+  }
+  return {
+    collection,
+    id: evaluationTimestamp(startedAt),
+    startedAt: new Date(startedAt).toISOString(),
+    requestedRuns,
+  };
+}
+
+/** Returns the immutable one-attempt result filename within a batch. */
+export function evaluationResultFilename(attempt: number): string {
+  if (!Number.isSafeInteger(attempt) || attempt < 1 || attempt > 20) {
+    throw new RangeError('Evaluation attempt must be an integer between 1 and 20.');
+  }
+  return `${String(attempt).padStart(2, '0')}.json`;
 }
 
 /** Maps a raw live report to the bounded, credential-safe comparison contract. */
 export function createEvaluationResult(
   scenario: LiveScenario,
+  batch: EvaluationBatch,
+  attempt: number,
   report: LiveRunReport,
 ): EvaluationResult {
   assertSafeId(scenario.name, 'Sample ID');
@@ -162,14 +243,19 @@ export function createEvaluationResult(
   if (report.scenarioContractVersion !== scenario.contractVersion) {
     throw new Error('Live report contract version does not match the evaluation sample.');
   }
+  if (attempt > batch.requestedRuns) {
+    throw new RangeError('Evaluation attempt cannot exceed the requested batch runs.');
+  }
+  const filename = evaluationResultFilename(attempt);
   const failedChecks = report.acceptance.checks
     .filter((check) => !check.passed)
     .map(({ name, detail }) => ({ name, detail }));
   const success =
     report.acceptance.passed && report.taskError === null && report.harnessError === null;
-  return {
-    schemaVersion: 3,
+  const result: EvaluationResult = {
+    schemaVersion: 4,
     sampleId: scenario.name,
+    batch: { ...batch, attempt },
     runId: report.runId,
     productRevision: report.productRevision,
     scenarioContractVersion: report.scenarioContractVersion,
@@ -197,10 +283,14 @@ export function createEvaluationResult(
       providerRetryCounts: { ...report.executionMetrics.providerRetryCounts },
       toolCalls: report.executionMetrics.toolCalls,
       toolCounts: { ...report.executionMetrics.toolCounts },
+      fullInteractiveObservations: report.executionMetrics.fullInteractiveObservations,
       providerRequests: report.providerTrace.requestCount,
       compactionRequests: report.providerTrace.compactionRequestCount ?? 0,
       traversalSegments: report.executionMetrics.traversalSegments,
       screenshotFallbacks: report.executionMetrics.screenshotFallbacks,
+      screenshotFallbackReasons: {
+        ...report.executionMetrics.screenshotFallbackReasons,
+      },
       staleRefs: report.executionMetrics.staleRefs,
       stateMismatches: report.executionMetrics.stateMismatches,
       repeatedFingerprints: report.executionMetrics.repeatedFingerprints,
@@ -214,6 +304,9 @@ export function createEvaluationResult(
       toolDefinitionCharactersMax: report.executionMetrics.toolDefinitionCharactersMax,
       toolDefinitionSchemaChanges: report.executionMetrics.toolDefinitionSchemaChanges,
       toolDefinitionSchemaVariants: report.executionMetrics.toolDefinitionSchemaVariants,
+      enabledToolsets: [...report.executionMetrics.enabledToolsets],
+      skillCatalogDisclosureCount: report.executionMetrics.skillCatalogDisclosureCount,
+      exactReads: report.executionMetrics.exactReads,
       auditOutputCharactersByTool: {
         ...report.executionMetrics.auditOutputCharactersByTool,
       },
@@ -227,23 +320,71 @@ export function createEvaluationResult(
     },
     failure: success
       ? null
-      : { taskError: report.taskError, harnessError: report.harnessError, failedChecks },
-    sourceReport: `e2e/.runtime/live-results/${report.runId}/report.json`,
+      : {
+          taskError: report.taskError,
+          harnessError: report.harnessError,
+          failedChecks,
+        },
+    evidence: {
+      taskId: report.taskId.length === 0 ? null : report.taskId,
+      conversationId: report.conversationId.length === 0 ? null : report.conversationId,
+      toolResults: report.toolResults.map((result) => ({
+        ...result,
+        attachmentIds: [...result.attachmentIds],
+      })),
+      providerTrace: {
+        requestCount: report.providerTrace.requestCount,
+        requests: [...report.providerTrace.requests],
+        ...(report.providerTrace.compactionRequestCount === undefined
+          ? {}
+          : {
+              compactionRequestCount: report.providerTrace.compactionRequestCount,
+            }),
+        ...(report.providerTrace.compactionRequests === undefined
+          ? {}
+          : {
+              compactionRequests: [...report.providerTrace.compactionRequests],
+            }),
+      },
+    },
   };
+  return parseEvaluationResult(result, scenario.name, batch.id, filename);
 }
 
 /** Persists one success or failure attempt below its owning sample directory. */
 export async function writeEvaluationResult(
   repositoryRoot: string,
   scenario: LiveScenario,
+  batch: EvaluationBatch,
+  attempt: number,
   report: LiveRunReport,
 ): Promise<string> {
-  const directory = join(repositoryRoot, 'e2e', 'samples', scenario.name, 'results');
-  const path = join(directory, evaluationResultFilename(report));
+  const directory = join(
+    repositoryRoot,
+    'e2e',
+    'samples',
+    scenario.name,
+    batch.collection,
+    batch.id,
+  );
+  const path = join(directory, evaluationResultFilename(attempt));
   await mkdir(directory, { recursive: true });
-  await writeFile(path, `${JSON.stringify(createEvaluationResult(scenario, report), null, 2)}\n`, {
-    encoding: 'utf8',
-    flag: 'wx',
-  });
+  if (attempt > 1) {
+    const previousFilename = evaluationResultFilename(attempt - 1);
+    const previousExists = await stat(join(directory, previousFilename))
+      .then((entry) => entry.isFile())
+      .catch(() => false);
+    if (!previousExists) {
+      throw new Error(`Evaluation previous batch attempt ${previousFilename} is missing.`);
+    }
+  }
+  await writeFile(
+    path,
+    `${JSON.stringify(createEvaluationResult(scenario, batch, attempt, report), null, 2)}\n`,
+    {
+      encoding: 'utf8',
+      flag: 'wx',
+    },
+  );
   return path;
 }

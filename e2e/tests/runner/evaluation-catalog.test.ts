@@ -34,11 +34,25 @@ async function writeResult(
     readonly success: boolean;
     readonly toolCalls?: number;
     readonly schemaVersion?: number;
+    readonly collection?: 'results' | 'benchmark';
+    readonly batchStartedAt?: string;
+    readonly requestedRuns?: number;
+    readonly attempt?: number;
   },
 ): Promise<void> {
-  const timestamp = input.startedAt.replaceAll('-', '').replaceAll(':', '');
+  const batchStartedAt = input.batchStartedAt ?? input.startedAt;
+  const batchId = batchStartedAt.replaceAll('-', '').replaceAll(':', '');
+  const collection = input.collection ?? 'results';
+  const attempt = input.attempt ?? 1;
   const base = evaluationResult();
   const result = evaluationResult({
+    batch: {
+      collection,
+      id: batchId,
+      startedAt: batchStartedAt,
+      requestedRuns: input.requestedRuns ?? 1,
+      attempt,
+    },
     runId: input.runId,
     productRevision: input.productRevision,
     scenarioContractVersion: input.contractVersion,
@@ -57,12 +71,17 @@ async function writeResult(
     acceptance: { passed: input.success, checks: [] },
     failure: input.success
       ? null
-      : { taskError: null, harnessError: 'Synthetic failure.', failedChecks: [] },
-    sourceReport: `e2e/.runtime/live-results/${input.runId}/report.json`,
+      : {
+          taskError: null,
+          harnessError: 'Synthetic failure.',
+          failedChecks: [],
+        },
   });
+  const directory = join(root, 'e2e', 'samples', 'example-read', collection, batchId);
+  await mkdir(directory, { recursive: true });
   await writeFile(
-    join(root, 'e2e', 'samples', 'example-read', 'results', `${timestamp}__${input.runId}.json`),
-    `${JSON.stringify({ ...result, schemaVersion: input.schemaVersion ?? 3 })}\n`,
+    join(directory, `${String(attempt).padStart(2, '0')}.json`),
+    `${JSON.stringify({ ...result, schemaVersion: input.schemaVersion ?? 4 })}\n`,
     'utf8',
   );
 }
@@ -84,23 +103,27 @@ describe('evaluation catalog', () => {
           startUrl: 'https://example.com/document',
           taskText: 'Read the complete page without changing it.',
         }),
-        resultCount: 0,
-        passedResultCount: 0,
+        results: {
+          attempts: 0,
+          passed: 0,
+          currentContractAttempts: 0,
+          currentContractPassed: 0,
+          revisionBatches: [],
+        },
+        benchmark: {
+          attempts: 0,
+          passed: 0,
+          currentContractAttempts: 0,
+          currentContractPassed: 0,
+          revisionBatches: [],
+        },
       }),
     ]);
   });
 
-  it('indexes only the current result schema and groups results by product revision', async () => {
+  it('indexes only schema-v4 batch attempts and groups results by product revision', async () => {
     const root = await createRoot();
     await createSample(root);
-    await writeResult(root, {
-      runId: 'live_old',
-      startedAt: '2026-08-27T10:00:00.000Z',
-      contractVersion: 1,
-      productRevision: 'revision_old',
-      success: true,
-      schemaVersion: 99,
-    });
     await writeResult(root, {
       runId: 'live_current_pass',
       startedAt: '2026-08-27T10:01:00.000Z',
@@ -119,21 +142,23 @@ describe('evaluation catalog', () => {
     const catalog = await validateEvaluationCatalog(root);
 
     expect(catalog.samples[0]).toMatchObject({
-      resultCount: 2,
-      passedResultCount: 1,
-      currentContractResultCount: 2,
-      currentContractPassedResultCount: 1,
-      currentContractRevisionBatches: [
-        {
-          productRevision: 'revision_current',
-          resultCount: 2,
-          passedResultCount: 1,
-        },
-      ],
+      results: {
+        attempts: 2,
+        passed: 1,
+        currentContractAttempts: 2,
+        currentContractPassed: 1,
+        revisionBatches: [
+          {
+            productRevision: 'revision_current',
+            attempts: 2,
+            passed: 1,
+          },
+        ],
+      },
     });
   });
 
-  it('loads only strict current-schema results for comparisons', async () => {
+  it('rejects a non-v4 report instead of treating it as a compatible archive', async () => {
     const root = await createRoot();
     await createSample(root);
     await writeResult(root, {
@@ -142,22 +167,15 @@ describe('evaluation catalog', () => {
       contractVersion: 2,
       productRevision: 'revision_current',
       success: true,
-      schemaVersion: 2,
-    });
-    await writeResult(root, {
-      runId: 'live_current',
-      startedAt: '2026-08-27T10:01:00.000Z',
-      contractVersion: 2,
-      productRevision: 'revision_current',
-      success: true,
+      schemaVersion: 3,
     });
 
-    const results = await loadEvaluationResults(
-      join(root, 'e2e', 'samples', 'example-read', 'results'),
-      'example-read',
-    );
-
-    expect(results.map(({ runId }) => runId)).toEqual(['live_current']);
+    await expect(
+      loadEvaluationResults(
+        join(root, 'e2e', 'samples', 'example-read', 'results'),
+        'example-read',
+      ),
+    ).rejects.toThrow('schemaVersion must equal 4');
   });
 
   it('rejects a sample without its own results directory', async () => {
@@ -179,7 +197,7 @@ describe('evaluation catalog', () => {
     );
   });
 
-  it('rejects a result filename without a sortable UTC timestamp', async () => {
+  it('rejects an entry outside a sortable UTC batch directory', async () => {
     const root = await createRoot();
     await createSample(root);
     await writeFile(
@@ -189,7 +207,106 @@ describe('evaluation catalog', () => {
     );
 
     await expect(validateEvaluationCatalog(root)).rejects.toThrow(
-      'must use <UTC-timestamp>__<run-id>.json',
+      'must be a sortable UTC batch directory',
+    );
+  });
+
+  it('loads benchmark attempts independently from ordinary results', async () => {
+    const root = await createRoot();
+    await createSample(root);
+    await writeResult(root, {
+      runId: 'live_result',
+      startedAt: '2026-08-27T10:00:00.000Z',
+      contractVersion: 2,
+      productRevision: 'revision_result',
+      success: true,
+    });
+    await writeResult(root, {
+      runId: 'live_benchmark_1',
+      startedAt: '2026-08-27T10:01:00.000Z',
+      batchStartedAt: '2026-08-27T10:00:30.000Z',
+      contractVersion: 2,
+      productRevision: 'revision_benchmark',
+      success: true,
+      collection: 'benchmark',
+      requestedRuns: 2,
+      attempt: 1,
+    });
+    await writeResult(root, {
+      runId: 'live_benchmark_2',
+      startedAt: '2026-08-27T10:02:00.000Z',
+      batchStartedAt: '2026-08-27T10:00:30.000Z',
+      contractVersion: 2,
+      productRevision: 'revision_benchmark',
+      success: true,
+      collection: 'benchmark',
+      requestedRuns: 2,
+      attempt: 2,
+    });
+
+    const results = await loadEvaluationResults(
+      join(root, 'e2e', 'samples', 'example-read', 'results'),
+      'example-read',
+    );
+    const benchmark = await loadEvaluationResults(
+      join(root, 'e2e', 'samples', 'example-read', 'benchmark'),
+      'example-read',
+    );
+
+    expect(results.map(({ runId }) => runId)).toEqual(['live_result']);
+    expect(benchmark.map(({ runId }) => runId)).toEqual(['live_benchmark_1', 'live_benchmark_2']);
+    const catalog = await validateEvaluationCatalog(root);
+    expect(catalog.samples[0]).toMatchObject({
+      results: { attempts: 1 },
+      benchmark: { attempts: 2, passed: 2 },
+    });
+  });
+
+  it('rejects a batch whose persisted attempt sequence starts after 01', async () => {
+    const root = await createRoot();
+    await createSample(root);
+    await writeResult(root, {
+      runId: 'live_gap',
+      startedAt: '2026-08-27T10:01:00.000Z',
+      batchStartedAt: '2026-08-27T10:00:30.000Z',
+      contractVersion: 2,
+      productRevision: 'revision_current',
+      success: true,
+      requestedRuns: 2,
+      attempt: 2,
+    });
+
+    await expect(validateEvaluationCatalog(root)).rejects.toThrow(
+      'attempt files must be contiguous from 01.json',
+    );
+  });
+
+  it('rejects inconsistent metadata inside one batch directory', async () => {
+    const root = await createRoot();
+    await createSample(root);
+    const common = {
+      batchStartedAt: '2026-08-27T10:00:30.000Z',
+      contractVersion: 2,
+      productRevision: 'revision_current',
+      success: true,
+      requestedRuns: 2,
+    } as const;
+    await writeResult(root, {
+      ...common,
+      runId: 'live_consistent_1',
+      startedAt: '2026-08-27T10:01:00.000Z',
+      attempt: 1,
+    });
+    await writeResult(root, {
+      ...common,
+      runId: 'live_inconsistent_2',
+      startedAt: '2026-08-27T10:02:00.000Z',
+      productRevision: 'revision_other',
+      attempt: 2,
+    });
+
+    await expect(validateEvaluationCatalog(root)).rejects.toThrow(
+      'product revision must be consistent within its batch',
     );
   });
 

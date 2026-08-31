@@ -1,4 +1,8 @@
-import { createEvaluationResult, type EvaluationResult } from '../../runner/evaluation-result';
+import {
+  createEvaluationBatch,
+  createEvaluationResult,
+  type EvaluationResult,
+} from '../../runner/evaluation-result';
 import type { LiveRunReport, LiveScenario } from '../../runner/live-types';
 import type { EvaluationSampleDefinition } from '../../runner/sample-loader';
 
@@ -142,7 +146,12 @@ export function liveRunReport(overrides: Partial<LiveRunReport> = {}): LiveRunRe
 
 export function evaluationResult(overrides: Partial<EvaluationResult> = {}): EvaluationResult {
   return {
-    ...createEvaluationResult(liveScenario(), liveRunReport()),
+    ...createEvaluationResult(
+      liveScenario(),
+      createEvaluationBatch('results', '2026-08-27T12:30:00.000Z', 1),
+      1,
+      liveRunReport(),
+    ),
     ...overrides,
   };
 }

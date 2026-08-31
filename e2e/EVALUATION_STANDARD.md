@@ -7,10 +7,9 @@ owns environment reconstruction and commands. SAMPLE_SPEC.md owns data formats.
 
 - A sample fixes one target, exact input, execution budget, side-effect mode, and deterministic
   acceptance policy.
-- An attempt starts one fresh WorkSession and ends with one immutable result.
-- A batch is the sample's predeclared attempt count for one product revision.
-- A raw report is detailed machine-local diagnostic evidence.
-- A standard result is the portable factual record used for comparison.
+- An attempt starts one fresh WorkSession and ends with one immutable report.
+- A batch is one command's ordered attempts for one product revision and one timestamp directory.
+- `results/` stores ordinary runs; `benchmark/` stores formal comparable batches.
 
 Freeze `sample.json` before the first attempt. Increment `contractVersion` when task, input,
 side-effect, or acceptance semantics change. Never loosen a check after observing a result.
@@ -28,8 +27,8 @@ Rebuild and verify the environment with `RUNBOOK.md`, then:
 4. Only after the first attempt passes, run the predeclared batch.
 5. Compare immutable attempt facts; never cherry-pick retries.
 
-Once a run ID exists, persist exactly one immutable result for every terminal outcome. A fix creates
-a new attempt; it never replaces the old result.
+Once a run ID exists, persist exactly one immutable report for every terminal outcome. A fix creates
+a new attempt; it never replaces the old report.
 
 ## Evidence and Pass Decision
 
@@ -38,7 +37,7 @@ Inspect the contract-relevant evidence:
 - Final user-visible output, terminal status, harness error, and every acceptance check.
 - Tool sequence, arguments, results, total calls, and per-tool counts.
 - Independent page readback for a declared mutation.
-- Raw report, execution metrics, and relevant extension logs.
+- Execution metrics, detailed bounded tool evidence, and relevant extension logs.
 - Sanitized Provider request and response structure when Provider behavior is material.
 
 An attempt passes only when all applicable facts agree:
@@ -68,8 +67,8 @@ a declared tool choice. Replay encrypted reasoning exactly once for its model tu
 
 ## Failure Handling
 
-Preserve the result, raw report, logs, and bounded sanitized Provider evidence. Classify the first
-material failure before another attempt:
+Preserve the report, logs, and bounded sanitized Provider evidence. Classify the first material
+failure before another attempt:
 
 | Classification         | Closure                                                                                         |
 | ---------------------- | ----------------------------------------------------------------------------------------------- |
@@ -96,10 +95,11 @@ Compare only attempts with:
 Use:
 
 ```bash
-npm run --silent e2e:results:compare -- <sample-id> <left-revision> <right-revision> [runs]
+npm run --silent e2e:benchmark:compare -- <sample-id> <left-revision> <right-revision> [runs]
 ```
 
-The command selects the earliest N current-contract results per revision; N defaults to
+The command reads only `benchmark/` and selects the earliest N current-contract reports per
+revision; N defaults to
 `requiredRuns`. It retains observed success rates but emits `null` deltas when evidence integrity
 prevents comparison. Deltas are right minus left. Report success rate, mean and P95 duration,
 cache read/write Tokens, first-event/first-text latency, rounds, Provider requests/retries, total

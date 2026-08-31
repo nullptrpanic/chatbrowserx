@@ -1,6 +1,6 @@
 import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { persistLiveEvaluationAttempt } from './live-result-writer';
+import { createEvaluationBatch, writeEvaluationResult } from './evaluation-result';
 import { runLiveBenchmark } from './live-benchmark';
 import { withExistingLiveSession } from './live-session';
 import { resolveLiveProductTarget, resolveProductRevision } from './product-revision';
@@ -36,6 +36,7 @@ async function main(): Promise<void> {
     workspaceRevision: await resolveProductRevision(repositoryRoot),
   });
   const productRevision = productTarget.productRevision;
+  const batch = createEvaluationBatch('benchmark', new Date().toISOString(), parsed.runs);
   const benchmark = await withExistingLiveSession(
     { repositoryRoot, environment: process.env, productTarget },
     async (session) => {
@@ -45,14 +46,20 @@ async function main(): Promise<void> {
         runs: parsed.runs,
         productRevision,
         scenarioContractVersion: scenario.contractVersion,
-        async runAttempt() {
+        async runAttempt(attempt) {
           const report = await runLiveScenario(
             runtime,
             scenario,
             createLiveRunDependencies(productRevision),
           );
-          const persisted = await persistLiveEvaluationAttempt(repositoryRoot, scenario, report);
-          process.stdout.write(`Evaluation result: ${persisted.evaluationResultPath}\n`);
+          const reportPath = await writeEvaluationResult(
+            repositoryRoot,
+            scenario,
+            batch,
+            attempt,
+            report,
+          );
+          process.stdout.write(`Evaluation report: ${reportPath}\n`);
           return report;
         },
       });

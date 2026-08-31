@@ -1,6 +1,6 @@
 import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { persistLiveEvaluationAttempt } from './live-result-writer';
+import { createEvaluationBatch, writeEvaluationResult } from './evaluation-result';
 import { withExistingLiveSession } from './live-session';
 import {
   createLiveRunDependencies,
@@ -28,6 +28,7 @@ async function main(): Promise<void> {
     workspaceRevision,
   });
   const dependencies = createLiveRunDependencies(productTarget.productRevision);
+  const batch = createEvaluationBatch('results', new Date().toISOString(), 1);
   let report: LiveRunReport;
   try {
     validateEvaluationSampleAuthorization(scenario, process.env);
@@ -39,9 +40,8 @@ async function main(): Promise<void> {
     report = createLiveHarnessFailureReport(scenario, error, dependencies);
   }
 
-  const persisted = await persistLiveEvaluationAttempt(repositoryRoot, scenario, report);
-  process.stdout.write(`Live E2E report: ${persisted.rawReportPath}\n`);
-  process.stdout.write(`Evaluation result: ${persisted.evaluationResultPath}\n`);
+  const reportPath = await writeEvaluationResult(repositoryRoot, scenario, batch, 1, report);
+  process.stdout.write(`Evaluation report: ${reportPath}\n`);
   process.stdout.write(`terminalStatus: ${report.terminalStatus}\n`);
   for (const check of report.acceptance.checks) {
     process.stdout.write(`${check.passed ? 'PASS' : 'FAIL'} ${check.name}: ${check.detail}\n`);

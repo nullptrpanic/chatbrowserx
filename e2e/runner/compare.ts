@@ -16,7 +16,7 @@ function parseArguments(arguments_: readonly string[]): {
   const values = arguments_[0] === '--' ? arguments_.slice(1) : [...arguments_];
   if (values.length < 3 || values.length > 4) {
     throw new Error(
-      'Usage: npm run e2e:results:compare -- <sample-id> <left-revision> <right-revision> [runs].',
+      'Usage: npm run e2e:benchmark:compare -- <sample-id> <left-revision> <right-revision> [runs].',
     );
   }
   const [sampleId = '', leftRevision = '', rightRevision = '', runsText] = values;
@@ -41,7 +41,7 @@ async function main(): Promise<void> {
   const sample = catalog.samples.find(({ id }) => id === parsed.sampleId);
   if (sample === undefined)
     throw new Error(`Evaluation sample "${parsed.sampleId}" was not found.`);
-  const results = await loadEvaluationResults(join(sample.directory, 'results'), sample.id);
+  const results = await loadEvaluationResults(join(sample.directory, 'benchmark'), sample.id);
   const comparison = compareEvaluationResultBatches({
     sampleId: sample.id,
     scenarioContractVersion: sample.contractVersion,

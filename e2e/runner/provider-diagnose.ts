@@ -1,6 +1,6 @@
 import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { persistLiveEvaluationAttempt } from './live-result-writer';
+import { createEvaluationBatch, writeEvaluationResult } from './evaluation-result';
 import { withExistingLiveSession } from './live-session';
 import { ResponsesRequestReplayProbe, type ProviderReplayResult } from './provider-replay';
 import { resolveLiveProductTarget, resolveProductRevision } from './product-revision';
@@ -29,6 +29,7 @@ async function main(): Promise<void> {
     workspaceRevision,
   });
   const dependencies = createLiveRunDependencies(productTarget.productRevision);
+  const batch = createEvaluationBatch('results', new Date().toISOString(), 1);
   let report: LiveRunReport;
   let replay: ProviderReplayResult | null = null;
   let replayError: string | null = null;
@@ -58,10 +59,9 @@ async function main(): Promise<void> {
     report = createLiveHarnessFailureReport(scenario, error, dependencies);
   }
 
-  const persisted = await persistLiveEvaluationAttempt(repositoryRoot, scenario, report);
+  const reportPath = await writeEvaluationResult(repositoryRoot, scenario, batch, 1, report);
   const original = report.providerTrace.requests.at(-1) ?? null;
-  process.stdout.write(`Live E2E report: ${persisted.rawReportPath}\n`);
-  process.stdout.write(`Evaluation result: ${persisted.evaluationResultPath}\n`);
+  process.stdout.write(`Evaluation report: ${reportPath}\n`);
   process.stdout.write(
     `${JSON.stringify(
       {

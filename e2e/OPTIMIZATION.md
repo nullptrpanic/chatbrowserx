@@ -113,7 +113,8 @@ The following are excluded unless a future reproducible defect changes the decis
 
 For each candidate, update only its row and append one concise entry containing the date, product
 revisions, sample counts, success rates, relevant mean/P95 deltas, and the admit/reject reason. Raw
-attempt facts remain in each ignored sample's `results/` directory; do not duplicate them here.
+attempt facts remain in each ignored sample's `results/` or `benchmark/` directory; do not
+duplicate them here.
 
 - 2026-08-29 — Phase 0 admitted against unchanged product
   `59f69065fad47886f63adc97897cae6858a3e870`. Deterministic evidence checks passed 124/124,
@@ -142,7 +143,7 @@ attempt facts remain in each ignored sample's `results/` directory; do not dupli
   `59f69065fad47886f63adc97897cae6858a3e870-dirty-33a79e04560d1e01`. The baseline retained only
   the first 64 KiB and failed the diagnostic-tail contract 0/1; the candidate retained one bounded
   head-tail result and passed 3/3, with exactly one `sandbox_exec` call in every valid attempt.
-  The persisted report remained redacted and capped at 50,000 characters while the in-memory
+  The persisted evidence remained redacted and capped at 50,000 characters while the in-memory
   evaluator used the complete 65,591-character durable fact. No Token or latency benefit is
   claimed. The final product revision then passed named section 5/5, full analysis 5/5, Messenger
   global search 5/5, Messenger month 1/1, network evidence 1/1, exam selection 1/1, and LeetCode

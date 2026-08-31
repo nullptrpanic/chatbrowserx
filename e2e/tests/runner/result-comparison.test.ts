@@ -42,8 +42,11 @@ function result(
     acceptance: { passed: success, checks: [] },
     failure: success
       ? null
-      : { taskError: 'Product task failed.', harnessError: null, failedChecks: [] },
-    sourceReport: `e2e/.runtime/live-results/${runId}/report.json`,
+      : {
+          taskError: 'Product task failed.',
+          harnessError: null,
+          failedChecks: [],
+        },
   });
 }
 

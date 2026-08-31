@@ -3,6 +3,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import {
+  createEvaluationBatch,
   createEvaluationResult,
   evaluationResultFilename,
   parseEvaluationResult,
@@ -12,6 +13,7 @@ import type { LiveRunReport } from '../../runner/live-types';
 import { liveRunReport, liveScenario } from './fixtures';
 
 const scenario = liveScenario();
+const batch = createEvaluationBatch('results', '2026-08-27T12:30:00.000Z', 5);
 
 function report(overrides: Partial<LiveRunReport> = {}): LiveRunReport {
   const base = liveRunReport();
@@ -26,13 +28,20 @@ function report(overrides: Partial<LiveRunReport> = {}): LiveRunReport {
 }
 
 describe('evaluation result', () => {
-  it('records one comparable successful attempt with materialized input and all token counters', () => {
-    const result = createEvaluationResult(scenario, report());
+  it('records one self-contained batch attempt with comparison facts and diagnostic evidence', () => {
+    const result = createEvaluationResult(scenario, batch, 2, report());
 
     expect(result).toEqual(
       expect.objectContaining({
-        schemaVersion: 3,
+        schemaVersion: 4,
         sampleId: 'example-read',
+        batch: {
+          collection: 'results',
+          id: '20260827T123000.000Z',
+          startedAt: '2026-08-27T12:30:00.000Z',
+          requestedRuns: 5,
+          attempt: 2,
+        },
         runId: 'live_abc-123',
         productRevision: 'revision-dirty-fingerprint',
         scenarioContractVersion: 3,
@@ -58,53 +67,67 @@ describe('evaluation result', () => {
           providerRetryCounts: { 'transient_model_retry:upstream_failure': 1 },
           toolCalls: 1,
           toolCounts: { browser_inspect: 1 },
+          fullInteractiveObservations: 1,
+          screenshotFallbackReasons: {},
+          enabledToolsets: [],
+          skillCatalogDisclosureCount: 0,
+          exactReads: 0,
           toolDefinitionCharactersTotal: 11_000,
           toolDefinitionCharactersMax: 5_500,
           toolDefinitionSchemaChanges: 0,
           toolDefinitionSchemaVariants: 0,
         }),
+        evidence: {
+          taskId: 'task_1',
+          conversationId: 'conversation_1',
+          toolResults: [],
+          providerTrace: { requestCount: 2, requests: [] },
+        },
       }),
     );
+    expect(result).not.toHaveProperty('sourceReport');
   });
 
-  it('uses a sortable millisecond UTC timestamp and run ID in every filename', () => {
-    expect(evaluationResultFilename(report())).toBe('20260827T123346.514Z__live_abc-123.json');
+  it('uses one sortable timestamp directory and simple ordered attempt filenames', () => {
+    expect(batch.id).toBe('20260827T123000.000Z');
+    expect(evaluationResultFilename(1)).toBe('01.json');
+    expect(evaluationResultFilename(5)).toBe('05.json');
   });
 
   it('rejects fields outside the current result schema', () => {
     const result = {
-      ...createEvaluationResult(scenario, report()),
+      ...createEvaluationResult(scenario, batch, 2, report()),
       extraMetric: 1,
     };
 
-    expect(() =>
-      parseEvaluationResult(result, scenario.name, '20260827T123346.514Z__live_abc-123.json'),
-    ).toThrow('extraMetric is not supported');
+    expect(() => parseEvaluationResult(result, scenario.name, batch.id, '02.json')).toThrow(
+      'extraMetric is not supported',
+    );
   });
 
-  it('loads earlier schema-v3 failures that predate the task-error split', () => {
-    const current = createEvaluationResult(
+  it('rejects a v4 failure that omits a required field', () => {
+    const result = createEvaluationResult(
       scenario,
+      batch,
+      1,
       report({
         acceptance: { passed: false, checks: [] },
-        harnessError: 'Synthetic harness failure.',
+        taskError: 'Product task failed.',
       }),
     );
-    const legacyFailure = { ...current.failure } as Record<string, unknown>;
-    delete legacyFailure.taskError;
+    const failure = { ...result.failure } as Record<string, unknown>;
+    delete failure.taskError;
 
-    const parsed = parseEvaluationResult(
-      { ...current, failure: legacyFailure },
-      scenario.name,
-      '20260827T123346.514Z__live_abc-123.json',
-    );
-
-    expect(parsed.failure?.taskError).toBeNull();
+    expect(() =>
+      parseEvaluationResult({ ...result, failure }, scenario.name, batch.id, '01.json'),
+    ).toThrow('failure.taskError');
   });
 
   it('records product task failures separately from harness failures', () => {
     const result = createEvaluationResult(
       scenario,
+      batch,
+      1,
       report({
         terminalStatus: 'paused',
         finalText: '',
@@ -130,25 +153,73 @@ describe('evaluation result', () => {
     });
   });
 
-  it('writes exactly one timestamped JSON file below the owning sample results directory', async () => {
-    const root = await mkdtemp(join(tmpdir(), 'chatbrowserx-e2e-result-'));
+  it('represents unavailable preflight execution identities as null', () => {
+    const result = createEvaluationResult(
+      scenario,
+      batch,
+      1,
+      report({
+        terminalStatus: 'preflight_failed',
+        taskId: '',
+        conversationId: '',
+        finalText: '',
+        acceptance: { passed: false, checks: [] },
+        harnessError: 'Authentication is unavailable.',
+      }),
+    );
 
-    const path = await writeEvaluationResult(root, scenario, report());
+    expect(result.evidence).toMatchObject({ taskId: null, conversationId: null });
+    expect(() => parseEvaluationResult(result, scenario.name, batch.id, '01.json')).not.toThrow();
+  });
+
+  it('writes one report directly below its batch directory', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'chatbrowserx-e2e-result-'));
+    await writeEvaluationResult(root, scenario, batch, 1, report({ runId: 'live_first' }));
+
+    const path = await writeEvaluationResult(root, scenario, batch, 2, report());
 
     expect(path).toBe(
-      join(
-        root,
-        'e2e',
-        'samples',
-        'example-read',
-        'results',
-        '20260827T123346.514Z__live_abc-123.json',
-      ),
+      join(root, 'e2e', 'samples', 'example-read', 'results', '20260827T123000.000Z', '02.json'),
     );
     const stored = JSON.parse(await readFile(path, 'utf8')) as {
       success: boolean;
       runId: string;
+      batch: { attempt: number };
     };
-    expect(stored).toEqual(expect.objectContaining({ success: true, runId: 'live_abc-123' }));
+    expect(stored).toEqual(
+      expect.objectContaining({
+        success: true,
+        runId: 'live_abc-123',
+        batch: expect.objectContaining({ attempt: 2 }),
+      }),
+    );
+  });
+
+  it('rejects an attempt that would create a gap in its batch', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'chatbrowserx-e2e-gap-'));
+
+    await expect(writeEvaluationResult(root, scenario, batch, 2, report())).rejects.toThrow(
+      'previous batch attempt 01.json is missing',
+    );
+  });
+
+  it('uses the same report layout in the parallel benchmark collection', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'chatbrowserx-e2e-benchmark-'));
+    const benchmark = createEvaluationBatch('benchmark', '2026-08-27T12:31:00.000Z', 5);
+    for (let attempt = 1; attempt < 5; attempt += 1) {
+      await writeEvaluationResult(
+        root,
+        scenario,
+        benchmark,
+        attempt,
+        report({ runId: `live_${String(attempt)}` }),
+      );
+    }
+
+    const path = await writeEvaluationResult(root, scenario, benchmark, 5, report());
+
+    expect(path).toBe(
+      join(root, 'e2e', 'samples', 'example-read', 'benchmark', '20260827T123100.000Z', '05.json'),
+    );
   });
 });
