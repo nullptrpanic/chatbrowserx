@@ -204,4 +204,47 @@ describe('SandboxToolExecutor sandbox_exec', () => {
     expect(new TextEncoder().encode(output.stderr).byteLength).toBe(64 * 1024);
     expect(output.truncated).toBe(true);
   });
+
+  it('replaces an oversized command stream with one bounded head-tail result', async () => {
+    const tail = 'CHATBROWSERX_TAIL_DIAGNOSTIC_9471';
+    const current = fixture({
+      code: 7,
+      stdout: `HEAD\n${'x'.repeat(70 * 1024)}\n${tail}\n`,
+      stderr: '',
+    });
+
+    const result = await current.executor.execute(execCall(null), SIGNAL);
+
+    const output = JSON.parse(result);
+    expect(output.stdout).toContain('HEAD');
+    expect(output.stdout).toContain('[... middle output omitted; tail follows ...]');
+    expect(output.stdout).toContain(tail);
+    expect(new TextEncoder().encode(output.stdout).byteLength).toBeLessThanOrEqual(64 * 1024);
+  });
+
+  it('applies the same head-tail projection when recovering a finished command', async () => {
+    const tail = 'RECOVERED_TAIL_DIAGNOSTIC';
+    const current = fixture(
+      { code: 0, stdout: '', stderr: '' },
+      {
+        status: 'finished',
+        executionId: 'sandboxExecution_1',
+        outcome: 'failed',
+        exitCode: 9,
+        stdout: `HEAD\n${'x'.repeat(70 * 1024)}\n${tail}\n`,
+        stderr: '',
+        stdoutTruncated: false,
+        stderrTruncated: false,
+      },
+    );
+
+    const recovery = await current.executor.recover('sandboxExecution_1', SIGNAL);
+
+    expect(recovery.status).toBe('finished');
+    if (recovery.status !== 'finished') throw new Error('Expected finished recovery.');
+    expect(JSON.parse(recovery.output).stdout).toContain(
+      '[... middle output omitted; tail follows ...]',
+    );
+    expect(JSON.parse(recovery.output).stdout).toContain(tail);
+  });
 });

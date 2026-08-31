@@ -2,6 +2,7 @@ import type { ParsedSandboxToolCall } from '../agent/tools/sandbox-tool-schema';
 import type { SandboxClientPort } from './sandbox-client';
 
 const MAX_STREAM_BYTES = 64 * 1024;
+const OMITTED_OUTPUT_MARKER = '\n[... middle output omitted; tail follows ...]\n';
 
 const READ_COMMAND = `set -euo pipefail
 path="\${CHATBROWSERX_READ_PATH:?}"
@@ -48,6 +49,46 @@ function boundUtf8(value: string): BoundedText {
   };
 }
 
+function boundUtf8HeadTail(value: string): BoundedText {
+  const encoded = new TextEncoder().encode(value);
+  if (encoded.byteLength <= MAX_STREAM_BYTES) return { text: value, truncated: false };
+
+  const marker = new TextEncoder().encode(OMITTED_OUTPUT_MARKER);
+  const retainedBytes = MAX_STREAM_BYTES - marker.byteLength;
+  let headEnd = Math.floor((retainedBytes * 7) / 8);
+  while (headEnd > 0 && ((encoded[headEnd] ?? 0) & 0xc0) === 0x80) headEnd -= 1;
+  let tailStart = encoded.byteLength - (retainedBytes - headEnd);
+  while (tailStart < encoded.byteLength && ((encoded[tailStart] ?? 0) & 0xc0) === 0x80) {
+    tailStart += 1;
+  }
+  const decoder = new TextDecoder();
+  return {
+    text: `${decoder.decode(encoded.slice(0, headEnd))}${OMITTED_OUTPUT_MARKER}${decoder.decode(
+      encoded.slice(tailStart),
+    )}`,
+    truncated: true,
+  };
+}
+
+function commandOutput(
+  code: number,
+  rawStdout: string,
+  rawStderr: string,
+  transportTruncated: boolean,
+  executionStatus: Readonly<Record<string, string>> = {},
+): string {
+  const stdout = boundUtf8HeadTail(rawStdout);
+  const stderr = boundUtf8HeadTail(rawStderr);
+  const truncated = transportTruncated || stdout.truncated || stderr.truncated;
+  return JSON.stringify({
+    code,
+    stdout: stdout.text,
+    stderr: stderr.text,
+    truncated,
+    ...executionStatus,
+  });
+}
+
 export class SandboxToolExecutor implements SandboxExecutionPort {
   readonly #client: SandboxClientPort;
 
@@ -70,25 +111,19 @@ export class SandboxToolExecutor implements SandboxExecutionPort {
     const receipt = await this.#client.getExecution(executionId, signal);
     if (receipt.status !== 'finished') return { status: receipt.status };
 
-    const stdout = boundUtf8(receipt.stdout);
-    const stderr = boundUtf8(receipt.stderr);
     const executionStatus =
       receipt.exitCode === null || !['succeeded', 'failed'].includes(receipt.outcome)
         ? { executionStatus: receipt.outcome }
         : {};
     return {
       status: 'finished',
-      output: JSON.stringify({
-        code: receipt.exitCode ?? 1,
-        stdout: stdout.text,
-        stderr: stderr.text,
-        truncated:
-          receipt.stdoutTruncated ||
-          receipt.stderrTruncated ||
-          stdout.truncated ||
-          stderr.truncated,
-        ...executionStatus,
-      }),
+      output: commandOutput(
+        receipt.exitCode ?? 1,
+        receipt.stdout,
+        receipt.stderr,
+        receipt.stdoutTruncated || receipt.stderrTruncated,
+        executionStatus,
+      ),
     };
   }
 
@@ -150,13 +185,6 @@ export class SandboxToolExecutor implements SandboxExecutionPort {
       },
       signal,
     );
-    const stdout = boundUtf8(result.stdout);
-    const stderr = boundUtf8(result.stderr);
-    return JSON.stringify({
-      code: result.code,
-      stdout: stdout.text,
-      stderr: stderr.text,
-      truncated: stdout.truncated || stderr.truncated,
-    });
+    return commandOutput(result.code, result.stdout, result.stderr, false);
   }
 }
