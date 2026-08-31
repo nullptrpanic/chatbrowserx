@@ -66,6 +66,7 @@ async function main(): Promise<void> {
     `${JSON.stringify(
       {
         terminalStatus: report.terminalStatus,
+        taskError: report.taskError,
         harnessError: report.harnessError,
         replayError,
         original:

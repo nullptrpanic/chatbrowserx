@@ -110,7 +110,9 @@ acceptance checks, and product safety rules.
 | requireVerticalBoundaryCoverage      | boolean                | no       | Require ordered top-before-bottom evidence.                        |
 | maxAttachmentCount                   | non-negative integer   | no       | Maximum durable image references in tool results.                  |
 | requiredTypedTextIncludes            | string array           | no       | Literals required in captured typing arguments.                    |
-| requiredToolOutputIncludes           | string array           | no       | Literals required in captured tool output.                         |
+| allowedKeypresses                    | non-empty string array | no       | Exact navigation key sequences allowed for `browser_keypress`.     |
+| requiredToolResultIncludes           | string array           | no       | Literals required in at least one complete durable tool result.    |
+| requiredToolOutputIncludes           | string array           | no       | Literals required as post-submit static page text.                 |
 | finalTextIncludesAny                 | array of string arrays | no       | Require one alternative from every inner group.                    |
 | requireFreshProviderContext          | boolean                | no       | Require only the active request in the first Provider context.     |
 | finalTextExcludes                    | string array           | no       | Any normalized matching literal fails output.                      |
@@ -165,38 +167,44 @@ acceptance checks, and product safety rules.
 }
 ```
 
-## Standard Result Schema Version 2
+## Standard Result Schema Version 3
 
 All fields below are required. failure is null for a pass and an object for a failure.
 
-| Field                                             | Meaning                                                                                                |
-| ------------------------------------------------- | ------------------------------------------------------------------------------------------------------ |
-| schemaVersion                                     | Exactly 2.                                                                                             |
-| sampleId / runId                                  | Sample identity and unique attempt identity.                                                           |
-| productRevision                                   | Product revision or explicit isolated-build label.                                                     |
-| scenarioContractVersion                           | Contract version used by the attempt.                                                                  |
-| startedAt / endedAt / elapsedMs                   | UTC boundaries and wall-clock duration.                                                                |
-| terminalStatus / success                          | Product terminal state and final evaluation decision.                                                  |
-| input.text / output.text                          | Materialized request and final output; failed output may be empty.                                     |
-| tokenUsage.inputTokens                            | Provider-reported input tokens.                                                                        |
-| tokenUsage.outputTokens                           | Provider-reported output tokens.                                                                       |
-| tokenUsage.totalTokens                            | Provider-reported total tokens.                                                                        |
-| tokenUsage.cachedInputTokens                      | Cached input tokens.                                                                                   |
-| tokenUsage.reasoningOutputTokens                  | Reasoning output tokens.                                                                               |
-| execution.modelElapsedMs / modelRounds            | Cumulative model time and round count.                                                                 |
-| execution.providerRetries / providerRetryCounts   | Total retries and counts by persisted reason.                                                          |
-| execution.toolCalls / toolCounts                  | Total Tool Calls and counts by tool name.                                                              |
-| execution.providerRequests / compactionRequests   | Provider requests and unsupported compact calls.                                                       |
-| execution.traversalSegments / screenshotFallbacks | Structured traversal and screenshot fallback counts.                                                   |
-| execution.staleRefs / stateMismatches             | Stale semantic references and post-action mismatches.                                                  |
-| execution.repeatedFingerprints / noProgressBlocks | Repeated actions and no-progress blocks.                                                               |
-| execution.verifiedMutations / ambiguousMutations  | Verified and ambiguous mutation counts.                                                                |
-| execution.auditOutputCharacters                   | Tool-output characters retained for audit.                                                             |
-| execution.modelOutputCharacters                   | Tool-output characters exposed to the model.                                                           |
-| execution.modelOutputReductionCharacters          | Audit characters minus model-visible characters.                                                       |
-| acceptance.passed / acceptance.checks             | Overall machine decision and each named check.                                                         |
-| failure.harnessError / failedChecks               | Sanitized harness error and failed check facts; evidence protocol defects use `E2E_EVIDENCE_MISMATCH`. |
-| sourceReport                                      | Relative pointer to the machine-local raw report.                                                      |
+| Field                                             | Meaning                                                                                             |
+| ------------------------------------------------- | --------------------------------------------------------------------------------------------------- |
+| schemaVersion                                     | Exactly 3.                                                                                          |
+| sampleId / runId                                  | Sample identity and unique attempt identity.                                                        |
+| productRevision                                   | Product revision or explicit isolated-build label.                                                  |
+| scenarioContractVersion                           | Contract version used by the attempt.                                                               |
+| startedAt / endedAt / elapsedMs                   | UTC boundaries and wall-clock duration.                                                             |
+| terminalStatus / success                          | Product terminal state and final evaluation decision.                                               |
+| input.text / output.text                          | Materialized request and final output; failed output may be empty.                                  |
+| tokenUsage.inputTokens                            | Provider-reported input tokens.                                                                     |
+| tokenUsage.outputTokens                           | Provider-reported output tokens.                                                                    |
+| tokenUsage.totalTokens                            | Provider-reported total tokens.                                                                     |
+| tokenUsage.cachedInputTokens                      | Cached input tokens.                                                                                |
+| tokenUsage.cacheWriteInputTokens                  | Cache-write input tokens reported by the Provider.                                                  |
+| tokenUsage.reasoningOutputTokens                  | Reasoning output tokens.                                                                            |
+| execution.modelElapsedMs / modelRounds            | Cumulative model time and round count.                                                              |
+| execution.firstEventMs / firstTextMs              | First turn event latency and first text-producing turn latency; zero when unavailable.              |
+| execution.providerRetries / providerRetryCounts   | Total retries and counts by persisted reason.                                                       |
+| execution.toolCalls / toolCounts                  | Total Tool Calls and counts by tool name.                                                           |
+| execution.providerRequests / compactionRequests   | Provider requests and unsupported compact calls.                                                    |
+| execution.traversalSegments / screenshotFallbacks | Structured traversal and screenshot fallback counts.                                                |
+| execution.staleRefs / stateMismatches             | Stale semantic references and post-action mismatches.                                               |
+| execution.repeatedFingerprints / noProgressBlocks | Repeated actions and no-progress blocks.                                                            |
+| execution.verifiedMutations / ambiguousMutations  | Verified and ambiguous mutation counts.                                                             |
+| execution.auditOutputCharacters                   | Tool-output characters retained for audit.                                                          |
+| execution.modelOutputCharacters                   | Tool-output characters exposed to the model.                                                        |
+| execution.modelOutputReductionCharacters          | Audit characters minus model-visible characters.                                                    |
+| execution.toolDefinitionCharactersTotal / Max     | Repeated tool-contract size across Provider requests and its per-request maximum.                   |
+| execution.toolDefinitionSchemaChanges / Variants  | Ordered tool-contract changes and distinct contract fingerprints.                                   |
+| execution.auditOutputCharactersByTool             | Audit-output characters grouped by tool name.                                                       |
+| execution.modelOutputCharactersByTool             | Model-visible output characters grouped by tool name.                                               |
+| acceptance.passed / acceptance.checks             | Overall machine decision and each named check.                                                      |
+| failure.taskError / harnessError / failedChecks   | Product task error, harness error, and failed checks; evidence defects use `E2E_EVIDENCE_MISMATCH`. |
+| sourceReport                                      | Relative pointer to the machine-local raw report.                                                   |
 
 The filename is derived from startedAt and runId, for example:
 
@@ -206,4 +214,6 @@ The filename is derived from startedAt and runId, for example:
 
 Writers use exclusive creation. Result history is sufficient for portable comparison;
 `sourceReport` may point to diagnostics that were not transported. The catalog indexes only schema
-version 2; other formats are outside the current contract.
+version 3; other formats are outside the current contract. Current writers always emit
+`failure.taskError`; the parser treats its absence in earlier version 3 results as `null` so
+immutable results created before the failure split remain readable.

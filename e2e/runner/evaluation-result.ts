@@ -22,7 +22,7 @@ const failureCheckSchema = z.object({ name: nonEmptyString, detail: nonEmptyStri
 
 const evaluationResultSchema = z
   .object({
-    schemaVersion: z.literal(2, { error: 'must equal 2.' }),
+    schemaVersion: z.literal(3, { error: 'must equal 3.' }),
     sampleId: nonEmptyString,
     runId: nonEmptyString,
     productRevision: nonEmptyString,
@@ -44,12 +44,15 @@ const evaluationResultSchema = z
         outputTokens: nonNegativeInteger,
         totalTokens: nonNegativeInteger,
         cachedInputTokens: nonNegativeInteger,
+        cacheWriteInputTokens: nonNegativeInteger,
         reasoningOutputTokens: nonNegativeInteger,
       })
       .strict(),
     execution: z
       .object({
         modelElapsedMs: nonNegativeNumber,
+        firstEventMs: nonNegativeNumber,
+        firstTextMs: nonNegativeNumber,
         modelRounds: nonNegativeInteger,
         providerRetries: nonNegativeInteger,
         providerRetryCounts: countsSchema,
@@ -68,11 +71,18 @@ const evaluationResultSchema = z
         auditOutputCharacters: nonNegativeInteger,
         modelOutputCharacters: nonNegativeInteger,
         modelOutputReductionCharacters: nonNegativeInteger,
+        toolDefinitionCharactersTotal: nonNegativeInteger,
+        toolDefinitionCharactersMax: nonNegativeInteger,
+        toolDefinitionSchemaChanges: nonNegativeInteger,
+        toolDefinitionSchemaVariants: nonNegativeInteger,
+        auditOutputCharactersByTool: countsSchema,
+        modelOutputCharactersByTool: countsSchema,
       })
       .strict(),
     acceptance: z.object({ passed: z.boolean(), checks: z.array(acceptanceCheckSchema) }).strict(),
     failure: z
       .object({
+        taskError: z.string().nullable().default(null),
         harnessError: z.string().nullable(),
         failedChecks: z.array(failureCheckSchema),
       })
@@ -155,9 +165,10 @@ export function createEvaluationResult(
   const failedChecks = report.acceptance.checks
     .filter((check) => !check.passed)
     .map(({ name, detail }) => ({ name, detail }));
-  const success = report.acceptance.passed && report.harnessError === null;
+  const success =
+    report.acceptance.passed && report.taskError === null && report.harnessError === null;
   return {
-    schemaVersion: 2,
+    schemaVersion: 3,
     sampleId: scenario.name,
     runId: report.runId,
     productRevision: report.productRevision,
@@ -174,10 +185,13 @@ export function createEvaluationResult(
       outputTokens: report.modelMetrics.outputTokens,
       totalTokens: report.modelMetrics.totalTokens,
       cachedInputTokens: report.modelMetrics.cachedInputTokens,
+      cacheWriteInputTokens: report.modelMetrics.cacheWriteInputTokens,
       reasoningOutputTokens: report.modelMetrics.reasoningOutputTokens,
     },
     execution: {
       modelElapsedMs: report.modelMetrics.elapsedMs,
+      firstEventMs: report.modelMetrics.firstEventMs,
+      firstTextMs: report.modelMetrics.firstTextMs,
       modelRounds: report.executionMetrics.modelRounds,
       providerRetries: report.executionMetrics.providerRetries,
       providerRetryCounts: { ...report.executionMetrics.providerRetryCounts },
@@ -196,12 +210,24 @@ export function createEvaluationResult(
       auditOutputCharacters: report.executionMetrics.auditOutputCharacters,
       modelOutputCharacters: report.executionMetrics.modelOutputCharacters,
       modelOutputReductionCharacters: report.executionMetrics.modelOutputReductionCharacters,
+      toolDefinitionCharactersTotal: report.executionMetrics.toolDefinitionCharactersTotal,
+      toolDefinitionCharactersMax: report.executionMetrics.toolDefinitionCharactersMax,
+      toolDefinitionSchemaChanges: report.executionMetrics.toolDefinitionSchemaChanges,
+      toolDefinitionSchemaVariants: report.executionMetrics.toolDefinitionSchemaVariants,
+      auditOutputCharactersByTool: {
+        ...report.executionMetrics.auditOutputCharactersByTool,
+      },
+      modelOutputCharactersByTool: {
+        ...report.executionMetrics.modelOutputCharactersByTool,
+      },
     },
     acceptance: {
       passed: report.acceptance.passed,
       checks: report.acceptance.checks.map((check) => ({ ...check })),
     },
-    failure: success ? null : { harnessError: report.harnessError, failedChecks },
+    failure: success
+      ? null
+      : { taskError: report.taskError, harnessError: report.harnessError, failedChecks },
     sourceReport: `e2e/.runtime/live-results/${report.runId}/report.json`,
   };
 }

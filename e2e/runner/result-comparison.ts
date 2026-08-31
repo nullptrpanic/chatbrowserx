@@ -1,5 +1,9 @@
 import type { EvaluationResult } from './evaluation-result';
 
+function ratio(numerator: number, denominator: number): number {
+  return denominator === 0 ? 0 : numerator / denominator;
+}
+
 const METRICS = Object.freeze({
   elapsedMs: (result: EvaluationResult) => result.elapsedMs,
   modelElapsedMs: (result: EvaluationResult) => result.execution.modelElapsedMs,
@@ -7,7 +11,14 @@ const METRICS = Object.freeze({
   outputTokens: (result: EvaluationResult) => result.tokenUsage.outputTokens,
   totalTokens: (result: EvaluationResult) => result.tokenUsage.totalTokens,
   cachedInputTokens: (result: EvaluationResult) => result.tokenUsage.cachedInputTokens,
+  cacheWriteInputTokens: (result: EvaluationResult) => result.tokenUsage.cacheWriteInputTokens,
+  cacheReadRatio: (result: EvaluationResult) =>
+    ratio(result.tokenUsage.cachedInputTokens, result.tokenUsage.inputTokens),
+  cacheWriteRatio: (result: EvaluationResult) =>
+    ratio(result.tokenUsage.cacheWriteInputTokens, result.tokenUsage.inputTokens),
   reasoningOutputTokens: (result: EvaluationResult) => result.tokenUsage.reasoningOutputTokens,
+  firstEventMs: (result: EvaluationResult) => result.execution.firstEventMs,
+  firstTextMs: (result: EvaluationResult) => result.execution.firstTextMs,
   modelRounds: (result: EvaluationResult) => result.execution.modelRounds,
   providerRetries: (result: EvaluationResult) => result.execution.providerRetries,
   toolCalls: (result: EvaluationResult) => result.execution.toolCalls,
@@ -25,6 +36,14 @@ const METRICS = Object.freeze({
   modelOutputCharacters: (result: EvaluationResult) => result.execution.modelOutputCharacters,
   modelOutputReductionCharacters: (result: EvaluationResult) =>
     result.execution.modelOutputReductionCharacters,
+  toolDefinitionCharactersTotal: (result: EvaluationResult) =>
+    result.execution.toolDefinitionCharactersTotal,
+  toolDefinitionCharactersMax: (result: EvaluationResult) =>
+    result.execution.toolDefinitionCharactersMax,
+  toolDefinitionSchemaChanges: (result: EvaluationResult) =>
+    result.execution.toolDefinitionSchemaChanges,
+  toolDefinitionSchemaVariants: (result: EvaluationResult) =>
+    result.execution.toolDefinitionSchemaVariants,
 } satisfies Readonly<Record<string, (result: EvaluationResult) => number>>);
 
 export interface EvaluationResultComparisonInput {
@@ -49,10 +68,14 @@ export interface EvaluationResultBatchSummary {
   readonly p95: Readonly<Record<string, number>> | null;
   readonly toolCountsMean: Readonly<Record<string, number>> | null;
   readonly toolCountsP95: Readonly<Record<string, number>> | null;
+  readonly auditOutputCharactersByToolMean: Readonly<Record<string, number>> | null;
+  readonly auditOutputCharactersByToolP95: Readonly<Record<string, number>> | null;
+  readonly modelOutputCharactersByToolMean: Readonly<Record<string, number>> | null;
+  readonly modelOutputCharactersByToolP95: Readonly<Record<string, number>> | null;
 }
 
 export interface EvaluationResultComparison {
-  readonly schemaVersion: 2;
+  readonly schemaVersion: 3;
   readonly sampleId: string;
   readonly scenarioContractVersion: number;
   readonly requestedRuns: number;
@@ -68,6 +91,10 @@ export interface EvaluationResultComparison {
     readonly p95: Readonly<Record<string, number>> | null;
     readonly toolCountsMean: Readonly<Record<string, number>> | null;
     readonly toolCountsP95: Readonly<Record<string, number>> | null;
+    readonly auditOutputCharactersByToolMean: Readonly<Record<string, number>> | null;
+    readonly auditOutputCharactersByToolP95: Readonly<Record<string, number>> | null;
+    readonly modelOutputCharactersByToolMean: Readonly<Record<string, number>> | null;
+    readonly modelOutputCharactersByToolP95: Readonly<Record<string, number>> | null;
   };
 }
 
@@ -109,15 +136,18 @@ function metricSummaries(results: readonly EvaluationResult[]): {
   return { mean: means, p95 };
 }
 
-function toolSummaries(results: readonly EvaluationResult[]): {
+function mappedSummaries(
+  results: readonly EvaluationResult[],
+  read: (result: EvaluationResult) => unknown,
+  label: string,
+): {
   readonly mean: Readonly<Record<string, number>>;
   readonly p95: Readonly<Record<string, number>>;
 } {
   const counts = results.map((result) => {
-    const value = (result as { readonly execution?: { readonly toolCounts?: unknown } }).execution
-      ?.toolCounts;
+    const value = read(result);
     if (typeof value !== 'object' || value === null || Array.isArray(value)) {
-      throw new Error(`Result ${result.runId} has no comparable toolCounts metric.`);
+      throw new Error(`Result ${result.runId} has no comparable ${label} metric.`);
     }
     return value as Readonly<Record<string, number>>;
   });
@@ -127,7 +157,7 @@ function toolSummaries(results: readonly EvaluationResult[]): {
   for (const name of names) {
     const values = counts.map((value) => value[name] ?? 0);
     if (values.some((value) => !Number.isFinite(value) || value < 0)) {
-      throw new Error(`Comparable tool count ${name} is invalid.`);
+      throw new Error(`Comparable ${label} value ${name} is invalid.`);
     }
     means[name] = mean(values);
     p95[name] = percentile95(values);
@@ -135,9 +165,15 @@ function toolSummaries(results: readonly EvaluationResult[]): {
   return { mean: means, p95 };
 }
 
+function toolSummaries(results: readonly EvaluationResult[]) {
+  return mappedSummaries(results, (result) => result.execution.toolCounts, 'toolCounts');
+}
+
 function resultHasValidEvidence(result: EvaluationResult): boolean {
   const harnessError = result.failure?.harnessError ?? '';
-  if (harnessError.includes('E2E_EVIDENCE_MISMATCH')) return false;
+  // Product task errors are valid failed outcomes. Harness errors mean the attempt cannot
+  // establish product behavior and therefore cannot participate in either comparison.
+  if (harnessError.length > 0) return false;
   if (result.execution.providerRequests > 0) {
     if (result.execution.modelElapsedMs === 0 || result.tokenUsage.totalTokens === 0) return false;
     if (result.execution.modelRounds !== result.execution.providerRequests) return false;
@@ -179,6 +215,20 @@ function selectBatch(
     selected.every((result) => result.execution.providerRequests > 0);
   const metrics = performanceMetricsComparable ? metricSummaries(selected) : null;
   const tools = performanceMetricsComparable ? toolSummaries(selected) : null;
+  const auditOutputByTool = performanceMetricsComparable
+    ? mappedSummaries(
+        selected,
+        (result) => result.execution.auditOutputCharactersByTool,
+        'auditOutputCharactersByTool',
+      )
+    : null;
+  const modelOutputByTool = performanceMetricsComparable
+    ? mappedSummaries(
+        selected,
+        (result) => result.execution.modelOutputCharactersByTool,
+        'modelOutputCharactersByTool',
+      )
+    : null;
   const passedRuns = selected.filter(({ success }) => success).length;
   return {
     productRevision,
@@ -193,6 +243,10 @@ function selectBatch(
     p95: metrics?.p95 ?? null,
     toolCountsMean: tools?.mean ?? null,
     toolCountsP95: tools?.p95 ?? null,
+    auditOutputCharactersByToolMean: auditOutputByTool?.mean ?? null,
+    auditOutputCharactersByToolP95: auditOutputByTool?.p95 ?? null,
+    modelOutputCharactersByToolMean: modelOutputByTool?.mean ?? null,
+    modelOutputCharactersByToolP95: modelOutputByTool?.p95 ?? null,
   };
 }
 
@@ -225,7 +279,7 @@ export function compareEvaluationResultBatches(
   const performanceMetricsComparable =
     left.performanceMetricsComparable && right.performanceMetricsComparable;
   return {
-    schemaVersion: 2,
+    schemaVersion: 3,
     sampleId: input.sampleId,
     scenarioContractVersion: input.scenarioContractVersion,
     requestedRuns: input.runs,
@@ -254,6 +308,36 @@ export function compareEvaluationResultBatches(
       toolCountsP95:
         performanceMetricsComparable && left.toolCountsP95 !== null && right.toolCountsP95 !== null
           ? numericDelta(left.toolCountsP95, right.toolCountsP95)
+          : null,
+      auditOutputCharactersByToolMean:
+        performanceMetricsComparable &&
+        left.auditOutputCharactersByToolMean !== null &&
+        right.auditOutputCharactersByToolMean !== null
+          ? numericDelta(
+              left.auditOutputCharactersByToolMean,
+              right.auditOutputCharactersByToolMean,
+            )
+          : null,
+      auditOutputCharactersByToolP95:
+        performanceMetricsComparable &&
+        left.auditOutputCharactersByToolP95 !== null &&
+        right.auditOutputCharactersByToolP95 !== null
+          ? numericDelta(left.auditOutputCharactersByToolP95, right.auditOutputCharactersByToolP95)
+          : null,
+      modelOutputCharactersByToolMean:
+        performanceMetricsComparable &&
+        left.modelOutputCharactersByToolMean !== null &&
+        right.modelOutputCharactersByToolMean !== null
+          ? numericDelta(
+              left.modelOutputCharactersByToolMean,
+              right.modelOutputCharactersByToolMean,
+            )
+          : null,
+      modelOutputCharactersByToolP95:
+        performanceMetricsComparable &&
+        left.modelOutputCharactersByToolP95 !== null &&
+        right.modelOutputCharactersByToolP95 !== null
+          ? numericDelta(left.modelOutputCharactersByToolP95, right.modelOutputCharactersByToolP95)
           : null,
     },
   };

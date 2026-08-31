@@ -39,6 +39,11 @@ export interface LiveScenario {
   /** Maximum durable image references expected across tool results; defaults to zero. */
   readonly maxAttachmentCount?: number;
   readonly requiredTypedTextIncludes?: readonly string[];
+  /** When declared, every browser_keypress call must use one of these exact key sequences. */
+  readonly allowedKeypresses?: readonly string[];
+  /** Literals that must occur in at least one complete durable tool result. */
+  readonly requiredToolResultIncludes?: readonly string[];
+  /** Literals that must be observed as post-submit static page text. */
   readonly requiredToolOutputIncludes?: readonly string[];
   readonly finalTextIncludes: readonly string[];
   /** Every inner group requires at least one normalized alternative to be present. */
@@ -86,8 +91,13 @@ export interface LiveModelMetrics {
   readonly outputTokens: number;
   readonly totalTokens: number;
   readonly cachedInputTokens: number;
+  readonly cacheWriteInputTokens: number;
   readonly reasoningOutputTokens: number;
   readonly elapsedMs: number;
+  /** First completed model turn's time to its first Provider event. */
+  readonly firstEventMs: number;
+  /** First model turn that emitted user-visible text; zero when none did. */
+  readonly firstTextMs: number;
 }
 
 export interface LiveExecutionMetrics {
@@ -107,6 +117,8 @@ export interface LiveExecutionMetrics {
   readonly ambiguousMutations: number;
   readonly toolDefinitionCharactersTotal: number;
   readonly toolDefinitionCharactersMax: number;
+  readonly toolDefinitionSchemaChanges: number;
+  readonly toolDefinitionSchemaVariants: number;
   readonly enabledToolsets: readonly string[];
   readonly skillCatalogDisclosureCount: number;
   readonly noProgressBlocks: number;
@@ -114,6 +126,8 @@ export interface LiveExecutionMetrics {
   readonly auditOutputCharacters: number;
   readonly modelOutputCharacters: number;
   readonly modelOutputReductionCharacters: number;
+  readonly auditOutputCharactersByTool: Readonly<Record<string, number>>;
+  readonly modelOutputCharactersByTool: Readonly<Record<string, number>>;
 }
 
 export interface LiveProviderInputItemSummary {
@@ -139,6 +153,7 @@ export interface LiveProviderRequestBodySummary {
   readonly includesEncryptedReasoning: boolean;
   readonly toolNames: readonly string[];
   readonly toolDefinitionCharacters: number;
+  readonly toolDefinitionFingerprint: string | null;
   readonly skillCatalogDisclosureCount: number;
   readonly toolChoice: string | null;
   readonly inputItems: readonly LiveProviderInputItemSummary[];
@@ -195,5 +210,8 @@ export interface LiveRunReport {
   readonly productRevision: string;
   readonly scenarioContractVersion: number;
   readonly acceptance: LiveAcceptanceResult;
+  /** Product task error or timeout; retained as a comparable failed attempt. */
+  readonly taskError: string | null;
+  /** Harness, environment, or evidence failure; invalidates product comparison. */
   readonly harnessError: string | null;
 }

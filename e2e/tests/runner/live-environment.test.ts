@@ -5,6 +5,7 @@ import {
   waitForTargetEnvironment,
 } from '../../runner/live-environment';
 import type { LiveEnvironmentDefinition, LiveScenario } from '../../runner/live-types';
+import { liveScenario } from './fixtures';
 
 const environment: LiveEnvironmentDefinition = {
   targetSetupMode: 'interactive',
@@ -174,6 +175,49 @@ describe('live target environment verification', () => {
       'target:page_text_excludes:4',
       'target:page_text_any:5',
     ]);
+  });
+
+  it('fails before task submission when a required Sandbox tool is not configured', async () => {
+    const scenario = liveScenario({
+      name: 'sandbox-diagnostic',
+      expectedOrigin: 'https://example.com',
+      environment,
+      requiredTools: ['sandbox_exec'],
+    });
+    const result = await verifyConfiguredLiveEnvironment(
+      {
+        async verifyEnvironment() {
+          return {
+            passed: true,
+            checks: environment.readinessChecks.map(({ kind }) => ({
+              kind,
+              passed: true,
+              detail: 'Matched.',
+            })),
+          };
+        },
+        async send() {
+          return {
+            settings: {
+              hasCodexToken: true,
+              sandboxServer: '',
+              hasSandboxToken: false,
+            },
+            tab: { id: 42, supported: true, hasPermission: true },
+          };
+        },
+      },
+      scenario,
+      { tabId: 42, url: 'https://example.com/document/1' },
+      'verify_sandbox',
+    );
+
+    expect(result.passed).toBe(false);
+    expect(result.checks).toContainEqual({
+      name: 'sandbox-configuration',
+      passed: false,
+      detail: 'The required Sandbox connection is not configured.',
+    });
   });
 
   it('preserves a safe readiness error category without exposing the raw error', async () => {

@@ -3,6 +3,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import { validateEvaluationCatalog } from '../../runner/evaluation-catalog';
+import { loadEvaluationResults } from '../../runner/evaluation-result-loader';
 import { evaluationResult, evaluationSampleDefinition } from './fixtures';
 
 const validDefinition = evaluationSampleDefinition({ contractVersion: 2 });
@@ -54,12 +55,14 @@ async function writeResult(
       toolCounts: { browser_inspect: input.toolCalls ?? 1 },
     },
     acceptance: { passed: input.success, checks: [] },
-    failure: input.success ? null : { harnessError: 'Synthetic failure.', failedChecks: [] },
+    failure: input.success
+      ? null
+      : { taskError: null, harnessError: 'Synthetic failure.', failedChecks: [] },
     sourceReport: `e2e/.runtime/live-results/${input.runId}/report.json`,
   });
   await writeFile(
     join(root, 'e2e', 'samples', 'example-read', 'results', `${timestamp}__${input.runId}.json`),
-    `${JSON.stringify({ ...result, schemaVersion: input.schemaVersion ?? 2 })}\n`,
+    `${JSON.stringify({ ...result, schemaVersion: input.schemaVersion ?? 3 })}\n`,
     'utf8',
   );
 }
@@ -128,6 +131,33 @@ describe('evaluation catalog', () => {
         },
       ],
     });
+  });
+
+  it('loads only strict current-schema results for comparisons', async () => {
+    const root = await createRoot();
+    await createSample(root);
+    await writeResult(root, {
+      runId: 'live_archived',
+      startedAt: '2026-08-27T10:00:00.000Z',
+      contractVersion: 2,
+      productRevision: 'revision_current',
+      success: true,
+      schemaVersion: 2,
+    });
+    await writeResult(root, {
+      runId: 'live_current',
+      startedAt: '2026-08-27T10:01:00.000Z',
+      contractVersion: 2,
+      productRevision: 'revision_current',
+      success: true,
+    });
+
+    const results = await loadEvaluationResults(
+      join(root, 'e2e', 'samples', 'example-read', 'results'),
+      'example-read',
+    );
+
+    expect(results.map(({ runId }) => runId)).toEqual(['live_current']);
   });
 
   it('rejects a sample without its own results directory', async () => {

@@ -90,6 +90,7 @@ describe('live Responses API trace sanitization', () => {
         (total, tool) => total + JSON.stringify(tool).length,
         0,
       ),
+      toolDefinitionFingerprint: expect.stringMatching(/^[a-f0-9]{16}$/u),
     });
     expect(summary.inputItems).toEqual([
       {
@@ -116,6 +117,34 @@ describe('live Responses API trace sanitization', () => {
     ]);
     expect(JSON.stringify(summary)).not.toContain('private');
     expect(JSON.stringify(summary)).not.toContain(activeUserText);
+  });
+
+  it('fingerprints the complete ordered tool contract without retaining its contents', () => {
+    const first = summarizeResponsesRequestBody(
+      {
+        input: [],
+        tools: [{ type: 'function', name: 'browser_inspect', description: 'first' }],
+      },
+      'request',
+    );
+    const same = summarizeResponsesRequestBody(
+      {
+        input: [],
+        tools: [{ type: 'function', name: 'browser_inspect', description: 'first' }],
+      },
+      'request',
+    );
+    const changed = summarizeResponsesRequestBody(
+      {
+        input: [],
+        tools: [{ type: 'function', name: 'browser_inspect', description: 'second' }],
+      },
+      'request',
+    );
+
+    expect(first.toolDefinitionFingerprint).toBe(same.toolDefinitionFingerprint);
+    expect(changed.toolDefinitionFingerprint).not.toBe(first.toolDefinitionFingerprint);
+    expect(first.toolDefinitionFingerprint).not.toContain('first');
   });
 
   it('counts duplicate active request items even when they share one message', () => {

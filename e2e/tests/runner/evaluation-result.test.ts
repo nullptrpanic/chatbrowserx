@@ -31,7 +31,7 @@ describe('evaluation result', () => {
 
     expect(result).toEqual(
       expect.objectContaining({
-        schemaVersion: 2,
+        schemaVersion: 3,
         sampleId: 'example-read',
         runId: 'live_abc-123',
         productRevision: 'revision-dirty-fingerprint',
@@ -48,13 +48,20 @@ describe('evaluation result', () => {
           outputTokens: 30,
           totalTokens: 150,
           cachedInputTokens: 40,
+          cacheWriteInputTokens: 0,
           reasoningOutputTokens: 10,
         },
         execution: expect.objectContaining({
+          firstEventMs: 0,
+          firstTextMs: 0,
           providerRetries: 1,
           providerRetryCounts: { 'transient_model_retry:upstream_failure': 1 },
           toolCalls: 1,
           toolCounts: { browser_inspect: 1 },
+          toolDefinitionCharactersTotal: 11_000,
+          toolDefinitionCharactersMax: 5_500,
+          toolDefinitionSchemaChanges: 0,
+          toolDefinitionSchemaVariants: 0,
         }),
       }),
     );
@@ -65,14 +72,37 @@ describe('evaluation result', () => {
   });
 
   it('rejects fields outside the current result schema', () => {
-    const result = { ...createEvaluationResult(scenario, report()), extraMetric: 1 };
+    const result = {
+      ...createEvaluationResult(scenario, report()),
+      extraMetric: 1,
+    };
 
     expect(() =>
       parseEvaluationResult(result, scenario.name, '20260827T123346.514Z__live_abc-123.json'),
     ).toThrow('extraMetric is not supported');
   });
 
-  it('records failed attempts instead of dropping them', () => {
+  it('loads earlier schema-v3 failures that predate the task-error split', () => {
+    const current = createEvaluationResult(
+      scenario,
+      report({
+        acceptance: { passed: false, checks: [] },
+        harnessError: 'Synthetic harness failure.',
+      }),
+    );
+    const legacyFailure = { ...current.failure } as Record<string, unknown>;
+    delete legacyFailure.taskError;
+
+    const parsed = parseEvaluationResult(
+      { ...current, failure: legacyFailure },
+      scenario.name,
+      '20260827T123346.514Z__live_abc-123.json',
+    );
+
+    expect(parsed.failure?.taskError).toBeNull();
+  });
+
+  it('records product task failures separately from harness failures', () => {
     const result = createEvaluationResult(
       scenario,
       report({
@@ -88,13 +118,14 @@ describe('evaluation result', () => {
             },
           ],
         },
-        harnessError: 'The provider is temporarily unavailable.',
+        taskError: 'The provider is temporarily unavailable.',
       }),
     );
 
     expect(result.success).toBe(false);
     expect(result.failure).toEqual({
-      harnessError: 'The provider is temporarily unavailable.',
+      taskError: 'The provider is temporarily unavailable.',
+      harnessError: null,
       failedChecks: [{ name: 'terminal-status', detail: 'Terminal status: paused.' }],
     });
   });

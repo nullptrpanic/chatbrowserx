@@ -1,9 +1,8 @@
-import { readFile, readdir } from 'node:fs/promises';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import type { EvaluationResult } from './evaluation-result';
 import { compareEvaluationResultBatches } from './result-comparison';
 import { validateEvaluationCatalog } from './evaluation-catalog';
+import { loadEvaluationResults } from './evaluation-result-loader';
 
 const repositoryRoot = resolve(dirname(fileURLToPath(import.meta.url)), '../..');
 const SAFE_ID = /^[a-zA-Z0-9][a-zA-Z0-9._:+-]{0,199}$/;
@@ -42,22 +41,14 @@ async function main(): Promise<void> {
   const sample = catalog.samples.find(({ id }) => id === parsed.sampleId);
   if (sample === undefined)
     throw new Error(`Evaluation sample "${parsed.sampleId}" was not found.`);
-  const resultFiles = (await readdir(join(sample.directory, 'results'), { withFileTypes: true }))
-    .filter((entry) => entry.isFile() && entry.name.endsWith('.json'))
-    .map(({ name }) => name)
-    .sort();
-  const results = await Promise.all(
-    resultFiles.map(async (name) =>
-      JSON.parse(await readFile(join(sample.directory, 'results', name), 'utf8')),
-    ),
-  );
+  const results = await loadEvaluationResults(join(sample.directory, 'results'), sample.id);
   const comparison = compareEvaluationResultBatches({
     sampleId: sample.id,
     scenarioContractVersion: sample.contractVersion,
     runs: parsed.runs ?? sample.requiredRuns,
     leftRevision: parsed.leftRevision,
     rightRevision: parsed.rightRevision,
-    results: results as EvaluationResult[],
+    results,
   });
   process.stdout.write(`${JSON.stringify(comparison, null, 2)}\n`);
 }

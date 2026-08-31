@@ -90,6 +90,36 @@ describe('self-contained E2E samples', () => {
     await expect(loadEvaluationSample(root, sample.id)).rejects.toThrow('input.text');
   });
 
+  it('materializes required raw tool-result literals', async () => {
+    const value = structuredClone(sample) as typeof sample & {
+      evaluation: {
+        policy: typeof sample.evaluation.policy & {
+          requiredToolResultIncludes: string[];
+        };
+      };
+    };
+    value.evaluation.policy.requiredToolResultIncludes = ['TAIL_DIAGNOSTIC'];
+    const root = await createSampleRoot(value);
+
+    const loaded = await loadEvaluationSample(root, sample.id);
+
+    expect(loaded.scenario).toMatchObject({
+      requiredToolResultIncludes: ['TAIL_DIAGNOSTIC'],
+    });
+  });
+
+  it('materializes the navigation keypress allowlist', async () => {
+    const value = structuredClone(sample) as unknown as {
+      evaluation: { policy: Record<string, unknown> };
+    };
+    value.evaluation.policy.allowedKeypresses = ['HOME'];
+    const root = await createSampleRoot(value);
+
+    const loaded = await loadEvaluationSample(root, sample.id);
+
+    expect(loaded.scenario).toMatchObject({ allowedKeypresses: ['HOME'] });
+  });
+
   it('rejects an interactive environment without setup instructions', async () => {
     const value = structuredClone(sample) as unknown as {
       environment: { targetSetupInstructions: string[] };

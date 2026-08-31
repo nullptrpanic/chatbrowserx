@@ -163,6 +163,33 @@ describe('live E2E acceptance policy', () => {
     );
   });
 
+  it('allows only explicitly declared navigation keypresses', () => {
+    const keypressScenario = {
+      ...scenario,
+      allowedKeypresses: ['HOME'],
+    } as LiveScenario & { readonly allowedKeypresses: readonly string[] };
+    const withKeypress = (keys: string): LiveRunInput => ({
+      ...completedInput(),
+      toolResults: [...completedInput().toolResults, tool('browser_keypress', { tabId: 0, keys })],
+    });
+
+    const accepted = evaluateLiveRun(keypressScenario, withKeypress('HOME'));
+    const rejected = evaluateLiveRun(keypressScenario, withKeypress('A'));
+
+    expect(accepted.checks).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ name: 'allowed-keypresses', passed: true }),
+      ]),
+    );
+    expect(accepted.passed).toBe(true);
+    expect(rejected.checks).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ name: 'allowed-keypresses', passed: false }),
+      ]),
+    );
+    expect(rejected.passed).toBe(false);
+  });
+
   it('allows one declared screenshot asset and requires exact delivery tool counts', () => {
     const deliveryScenario: LiveScenario = {
       ...scenario,
@@ -339,6 +366,63 @@ describe('live E2E acceptance policy', () => {
           passed: false,
         }),
       ]),
+    );
+  });
+
+  it('checks declared literals against complete raw tool results', () => {
+    const required = 'CHATBROWSERX_TAIL_DIAGNOSTIC_9471';
+    const guardedScenario = {
+      ...scenario,
+      requiredToolResultIncludes: [required],
+    } as LiveScenario & {
+      readonly requiredToolResultIncludes: readonly string[];
+    };
+    const present = evaluateLiveRun(guardedScenario, {
+      ...completedInput(),
+      toolResults: [
+        tool(
+          'sandbox_exec',
+          { command: 'produce-output', cwd: null },
+          {
+            output: JSON.stringify({
+              code: 0,
+              stdout: required,
+              stderr: '',
+              truncated: true,
+            }),
+          },
+        ),
+      ],
+    });
+    const missing = evaluateLiveRun(guardedScenario, {
+      ...completedInput(),
+      toolResults: [
+        tool(
+          'sandbox_exec',
+          { command: 'produce-output', cwd: null },
+          {
+            output: JSON.stringify({
+              code: 0,
+              stdout: 'head only',
+              stderr: '',
+              truncated: true,
+            }),
+          },
+        ),
+      ],
+    });
+
+    expect(present.checks).toContainEqual(
+      expect.objectContaining({
+        name: 'required-tool-result-content',
+        passed: true,
+      }),
+    );
+    expect(missing.checks).toContainEqual(
+      expect.objectContaining({
+        name: 'required-tool-result-content',
+        passed: false,
+      }),
     );
   });
 
@@ -596,6 +680,7 @@ describe('live E2E acceptance policy', () => {
       includesEncryptedReasoning: true,
       toolNames: ['browser_inspect'],
       toolDefinitionCharacters: 256,
+      toolDefinitionFingerprint: 'aaaaaaaaaaaaaaaa',
       skillCatalogDisclosureCount: 0,
       toolChoice: 'auto',
       inputItems: [
@@ -676,10 +761,48 @@ describe('live E2E acceptance policy', () => {
     });
     expect(recoveredTransportRetry.checks).toEqual(
       expect.arrayContaining([
-        expect.objectContaining({ name: 'provider-response-evidence', passed: true }),
+        expect.objectContaining({
+          name: 'provider-response-evidence',
+          passed: true,
+        }),
       ]),
     );
     expect(recoveredTransportRetry.passed).toBe(true);
+
+    const recoveredHttpRetry = evaluateLiveRun(scenario, {
+      ...completedInput(),
+      providerRetryReasons: ['transient_model_retry:upstream_failure'],
+      providerTrace: {
+        requestCount: 2,
+        requests: [
+          {
+            ...request,
+            response: {
+              ...request.response,
+              status: 503,
+              completed: false,
+              failed: true,
+              eventTypes: ['response.failed'],
+              encryptedReasoningOutputCount: 0,
+            },
+          },
+          {
+            ...request,
+            sequence: 2,
+            response: { ...request.response, encryptedReasoningOutputCount: 0 },
+          },
+        ],
+      },
+    });
+    expect(recoveredHttpRetry.checks).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          name: 'provider-response-evidence',
+          passed: true,
+        }),
+      ]),
+    );
+    expect(recoveredHttpRetry.passed).toBe(true);
 
     const broken = evaluateLiveRun(scenario, {
       ...input,

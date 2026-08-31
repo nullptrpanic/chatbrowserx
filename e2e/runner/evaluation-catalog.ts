@@ -1,17 +1,9 @@
-import { readdir, stat } from "node:fs/promises";
-import { join } from "node:path";
-import type { LiveScenario } from "./live-types";
-import { parseEvaluationResult } from "./evaluation-result";
-import { jsonRecord, readJsonFile } from "./json-contract";
-import {
-  listEvaluationSamples,
-  type EvaluationSampleDefinition,
-} from "./sample-loader";
+import { join } from 'node:path';
+import type { LiveScenario } from './live-types';
+import { loadEvaluationResults } from './evaluation-result-loader';
+import { listEvaluationSamples, type EvaluationSampleDefinition } from './sample-loader';
 
-export type { EvaluationSampleDefinition } from "./sample-loader";
-
-const RESULT_FILENAME =
-  /^\d{8}T\d{6}\.\d{3}Z__[a-zA-Z0-9][a-zA-Z0-9_-]*\.json$/;
+export type { EvaluationSampleDefinition } from './sample-loader';
 
 export interface EvaluationSampleSummary extends EvaluationSampleDefinition {
   readonly directory: string;
@@ -44,29 +36,13 @@ async function validateResults(
   readonly currentContractPassedResultCount: number;
   readonly currentContractRevisionBatches: readonly EvaluationRevisionBatch[];
 }> {
-  const exists = await stat(directory)
-    .then((entry) => entry.isDirectory())
-    .catch(() => false);
-  if (!exists)
-    throw new Error(`Sample "${sampleId}" results directory is missing.`);
-  const entries = await readdir(directory, { withFileTypes: true });
+  const results = await loadEvaluationResults(directory, sampleId);
   let resultCount = 0;
   let passedResultCount = 0;
   let currentContractResultCount = 0;
   let currentContractPassedResultCount = 0;
-  const currentBatches = new Map<
-    string,
-    { resultCount: number; passedResultCount: number }
-  >();
-  for (const entry of entries) {
-    if (!entry.isFile() || !RESULT_FILENAME.test(entry.name)) {
-      throw new Error(
-        `Sample "${sampleId}" result "${entry.name}" must use <UTC-timestamp>__<run-id>.json.`,
-      );
-    }
-    const value = await readJsonFile(join(directory, entry.name));
-    if (jsonRecord(value)?.schemaVersion !== 2) continue;
-    const input = parseEvaluationResult(value, sampleId, entry.name);
+  const currentBatches = new Map<string, { resultCount: number; passedResultCount: number }>();
+  for (const input of results) {
     const contractVersion = input.scenarioContractVersion;
     const productRevision = input.productRevision;
     resultCount += 1;
@@ -91,9 +67,7 @@ async function validateResults(
     currentContractPassedResultCount,
     currentContractRevisionBatches: [...currentBatches]
       .map(([productRevision, counts]) => ({ productRevision, ...counts }))
-      .sort((left, right) =>
-        left.productRevision.localeCompare(right.productRevision),
-      ),
+      .sort((left, right) => left.productRevision.localeCompare(right.productRevision)),
   };
 }
 
@@ -108,7 +82,7 @@ export async function validateEvaluationCatalog(
       directory,
       scenario,
       ...(await validateResults(
-        join(directory, "results"),
+        join(directory, 'results'),
         definition.id,
         definition.contractVersion,
       )),

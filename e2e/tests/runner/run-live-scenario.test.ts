@@ -28,7 +28,11 @@ const scenario: LiveScenario = {
 };
 
 function taskSnapshot(status: string, includeEvidence = false) {
-  const output = JSON.stringify({ ok: true, page: 'Example chat', accessToken: 'secret-output' });
+  const output = JSON.stringify({
+    ok: true,
+    page: 'Example chat',
+    accessToken: 'secret-output',
+  });
   const modelOutput = JSON.stringify({ ok: true, page: 'Example chat' });
   return {
     task: {
@@ -54,6 +58,7 @@ function taskSnapshot(status: string, includeEvidence = false) {
               outputTokens: 30,
               totalTokens: 130,
               cachedInputTokens: 40,
+              cacheWriteInputTokens: 5,
               reasoningOutputTokens: 10,
             },
           },
@@ -92,10 +97,12 @@ function taskSnapshot(status: string, includeEvidence = false) {
               inputItemCount: 3,
               elapsedMs: 180,
               firstEventMs: 30,
+              firstTextMs: 60,
               inputTokens: 200,
               outputTokens: 50,
               totalTokens: 250,
               cachedInputTokens: 80,
+              cacheWriteInputTokens: 7,
               reasoningOutputTokens: 20,
             },
           },
@@ -183,6 +190,7 @@ function providerTrace(functionOutputCount: number, requestCount = 2): LiveProvi
         includesEncryptedReasoning: true,
         toolNames: ['browser_inspect'],
         toolDefinitionCharacters: 100,
+        toolDefinitionFingerprint: 'aaaaaaaaaaaaaaaa',
         skillCatalogDisclosureCount: 0,
         toolChoice: 'auto',
         inputItems: [],
@@ -236,6 +244,7 @@ async function runCompletedSnapshot(
   snapshot: unknown,
   panelToolCount: number,
   trace?: LiveProviderTrace,
+  liveScenario: LiveScenario = scenario,
 ) {
   const base = liveRuntime((message) => {
     switch (message.type) {
@@ -259,7 +268,7 @@ async function runCompletedSnapshot(
             return trace;
           },
         };
-  return runLiveScenario(runtime, scenario, {
+  return runLiveScenario(runtime, liveScenario, {
     now: () => 10_000,
     sleep: vi.fn(),
     createRunId: () => 'run_evidence_check',
@@ -356,9 +365,13 @@ describe('live scenario orchestration', () => {
         outputTokens: 80,
         totalTokens: 380,
         cachedInputTokens: 120,
+        cacheWriteInputTokens: 12,
         reasoningOutputTokens: 30,
         elapsedMs: 300,
+        firstEventMs: 20,
+        firstTextMs: 60,
       },
+      executionMetrics: { modelRounds: 2 },
       acceptance: { passed: true },
       harnessError: null,
     });
@@ -416,6 +429,20 @@ describe('live scenario orchestration', () => {
     expect(report.executionMetrics.providerRetryCounts).toEqual({
       'transient_model_retry:upstream_failure': 1,
     });
+  });
+
+  it('preserves a legitimate zero-millisecond first event latency', async () => {
+    const snapshot = structuredClone(taskSnapshot('completed', true));
+    const firstModelTurn = snapshot.events.find((event) => event.type === 'model.turn');
+    if (firstModelTurn?.type !== 'model.turn' || firstModelTurn.metrics === undefined) {
+      throw new Error('Expected a model turn fixture.');
+    }
+    firstModelTurn.metrics.firstEventMs = 0;
+
+    const report = await runCompletedSnapshot(snapshot, 1);
+
+    expect(report.modelMetrics.firstEventMs).toBe(0);
+    expect(report.modelMetrics.firstTextMs).toBe(60);
   });
 
   it('reads factual tool and model evidence from the legacy checkpoint snapshot', async () => {
@@ -483,7 +510,11 @@ describe('live scenario orchestration', () => {
 
     expect(report.harnessError).toBeNull();
     expect(report.toolResults).toEqual([
-      expect.objectContaining({ toolName: 'browser_inspect', argumentsJson, output }),
+      expect.objectContaining({
+        toolName: 'browser_inspect',
+        argumentsJson,
+        output,
+      }),
     ]);
     expect(report.modelMetrics).toMatchObject({
       inputTokens: 200,
@@ -530,7 +561,8 @@ describe('live scenario orchestration', () => {
     });
 
     expect(report.terminalStatus).toBe('paused');
-    expect(report.harnessError).toContain('The provider is temporarily unavailable.');
+    expect(report.taskError).toContain('The provider is temporarily unavailable.');
+    expect(report.harnessError).toBeNull();
   });
 
   it('cancels a paused task before starting a fresh WorkSession', async () => {
@@ -612,9 +644,33 @@ describe('live scenario orchestration', () => {
       outputTokens: 80,
       totalTokens: 380,
       cachedInputTokens: 120,
+      cacheWriteInputTokens: 12,
       reasoningOutputTokens: 30,
       elapsedMs: 300,
+      firstEventMs: 20,
+      firstTextMs: 60,
     });
+  });
+
+  it('evaluates complete tool evidence while keeping the reported projection bounded', async () => {
+    const tail = 'CHATBROWSERX_TAIL_DIAGNOSTIC_9471';
+    const snapshot = structuredClone(taskSnapshot('completed', true));
+    const result = snapshot.toolResults[0];
+    if (result === undefined) throw new Error('Missing tool-result fixture.');
+    result.output = 'x'.repeat(55_000) + tail;
+    const evidenceScenario: LiveScenario = {
+      ...scenario,
+      requiredToolResultIncludes: [tail],
+    };
+
+    const report = await runCompletedSnapshot(snapshot, 1, undefined, evidenceScenario);
+
+    expect(
+      report.acceptance.checks.find(({ name }) => name === 'required-tool-result-content'),
+    ).toMatchObject({ passed: true });
+    expect(report.toolResults[0]?.output).not.toContain(tail);
+    expect(report.toolResults[0]?.output.length).toBeLessThanOrEqual(50_000);
+    expect(report.toolResults[0]?.auditOutputCharacters).toBe(55_000 + tail.length);
   });
 
   it('fails closed when Provider tool outputs have no local TaskSnapshot results', async () => {
@@ -672,6 +728,17 @@ describe('live scenario orchestration', () => {
 
     expect(report.harnessError).toContain('E2E_EVIDENCE_MISMATCH');
     expect(report.harnessError).toContain('no matching tool.result event');
+  });
+
+  it('fails closed when a tool call has neither a result event nor a snapshot result', async () => {
+    const snapshot = structuredClone(taskSnapshot('completed', true));
+    snapshot.events = snapshot.events.filter((event) => event.type !== 'tool.result');
+    snapshot.toolResults = [];
+
+    const report = await runCompletedSnapshot(snapshot, 0);
+
+    expect(report.harnessError).toContain('E2E_EVIDENCE_MISMATCH');
+    expect(report.harnessError).toContain('tool.call event has no matching tool result');
   });
 
   it('fails closed when one call ID has multiple durable results', async () => {
@@ -734,7 +801,8 @@ describe('live scenario orchestration', () => {
     expect(cancellations).toEqual([expect.objectContaining({ payload: { taskId: 'task_live' } })]);
     expect(report.terminalStatus).toBe('timed_out');
     expect(report.acceptance.passed).toBe(false);
-    expect(report.harnessError).toMatch(/timed out/i);
+    expect(report.taskError).toMatch(/timed out/i);
+    expect(report.harnessError).toBeNull();
   });
 
   it('bounds a polling request that never resolves by the task deadline', async () => {
@@ -771,7 +839,8 @@ describe('live scenario orchestration', () => {
     expect(outcome).not.toBe('test-timeout');
     if (outcome === 'test-timeout') return;
     expect(outcome.terminalStatus).toBe('timed_out');
-    expect(outcome.harnessError).toMatch(/timed out/i);
+    expect(outcome.taskError).toMatch(/timed out/i);
+    expect(outcome.harnessError).toBeNull();
     expect(runtime.messages.filter(({ type }) => type === 'task.cancel')).toHaveLength(1);
   });
 
@@ -816,7 +885,7 @@ describe('live scenario orchestration', () => {
     expect(outcome).not.toBe('test-timeout');
     if (outcome === 'test-timeout') return;
     expect(outcome.terminalStatus).toBe('timed_out');
-    expect(outcome.harnessError).toMatch(/timed out/i);
+    expect(outcome.taskError).toMatch(/timed out/i);
     expect(outcome.harnessError).toMatch(/cancellation/i);
     expect(runtime.messages.filter(({ type }) => type === 'task.cancel')).toHaveLength(1);
   });

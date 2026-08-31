@@ -13,9 +13,15 @@ function tool(toolName: string, argumentsValue: unknown, outputValue: unknown): 
 
 describe('live execution metrics', () => {
   it('counts model rounds, tools, observations, traversals, fallbacks, and mutations', () => {
+    const inspect = {
+      ...tool('browser_inspect', { mode: 'interactive' }, { ok: true, data: { refs: [] } }),
+      auditOutputCharacters: 200,
+      modelOutputCharacters: 80,
+    };
     const metrics = deriveLiveExecutionMetrics({
+      modelTurns: 2,
       toolResults: [
-        tool('browser_inspect', { mode: 'interactive' }, { ok: true, data: { refs: [] } }),
+        inspect,
         tool(
           'browser_scroll',
           { target: 'viewport', maxSegments: 2, deltaY: 800 },
@@ -43,7 +49,26 @@ describe('live execution metrics', () => {
           { ok: true, data: { recovered: true, reconciliation: 'verified' } },
         ),
       ],
-      providerTrace: { requestCount: 3, requests: [] },
+      providerTrace: {
+        requestCount: 3,
+        requests: [
+          {
+            toolDefinitionCharacters: 100,
+            toolDefinitionFingerprint: 'aaaaaaaaaaaaaaaa',
+            skillCatalogDisclosureCount: 0,
+          },
+          {
+            toolDefinitionCharacters: 100,
+            toolDefinitionFingerprint: 'aaaaaaaaaaaaaaaa',
+            skillCatalogDisclosureCount: 0,
+          },
+          {
+            toolDefinitionCharacters: 150,
+            toolDefinitionFingerprint: 'bbbbbbbbbbbbbbbb',
+            skillCatalogDisclosureCount: 0,
+          },
+        ],
+      } as never,
       providerRetryReasons: [
         'transient_model_retry:upstream_failure',
         'transient_model_retry:upstream_failure',
@@ -51,7 +76,7 @@ describe('live execution metrics', () => {
     });
 
     expect(metrics).toEqual({
-      modelRounds: 3,
+      modelRounds: 2,
       providerRetries: 2,
       providerRetryCounts: { 'transient_model_retry:upstream_failure': 2 },
       toolCalls: 8,
@@ -72,15 +97,23 @@ describe('live execution metrics', () => {
       repeatedFingerprints: 0,
       verifiedMutations: 2,
       ambiguousMutations: 1,
-      toolDefinitionCharactersTotal: 0,
-      toolDefinitionCharactersMax: 0,
+      toolDefinitionCharactersTotal: 350,
+      toolDefinitionCharactersMax: 150,
+      toolDefinitionSchemaChanges: 1,
+      toolDefinitionSchemaVariants: 2,
       enabledToolsets: [],
       skillCatalogDisclosureCount: 0,
       noProgressBlocks: 0,
       exactReads: 0,
       auditOutputCharacters: expect.any(Number),
       modelOutputCharacters: expect.any(Number),
-      modelOutputReductionCharacters: 0,
+      modelOutputReductionCharacters: 120,
+      auditOutputCharactersByTool: expect.objectContaining({
+        browser_inspect: 277,
+      }),
+      modelOutputCharactersByTool: expect.objectContaining({
+        browser_inspect: 157,
+      }),
     });
   });
 
@@ -102,6 +135,7 @@ describe('live execution metrics', () => {
     };
 
     const metrics = deriveLiveExecutionMetrics({
+      modelTurns: 0,
       toolResults: [repeated, sameWithDifferentKeyOrder, malformed],
       providerTrace: { requestCount: 0, requests: [] },
     });

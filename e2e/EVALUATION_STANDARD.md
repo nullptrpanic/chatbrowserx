@@ -55,6 +55,8 @@ An attempt passes only when all applicable facts agree:
 The factual source for model telemetry and tools is the terminal `TaskSnapshot`: numeric
 `model.turn` events and permanent `toolResults`. Panel details are only a UI consistency check.
 Missing or contradictory event/result/Provider evidence is `E2E_EVIDENCE_MISMATCH`, not zero usage.
+Product task errors and timeouts remain comparable failed outcomes. Environment, harness, and
+evidence errors invalidate product comparison and are stored separately as `harnessError`.
 
 Completed alone is not a pass. If the target changed or evidence is insufficient, retain a failed
 attempt rather than weakening the contract.
@@ -100,8 +102,9 @@ npm run --silent e2e:results:compare -- <sample-id> <left-revision> <right-revis
 The command selects the earliest N current-contract results per revision; N defaults to
 `requiredRuns`. It retains observed success rates but emits `null` deltas when evidence integrity
 prevents comparison. Deltas are right minus left. Report success rate, mean and P95 duration,
-tokens, rounds, Provider requests/retries, total and per-tool calls, traversal/fallback metrics,
-mutation verification, output reduction, failures, and limitations. One pass is not a stability
+cache read/write Tokens, first-event/first-text latency, rounds, Provider requests/retries, total
+and per-tool calls, tool-contract size and changes, traversal/fallback metrics, mutation
+verification, per-tool output reduction, failures, and limitations. One pass is not a stability
 claim.
 
 ## Repository Gates

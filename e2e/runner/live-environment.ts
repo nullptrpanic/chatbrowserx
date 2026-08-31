@@ -219,6 +219,12 @@ export function evaluateConfiguredLiveEnvironment(
   const settings = jsonRecord(snapshot?.settings);
   const tab = jsonRecord(snapshot?.tab);
   const hasCodexToken = settings?.hasCodexToken === true;
+  const requiresSandbox =
+    scenario.requiredTools?.some((name) => name.startsWith('sandbox_')) ?? false;
+  const sandboxConfigured =
+    typeof settings?.sandboxServer === 'string' &&
+    settings.sandboxServer.trim().length > 0 &&
+    settings.hasSandboxToken === true;
   const extensionTabAccess =
     tab?.id === target.tabId && tab.supported === true && tab.hasPermission === true;
   const checks: ConfiguredEnvironmentCheck[] = [
@@ -241,6 +247,16 @@ export function evaluateConfiguredLiveEnvironment(
       'The extension cannot access the intended target tab.',
     ),
   ];
+  if (requiresSandbox) {
+    checks.push(
+      configuredCheck(
+        'sandbox-configuration',
+        sandboxConfigured,
+        'The required Sandbox connection is configured.',
+        'The required Sandbox connection is not configured.',
+      ),
+    );
+  }
   for (const [index, readiness] of targetVerification.checks.entries()) {
     checks.push({
       name: `target:${readiness.kind}:${String(index + 1)}`,

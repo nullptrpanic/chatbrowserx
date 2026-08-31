@@ -2,6 +2,7 @@ import type { LiveExecutionMetrics, LiveProviderTrace, LiveToolResult } from './
 import { jsonRecord } from './json-contract';
 
 interface LiveExecutionMetricInput {
+  readonly modelTurns: number;
   readonly toolResults: readonly LiveToolResult[];
   readonly providerTrace: LiveProviderTrace;
   readonly providerRetryReasons?: readonly string[];
@@ -56,6 +57,8 @@ export function deriveLiveExecutionMetrics(input: LiveExecutionMetricInput): Liv
   let exactReads = 0;
   let auditOutputCharacters = 0;
   let modelOutputCharacters = 0;
+  const auditOutputCharactersByTool = new Map<string, number>();
+  const modelOutputCharactersByTool = new Map<string, number>();
 
   for (const reason of input.providerRetryReasons ?? []) {
     providerRetryCounts.set(reason, (providerRetryCounts.get(reason) ?? 0) + 1);
@@ -71,8 +74,18 @@ export function deriveLiveExecutionMetrics(input: LiveExecutionMetricInput): Liv
     const argumentsValue = parseRecord(result.argumentsJson);
     const output = parseRecord(result.output);
     const data = jsonRecord(output?.data);
-    auditOutputCharacters += result.auditOutputCharacters ?? result.output.length;
-    modelOutputCharacters += result.modelOutputCharacters ?? result.output.length;
+    const auditCharacters = result.auditOutputCharacters ?? result.output.length;
+    const modelCharacters = result.modelOutputCharacters ?? result.output.length;
+    auditOutputCharacters += auditCharacters;
+    modelOutputCharacters += modelCharacters;
+    auditOutputCharactersByTool.set(
+      result.toolName,
+      (auditOutputCharactersByTool.get(result.toolName) ?? 0) + auditCharacters,
+    );
+    modelOutputCharactersByTool.set(
+      result.toolName,
+      (modelOutputCharactersByTool.get(result.toolName) ?? 0) + modelCharacters,
+    );
     if (
       result.toolName === 'toolset_enable' &&
       output?.ok === true &&
@@ -110,8 +123,17 @@ export function deriveLiveExecutionMetrics(input: LiveExecutionMetricInput): Liv
     }
   }
 
+  const toolDefinitionFingerprints = input.providerTrace.requests.flatMap((request) =>
+    request.toolDefinitionFingerprint === null ? [] : [request.toolDefinitionFingerprint],
+  );
+  const toolDefinitionSchemaChanges = toolDefinitionFingerprints.reduce(
+    (changes, fingerprint, index) =>
+      index > 0 && fingerprint !== toolDefinitionFingerprints[index - 1] ? changes + 1 : changes,
+    0,
+  );
+
   return {
-    modelRounds: input.providerTrace.requestCount,
+    modelRounds: input.modelTurns,
     providerRetries: input.providerRetryReasons?.length ?? 0,
     providerRetryCounts: Object.fromEntries(
       [...providerRetryCounts].sort(([left], [right]) => left.localeCompare(right)),
@@ -142,6 +164,8 @@ export function deriveLiveExecutionMetrics(input: LiveExecutionMetricInput): Liv
       (maximum, request) => Math.max(maximum, request.toolDefinitionCharacters),
       0,
     ),
+    toolDefinitionSchemaChanges,
+    toolDefinitionSchemaVariants: new Set(toolDefinitionFingerprints).size,
     enabledToolsets: [...enabledToolsets].sort(),
     skillCatalogDisclosureCount: input.providerTrace.requests.reduce(
       (maximum, request) => Math.max(maximum, request.skillCatalogDisclosureCount),
@@ -152,5 +176,11 @@ export function deriveLiveExecutionMetrics(input: LiveExecutionMetricInput): Liv
     auditOutputCharacters,
     modelOutputCharacters,
     modelOutputReductionCharacters: Math.max(0, auditOutputCharacters - modelOutputCharacters),
+    auditOutputCharactersByTool: Object.fromEntries(
+      [...auditOutputCharactersByTool].sort(([left], [right]) => left.localeCompare(right)),
+    ),
+    modelOutputCharactersByTool: Object.fromEntries(
+      [...modelOutputCharactersByTool].sort(([left], [right]) => left.localeCompare(right)),
+    ),
   };
 }

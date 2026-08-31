@@ -46,10 +46,15 @@ async function main(): Promise<void> {
   for (const check of report.acceptance.checks) {
     process.stdout.write(`${check.passed ? 'PASS' : 'FAIL'} ${check.name}: ${check.detail}\n`);
   }
+  if (report.taskError !== null) {
+    process.stdout.write(`taskError: ${report.taskError}\n`);
+  }
   if (report.harnessError !== null) {
     process.stdout.write(`harnessError: ${report.harnessError}\n`);
   }
-  if (!report.acceptance.passed || report.harnessError !== null) process.exitCode = 1;
+  if (!report.acceptance.passed || report.taskError !== null || report.harnessError !== null) {
+    process.exitCode = 1;
+  }
 }
 
 await main().catch((error: unknown) => {

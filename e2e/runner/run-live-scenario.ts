@@ -99,10 +99,13 @@ interface RuntimeTask {
 
 interface RuntimeModelTurn {
   readonly elapsedMs: number;
+  readonly firstEventMs?: number;
+  readonly firstTextMs?: number;
   readonly inputTokens?: number;
   readonly outputTokens?: number;
   readonly totalTokens?: number;
   readonly cachedInputTokens?: number;
+  readonly cacheWriteInputTokens?: number;
   readonly reasoningOutputTokens?: number;
 }
 
@@ -180,10 +183,13 @@ function readModelTurnMetrics(value: unknown, field: string): RuntimeModelTurn {
   }
   return {
     elapsedMs: requiredMetric(metrics.elapsedMs, field + '.elapsedMs'),
+    ...optionalMetricField(metrics, 'firstEventMs', field),
+    ...optionalMetricField(metrics, 'firstTextMs', field),
     ...optionalMetricField(metrics, 'inputTokens', field),
     ...optionalMetricField(metrics, 'outputTokens', field),
     ...optionalMetricField(metrics, 'totalTokens', field),
     ...optionalMetricField(metrics, 'cachedInputTokens', field),
+    ...optionalMetricField(metrics, 'cacheWriteInputTokens', field),
     ...optionalMetricField(metrics, 'reasoningOutputTokens', field),
   };
 }
@@ -358,11 +364,26 @@ function readPreflightSnapshot(value: unknown): readonly string[] {
 
 function readToolResults(results: readonly RuntimeToolResult[]): LiveToolResult[] {
   return results.map((result) => ({
+    toolName: result.toolName,
+    argumentsJson: result.argumentsJson,
+    output: result.output,
+    auditOutputCharacters: result.output.length,
+    modelOutputCharacters: (result.modelOutput ?? result.output).length,
+    attachmentIds: result.attachmentIds,
+  }));
+}
+
+function reportedToolResults(results: readonly LiveToolResult[]): LiveToolResult[] {
+  return results.map((result) => ({
     toolName: result.toolName.slice(0, 128),
     argumentsJson: sanitizeToolPayload(result.argumentsJson, MAX_REPORTED_ARGUMENT_CHARACTERS),
     output: sanitizeToolPayload(result.output, MAX_REPORTED_OUTPUT_CHARACTERS),
-    auditOutputCharacters: result.output.length,
-    modelOutputCharacters: (result.modelOutput ?? result.output).length,
+    ...(result.auditOutputCharacters === undefined
+      ? {}
+      : { auditOutputCharacters: result.auditOutputCharacters }),
+    ...(result.modelOutputCharacters === undefined
+      ? {}
+      : { modelOutputCharacters: result.modelOutputCharacters }),
     attachmentIds: result.attachmentIds.slice(0, 8),
   }));
 }
@@ -432,6 +453,12 @@ function validateTaskEvidence(snapshot: RuntimeTaskSnapshot): void {
       throw new LiveEvidenceMismatchError(
         'A tool.result event has no matching TaskSnapshot tool result.',
       );
+    }
+  }
+
+  for (const callId of calls.keys()) {
+    if (!resultEventsByCall.has(callId) && !snapshotResultsByCall.has(callId)) {
+      throw new LiveEvidenceMismatchError('A tool.call event has no matching tool result.');
     }
   }
 }
@@ -546,25 +573,47 @@ function finiteMetric(value: unknown): number {
 }
 
 function aggregateMetrics(events: RuntimeTaskSnapshot['events']): LiveModelMetrics {
-  return events.reduce<LiveModelMetrics>(
-    (metrics, event) => ({
-      inputTokens: metrics.inputTokens + finiteMetric(event.metrics?.inputTokens),
-      outputTokens: metrics.outputTokens + finiteMetric(event.metrics?.outputTokens),
-      totalTokens: metrics.totalTokens + finiteMetric(event.metrics?.totalTokens),
-      cachedInputTokens: metrics.cachedInputTokens + finiteMetric(event.metrics?.cachedInputTokens),
-      reasoningOutputTokens:
-        metrics.reasoningOutputTokens + finiteMetric(event.metrics?.reasoningOutputTokens),
-      elapsedMs: metrics.elapsedMs + finiteMetric(event.metrics?.elapsedMs),
-    }),
-    {
-      inputTokens: 0,
-      outputTokens: 0,
-      totalTokens: 0,
-      cachedInputTokens: 0,
-      reasoningOutputTokens: 0,
-      elapsedMs: 0,
-    },
-  );
+  let inputTokens = 0;
+  let outputTokens = 0;
+  let totalTokens = 0;
+  let cachedInputTokens = 0;
+  let cacheWriteInputTokens = 0;
+  let reasoningOutputTokens = 0;
+  let elapsedMs = 0;
+  let firstEventMs: number | undefined;
+  let firstTextMs: number | undefined;
+  for (const event of events) {
+    const metrics = event.metrics;
+    if (metrics === undefined) continue;
+    inputTokens += finiteMetric(metrics.inputTokens);
+    outputTokens += finiteMetric(metrics.outputTokens);
+    totalTokens += finiteMetric(metrics.totalTokens);
+    cachedInputTokens += finiteMetric(metrics.cachedInputTokens);
+    cacheWriteInputTokens += finiteMetric(metrics.cacheWriteInputTokens);
+    reasoningOutputTokens += finiteMetric(metrics.reasoningOutputTokens);
+    elapsedMs += finiteMetric(metrics.elapsedMs);
+    if (firstEventMs === undefined && metrics.firstEventMs !== undefined) {
+      firstEventMs = finiteMetric(metrics.firstEventMs);
+    }
+    if (firstTextMs === undefined && metrics.firstTextMs !== undefined) {
+      firstTextMs = finiteMetric(metrics.firstTextMs);
+    }
+  }
+  return {
+    inputTokens,
+    outputTokens,
+    totalTokens,
+    cachedInputTokens,
+    cacheWriteInputTokens,
+    reasoningOutputTokens,
+    elapsedMs,
+    firstEventMs: firstEventMs ?? 0,
+    firstTextMs: firstTextMs ?? 0,
+  };
+}
+
+function modelTurnCount(events: RuntimeTaskSnapshot['events']): number {
+  return events.filter((event) => event.type === 'model.turn').length;
 }
 
 function providerRetryReasons(events: RuntimeTaskSnapshot['events']): readonly string[] {
@@ -635,10 +684,14 @@ export function createLiveHarnessFailureReport(
       outputTokens: 0,
       totalTokens: 0,
       cachedInputTokens: 0,
+      cacheWriteInputTokens: 0,
       reasoningOutputTokens: 0,
       elapsedMs: 0,
+      firstEventMs: 0,
+      firstTextMs: 0,
     },
     executionMetrics: deriveLiveExecutionMetrics({
+      modelTurns: 0,
       toolResults: [],
       providerTrace,
       providerRetryReasons: [],
@@ -647,6 +700,7 @@ export function createLiveHarnessFailureReport(
     productRevision: dependencies.productRevision ?? 'unknown',
     scenarioContractVersion: scenario.contractVersion,
     acceptance,
+    taskError: null,
     harnessError,
   };
 }
@@ -671,6 +725,11 @@ function expandScenario(scenario: LiveScenario, runId: string): LiveScenario {
       ? {}
       : {
           requiredTypedTextIncludes: expandAll(scenario.requiredTypedTextIncludes),
+        }),
+    ...(scenario.requiredToolResultIncludes === undefined
+      ? {}
+      : {
+          requiredToolResultIncludes: expandAll(scenario.requiredToolResultIncludes),
         }),
     ...(scenario.requiredToolOutputIncludes === undefined
       ? {}
@@ -697,6 +756,7 @@ export async function runLiveScenario(
   let finalText = '';
   let toolResults: LiveToolResult[] = [];
   let providerTrace: LiveProviderTrace = { requestCount: 0, requests: [] };
+  let taskError: string | null = null;
   let harnessError: string | null = null;
   let requestSequence = 0;
   const cleanupRequestTimeoutMs =
@@ -806,7 +866,7 @@ export async function runLiveScenario(
 
     if (!RUN_STOP_STATUSES.has(terminalStatus)) {
       terminalStatus = 'timed_out';
-      harnessError = `Live task timed out after ${String(expandedScenario.taskTimeoutMs)} ms and was cancelled.`;
+      taskError = `Live task timed out after ${String(expandedScenario.taskTimeoutMs)} ms and was cancelled.`;
       try {
         latestSnapshot = readTaskSnapshot(
           await withRequestTimeout(
@@ -820,7 +880,7 @@ export async function runLiveScenario(
       }
     } else if (terminalStatus !== 'completed') {
       const userMessage = latestSnapshot.task.lastError?.userMessage;
-      harnessError =
+      taskError =
         typeof userMessage === 'string' && userMessage.length > 0
           ? errorMessage(userMessage)
           : `Live task ended with status ${terminalStatus}.`;
@@ -928,6 +988,7 @@ export async function runLiveScenario(
     providerRetryReasons: retryReasons,
     ...(runtime.finishProviderTrace === undefined ? {} : { providerTrace }),
   });
+  const reportToolResults = reportedToolResults(toolResults);
   return {
     runId,
     scenario: scenario.name,
@@ -938,9 +999,10 @@ export async function runLiveScenario(
     taskId,
     conversationId,
     finalText,
-    toolResults,
+    toolResults: reportToolResults,
     modelMetrics: aggregateMetrics(latestSnapshot?.events ?? []),
     executionMetrics: deriveLiveExecutionMetrics({
+      modelTurns: modelTurnCount(latestSnapshot?.events ?? []),
       toolResults,
       providerTrace,
       providerRetryReasons: retryReasons,
@@ -949,6 +1011,7 @@ export async function runLiveScenario(
     productRevision: dependencies.productRevision ?? 'unknown',
     scenarioContractVersion: scenario.contractVersion,
     acceptance,
+    taskError,
     harnessError,
   };
 }

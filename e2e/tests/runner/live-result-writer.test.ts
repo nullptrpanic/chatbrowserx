@@ -33,7 +33,7 @@ function report(runId: string, success: boolean) {
         },
       ],
     },
-    harnessError: success ? null : 'Provider failed.',
+    taskError: success ? null : 'Provider failed.',
   });
 }
 

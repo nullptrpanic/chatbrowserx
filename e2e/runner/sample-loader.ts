@@ -62,6 +62,8 @@ const policySchema = z
     requireVerticalBoundaryCoverage: z.boolean().optional(),
     maxAttachmentCount: nonNegativeInteger.optional(),
     requiredTypedTextIncludes: z.array(nonEmptyString).optional(),
+    allowedKeypresses: nonEmptyStrings.optional(),
+    requiredToolResultIncludes: z.array(nonEmptyString).optional(),
     requiredToolOutputIncludes: z.array(nonEmptyString).optional(),
     finalTextIncludes: nonEmptyStrings,
     finalTextIncludesAny: z.array(nonEmptyStrings).min(1).optional(),
@@ -209,6 +211,12 @@ export function materializeLiveScenario(sample: EvaluationSampleDefinition): Liv
     ...(policy.requiredTypedTextIncludes === undefined
       ? {}
       : { requiredTypedTextIncludes: policy.requiredTypedTextIncludes }),
+    ...(policy.allowedKeypresses === undefined
+      ? {}
+      : { allowedKeypresses: policy.allowedKeypresses }),
+    ...(policy.requiredToolResultIncludes === undefined
+      ? {}
+      : { requiredToolResultIncludes: policy.requiredToolResultIncludes }),
     ...(policy.requiredToolOutputIncludes === undefined
       ? {}
       : { requiredToolOutputIncludes: policy.requiredToolOutputIncludes }),

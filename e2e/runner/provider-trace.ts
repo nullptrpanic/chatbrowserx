@@ -1,4 +1,5 @@
 import type { BrowserContext, Request, Response } from '@playwright/test';
+import { createHash } from 'node:crypto';
 import { CODEX_RESPONSES_URL } from '../../src/providers/codex/codex-constants';
 import { RUNTIME_SUPPLEMENT_PREFIX } from '../../src/agent/context/agent-context';
 import { jsonRecord } from './json-contract';
@@ -30,6 +31,10 @@ function serializedCharacters(value: unknown): number {
   } catch {
     return 0;
   }
+}
+
+function toolDefinitionFingerprint(definitions: readonly unknown[]): string {
+  return createHash('sha256').update(JSON.stringify(definitions)).digest('hex').slice(0, 16);
 }
 
 function messageItemSummary(
@@ -99,6 +104,7 @@ function invalidRequestSummary(): LiveProviderRequestBodySummary {
     includesEncryptedReasoning: false,
     toolNames: [],
     toolDefinitionCharacters: 0,
+    toolDefinitionFingerprint: null,
     skillCatalogDisclosureCount: 0,
     toolChoice: null,
     inputItems: [],
@@ -172,6 +178,7 @@ export function summarizeResponsesRequestBody(
       (total, definition) => total + serializedCharacters(definition),
       0,
     ),
+    toolDefinitionFingerprint: toolDefinitionFingerprint(toolDefinitions),
     skillCatalogDisclosureCount:
       typeof request.instructions === 'string'
         ? new Set(request.instructions.match(/skill_[a-z0-9]{14}/g) ?? []).size

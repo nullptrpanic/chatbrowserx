@@ -38,7 +38,7 @@ export async function runLiveBenchmark(input: LiveBenchmarkInput): Promise<LiveB
       throw new Error('Live benchmark report contract version does not match the batch contract.');
     }
     reports.push(report);
-    if (!report.acceptance.passed || report.harnessError !== null) {
+    if (!report.acceptance.passed || report.taskError !== null || report.harnessError !== null) {
       stoppedOnFailure = true;
       break;
     }
@@ -47,8 +47,10 @@ export async function runLiveBenchmark(input: LiveBenchmarkInput): Promise<LiveB
   return {
     requestedRuns: input.runs,
     completedRuns: reports.length,
-    passedRuns: reports.filter((report) => report.acceptance.passed && report.harnessError === null)
-      .length,
+    passedRuns: reports.filter(
+      (report) =>
+        report.acceptance.passed && report.taskError === null && report.harnessError === null,
+    ).length,
     stoppedOnFailure,
   };
 }

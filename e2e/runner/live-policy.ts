@@ -231,6 +231,21 @@ export function evaluateLiveRun(scenario: LiveScenario, input: LiveRunInput): Li
   const missingTypedText = (scenario.requiredTypedTextIncludes ?? []).filter(
     (value) => !typedTexts.some((text) => text.includes(value)),
   );
+  const allowedKeypresses = new Set(
+    (scenario.allowedKeypresses ?? []).map((keys) => keys.trim().toUpperCase()),
+  );
+  const disallowedKeypresses =
+    scenario.allowedKeypresses === undefined
+      ? []
+      : parsedCalls.filter(
+          ({ result, arguments_ }) =>
+            result.toolName === 'browser_keypress' &&
+            (typeof arguments_?.keys !== 'string' ||
+              !allowedKeypresses.has(arguments_.keys.trim().toUpperCase())),
+        );
+  const missingToolResultContent = (scenario.requiredToolResultIncludes ?? []).filter(
+    (value) => !input.toolResults.some((result) => result.output.includes(value)),
+  );
   const lastSubmittedIndex = parsedCalls.findLastIndex(
     ({ result, arguments_ }) => result.toolName === 'browser_type' && arguments_?.submit === true,
   );
@@ -461,6 +476,7 @@ export function evaluateLiveRun(scenario: LiveScenario, input: LiveRunInput): Li
       includesEncryptedReasoning: request.includesEncryptedReasoning,
       toolNames: request.toolNames,
       toolDefinitionCharacters: request.toolDefinitionCharacters,
+      toolDefinitionFingerprint: request.toolDefinitionFingerprint,
       skillCatalogDisclosureCount: request.skillCatalogDisclosureCount,
       toolChoice: request.toolChoice,
       inputItems: request.inputItems,
@@ -491,7 +507,7 @@ export function evaluateLiveRun(scenario: LiveScenario, input: LiveRunInput): Li
       !request.response.failed &&
       request.response.captureError === null;
     return (
-      (request.response.status === 200 || capturedTransportFailure) &&
+      (request.response.status === 200 || capturedFailure || capturedTransportFailure) &&
       !request.response.completed &&
       !request.response.bodyTooLarge &&
       (captureWasUnavailable || capturedFailure || capturedTransportFailure) &&
@@ -562,6 +578,15 @@ export function evaluateLiveRun(scenario: LiveScenario, input: LiveRunInput): Li
       usedForbiddenTools.length === 0
         ? 'No forbidden tools were used.'
         : `Used: ${usedForbiddenTools.join(', ')}.`,
+    ),
+    check(
+      'allowed-keypresses',
+      disallowedKeypresses.length === 0,
+      scenario.allowedKeypresses === undefined
+        ? 'No keypress allowlist declared.'
+        : disallowedKeypresses.length === 0
+          ? `Every keypress matched the declared allowlist: ${scenario.allowedKeypresses.join(', ')}.`
+          : `${String(disallowedKeypresses.length)} keypress call(s) were outside the declared allowlist.`,
     ),
     check(
       'no-screenshot-inspection',
@@ -638,6 +663,13 @@ export function evaluateLiveRun(scenario: LiveScenario, input: LiveRunInput): Li
       missingTypedText.length === 0
         ? 'Every required text fragment was typed.'
         : `Missing required typed text: ${missingTypedText.join(', ')}.`,
+    ),
+    check(
+      'required-tool-result-content',
+      missingToolResultContent.length === 0,
+      missingToolResultContent.length === 0
+        ? 'Every required literal was retained in a durable tool result.'
+        : `${String(missingToolResultContent.length)} required literals were absent from durable tool results.`,
     ),
     check(
       'required-tool-readback',

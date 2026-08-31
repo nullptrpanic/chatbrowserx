@@ -8,6 +8,7 @@ These rules apply to every file and operation under `e2e/`.
   to produce a runnable, authenticated E2E environment.
 - `SAMPLE_SPEC.md`: sample and result contracts.
 - `EVALUATION_STANDARD.md`: execution, evidence, failure, and comparison rules.
+- `OPTIMIZATION.md`: optimization candidates, admission status, and concise decision history.
 
 ## Mandatory Rules
 
