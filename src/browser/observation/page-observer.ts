@@ -26,6 +26,7 @@ const DEEP_INTERACTIVE_BUDGET = {
 } as const;
 const MAX_INTERACTIVE_SNAPSHOT_TABS = 50;
 const MAX_SESSION_OBSERVATION_CONCURRENCY = 3;
+const MAX_RESERVED_EDITABLE_TARGETS = 4;
 const INTERACTIVE_ENTRY_KEYS =
   'd=depth,r=role(default generic),n=name,s=state,a=extra actions(ref defaults click),f=frame';
 const MAX_CONTENT_CHARACTERS = 40_000;
@@ -177,8 +178,24 @@ function interactiveCandidateIndexes(
   deep: boolean,
 ): readonly number[] {
   if (!deep) {
-    const priority = (entry: SemanticPageEntry): number => {
-      if (entry.actions?.includes('scroll')) return -1;
+    const reservedEditableIndexes = new Set<number>();
+    const reservedTargetIndexes = new Set<number>();
+    entries.forEach((entry, index) => {
+      if (
+        reservedTargetIndexes.size >= MAX_RESERVED_EDITABLE_TARGETS ||
+        entry.inViewport === true ||
+        !entry.actions?.includes('type') ||
+        entry.targetIndex === undefined ||
+        reservedTargetIndexes.has(entry.targetIndex)
+      ) {
+        return;
+      }
+      reservedEditableIndexes.add(index);
+      reservedTargetIndexes.add(entry.targetIndex);
+    });
+    const priority = (entry: SemanticPageEntry, index: number): number => {
+      if (entry.actions?.includes('scroll')) return -3;
+      if (reservedEditableIndexes.has(index)) return -2;
       if (entry.inViewport && entry.targetIndex !== undefined) return 0;
       if (entry.inViewport) return 1;
       if (
@@ -196,7 +213,7 @@ function interactiveCandidateIndexes(
         const leftEntry = entries[left];
         const rightEntry = entries[right];
         if (!leftEntry || !rightEntry) return left - right;
-        return priority(leftEntry) - priority(rightEntry) || left - right;
+        return priority(leftEntry, left) - priority(rightEntry, right) || left - right;
       });
   }
   const indexes: number[] = [];
@@ -442,7 +459,12 @@ function interactiveCoverage(
   ): void => {
     if (seen.has(ref)) return;
     seen.add(ref);
-    candidates.push({ ref, name, depth, ...(metrics === undefined ? {} : { metrics }) });
+    candidates.push({
+      ref,
+      name,
+      depth,
+      ...(metrics === undefined ? {} : { metrics }),
+    });
   };
   if (documentCoverage !== undefined) {
     candidates.push({
@@ -632,8 +654,9 @@ export class PageObserver {
   ): Promise<PageObservationResult> {
     const browserSession = await this.#dependencies.sessions.ensure(tabId, signal);
     throwIfAborted(signal);
-    const targets: (ObservedElementTarget & { readonly scrollMetrics?: SemanticScrollMetrics })[] =
-      [];
+    const targets: (ObservedElementTarget & {
+      readonly scrollMetrics?: SemanticScrollMetrics;
+    })[] = [];
     const entries: SemanticPageEntry[] = [];
     const documentEpochParts: string[] = [];
     let mainDocumentCoverage: DocumentViewportCoverage | undefined;
@@ -753,7 +776,10 @@ export class PageObserver {
     const budget = deep ? DEEP_INTERACTIVE_BUDGET : INTERACTIVE_BUDGET;
     const selectedEntryIndexes: number[] = [];
     const usedTargetIndexes = new Set<number>();
-    let serializedCharacters = JSON.stringify({ mode: 'interactive', elements: [] }).length;
+    let serializedCharacters = JSON.stringify({
+      mode: 'interactive',
+      elements: [],
+    }).length;
     for (const entryIndex of interactiveCandidateIndexes(entries, deep)) {
       if (selectedEntryIndexes.length >= budget.elements) break;
       const entry = entries[entryIndex];

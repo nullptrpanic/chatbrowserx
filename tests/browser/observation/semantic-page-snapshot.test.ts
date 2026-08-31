@@ -204,14 +204,76 @@ function labeledCheckboxSnapshot(checked: boolean) {
 }
 
 describe('buildSemanticPageSnapshot', () => {
+  it.each(['generic', 'link'] as const)(
+    'recovers same-page link semantics when AX exposes an anchor as %s',
+    (axRole) => {
+      const result = buildSemanticPageSnapshot({
+        axNodes: [
+          axNode('root', 1, 'RootWebArea', 'Document', {
+            childIds: ['contents-link'],
+          }),
+          axNode('contents-link', 12, axRole, 'Critical issues', {
+            parentId: 'root',
+            properties: [
+              {
+                name: 'focusable',
+                value: { type: 'boolean', value: true },
+              },
+            ],
+          }),
+        ],
+        domSnapshot: domSnapshot([
+          { backendNodeId: 1, nodeName: '#document', parentIndex: -1 },
+          {
+            backendNodeId: 11,
+            nodeName: 'A',
+            parentIndex: 0,
+            attributes: { href: '#critical-issues' },
+            clickable: true,
+            bounds: [20, 40, 180, 32],
+          },
+          {
+            backendNodeId: 12,
+            nodeName: 'SPAN',
+            parentIndex: 1,
+            bounds: [24, 44, 172, 24],
+          },
+        ]),
+        frame: 'main',
+      });
+
+      expect(result.entries).toContainEqual({
+        depth: 1,
+        role: 'link',
+        name: 'Critical issues',
+        targetIndex: 0,
+        state: ['same-page'],
+        actions: ['click'],
+      });
+      expect(result.targets).toContainEqual(
+        expect.objectContaining({
+          backendNodeId: 12,
+          role: 'link',
+          name: 'Critical issues',
+          state: ['same-page'],
+          actions: ['click'],
+        }),
+      );
+    },
+  );
+
   it('does not advertise a click target completely covered by an unrelated higher layer', () => {
     const result = buildSemanticPageSnapshot({
       axNodes: [
         axNode('root', 1, 'RootWebArea', 'Messenger', {
           childIds: ['covered-action', 'search-overlay'],
         }),
-        axNode('covered-action', 2, 'button', 'Covered action', { parentId: 'root' }),
-        axNode('search-overlay', 3, 'generic', 'Search overlay', { parentId: 'root' }),
+        axNode('covered-action', 2, 'button', 'Covered action', {
+          parentId: 'root',
+        }),
+        axNode('search-overlay', 3, 'generic', 'Search overlay', {
+          parentId: 'root',
+        }),
       ],
       domSnapshot: domSnapshot([
         { backendNodeId: 1, nodeName: '#document', parentIndex: -1 },
@@ -252,7 +314,9 @@ describe('buildSemanticPageSnapshot', () => {
           parentId: 'root',
           childIds: ['button-label'],
         }),
-        axNode('button-label', 3, 'StaticText', 'Continue', { parentId: 'button' }),
+        axNode('button-label', 3, 'StaticText', 'Continue', {
+          parentId: 'button',
+        }),
       ],
       domSnapshot: domSnapshot([
         { backendNodeId: 1, nodeName: '#document', parentIndex: -1 },
@@ -282,7 +346,9 @@ describe('buildSemanticPageSnapshot', () => {
   it('keeps a click target beneath a pointer-events-none visual layer', () => {
     const result = buildSemanticPageSnapshot({
       axNodes: [
-        axNode('root', 1, 'RootWebArea', 'Form', { childIds: ['button', 'decoration'] }),
+        axNode('root', 1, 'RootWebArea', 'Form', {
+          childIds: ['button', 'decoration'],
+        }),
         axNode('button', 2, 'button', 'Continue', { parentId: 'root' }),
         axNode('decoration', 3, 'generic', 'Decoration', { parentId: 'root' }),
       ],
@@ -359,7 +425,10 @@ describe('buildSemanticPageSnapshot', () => {
           backendNodeId: 6,
           nodeName: 'DIV',
           parentIndex: 4,
-          attributes: { contenteditable: 'true', 'data-placeholder': 'Message Alex' },
+          attributes: {
+            contenteditable: 'true',
+            'data-placeholder': 'Message Alex',
+          },
           bounds: [32, 176, 420, 30],
           paintOrder: 1,
         },
@@ -525,8 +594,12 @@ describe('buildSemanticPageSnapshot', () => {
   it('exposes a nested overflow container as an explicit scroll target', () => {
     const result = buildSemanticPageSnapshot({
       axNodes: [
-        axNode('root', 1, 'RootWebArea', 'Messenger', { childIds: ['message'] }),
-        axNode('message', 20, 'StaticText', 'Newest message', { parentId: 'root' }),
+        axNode('root', 1, 'RootWebArea', 'Messenger', {
+          childIds: ['message'],
+        }),
+        axNode('message', 20, 'StaticText', 'Newest message', {
+          parentId: 'root',
+        }),
       ],
       domSnapshot: domSnapshot([
         { backendNodeId: 1, nodeName: '#document', parentIndex: -1 },
@@ -660,7 +733,9 @@ describe('buildSemanticPageSnapshot', () => {
   it('promotes passive option text to its nearest actionable tree ancestor', () => {
     const result = buildSemanticPageSnapshot({
       axNodes: [
-        axNode('root', 1, 'RootWebArea', 'Policy editor', { childIds: ['domain-text'] }),
+        axNode('root', 1, 'RootWebArea', 'Policy editor', {
+          childIds: ['domain-text'],
+        }),
         axNode('domain-text', 21, 'StaticText', '域名', { parentId: 'root' }),
       ],
       domSnapshot: domSnapshot([
@@ -817,7 +892,9 @@ describe('buildSemanticPageSnapshot', () => {
           childIds: ['choice-label', 'choice-text'],
         }),
         axNode('choice-label', 21, 'generic', 'A.', { parentId: 'root' }),
-        axNode('choice-text', 22, 'StaticText', 'First answer', { parentId: 'root' }),
+        axNode('choice-text', 22, 'StaticText', 'First answer', {
+          parentId: 'root',
+        }),
       ],
       domSnapshot: domSnapshot([
         { backendNodeId: 1, nodeName: '#document', parentIndex: -1 },
@@ -940,11 +1017,15 @@ describe('buildSemanticPageSnapshot', () => {
         axNode('question', 10, 'StaticText', '1. Which option is correct?', {
           parentId: 'root',
         }),
-        axNode('choice-a', 21, 'generic', 'A. First answer', { parentId: 'root' }),
+        axNode('choice-a', 21, 'generic', 'A. First answer', {
+          parentId: 'root',
+        }),
         axNode('choice-a-text', 21, 'StaticText', 'A. First answer', {
           parentId: 'choice-a',
         }),
-        axNode('choice-b', 31, 'generic', 'B. Second answer', { parentId: 'root' }),
+        axNode('choice-b', 31, 'generic', 'B. Second answer', {
+          parentId: 'root',
+        }),
         axNode('submit', 40, 'button', 'Submit', {
           parentId: 'root',
           properties: [{ name: 'focusable', value: { type: 'boolean', value: true } }],
@@ -969,7 +1050,11 @@ describe('buildSemanticPageSnapshot', () => {
         state: ['selected=false'],
         actions: ['click', 'set_checked'],
       }),
-      expect.objectContaining({ backendNodeId: 40, role: 'button', actions: ['click'] }),
+      expect.objectContaining({
+        backendNodeId: 40,
+        role: 'button',
+        actions: ['click'],
+      }),
     ]);
     expect(result.entries).toEqual([
       { depth: 1, role: 'statictext', name: '1. Which option is correct?' },
@@ -1008,8 +1093,12 @@ describe('buildSemanticPageSnapshot', () => {
         axNode('root', 1, 'RootWebArea', 'Exam', {
           childIds: ['choice-a', 'choice-b'],
         }),
-        axNode('choice-a', 21, 'StaticText', 'A. First answer', { parentId: 'root' }),
-        axNode('choice-b', 31, 'StaticText', 'B. Second answer', { parentId: 'root' }),
+        axNode('choice-a', 21, 'StaticText', 'A. First answer', {
+          parentId: 'root',
+        }),
+        axNode('choice-b', 31, 'StaticText', 'B. Second answer', {
+          parentId: 'root',
+        }),
       ],
       domSnapshot: domSnapshot([
         { backendNodeId: 1, nodeName: '#document', parentIndex: -1 },
@@ -1137,7 +1226,9 @@ describe('buildSemanticPageSnapshot', () => {
           parentId: 'root',
           properties: [{ name: 'checked', value: { type: 'boolean', value: false } }],
         }),
-        axNode('second-toggle', 30, 'checkbox', 'Second toggle', { parentId: 'root' }),
+        axNode('second-toggle', 30, 'checkbox', 'Second toggle', {
+          parentId: 'root',
+        }),
       ],
       domSnapshot: domSnapshot([
         { backendNodeId: 1, nodeName: '#document', parentIndex: -1 },
@@ -1178,8 +1269,12 @@ describe('buildSemanticPageSnapshot', () => {
         axNode('root', 1, 'RootWebArea', 'Settings', {
           childIds: ['first-toggle', 'second-toggle'],
         }),
-        axNode('first-toggle', 20, 'checkbox', 'First toggle', { parentId: 'root' }),
-        axNode('second-toggle', 30, 'checkbox', 'Second toggle', { parentId: 'root' }),
+        axNode('first-toggle', 20, 'checkbox', 'First toggle', {
+          parentId: 'root',
+        }),
+        axNode('second-toggle', 30, 'checkbox', 'Second toggle', {
+          parentId: 'root',
+        }),
       ],
       domSnapshot: domSnapshot([
         { backendNodeId: 1, nodeName: '#document', parentIndex: -1 },
@@ -1220,8 +1315,12 @@ describe('buildSemanticPageSnapshot', () => {
         axNode('root', 1, 'RootWebArea', 'Survey', {
           childIds: ['choice-a', 'choice-b'],
         }),
-        axNode('choice-a', 21, 'StaticText', 'A. First answer', { parentId: 'root' }),
-        axNode('choice-b', 31, 'StaticText', 'B. Second answer', { parentId: 'root' }),
+        axNode('choice-a', 21, 'StaticText', 'A. First answer', {
+          parentId: 'root',
+        }),
+        axNode('choice-b', 31, 'StaticText', 'B. Second answer', {
+          parentId: 'root',
+        }),
       ],
       domSnapshot: domSnapshot([
         { backendNodeId: 1, nodeName: '#document', parentIndex: -1 },
@@ -1313,7 +1412,9 @@ describe('buildSemanticPageSnapshot', () => {
   it('does not advertise typing for a native readonly editor', () => {
     const result = buildSemanticPageSnapshot({
       axNodes: [
-        axNode('root', 1, 'RootWebArea', 'Profile', { childIds: ['account-id'] }),
+        axNode('root', 1, 'RootWebArea', 'Profile', {
+          childIds: ['account-id'],
+        }),
         axNode('account-id', 20, 'textbox', 'Account ID', { parentId: 'root' }),
       ],
       domSnapshot: domSnapshot([
@@ -1344,7 +1445,9 @@ describe('buildSemanticPageSnapshot', () => {
   it('keeps answer-sheet navigation as ordinary clicks without selection semantics', () => {
     const result = buildSemanticPageSnapshot({
       axNodes: [
-        axNode('root', 1, 'RootWebArea', 'Exam', { childIds: ['jump-1', 'jump-2'] }),
+        axNode('root', 1, 'RootWebArea', 'Exam', {
+          childIds: ['jump-1', 'jump-2'],
+        }),
         axNode('jump-1', 21, 'StaticText', '1', { parentId: 'root' }),
         axNode('jump-2', 31, 'StaticText', '2', { parentId: 'root' }),
       ],
@@ -1415,7 +1518,12 @@ describe('buildSemanticPageSnapshot', () => {
     const result = buildSemanticPageSnapshot({
       axNodes: [axNode('root', 1, 'RootWebArea', 'Delegated app')],
       domSnapshot: domSnapshot([
-        { backendNodeId: 1, nodeName: '#document', parentIndex: -1, clickable: true },
+        {
+          backendNodeId: 1,
+          nodeName: '#document',
+          parentIndex: -1,
+          clickable: true,
+        },
         {
           backendNodeId: 2,
           nodeName: 'BODY',
@@ -1502,7 +1610,10 @@ describe('buildSemanticPageSnapshot', () => {
   });
 
   it('keeps native checked state and prunes duplicate inline text', () => {
-    const checked = { name: 'checked', value: { type: 'tristate', value: 'true' } } as const;
+    const checked = {
+      name: 'checked',
+      value: { type: 'tristate', value: 'true' },
+    } as const;
     const result = buildSemanticPageSnapshot({
       axNodes: [
         axNode('root', 1, 'RootWebArea', 'Form', { childIds: ['checkbox'] }),
@@ -1511,7 +1622,9 @@ describe('buildSemanticPageSnapshot', () => {
           childIds: ['inline'],
           properties: [checked],
         }),
-        axNode('inline', 2, 'InlineTextBox', 'Accept', { parentId: 'checkbox' }),
+        axNode('inline', 2, 'InlineTextBox', 'Accept', {
+          parentId: 'checkbox',
+        }),
       ],
       domSnapshot: domSnapshot([
         { backendNodeId: 1, nodeName: '#document', parentIndex: -1 },
@@ -1614,7 +1727,10 @@ describe('buildSemanticPageSnapshot', () => {
 
     expect(result.entries).toEqual([
       expect.objectContaining({ name: 'Visible question', inViewport: true }),
-      expect.objectContaining({ name: 'Offscreen appendix', inViewport: false }),
+      expect.objectContaining({
+        name: 'Offscreen appendix',
+        inViewport: false,
+      }),
     ]);
   });
 });

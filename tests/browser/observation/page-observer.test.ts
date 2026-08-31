@@ -568,15 +568,32 @@ describe('PageObserver', () => {
       }
       if (method === 'DOMSnapshot.captureSnapshot') {
         return multipleScrollContainersDomSnapshot([
-          { label: 'Short sidebar', bounds: [0, 0, 240, 600], scrollHeight: 680 },
-          { label: 'Main document', bounds: [250, 0, 900, 650], scrollHeight: 21_000 },
-          { label: 'Short auxiliary panel', bounds: [250, 660, 900, 100], scrollHeight: 220 },
+          {
+            label: 'Short sidebar',
+            bounds: [0, 0, 240, 600],
+            scrollHeight: 680,
+          },
+          {
+            label: 'Main document',
+            bounds: [250, 0, 900, 650],
+            scrollHeight: 21_000,
+          },
+          {
+            label: 'Short auxiliary panel',
+            bounds: [250, 660, 900, 100],
+            scrollHeight: 220,
+          },
         ]);
       }
       if (method === 'Page.getFrameTree') return mainFrameTree();
       if (method === 'Page.getLayoutMetrics') {
         return {
-          visualViewport: { pageX: 0, pageY: 0, clientWidth: 1_200, clientHeight: 800 },
+          visualViewport: {
+            pageX: 0,
+            pageY: 0,
+            clientWidth: 1_200,
+            clientHeight: 800,
+          },
           contentSize: { x: 0, y: 0, width: 1_200, height: 800 },
         };
       }
@@ -588,7 +605,9 @@ describe('PageObserver', () => {
       sessions: sessions(snapshot),
       transport,
       content: CONTENT,
-      refs: new ElementRefStore({ create: () => refs.shift() ?? 'unexpected_ref' }),
+      refs: new ElementRefStore({
+        create: () => refs.shift() ?? 'unexpected_ref',
+      }),
     });
 
     const result = await observer.inspect(7, 'interactive', new AbortController().signal);
@@ -622,13 +641,22 @@ describe('PageObserver', () => {
       if (method === 'DOMSnapshot.captureSnapshot') {
         return multipleScrollContainersDomSnapshot([
           { label: 'Left pane', bounds: [0, 0, 580, 700], scrollHeight: 6_000 },
-          { label: 'Right pane', bounds: [600, 0, 580, 700], scrollHeight: 5_500 },
+          {
+            label: 'Right pane',
+            bounds: [600, 0, 580, 700],
+            scrollHeight: 5_500,
+          },
         ]);
       }
       if (method === 'Page.getFrameTree') return mainFrameTree();
       if (method === 'Page.getLayoutMetrics') {
         return {
-          visualViewport: { pageX: 0, pageY: 0, clientWidth: 1_200, clientHeight: 800 },
+          visualViewport: {
+            pageX: 0,
+            pageY: 0,
+            clientWidth: 1_200,
+            clientHeight: 800,
+          },
           contentSize: { x: 0, y: 0, width: 1_200, height: 800 },
         };
       }
@@ -640,7 +668,9 @@ describe('PageObserver', () => {
       sessions: sessions(snapshot),
       transport,
       content: CONTENT,
-      refs: new ElementRefStore({ create: () => refs.shift() ?? 'unexpected_ref' }),
+      refs: new ElementRefStore({
+        create: () => refs.shift() ?? 'unexpected_ref',
+      }),
     });
 
     const result = await observer.inspect(7, 'interactive', new AbortController().signal);
@@ -675,7 +705,12 @@ describe('PageObserver', () => {
       if (method === 'Page.getFrameTree') return mainFrameTree();
       if (method === 'Page.getLayoutMetrics') {
         return {
-          visualViewport: { pageX: 0, pageY: 0, clientWidth: 1_200, clientHeight: 800 },
+          visualViewport: {
+            pageX: 0,
+            pageY: 0,
+            clientWidth: 1_200,
+            clientHeight: 800,
+          },
           contentSize: { x: 0, y: 0, width: 1_200, height: 800 },
         };
       }
@@ -687,7 +722,9 @@ describe('PageObserver', () => {
       sessions: sessions(snapshot),
       transport,
       content: CONTENT,
-      refs: new ElementRefStore({ create: () => refs.shift() ?? 'unexpected_ref' }),
+      refs: new ElementRefStore({
+        create: () => refs.shift() ?? 'unexpected_ref',
+      }),
     });
 
     const result = await observer.inspect(7, 'interactive', new AbortController().signal);
@@ -919,6 +956,263 @@ describe('PageObserver', () => {
     );
     expect(JSON.stringify(ordinary.data)).not.toContain('bounds');
     expect(JSON.stringify(ordinary.data)).not.toContain('inViewport');
+  });
+
+  it('retains an editable target when viewport coordinate spaces differ', async () => {
+    const snapshot: BrowserSessionSnapshot = {
+      tabId: 7,
+      generation: 1,
+      root: { tabId: 7 },
+      children: new Map(),
+    };
+    const buttonCount = 120;
+    const buttonBackendIds = Array.from({ length: buttonCount }, (_, index) => 1_000 + index);
+    const editorBackendId = 9_999;
+    const strings = [
+      'https://top.test/',
+      'Crowded editor',
+      '',
+      'frame-main',
+      '#document',
+      'BUTTON',
+      'DIV',
+      'pointer',
+      'block',
+      'visible',
+      'auto',
+      'contenteditable',
+      'true',
+    ];
+    const transport = debuggerTransport((_session, method) => {
+      if (method === 'Accessibility.getFullAXTree') {
+        return {
+          nodes: [
+            {
+              nodeId: 'root',
+              backendDOMNodeId: 1,
+              ignored: false,
+              role: { value: 'RootWebArea' },
+              name: { value: 'Crowded editor' },
+              childIds: buttonBackendIds.map((id) => `button_${String(id)}`),
+            },
+            ...buttonBackendIds.map((backendDOMNodeId, index) => ({
+              nodeId: `button_${String(backendDOMNodeId)}`,
+              parentId: 'root',
+              backendDOMNodeId,
+              ignored: false,
+              role: { value: 'button' },
+              name: { value: `Action ${String(index)}` },
+            })),
+          ],
+        };
+      }
+      if (method === 'DOMSnapshot.captureSnapshot') {
+        const elementCount = buttonCount + 1;
+        return {
+          strings,
+          documents: [
+            {
+              documentURL: 0,
+              title: 1,
+              baseURL: 0,
+              contentLanguage: 2,
+              encodingName: 2,
+              publicId: 2,
+              systemId: 2,
+              frameId: 3,
+              nodes: {
+                parentIndex: [-1, ...Array.from({ length: elementCount }, () => 0)],
+                nodeType: [9, ...Array.from({ length: elementCount }, () => 1)],
+                nodeName: [4, ...Array.from({ length: buttonCount }, () => 5), 6],
+                nodeValue: Array.from({ length: elementCount + 1 }, () => 2),
+                backendNodeId: [1, ...buttonBackendIds, editorBackendId],
+                attributes: [...Array.from({ length: buttonCount + 1 }, () => []), [11, 12]],
+                isClickable: {
+                  index: Array.from({ length: buttonCount }, (_, index) => index + 1),
+                },
+                inputChecked: { index: [] },
+              },
+              layout: {
+                nodeIndex: Array.from({ length: elementCount }, (_, index) => index + 1),
+                styles: Array.from({ length: elementCount }, () => [7, 8, 9, 7, 10, 10]),
+                bounds: [
+                  ...Array.from({ length: buttonCount }, () => [3_000, 3_000, 100, 30]),
+                  [1_286, 1_674, 1_128, 44],
+                ],
+                text: Array.from({ length: elementCount }, () => 2),
+                stackingContexts: { index: [] },
+              },
+              textBoxes: { layoutIndex: [], bounds: [], start: [], length: [] },
+            },
+          ],
+        };
+      }
+      if (method === 'Page.getFrameTree') return mainFrameTree();
+      if (method === 'Page.getLayoutMetrics') {
+        return {
+          visualViewport: {
+            pageX: 0,
+            pageY: 0,
+            clientWidth: 2_880,
+            clientHeight: 1_800,
+          },
+          cssVisualViewport: {
+            pageX: 0,
+            pageY: 0,
+            clientWidth: 1_440,
+            clientHeight: 900,
+          },
+        };
+      }
+      if (method === 'Page.getNavigationHistory') return { currentIndex: 0, entries: [] };
+      return {};
+    });
+    let refSequence = 0;
+    const observer = new PageObserver({
+      sessions: sessions(snapshot),
+      transport,
+      content: CONTENT,
+      refs: new ElementRefStore({
+        create: () => `ref_${String(++refSequence)}`,
+      }),
+    });
+
+    const result = await observer.inspect(7, 'interactive', new AbortController().signal);
+
+    expect(result.data.elements).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          r: 'textbox',
+          n: 'Editable field',
+          a: ['type'],
+          ref: expect.any(String),
+        }),
+      ]),
+    );
+  });
+
+  it('does not let dense editable targets displace a visible action', async () => {
+    const snapshot: BrowserSessionSnapshot = {
+      tabId: 7,
+      generation: 1,
+      root: { tabId: 7 },
+      children: new Map(),
+    };
+    const editorCount = 121;
+    const editorBackendIds = Array.from({ length: editorCount }, (_, index) => 1_000 + index);
+    const buttonBackendId = 9_999;
+    const strings = [
+      'https://top.test/',
+      'Crowded editors',
+      '',
+      'frame-main',
+      '#document',
+      'DIV',
+      'BUTTON',
+      'pointer',
+      'block',
+      'visible',
+      'auto',
+      'contenteditable',
+      'true',
+    ];
+    const transport = debuggerTransport((_session, method) => {
+      if (method === 'Accessibility.getFullAXTree') {
+        return {
+          nodes: [
+            {
+              nodeId: 'root',
+              backendDOMNodeId: 1,
+              ignored: false,
+              role: { value: 'RootWebArea' },
+              name: { value: 'Crowded editors' },
+              childIds: ['visible_button'],
+            },
+            {
+              nodeId: 'visible_button',
+              parentId: 'root',
+              backendDOMNodeId: buttonBackendId,
+              ignored: false,
+              role: { value: 'button' },
+              name: { value: 'Continue visible form' },
+            },
+          ],
+        };
+      }
+      if (method === 'DOMSnapshot.captureSnapshot') {
+        const elementCount = editorCount + 1;
+        return {
+          strings,
+          documents: [
+            {
+              documentURL: 0,
+              title: 1,
+              baseURL: 0,
+              contentLanguage: 2,
+              encodingName: 2,
+              publicId: 2,
+              systemId: 2,
+              frameId: 3,
+              nodes: {
+                parentIndex: [-1, ...Array.from({ length: elementCount }, () => 0)],
+                nodeType: [9, ...Array.from({ length: elementCount }, () => 1)],
+                nodeName: [4, ...Array.from({ length: editorCount }, () => 5), 6],
+                nodeValue: Array.from({ length: elementCount + 1 }, () => 2),
+                backendNodeId: [1, ...editorBackendIds, buttonBackendId],
+                attributes: [[], ...Array.from({ length: editorCount }, () => [11, 12]), []],
+                isClickable: { index: [editorCount + 1] },
+                inputChecked: { index: [] },
+              },
+              layout: {
+                nodeIndex: Array.from({ length: elementCount }, (_, index) => index + 1),
+                styles: Array.from({ length: elementCount }, () => [7, 8, 9, 7, 10, 10]),
+                bounds: [
+                  ...Array.from({ length: editorCount }, () => [3_000, 3_000, 100, 30]),
+                  [10, 20, 100, 30],
+                ],
+                text: Array.from({ length: elementCount }, () => 2),
+                stackingContexts: { index: [] },
+              },
+              textBoxes: { layoutIndex: [], bounds: [], start: [], length: [] },
+            },
+          ],
+        };
+      }
+      if (method === 'Page.getFrameTree') return mainFrameTree();
+      if (method === 'Page.getLayoutMetrics') {
+        return {
+          visualViewport: {
+            pageX: 0,
+            pageY: 0,
+            clientWidth: 1_000,
+            clientHeight: 800,
+          },
+        };
+      }
+      if (method === 'Page.getNavigationHistory') return { currentIndex: 0, entries: [] };
+      return {};
+    });
+    let refSequence = 0;
+    const observer = new PageObserver({
+      sessions: sessions(snapshot),
+      transport,
+      content: CONTENT,
+      refs: new ElementRefStore({
+        create: () => `ref_${String(++refSequence)}`,
+      }),
+    });
+
+    const result = await observer.inspect(7, 'interactive', new AbortController().signal);
+
+    expect(result.data.elements).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          r: 'button',
+          n: 'Continue visible form',
+          ref: expect.any(String),
+        }),
+      ]),
+    );
   });
 
   it('retains a scrollable traversal target when many in-viewport controls exhaust the target budget', async () => {

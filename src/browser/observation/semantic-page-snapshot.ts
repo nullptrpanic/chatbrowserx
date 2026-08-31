@@ -272,7 +272,9 @@ function compactTargetEntries(
       targetIndex,
       ...((existing.state?.length ?? 0) + (entry.state?.length ?? 0) === 0
         ? {}
-        : { state: uniqueState([...(existing.state ?? []), ...(entry.state ?? [])]) }),
+        : {
+            state: uniqueState([...(existing.state ?? []), ...(entry.state ?? [])]),
+          }),
       ...((existing.actions?.length ?? 0) + (entry.actions?.length ?? 0) === 0
         ? {}
         : {
@@ -283,7 +285,9 @@ function compactTargetEntries(
         : { frame: existing.frame ?? entry.frame }),
       ...(existing.inViewport === undefined && entry.inViewport === undefined
         ? {}
-        : { inViewport: existing.inViewport === true || entry.inViewport === true }),
+        : {
+            inViewport: existing.inViewport === true || entry.inViewport === true,
+          }),
     });
   }
 
@@ -1092,6 +1096,19 @@ function nearestEditableDomNode(
   return undefined;
 }
 
+function nearestDomLink(start: SnapshotDomNode): SnapshotDomNode | undefined {
+  let current: SnapshotDomNode | null = start;
+  for (let depth = 0; current && depth < 8; depth += 1) {
+    if (current.nodeName === 'A' && current.attributes.has('href')) return current;
+    current = current.parent;
+  }
+  return undefined;
+}
+
+function domLinkState(node: SnapshotDomNode): readonly string[] {
+  return node.attributes.get('href')?.trim().startsWith('#') ? ['same-page'] : [];
+}
+
 function syntheticSemanticLocator(node: SnapshotDomNode, role: string, name: string): string {
   return JSON.stringify([[], domSemanticPath(node), role, name]).slice(
     0,
@@ -1201,9 +1218,19 @@ export function buildSemanticPageSnapshot(
     const selectable = targetDomNode
       ? associatedSelectableControl(targetDomNode, snapshotIndex)
       : undefined;
+    const linkTarget =
+      (role === 'generic' || role === 'link') && targetDomNode && actions.includes('click')
+        ? nearestDomLink(targetDomNode)
+        : undefined;
     const effectiveRole =
       selectable?.role ??
-      (editableTarget ? (EDITABLE_ROLES.has(role) ? role : editableTarget.role) : role);
+      (editableTarget
+        ? EDITABLE_ROLES.has(role)
+          ? role
+          : editableTarget.role
+        : linkTarget
+          ? 'link'
+          : role);
     const name =
       syntheticNameText(axText(node.name)) ||
       (targetDomNode && actions.includes('type')
@@ -1219,6 +1246,7 @@ export function buildSemanticPageSnapshot(
     if (targetDomNode) {
       state = uniqueState([
         ...state,
+        ...(linkTarget ? domLinkState(linkTarget) : []),
         ...(selectable ? domState(selectable.node, effectiveRole) : []),
         ...domState(targetDomNode, effectiveRole),
       ]);
