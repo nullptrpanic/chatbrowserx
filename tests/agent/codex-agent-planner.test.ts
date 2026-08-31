@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from 'vitest';
 import { CodexAgentPlanner } from '../../src/agent/codex-agent-planner';
+import { BROWSER_EXECUTION_POLICY } from '../../src/agent/browser-execution-policy';
 import type { AgentPlanInput } from '../../src/agent/execution-types';
 import type { AttachmentRepository } from '../../src/persistence/attachment-repository';
 import type { ConversationRepository } from '../../src/persistence/conversation-repository';
@@ -369,7 +370,7 @@ describe('CodexAgentPlanner', () => {
     expect(model.requests[0]).toMatchObject({
       model: 'gpt-5.6-terra',
       reasoningEffort: 'medium',
-      systemPrompt: 'Custom safe preference.',
+      systemPrompt: `Custom safe preference.\n\n${BROWSER_EXECUTION_POLICY}`,
       input: [
         {
           type: 'message',
@@ -538,7 +539,7 @@ describe('CodexAgentPlanner', () => {
     ]);
   });
 
-  it('keeps the exact current prompt and tools when Sandbox is not configured', async () => {
+  it('adds the shared browser policy once when Sandbox is not configured', async () => {
     const model = provider(async function* () {
       yield { type: 'response.started', responseId: 'resp_without_sandbox' };
       yield { type: 'text.delta', delta: 'No Sandbox.' };
@@ -561,7 +562,9 @@ describe('CodexAgentPlanner', () => {
     await collect(planner);
 
     expect(skillCatalog.get).toHaveBeenCalledOnce();
-    expect(model.requests[0]?.systemPrompt).toBe('Custom safe preference.');
+    expect(model.requests[0]?.systemPrompt).toBe(
+      `Custom safe preference.\n\n${BROWSER_EXECUTION_POLICY}`,
+    );
     expect(model.requests[0]?.tools.map(({ name }) => name)).toEqual([
       ...FIRST_TURN_BROWSER_TOOL_NAMES,
       'tavily_search',
@@ -629,6 +632,7 @@ describe('CodexAgentPlanner', () => {
       'sandbox_exec',
     ]);
     expect(model.requests[0]?.systemPrompt.startsWith('Custom safe preference.\n\n')).toBe(true);
+    expect(model.requests[0]?.systemPrompt).toContain(BROWSER_EXECUTION_POLICY);
     expect(model.requests[0]?.systemPrompt).toContain('Run the example workflow.');
   });
 

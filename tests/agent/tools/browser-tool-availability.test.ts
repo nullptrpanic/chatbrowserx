@@ -527,6 +527,15 @@ describe('browserToolDefinitionsForCheckpoint', () => {
     });
   });
 
+  it('keeps deferred image delivery discoverable before a screenshot asset exists', () => {
+    const definitions = browserToolDefinitionsForCheckpoint(checkpoint());
+    const capture = definitions.find(({ name }) => name === 'browser_capture_screenshot');
+
+    expect(definitions.map(({ name }) => name)).not.toContain('browser_paste_image');
+    expect(capture?.description).toContain('browser_paste_image');
+    expect(capture?.description).toContain('next model turn');
+  });
+
   it('retains a used image-delivery definition until the replay window is compacted', () => {
     const used = pair(
       'paste',

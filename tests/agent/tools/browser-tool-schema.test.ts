@@ -264,102 +264,17 @@ describe('BROWSER_TOOL_DEFINITIONS', () => {
     expect(mode.enum).toEqual(['content', 'interactive', 'interactive_deep', 'screenshot']);
   });
 
-  it('documents AX-first inspection and idempotent selectable actions', () => {
+  it('keeps page-wide action guards beside the tools that enforce them', () => {
     const definitions = new Map(
-      BROWSER_TOOL_DEFINITIONS.map((definition) => [definition.name, definition]),
+      BROWSER_TOOL_DEFINITIONS.map((definition) => [definition.name, definition.description]),
     );
 
-    expect(definitions.get('browser_inspect')?.description).toContain('Always inspect interactive');
-    expect(definitions.get('browser_inspect')?.description).toContain(
-      'Do not use screenshots to verify semantic form state',
+    expect(definitions.get('browser_inspect')).toContain('shared browser evidence-scope policy');
+    expect(definitions.get('browser_click')).toContain(
+      'never click same-page or table-of-contents links',
     );
-    expect(definitions.get('browser_inspect')?.description).toContain(
-      'browser_click_point becomes available on the next model turn',
-    );
-    expect(definitions.get('browser_click')?.description).toContain('advertises set_checked');
-    expect(definitions.get('browser_inspect')?.description).toContain(
-      'scrollable ref that advertises scroll',
-    );
-    expect(definitions.get('browser_inspect')?.description).toContain(
-      'page-global coverage.complete=false does not by itself make a named-section objective incomplete',
-    );
-    expect(definitions.get('browser_inspect')?.description).toContain(
-      'inspect the destination heading and requested content, then answer without traversing unrelated content below it',
-    );
-    expect(definitions.get('browser_inspect')?.description).toContain(
-      'For scoped navigation requests, stop once the requested target and enough relevant context are visible',
-    );
-    expect(definitions.get('browser_inspect')?.description).not.toContain('看下/看看');
-    expect(definitions.get('browser_inspect')?.description).not.toContain(
-      'When interactive coverage.complete=false, the returned tree is not complete page evidence and the relevant coverage target must be traversed before answering.',
-    );
-    expect(definitions.get('browser_inspect')?.description).toContain(
-      'do not click same-page navigation or table-of-contents links before or after traversal',
-    );
-    expect(definitions.get('browser_scroll')?.description).toContain(
-      'do not click passive content',
-    );
-    expect(definitions.get('browser_scroll')?.description).toContain('maxSegments=1');
-    expect(definitions.get('browser_scroll')?.description).toContain('maxSegments>1');
-    expect(definitions.get('browser_scroll')?.description).toContain(
-      'observations in chronological order',
-    );
-    expect(definitions.get('browser_scroll')?.description).toContain(
-      'instead of immediately inspecting again',
-    );
-    expect(definitions.get('browser_scroll')?.description).toContain('virtualized content changed');
-    expect(definitions.get('browser_scroll')?.description).toContain('loadedMore=true');
-    expect(definitions.get('browser_scroll')?.description).toContain('needsBoundaryProbe=true');
-    expect(definitions.get('browser_scroll')?.description).toContain('boundaryVerified=true');
-    expect(definitions.get('browser_scroll')?.description).toContain('requestedDeltaApplied=false');
-    expect(definitions.get('browser_scroll')?.description).toContain('remainingDelta');
-    expect(definitions.get('browser_scroll')?.description).toContain(
-      'outside it or a verified boundary',
-    );
-    expect(definitions.get('browser_scroll')?.description).toContain('complete named section');
-    expect(definitions.get('browser_scroll')?.description).toContain(
-      'do not use an empty stopText to continue to the document boundary',
-    );
-    expect(definitions.get('browser_scroll')?.description).toContain(
-      'do not choose a distant marker',
-    );
-    expect(definitions.get('browser_scroll')?.description).toContain(
-      'Limited adjacent-section overlap is acceptable',
-    );
-    expect(definitions.get('browser_scroll')?.description).toContain(
-      'Only explicit heading levels or parent relationships make the hierarchy reliable',
-    );
-    expect(definitions.get('browser_scroll')?.description).toContain(
-      'Table-of-contents order alone is not reliable',
-    );
-    expect(definitions.get('browser_scroll')?.description).toContain(
-      'maxSegments MUST be 1 with stopText=""',
-    );
-    expect(definitions.get('browser_scroll')?.description).toContain(
-      'stop at the first plausible following section',
-    );
-    expect(definitions.get('browser_scroll')?.description).toContain(
-      'Never traverse through a second plausible following section',
-    );
-    expect(definitions.get('browser_scroll')?.description).toContain(
-      'do not summarize adjacent overlap as part of the requested section',
-    );
-    expect(definitions.get('browser_scroll')?.description).toContain(
-      'headings, anchors, or table-of-contents items as a substitute for traversal',
-    );
-    expect(definitions.get('browser_scroll')?.description).toContain(
-      'first traverse upward until boundaryVerified=true, then downward',
-    );
-    expect(definitions.get('browser_scroll')?.description).toContain(
-      'For scoped navigation requests, stop once the requested target and enough relevant context are visible',
-    );
-    expect(definitions.get('browser_scroll')?.description).toContain(
-      'Traverse further only when the user explicitly requests a broader read or analysis',
-    );
-    expect(definitions.get('browser_scroll')?.description).not.toContain('看下/看看');
-    expect(definitions.has('browser_scroll_until')).toBe(false);
-    expect(definitions.get('browser_select')?.description).toContain('advertises select');
-    expect(definitions.get('browser_select')?.description).toContain('custom dropdown');
+    expect(definitions.get('browser_scroll')).toContain('verify the upper boundary once');
+    expect(definitions.get('browser_scroll')).toContain('never call another browser tool');
   });
 
   it('requires an explicit string base snapshot on model-generated inspections', () => {

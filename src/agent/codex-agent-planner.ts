@@ -29,6 +29,7 @@ import { SANDBOX_TOOL_DEFINITIONS, parseSandboxToolCall } from './tools/sandbox-
 import { HISTORY_TOOL_DEFINITIONS, parseHistoryToolCall } from './tools/history-tool-schema';
 import { TAVILY_TOOL_DEFINITIONS, parseTavilyToolCall } from './tools/tavily-tool-schema';
 import { loadConversationView, type ConversationView } from './conversation-view';
+import { BROWSER_EXECUTION_POLICY } from './browser-execution-policy';
 
 export interface TavilyAvailabilityPort {
   isConfigured(): Promise<boolean>;
@@ -177,10 +178,9 @@ export class CodexAgentPlanner implements AgentPlanner {
       skillCatalog === null
         ? ''
         : sandboxCatalogInstructions(sandboxCatalogForToolResults(skillCatalog, input.toolResults));
-    const systemPrompt =
-      catalogInstructions.length === 0
-        ? context.systemPrompt
-        : `${context.systemPrompt}\n\n${catalogInstructions}`;
+    const systemPrompt = [context.systemPrompt, BROWSER_EXECUTION_POLICY, catalogInstructions]
+      .filter((section) => section.length > 0)
+      .join('\n\n');
     const reusableMessage = await this.#prepareReusableMessage(input, conversationView);
     const state: ModelTurnState = {
       responseId: null,
@@ -345,10 +345,7 @@ export class CodexAgentPlanner implements AgentPlanner {
           yield { type: 'sandbox.call', call, modelTurn, modelOutputItems };
           return;
         }
-        if (
-          state.tool.name === 'history_read' ||
-          state.tool.name === 'result_read'
-        ) {
+        if (state.tool.name === 'history_read' || state.tool.name === 'result_read') {
           let call: ReturnType<typeof parseHistoryToolCall>;
           try {
             call = parseHistoryToolCall(source);
