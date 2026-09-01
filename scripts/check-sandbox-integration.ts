@@ -7,10 +7,14 @@ import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { promisify } from 'node:util';
-import { parseSandboxToolCall } from '../src/agent/tools/sandbox-tool-schema';
 import { SandboxClient, type SandboxClientPort } from '../src/sandbox/sandbox-client';
 import { SandboxToolExecutor } from '../src/sandbox/sandbox-tool-executor';
 import { SkillCatalog } from '../src/sandbox/skill-catalog';
+import { sandboxExecTool, sandboxReadTool, sandboxRuntime } from '../src/tools/sandbox/tool';
+import { ToolDeclarationCatalog } from '../src/tools/register';
+import { bindToolRuntime } from '../src/tools/registry';
+import { ToolServiceResolver } from '../src/tools/service-resolver';
+import type { SandboxToolCall } from '../src/tools/sandbox/contract';
 
 const execFileAsync = promisify(execFile);
 const projectRoot = dirname(dirname(fileURLToPath(import.meta.url)));
@@ -161,7 +165,9 @@ async function checkSandbox(): Promise<void> {
         sandboxServer: `http://127.0.0.1:${String(port)}`,
       }),
     };
-    const client = new SandboxClient(settings, { getSandboxToken: async () => token });
+    const client = new SandboxClient(settings, {
+      getSandboxToken: async () => token,
+    });
     let requestCount = 0;
     const countedClient: SandboxClientPort = {
       isConfigured: () => client.isConfigured(),
@@ -175,6 +181,13 @@ async function checkSandbox(): Promise<void> {
     const catalog = new SkillCatalog(countedClient, settings, new MemoryStorage(), clock);
     const executor = new SandboxToolExecutor(countedClient);
     const signal = new AbortController().signal;
+    const toolCatalog = new ToolDeclarationCatalog();
+    toolCatalog.register(sandboxReadTool, sandboxRuntime);
+    toolCatalog.register(sandboxExecTool, sandboxRuntime);
+    const toolContract = await bindToolRuntime(
+      toolCatalog.seal(),
+      new ToolServiceResolver(),
+    ).contract({ sandboxAvailable: true });
 
     currentStage = 'discover catalog';
     const firstCatalog = await catalog.get(signal);
@@ -189,11 +202,15 @@ async function checkSandbox(): Promise<void> {
     currentStage = 'read Skill';
     const readResult = JSON.parse(
       await executor.execute(
-        parseSandboxToolCall({
+        toolContract.parse({
           callId: 'call_read',
           name: 'sandbox_read',
-          argumentsJson: JSON.stringify({ path: skillPath, startLine: 1, maxLines: 400 }),
-        }),
+          argumentsJson: JSON.stringify({
+            path: skillPath,
+            startLine: 1,
+            maxLines: 400,
+          }),
+        }) as SandboxToolCall,
         signal,
       ),
     ) as Record<string, unknown>;
@@ -205,11 +222,14 @@ async function checkSandbox(): Promise<void> {
     currentStage = 'execute Skill';
     const execResult = JSON.parse(
       await executor.execute(
-        parseSandboxToolCall({
+        toolContract.parse({
           callId: 'call_exec',
           name: 'sandbox_exec',
-          argumentsJson: JSON.stringify({ command: 'bash scripts/run.sh', cwd: skillDirectory }),
-        }),
+          argumentsJson: JSON.stringify({
+            command: 'bash scripts/run.sh',
+            cwd: skillDirectory,
+          }),
+        }) as SandboxToolCall,
         signal,
       ),
     ) as Record<string, unknown>;

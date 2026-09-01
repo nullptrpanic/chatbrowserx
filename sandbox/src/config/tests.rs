@@ -1,4 +1,4 @@
-use super::{Config, FilesystemSettings, TlsSettings};
+use super::{Config, LocalFilesystemSettings, TlsSettings};
 use std::net::SocketAddr;
 
 const SECRET: &str = "0123456789abcdef0123456789abcdef";
@@ -56,7 +56,9 @@ fn loads_plain_sandbox_and_resolves_paths_from_their_owners() {
                 "sandbox": {{
                     "workspace": "runtime/sandbox",
                     "log_file": "logs/audit.jsonl",
-                    "filesystem": {{ "mode": "plain" }},
+                    "filesystem": {{
+                        "local": {{ "encrypt": "plain" }}
+                    }},
                     "tls": "off"
                 }}
             }}"#
@@ -79,12 +81,17 @@ fn loads_plain_sandbox_and_resolves_paths_from_their_owners() {
         sandbox.log_file(),
         directory.path().join("runtime/sandbox/logs/audit.jsonl")
     );
-    assert_eq!(sandbox.filesystem(), &FilesystemSettings::Plain);
+    assert_eq!(
+        sandbox.filesystem().local(),
+        &LocalFilesystemSettings::Plain
+    );
+    assert!(sandbox.filesystem().bypass().is_empty());
+    assert!(sandbox.filesystem().nfs().is_empty());
     assert_eq!(sandbox.tls(), TlsSettings::Off);
 }
 
 #[test]
-fn loads_encrypted_sandbox() {
+fn loads_encrypted_sandbox_with_bypass_and_smb_remote() {
     let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join("sandbox.json");
     std::fs::write(
@@ -100,8 +107,24 @@ fn loads_encrypted_sandbox() {
                     "workspace": "/tmp/chatbrowserx-sandbox",
                     "log_file": "/tmp/chatbrowserx-audit.jsonl",
                     "filesystem": {{
-                        "mode": "encrypted",
-                        "key": "test-only-key"
+                        "bypass": [
+                            "/Users/bytedance/Library/Application Support/lark-cli",
+                            "/Users/bytedance/.lark-cli",
+                            "/Users/bytedance/.lark-cli"
+                        ],
+                        "local": {{
+                            "encrypt": "encrypted",
+                            "key": "test-only-key"
+                        }},
+                        "nfs": [
+                            {{
+                                "type": "smb",
+                                "dir": "/Users/bytedance/smb",
+                                "server": "smb://127.0.0.1:10445/workspace/team",
+                                "username": "openclaw",
+                                "password": "test-only-password"
+                            }}
+                        ]
                     }},
                     "tls": "auto"
                 }}
@@ -122,13 +145,28 @@ fn loads_encrypted_sandbox() {
         std::path::Path::new("/tmp/chatbrowserx-audit.jsonl")
     );
     assert_eq!(
-        sandbox.filesystem(),
-        &FilesystemSettings::Encrypted {
+        sandbox.filesystem().local(),
+        &LocalFilesystemSettings::Encrypted {
             key: "test-only-key".to_owned()
         }
     );
+    assert_eq!(
+        sandbox.filesystem().bypass(),
+        &[
+            std::path::PathBuf::from("/Users/bytedance/.lark-cli"),
+            std::path::PathBuf::from("/Users/bytedance/Library/Application Support/lark-cli"),
+        ]
+    );
+    let remote = &sandbox.filesystem().nfs()[0];
+    assert_eq!(remote.dir(), std::path::Path::new("/Users/bytedance/smb"));
+    assert_eq!(remote.server(), "127.0.0.1:10445");
+    assert_eq!(remote.share(), "workspace");
+    assert_eq!(remote.remote_path(), "team");
+    assert_eq!(remote.username(), "openclaw");
+    assert_eq!(remote.password(), "test-only-password");
     assert_eq!(sandbox.tls(), TlsSettings::Auto);
     assert!(!format!("{:?}", sandbox.filesystem()).contains("test-only-key"));
+    assert!(!format!("{:?}", sandbox.filesystem()).contains("test-only-password"));
 }
 
 #[test]
@@ -183,10 +221,11 @@ fn rejects_invalid_addresses_and_zero_timeout() {
 }
 
 #[test]
-fn rejects_invalid_filesystem_mode_options() {
+fn rejects_invalid_local_filesystem_options() {
     for filesystem in [
-        r#"{ "mode": "plain", "key": "not-allowed" }"#,
-        r#"{ "mode": "encrypted" }"#,
+        r#"{ "local": { "encrypt": "plain", "key": "not-allowed" } }"#,
+        r#"{ "local": { "encrypt": "encrypted" } }"#,
+        r#"{ "mode": "encrypted", "key": "legacy-format" }"#,
     ] {
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("sandbox.json");
@@ -211,6 +250,40 @@ fn rejects_invalid_filesystem_mode_options() {
         .unwrap();
 
         assert!(Config::load(&path).is_err());
+    }
+}
+
+#[test]
+fn rejects_relative_bypass_and_invalid_smb_locations() {
+    for filesystem in [
+        r#"{ "bypass": ["relative/path"] }"#,
+        r#"{ "nfs": [{ "type": "smb", "dir": "relative", "server": "smb://host/share" }] }"#,
+        r#"{ "nfs": [{ "type": "smb", "dir": "/remote", "server": "https://host/share" }] }"#,
+        r#"{ "nfs": [{ "type": "smb", "dir": "/remote", "server": "smb://host" }] }"#,
+    ] {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("sandbox.json");
+        std::fs::write(
+            &path,
+            format!(
+                r#"{{
+                    "address": "127.0.0.1:43129",
+                    "web_address": "127.0.0.1:43130",
+                    "secret": "{SECRET}",
+                    "log_file": "logs/sandbox.log",
+                    "timeout_seconds": 45,
+                    "sandbox": {{
+                        "workspace": "runtime/sandbox",
+                        "log_file": "audit.jsonl",
+                        "filesystem": {filesystem},
+                        "tls": "off"
+                    }}
+                }}"#
+            ),
+        )
+        .unwrap();
+
+        assert!(Config::load(&path).is_err(), "accepted {filesystem}");
     }
 }
 

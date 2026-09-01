@@ -8,7 +8,11 @@
     "workspace": "runtime/sandbox",
     "log_file": "logs/audit.jsonl",
     "filesystem": {
-      "mode": "plain"
+      "bypass": [],
+      "local": {
+        "encrypt": "plain"
+      },
+      "nfs": []
     },
     "tls": "auto"
   }
