@@ -1,4 +1,4 @@
-import type { ParsedBrowserToolCall } from '../agent/tools/browser-tool-schema';
+import type { ParsedBrowserToolCall } from '../tools/browser/contract';
 
 export interface BrowserToolExecutionResult {
   readonly output: string;

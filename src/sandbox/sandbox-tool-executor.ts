@@ -1,4 +1,4 @@
-import type { ParsedSandboxToolCall } from '../agent/tools/sandbox-tool-schema';
+import type { SandboxToolCall } from '../tools/sandbox/contract';
 import type { SandboxClientPort } from './sandbox-client';
 
 const MAX_STREAM_BYTES = 64 * 1024;
@@ -20,7 +20,7 @@ LC_ALL=C awk -v start="$start" -v limit="$limit" 'NR >= start && NR < start + li
 
 export interface SandboxExecutionPort {
   execute(
-    call: ParsedSandboxToolCall,
+    call: SandboxToolCall,
     signal: AbortSignal,
     context?: { readonly executionId?: string },
   ): Promise<string>;
@@ -97,7 +97,7 @@ export class SandboxToolExecutor implements SandboxExecutionPort {
   }
 
   async execute(
-    call: ParsedSandboxToolCall,
+    call: SandboxToolCall,
     signal: AbortSignal,
     context: { readonly executionId?: string } = {},
   ): Promise<string> {
@@ -128,7 +128,7 @@ export class SandboxToolExecutor implements SandboxExecutionPort {
   }
 
   async #readFile(
-    call: Extract<ParsedSandboxToolCall, { readonly operation: 'read' }>,
+    call: Extract<SandboxToolCall, { readonly operation: 'read' }>,
     signal: AbortSignal,
   ): Promise<string> {
     const { path, startLine, maxLines } = call.arguments;
@@ -173,7 +173,7 @@ export class SandboxToolExecutor implements SandboxExecutionPort {
   }
 
   async #executeCommand(
-    call: Extract<ParsedSandboxToolCall, { readonly operation: 'exec' }>,
+    call: Extract<SandboxToolCall, { readonly operation: 'exec' }>,
     signal: AbortSignal,
     executionId: string | undefined,
   ): Promise<string> {

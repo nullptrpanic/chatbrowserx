@@ -1,5 +1,5 @@
 import type { Protocol } from 'devtools-protocol';
-import type { ParsedBrowserToolCall } from '../../agent/tools/browser-tool-schema';
+import type { ParsedBrowserToolCall } from '../../tools/browser/contract';
 import { IMAGE_POLICY } from '../../attachments/attachment-policy';
 import type { AttachmentRepository } from '../../persistence/attachment-repository';
 import type { PageCommand } from '../../shared/protocol/message-types';
@@ -365,6 +365,132 @@ const INSERT_FOCUSED_TEXT_FUNCTION = `function(text, replace, customEditor) {
   }
   return { dispatched: true, strategy: inserted ? 'insert_text' : 'range_insert' };
 }`;
+
+/** Finds a visible image-insert control only when the same local editor owns a compatible input. */
+export function findImageFileInputTrigger(
+  this: unknown,
+  mimeType: string,
+): { readonly found: boolean; readonly x?: number; readonly y?: number } {
+  const __chatbrowserxImageFileInputTrigger = true;
+  void __chatbrowserxImageFileInputTrigger;
+  const source = this as (Node & { readonly document?: Document }) | null;
+  const document_ = source?.ownerDocument ?? source?.document;
+  const window_ = document_?.defaultView;
+  if (!document_ || !window_?.Element) return { found: false };
+  const isElement = (candidate: unknown): candidate is Element =>
+    Boolean(window_.Element && candidate instanceof window_.Element);
+  const composedParent = (candidate: Node): Element | null => {
+    const root = candidate?.getRootNode?.();
+    return (
+      candidate?.parentElement ||
+      (window_.ShadowRoot && root instanceof window_.ShadowRoot ? root.host : null)
+    );
+  };
+  const target = isElement(source)
+    ? source
+    : source instanceof window_.Node
+      ? composedParent(source)
+      : null;
+  if (!target?.isConnected) return { found: false };
+  let observationRoot = target;
+  for (let depth = 0; depth < 6; depth += 1) {
+    const parent = composedParent(observationRoot);
+    if (!parent) break;
+    observationRoot = parent;
+  }
+  const accepted = (candidate: HTMLInputElement): boolean => {
+    const normalizedMime = mimeType.trim().toLowerCase();
+    const extension =
+      normalizedMime === 'image/jpeg' ? '.jpg' : `.${normalizedMime.split('/')[1] || ''}`;
+    return candidate.accept
+      .split(',')
+      .map((value) => value.trim().toLowerCase())
+      .some(
+        (value) =>
+          value === normalizedMime ||
+          value === 'image/*' ||
+          value === extension ||
+          (normalizedMime === 'image/jpeg' && value === '.jpeg'),
+      );
+  };
+  const inputs = Array.from(observationRoot.querySelectorAll('input[type="file"]')).filter(
+    (candidate): candidate is HTMLInputElement =>
+      Boolean(
+        window_.HTMLInputElement &&
+        candidate instanceof window_.HTMLInputElement &&
+        !candidate.disabled &&
+        accepted(candidate),
+      ),
+  );
+  if (inputs.length === 0) return { found: false };
+  const path = (element: Element): Element[] => {
+    const result: Element[] = [];
+    let current: Element | null = element;
+    while (current && result.length < 32) {
+      result.push(current);
+      current = composedParent(current);
+    }
+    return result;
+  };
+  const distance = (left: Element, right: Element): number => {
+    const leftPath = path(left);
+    const rightPath = path(right);
+    const common = leftPath.find((candidate) => rightPath.includes(candidate));
+    return common ? leftPath.indexOf(common) + rightPath.indexOf(common) : Number.MAX_SAFE_INTEGER;
+  };
+  const hintPattern = /(?:^|[-_\s:])(?:insert[-_\s:]*)?(?:image|photo|picture)(?:$|[-_\s:])/i;
+  const candidates = Array.from(observationRoot.querySelectorAll('*')).flatMap((candidate) => {
+    if (
+      candidate === target ||
+      target.contains(candidate) ||
+      (window_.HTMLInputElement && candidate instanceof window_.HTMLInputElement) ||
+      candidate.matches('img, canvas, video, object, embed')
+    ) {
+      return [];
+    }
+    const rect = candidate.getBoundingClientRect();
+    const style = window_.getComputedStyle(candidate);
+    if (
+      rect.width < 4 ||
+      rect.height < 4 ||
+      style.display === 'none' ||
+      style.visibility === 'hidden' ||
+      style.pointerEvents === 'none'
+    ) {
+      return [];
+    }
+    const attributes = candidate
+      .getAttributeNames()
+      .flatMap((name) => [name, candidate.getAttribute(name) || '']);
+    const controlSemantics = [candidate.tagName, ...attributes].join(' ');
+    const actionable =
+      candidate.matches('button, a[href], [role="button"], [role="menuitem"], [tabindex]') ||
+      style.cursor === 'pointer' ||
+      /(?:^|[-_\s:])(?:button|control|action|command|tool)(?:$|[-_\s:])/i.test(controlSemantics);
+    if (!actionable) return [];
+    const ownText =
+      candidate.children.length === 0 && (candidate.textContent || '').length <= 80
+        ? candidate.textContent || ''
+        : '';
+    const textHint = /^(?:insert\s+)?(?:image|photo|picture)$/i.test(ownText.trim());
+    if (!textHint && !hintPattern.test(controlSemantics)) return [];
+    const inputDistance = Math.min(...inputs.map((input) => distance(candidate, input)));
+    const targetDistance = distance(candidate, target);
+    if (!Number.isSafeInteger(inputDistance) || !Number.isSafeInteger(targetDistance)) return [];
+    return [
+      {
+        x: rect.left + rect.width / 2,
+        y: rect.top + rect.height / 2,
+        score: inputDistance + targetDistance,
+      },
+    ];
+  });
+  candidates.sort((left, right) => left.score - right.score);
+  const best = candidates[0];
+  return best ? { found: true, x: best.x, y: best.y } : { found: false };
+}
+
+const FIND_IMAGE_FILE_INPUT_TRIGGER_FUNCTION = findImageFileInputTrigger.toString();
 
 export async function pasteImageIntoEditor(
   this: unknown,
@@ -1190,8 +1316,10 @@ function verifiesRichTextReplacement(actual: string, expected: string): boolean 
   if (expectedLines.length === 0) return false;
   const actualLines = substantiveEditorLines(actual);
   return (
-    actualLines.length === expectedLines.length &&
-    actualLines.every((line, index) => line === expectedLines[index])
+    (actualLines.length === expectedLines.length &&
+      actualLines.every((line, index) => line === expectedLines[index])) ||
+    actualLines.join(' ').replace(/\s+/gu, ' ').trim() ===
+      expectedLines.join(' ').replace(/\s+/gu, ' ').trim()
   );
 }
 
@@ -1531,20 +1659,40 @@ export class BrowserActionExecutor implements BrowserActionPort {
                   : 0,
             };
           } else {
-            const nativePaste = await this.#pasteImageFromSystemClipboard(
-              target,
-              objectId,
-              base64,
-              mimeType,
-              signal,
-            );
-            if (!nativePaste) {
+            const fileChooserPaste =
+              pasted.strategy === 'clipboard_event'
+                ? await this.#pasteImageThroughFileChooser(
+                    target,
+                    objectId,
+                    base64,
+                    mimeType,
+                    fileName,
+                    signal,
+                  )
+                : { attempted: false as const };
+            if (fileChooserPaste.data) {
+              data = { action: 'paste_image', ...fileChooserPaste.data };
+            } else if (fileChooserPaste.attempted) {
               throw new BrowserActionError(
                 'ATTACHMENT_VERIFICATION_FAILED',
                 'The editor handled the image paste, but no attachment preview change was measured.',
               );
+            } else {
+              const nativePaste = await this.#pasteImageFromSystemClipboard(
+                target,
+                objectId,
+                base64,
+                mimeType,
+                signal,
+              );
+              if (!nativePaste) {
+                throw new BrowserActionError(
+                  'ATTACHMENT_VERIFICATION_FAILED',
+                  'The editor handled the image paste, but no attachment preview change was measured.',
+                );
+              }
+              data = { action: 'paste_image', ...nativePaste };
             }
-            data = { action: 'paste_image', ...nativePaste };
           }
         } finally {
           await this.#dependencies.transport
@@ -1805,6 +1953,9 @@ export class BrowserActionExecutor implements BrowserActionPort {
           }
         }
         if (value.submit) {
+          if (trustedInput && target && value.text.length > 0) {
+            await this.#settleSubmissionEditor(target, value.text, signal);
+          }
           await this.#dispatchKey(targetSession, {
             kind: 'key',
             key: 'Enter',
@@ -2181,6 +2332,191 @@ export class BrowserActionExecutor implements BrowserActionPort {
     return response.exceptionDetails === undefined
       ? parsedImagePasteState(response.result.value)
       : undefined;
+  }
+
+  async #pasteImageThroughFileChooser(
+    target: PreparedElementTarget,
+    objectId: string,
+    base64: string,
+    mimeType: string,
+    fileName: string,
+    signal: AbortSignal,
+  ): Promise<{
+    readonly attempted: boolean;
+    readonly data?: Readonly<Record<string, unknown>>;
+  }> {
+    const probe = await this.#dependencies.transport.send<Protocol.Runtime.CallFunctionOnResponse>(
+      target.session,
+      'Runtime.callFunctionOn',
+      {
+        objectId,
+        functionDeclaration: FIND_IMAGE_FILE_INPUT_TRIGGER_FUNCTION,
+        arguments: [{ value: mimeType }],
+        awaitPromise: false,
+        returnByValue: true,
+        silent: true,
+      },
+    );
+    const trigger = probe.result.value as
+      { readonly found?: unknown; readonly x?: unknown; readonly y?: unknown } | undefined;
+    if (
+      probe.exceptionDetails !== undefined ||
+      trigger?.found !== true ||
+      typeof trigger.x !== 'number' ||
+      !Number.isFinite(trigger.x) ||
+      typeof trigger.y !== 'number' ||
+      !Number.isFinite(trigger.y)
+    ) {
+      return { attempted: false };
+    }
+    const point = { x: trigger.x, y: trigger.y };
+    await this.#validatePoint(target.session, point);
+    let interceptEnabled = false;
+    let clicked = false;
+    let chooser:
+      | {
+          readonly promise: Promise<number | null>;
+          readonly cancel: () => void;
+        }
+      | undefined;
+    try {
+      await this.#dependencies.transport.send(
+        target.session,
+        'Page.setInterceptFileChooserDialog',
+        { enabled: true },
+      );
+      interceptEnabled = true;
+      chooser = this.#waitForFileChooser(target.session, signal, 2_000);
+      await this.#showPointer(target.reference.tabId, point, point, 'click');
+      await this.#click(target.session, point, 'left', 1);
+      clicked = true;
+      throwIfAborted(signal);
+      const backendNodeId = await chooser.promise;
+      if (backendNodeId === null) return { attempted: true };
+      const resolved = await this.#dependencies.transport.send<Protocol.DOM.ResolveNodeResponse>(
+        target.session,
+        'DOM.resolveNode',
+        { backendNodeId },
+      );
+      const fileInputObjectId = resolved.object.objectId;
+      if (typeof fileInputObjectId !== 'string' || fileInputObjectId.length === 0) {
+        return { attempted: true };
+      }
+      const response =
+        await this.#dependencies.transport.send<Protocol.Runtime.CallFunctionOnResponse>(
+          target.session,
+          'Runtime.callFunctionOn',
+          {
+            objectId: fileInputObjectId,
+            functionDeclaration: PASTE_IMAGE_FUNCTION,
+            arguments: [
+              { value: base64 },
+              { value: mimeType },
+              { value: fileName },
+              { value: IMAGE_PASTE_SETTLE_TIMEOUT_MS },
+            ],
+            awaitPromise: true,
+            returnByValue: true,
+            silent: true,
+            userGesture: true,
+          },
+        );
+      const pasted = response.result.value as
+        | {
+            readonly dispatched?: unknown;
+            readonly strategy?: unknown;
+            readonly fileCount?: unknown;
+            readonly handled?: unknown;
+            readonly verified?: unknown;
+            readonly mutations?: unknown;
+            readonly previewCount?: unknown;
+          }
+        | undefined;
+      try {
+        if (
+          response.exceptionDetails !== undefined ||
+          pasted?.dispatched !== true ||
+          pasted.strategy !== 'file_input' ||
+          pasted.verified !== true
+        ) {
+          return { attempted: true };
+        }
+      } finally {
+        await this.#dependencies.transport
+          .send(target.session, 'Runtime.releaseObject', {
+            objectId: fileInputObjectId,
+          })
+          .catch(() => undefined);
+      }
+      return {
+        attempted: true,
+        data: {
+          dispatched: true,
+          strategy: 'file_input',
+          fileCount: 1,
+          handled: pasted.handled === true,
+          verified: true,
+          mutations:
+            typeof pasted.mutations === 'number' && Number.isSafeInteger(pasted.mutations)
+              ? pasted.mutations
+              : 0,
+          previewCount:
+            typeof pasted.previewCount === 'number' && Number.isSafeInteger(pasted.previewCount)
+              ? pasted.previewCount
+              : 0,
+        },
+      };
+    } catch (error) {
+      if (signal.aborted || (error instanceof Error && error.name === 'AbortError')) throw error;
+      return { attempted: clicked };
+    } finally {
+      chooser?.cancel();
+      if (interceptEnabled) {
+        await this.#dependencies.transport
+          .send(target.session, 'Page.setInterceptFileChooserDialog', {
+            enabled: false,
+          })
+          .catch(() => undefined);
+      }
+    }
+  }
+
+  #waitForFileChooser(
+    session: DebuggerSession,
+    signal: AbortSignal,
+    timeoutMs: number,
+  ): { readonly promise: Promise<number | null>; readonly cancel: () => void } {
+    let finish: (backendNodeId: number | null, error?: unknown) => void = () => undefined;
+    const promise = new Promise<number | null>((resolve, reject) => {
+      let done = false;
+      const unsubscribe = this.#dependencies.transport.onEvent((source, method, params) => {
+        if (
+          source.tabId !== session.tabId ||
+          source.sessionId !== session.sessionId ||
+          method !== 'Page.fileChooserOpened'
+        ) {
+          return;
+        }
+        const backendNodeId = params.backendNodeId;
+        if (typeof backendNodeId === 'number' && Number.isSafeInteger(backendNodeId)) {
+          finish(backendNodeId);
+        }
+      });
+      const onAbort = (): void =>
+        finish(null, new DOMException('Browser action was aborted.', 'AbortError'));
+      const timer = setTimeout(() => finish(null), timeoutMs);
+      finish = (backendNodeId, error) => {
+        if (done) return;
+        done = true;
+        clearTimeout(timer);
+        unsubscribe();
+        signal.removeEventListener('abort', onAbort);
+        if (error) reject(error);
+        else resolve(backendNodeId);
+      };
+      signal.addEventListener('abort', onAbort, { once: true });
+    });
+    return { promise, cancel: () => finish(null) };
   }
 
   async #pasteImageFromSystemClipboard(
@@ -2791,12 +3127,16 @@ export class BrowserActionExecutor implements BrowserActionPort {
         | {
             readonly editor?: unknown;
             readonly custom?: unknown;
+            readonly connected?: unknown;
             readonly value?: unknown;
           }
         | undefined;
       return {
         editor: response.exceptionDetails === undefined && value?.editor === true,
         custom: response.exceptionDetails === undefined && value?.custom === true,
+        ...(response.exceptionDetails === undefined && typeof value?.connected === 'boolean'
+          ? { connected: value.connected }
+          : {}),
         value: typeof value?.value === 'string' ? value.value.slice(0, 20_000) : '',
       };
     } catch {
@@ -3241,6 +3581,43 @@ export class BrowserActionExecutor implements BrowserActionPort {
     return verifiedValue ?? before;
   }
 
+  /** Waits for asynchronous rich-text insertion to settle before the one allowed submit key. */
+  async #settleSubmissionEditor(
+    target: PreparedElementTarget,
+    text: string,
+    signal: AbortSignal,
+  ): Promise<void> {
+    const expected = normalizeInputValue(text);
+    const settleDeadline = Date.now() + INPUT_SETTLE_TIMEOUT_MS;
+    let previous: string | null = null;
+    let stableReads = 0;
+    for (;;) {
+      throwIfAborted(signal);
+      const exact = await this.#editorTargetInfo(target);
+      const candidate = normalizeInputValue(exact.value);
+      if (exact.connected !== false && exact.editor && verifiesReplacement(candidate, expected)) {
+        stableReads = candidate === previous ? stableReads + 1 : 1;
+        previous = candidate;
+        if (stableReads >= 2) {
+          await this.#dependencies.transport.send(target.session, 'DOM.focus', {
+            backendNodeId: target.reference.backendNodeId,
+          });
+          return;
+        }
+      } else {
+        previous = null;
+        stableReads = 0;
+      }
+      if (Date.now() >= settleDeadline) break;
+      await this.#delay(Math.min(INPUT_POLL_INTERVAL_MS, settleDeadline - Date.now()), signal);
+    }
+    throw new BrowserActionError(
+      'TYPE_VERIFICATION_FAILED',
+      'The submitted editable did not stabilize with the requested text.',
+      'readback',
+    );
+  }
+
   /** Requires submitted text to leave the editable surface before reporting mutation success. */
   async #verifySubmittedInput(
     session: DebuggerSession,
@@ -3260,6 +3637,7 @@ export class BrowserActionExecutor implements BrowserActionPort {
         try {
           const exact = await this.#editorTargetInfo(target);
           if (exact.connected === false) return;
+          if (exact.connected === true && !exact.editor) return;
           observed = exact.value.replace(/\r\n?/g, '\n');
           observable = true;
         } catch {
@@ -3618,7 +3996,7 @@ export class BrowserActionExecutor implements BrowserActionPort {
     return new Promise((resolve, reject) => {
       let quietTimer: ReturnType<typeof setTimeout> | undefined;
       const finish = (error?: unknown) => {
-        clearTimeout(timeoutTimer);
+        if (timeoutTimer) clearTimeout(timeoutTimer);
         if (quietTimer) clearTimeout(quietTimer);
         unsubscribe();
         signal.removeEventListener('abort', onAbort);
@@ -3640,12 +4018,12 @@ export class BrowserActionExecutor implements BrowserActionPort {
         }
       });
       const onAbort = () => finish(new DOMException('Browser wait was aborted.', 'AbortError'));
+      if (quietMs > 0) scheduleQuiet();
       const timeoutTimer = setTimeout(
         () => finish(new BrowserActionError('WAIT_TIMEOUT', 'The browser wait timed out.')),
         timeoutMs,
       );
       signal.addEventListener('abort', onAbort, { once: true });
-      if (quietMs > 0) scheduleQuiet();
     });
   }
 

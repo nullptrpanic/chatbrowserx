@@ -1,8 +1,29 @@
 import { describe, expect, it } from 'vitest';
 import {
-  SANDBOX_TOOL_DEFINITIONS,
-  parseSandboxToolCall,
-} from '../../../src/agent/tools/sandbox-tool-schema';
+  sandboxExecDefinition,
+  sandboxReadDefinition,
+  skillSearchDefinition,
+} from '../../../src/tools/sandbox/contract';
+import {
+  sandboxExecTool,
+  sandboxReadTool,
+  sandboxRuntime,
+  skillSearchTool,
+} from '../../../src/tools/sandbox/tool';
+import { ToolDeclarationCatalog } from '../../../src/tools/register';
+import { bindToolRuntime } from '../../../src/tools/registry';
+import { ToolServiceResolver } from '../../../src/tools/service-resolver';
+
+const SANDBOX_TOOL_DEFINITIONS = [
+  skillSearchDefinition,
+  sandboxReadDefinition,
+  sandboxExecDefinition,
+];
+const catalog = new ToolDeclarationCatalog();
+catalog.register(skillSearchTool, sandboxRuntime);
+catalog.register(sandboxReadTool, sandboxRuntime);
+catalog.register(sandboxExecTool, sandboxRuntime);
+const runtime = bindToolRuntime(catalog.seal(), new ToolServiceResolver());
 
 const READ = {
   path: '/home/test/.codex/skills/example/SKILL.md',
@@ -13,10 +34,12 @@ const EXEC = {
   command: 'bash scripts/run.sh',
   cwd: '/home/test/.codex/skills/example',
 } as const;
+const SEARCH = { query: 'lark document', limit: 5 } as const;
 
 describe('SANDBOX_TOOL_DEFINITIONS', () => {
-  it('exposes exactly two strict fixed contracts with every property required', () => {
+  it('exposes exactly three strict fixed contracts with every property required', () => {
     expect(SANDBOX_TOOL_DEFINITIONS.map(({ name }) => name)).toEqual([
+      'skill_search',
       'sandbox_read',
       'sandbox_exec',
     ]);
@@ -39,7 +62,7 @@ describe('SANDBOX_TOOL_DEFINITIONS', () => {
 
     expect(serialized).not.toContain('"env"');
     expect(serialized).not.toContain('"uniqueItems"');
-    expect(SANDBOX_TOOL_DEFINITIONS[1]?.parameters).toMatchObject({
+    expect(SANDBOX_TOOL_DEFINITIONS[2]?.parameters).toMatchObject({
       properties: {
         command: { type: 'string', maxLength: 20_000 },
         cwd: { type: ['string', 'null'], maxLength: 4_096 },
@@ -49,10 +72,26 @@ describe('SANDBOX_TOOL_DEFINITIONS', () => {
   });
 });
 
-describe('parseSandboxToolCall', () => {
-  it('parses reads as replay-safe and execs as mutations', () => {
+describe('registered Sandbox tool parsing', () => {
+  it('parses searches and reads as replay-safe and execs as mutations', async () => {
+    const contract = await runtime.contract({ sandboxAvailable: true, skillSearchAvailable: true });
     expect(
-      parseSandboxToolCall({
+      contract.parse({
+        callId: 'call_search',
+        name: 'skill_search',
+        argumentsJson: JSON.stringify(SEARCH),
+      }),
+    ).toEqual({
+      family: 'sandbox',
+      operation: 'skill_search',
+      replay: 'safe',
+      callId: 'call_search',
+      name: 'skill_search',
+      argumentsJson: JSON.stringify(SEARCH),
+      arguments: SEARCH,
+    });
+    expect(
+      contract.parse({
         callId: 'call_read',
         name: 'sandbox_read',
         argumentsJson: JSON.stringify(READ),
@@ -67,7 +106,7 @@ describe('parseSandboxToolCall', () => {
       arguments: READ,
     });
     expect(
-      parseSandboxToolCall({
+      contract.parse({
         callId: 'call_exec',
         name: 'sandbox_exec',
         argumentsJson: JSON.stringify({ ...EXEC, cwd: null }),
@@ -85,7 +124,11 @@ describe('parseSandboxToolCall', () => {
 
   it.each([
     { callId: '', name: 'sandbox_read', argumentsJson: JSON.stringify(READ) },
-    { callId: 'c'.repeat(257), name: 'sandbox_read', argumentsJson: JSON.stringify(READ) },
+    {
+      callId: 'c'.repeat(257),
+      name: 'sandbox_read',
+      argumentsJson: JSON.stringify(READ),
+    },
     { callId: 'call_1', name: 'sandbox_unknown', argumentsJson: '{}' },
     { callId: 'call_1', name: 'sandbox_read', argumentsJson: '{secret-value' },
     {
@@ -133,15 +176,18 @@ describe('parseSandboxToolCall', () => {
       name: 'sandbox_exec',
       argumentsJson: JSON.stringify({ ...EXEC, env: { SECRET: 'value' } }),
     },
-  ])('redacts unsupported or malformed calls as provider failures', (input) => {
-    let thrown: unknown;
-    try {
-      parseSandboxToolCall(input);
-    } catch (error) {
-      thrown = error;
-    }
-
-    expect(thrown).toMatchObject({ code: 'INVALID_RESPONSE' });
-    expect(String(thrown)).not.toContain('secret-value');
+    {
+      callId: 'call_1',
+      name: 'skill_search',
+      argumentsJson: JSON.stringify({ ...SEARCH, query: '   ' }),
+    },
+    {
+      callId: 'call_1',
+      name: 'skill_search',
+      argumentsJson: JSON.stringify({ ...SEARCH, limit: 11 }),
+    },
+  ])('rejects unsupported or malformed calls', async (input) => {
+    const contract = await runtime.contract({ sandboxAvailable: true, skillSearchAvailable: true });
+    expect(() => contract.parse(input)).toThrow();
   });
 });

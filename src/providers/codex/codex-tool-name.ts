@@ -1,4 +1,4 @@
-import { providerErrorFromCode } from '../provider-errors';
+import { providerErrorFromCode } from '../../agent/model/model-provider-error';
 
 const WIRE_TOOL_NAME_PATTERN = /^[a-zA-Z0-9_-]+$/;
 

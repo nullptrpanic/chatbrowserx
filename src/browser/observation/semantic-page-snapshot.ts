@@ -39,6 +39,18 @@ function semanticPageEntry(
   }) as SemanticPageEntry;
 }
 
+function semanticPageTarget(
+  target: Omit<SemanticPageTarget, 'paintOrder'>,
+  paintOrder: number | undefined,
+): SemanticPageTarget {
+  return paintOrder === undefined
+    ? target
+    : (Object.defineProperty(target, 'paintOrder', {
+        value: paintOrder,
+        enumerable: false,
+      }) as SemanticPageTarget);
+}
+
 export interface SemanticPageTarget {
   readonly backendNodeId: number;
   readonly stateBackendNodeId?: number;
@@ -50,6 +62,8 @@ export interface SemanticPageTarget {
   readonly actions: readonly SemanticAction[];
   /** Internal ranking evidence; compact model entries never serialize geometry. */
   readonly scrollMetrics?: SemanticScrollMetrics;
+  /** Internal top-layer ranking evidence; never serialized into the model-visible result. */
+  readonly paintOrder?: number;
 }
 
 export interface SemanticScrollMetrics {
@@ -167,14 +181,28 @@ const SYNTHETIC_ACTION_WORDS = new Set([
 const SYNTHETIC_TECHNICAL_WORDS = new Set([
   'btn',
   'button',
+  'colorful',
   'control',
+  'default',
   'icon',
+  'item',
+  'size',
+  'toolbar',
   'trigger',
+  'ui',
+  'ud',
   'wrapper',
 ]);
 
 function normalizedText(value: unknown, maximum = 500): string {
-  return typeof value === 'string' ? value.replace(/\s+/g, ' ').trim().slice(0, maximum) : '';
+  if (typeof value !== 'string') return '';
+  const normalized = value.replace(/\s+/g, ' ').trim();
+  if (normalized.length <= maximum) return normalized;
+  let end = Math.max(0, maximum);
+  const last = normalized.charCodeAt(end - 1);
+  const next = normalized.charCodeAt(end);
+  if (last >= 0xd800 && last <= 0xdbff && next >= 0xdc00 && next <= 0xdfff) end -= 1;
+  return normalized.slice(0, end);
 }
 
 function axText(value: Protocol.Accessibility.AXValue | undefined): string {
@@ -296,13 +324,16 @@ function compactTargetEntries(
     const entry = entryIndex === undefined ? undefined : compactedEntries[entryIndex];
     return entry === undefined
       ? target
-      : {
-          ...target,
-          role: entry.role,
-          name: entry.name,
-          state: [...(entry.state ?? [])],
-          actions: [...(entry.actions ?? [])],
-        };
+      : semanticPageTarget(
+          {
+            ...target,
+            role: entry.role,
+            name: entry.name,
+            state: [...(entry.state ?? [])],
+            actions: [...(entry.actions ?? [])],
+          },
+          target.paintOrder,
+        );
   });
   return { entries: compactedEntries, targets: compactedTargets };
 }
@@ -842,6 +873,14 @@ function hasAxBoolean(node: Protocol.Accessibility.AXNode, name: string): boolea
   );
 }
 
+function hasAxEditable(node: Protocol.Accessibility.AXNode): boolean {
+  return (node.properties ?? []).some((property) => {
+    if (property.name !== 'editable') return false;
+    const value = property.value?.value;
+    return value === true || value === 'plaintext' || value === 'richtext';
+  });
+}
+
 function actionsFor(
   node: Protocol.Accessibility.AXNode,
   role: string,
@@ -849,7 +888,7 @@ function actionsFor(
 ): readonly SemanticAction[] {
   const actions: SemanticAction[] = [];
   if (CLICK_ROLES.has(role) || hasAxBoolean(node, 'focusable')) actions.push('click');
-  if (EDITABLE_ROLES.has(role) || hasAxBoolean(node, 'editable')) {
+  if (EDITABLE_ROLES.has(role) || hasAxEditable(node)) {
     if (!actions.includes('click')) actions.push('click');
     actions.push('type');
   }
@@ -859,6 +898,7 @@ function actionsFor(
 
 function safePointerTarget(start: SnapshotDomNode): SnapshotDomNode | undefined {
   if (!start.visible || UNSAFE_CLICK_NODE_NAMES.has(start.nodeName)) return undefined;
+  if (inherentlyClickableDomNode(start)) return start;
   let pointerTarget: SnapshotDomNode | undefined;
   let current: SnapshotDomNode | null = start;
   for (let depth = 0; current && depth < 8; depth += 1) {
@@ -870,6 +910,15 @@ function safePointerTarget(start: SnapshotDomNode): SnapshotDomNode | undefined 
     current = current.parent;
   }
   return pointerTarget;
+}
+
+function inherentlyClickableDomNode(node: SnapshotDomNode): boolean {
+  if (node.nodeName === 'BUTTON' || node.nodeName === 'SUMMARY') return true;
+  if (node.nodeName === 'A') return node.attributes.has('href');
+  if (node.nodeName !== 'INPUT') return false;
+  return ['button', 'file', 'image', 'reset', 'submit'].includes(
+    normalizedText(node.attributes.get('type'), 20).toLowerCase(),
+  );
 }
 
 function depthOf(
@@ -1016,10 +1065,28 @@ function syntheticActionHint(
   return undefined;
 }
 
+function contextualSyntheticActionHint(
+  node: SnapshotDomNode,
+): { readonly name: string; readonly role: string } | undefined {
+  let fallback: { readonly name: string; readonly role: string } | undefined;
+  let current: SnapshotDomNode | null = node;
+  for (let depth = 0; current && depth < 4; depth += 1) {
+    const hint = syntheticActionHint(current);
+    if (hint) {
+      if (identifierWords(hint.name).some((word) => SYNTHETIC_ACTION_WORDS.has(word))) {
+        return hint;
+      }
+      fallback ??= hint;
+    }
+    current = current.parent;
+  }
+  return fallback;
+}
+
 function syntheticClickableName(
   node: SnapshotDomNode,
 ): { readonly name: string; readonly role: string } | undefined {
-  const hint = syntheticActionHint(node);
+  const hint = contextualSyntheticActionHint(node);
   const name = syntheticTargetName(node, hint?.name ?? '');
   if (!name) return undefined;
   const declaredRole = normalizedText(node.attributes.get('role'), 100).toLowerCase();
@@ -1031,7 +1098,9 @@ function syntheticClickableName(
         ? 'button'
         : node.nodeName === 'A' && node.attributes.has('href')
           ? 'link'
-          : (hint?.role ?? 'generic'));
+          : node.nodeName === 'LI'
+            ? 'listitem'
+            : (hint?.role ?? 'generic'));
   return { name, role };
 }
 
@@ -1202,6 +1271,13 @@ export function buildSemanticPageSnapshot(
         targetDomNode = customTarget;
       }
     }
+    if (
+      targetDomNode &&
+      (targetDomNode.scrollableX || targetDomNode.scrollableY) &&
+      !actions.includes('scroll')
+    ) {
+      actions = [...actions, 'scroll'];
+    }
     if (!targetDomNode) actions = [];
     else if (
       fullyCoveredByHigherLayer(
@@ -1215,14 +1291,31 @@ export function buildSemanticPageSnapshot(
       targetDomNode = undefined;
     }
 
-    const selectable = targetDomNode
+    let selectable = targetDomNode
       ? associatedSelectableControl(targetDomNode, snapshotIndex)
       : undefined;
+    let independentContainerClick: { readonly name: string; readonly role: string } | undefined;
+    if (
+      targetDomNode &&
+      selectable &&
+      selectable.node.backendNodeId !== targetDomNode.backendNodeId &&
+      targetDomNode.clickable &&
+      targetDomNode.nodeName !== 'LABEL'
+    ) {
+      if (selectable.node.visible) {
+        targetDomNode = selectable.node;
+        actions = actions.filter((action) => action !== 'scroll');
+      } else {
+        independentContainerClick = syntheticClickableName(targetDomNode);
+        if (independentContainerClick) selectable = undefined;
+      }
+    }
     const linkTarget =
       (role === 'generic' || role === 'link') && targetDomNode && actions.includes('click')
         ? nearestDomLink(targetDomNode)
         : undefined;
     const effectiveRole =
+      independentContainerClick?.role ??
       selectable?.role ??
       (editableTarget
         ? EDITABLE_ROLES.has(role)
@@ -1238,11 +1331,17 @@ export function buildSemanticPageSnapshot(
             targetDomNode,
             effectiveRole === 'searchbox' ? 'Search' : 'Editable field',
           )
-        : '');
+        : targetDomNode && actions.includes('click')
+          ? (syntheticClickableName(targetDomNode)?.name ?? '')
+          : '');
     if (!name) continue;
 
     let targetIndex: number | undefined;
-    let state = axState(node);
+    let state = independentContainerClick
+      ? axState(node).filter(
+          (value) => !['checked', 'checked=false', 'selected', 'selected=false'].includes(value),
+        )
+      : axState(node);
     if (targetDomNode) {
       state = uniqueState([
         ...state,
@@ -1267,20 +1366,25 @@ export function buildSemanticPageSnapshot(
         targetIndex = targets.length;
         targetIndexes.set(targetDomNode.backendNodeId, targetIndex);
         const scrollMetrics = scrollMetricsFor(targetDomNode);
-        targets.push({
-          backendNodeId: targetDomNode.backendNodeId,
-          ...(selectable === undefined ||
-          selectable.node.backendNodeId === targetDomNode.backendNodeId
-            ? {}
-            : { stateBackendNodeId: selectable.node.backendNodeId }),
-          documentFrameId: targetDomNode.documentFrameId,
-          role: effectiveRole,
-          name,
-          semanticLocator: semanticLocatorFor(node, targetDomNode, effectiveRole, name, axById),
-          state,
-          actions,
-          ...(scrollMetrics === undefined ? {} : { scrollMetrics }),
-        });
+        targets.push(
+          semanticPageTarget(
+            {
+              backendNodeId: targetDomNode.backendNodeId,
+              ...(selectable === undefined ||
+              selectable.node.backendNodeId === targetDomNode.backendNodeId
+                ? {}
+                : { stateBackendNodeId: selectable.node.backendNodeId }),
+              documentFrameId: targetDomNode.documentFrameId,
+              role: effectiveRole,
+              name,
+              semanticLocator: semanticLocatorFor(node, targetDomNode, effectiveRole, name, axById),
+              state,
+              actions,
+              ...(scrollMetrics === undefined ? {} : { scrollMetrics }),
+            },
+            targetDomNode.paintOrder,
+          ),
+        );
       }
     }
 
@@ -1315,7 +1419,8 @@ export function buildSemanticPageSnapshot(
     const scrollable = domNode.scrollableX || domNode.scrollableY;
     const pointerTarget = safePointerTarget(domNode);
     const clickable =
-      pointerTarget?.backendNodeId === domNode.backendNodeId && domNode.clickable
+      pointerTarget?.backendNodeId === domNode.backendNodeId &&
+      (domNode.clickable || inherentlyClickableDomNode(domNode))
         ? syntheticClickableName(domNode)
         : undefined;
     if (!editableRole && !scrollable && !clickable) {
@@ -1376,16 +1481,21 @@ export function buildSemanticPageSnapshot(
     const targetIndex = targets.length;
     const scrollMetrics = scrollMetricsFor(domNode);
     targetIndexes.set(domNode.backendNodeId, targetIndex);
-    targets.push({
-      backendNodeId: domNode.backendNodeId,
-      documentFrameId: domNode.documentFrameId,
-      role,
-      name,
-      semanticLocator: syntheticSemanticLocator(domNode, role, name),
-      state,
-      actions,
-      ...(scrollMetrics === undefined ? {} : { scrollMetrics }),
-    });
+    targets.push(
+      semanticPageTarget(
+        {
+          backendNodeId: domNode.backendNodeId,
+          documentFrameId: domNode.documentFrameId,
+          role,
+          name,
+          semanticLocator: syntheticSemanticLocator(domNode, role, name),
+          state,
+          actions,
+          ...(scrollMetrics === undefined ? {} : { scrollMetrics }),
+        },
+        domNode.paintOrder,
+      ),
+    );
     entries.push(
       semanticPageEntry(`${input.frame}:dom:${String(domNode.backendNodeId)}`, {
         depth: domDepth(domNode),

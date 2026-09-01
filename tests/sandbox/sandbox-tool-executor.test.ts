@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from 'vitest';
-import type { ParsedSandboxToolCall } from '../../src/agent/tools/sandbox-tool-schema';
+import type { SandboxToolCall } from '../../src/tools/sandbox/contract';
 import {
   SandboxClientError,
   type SandboxClientPort,
@@ -10,7 +10,9 @@ import { SandboxToolExecutor } from '../../src/sandbox/sandbox-tool-executor';
 
 const SIGNAL = new AbortController().signal;
 
-function readCall(overrides: Partial<ParsedSandboxToolCall['arguments']> = {}) {
+function readCall(
+  overrides: Partial<Extract<SandboxToolCall, { name: 'sandbox_read' }>['arguments']> = {},
+) {
   const arguments_ = {
     path: '/home/test/.codex/skills/example/SKILL.md',
     startLine: 1,
@@ -25,7 +27,7 @@ function readCall(overrides: Partial<ParsedSandboxToolCall['arguments']> = {}) {
     name: 'sandbox_read',
     argumentsJson: JSON.stringify(arguments_),
     arguments: arguments_,
-  } as const satisfies ParsedSandboxToolCall;
+  } as const satisfies SandboxToolCall;
 }
 
 function execCall(cwd: string | null = '/home/test/.codex/skills/example') {
@@ -38,7 +40,7 @@ function execCall(cwd: string | null = '/home/test/.codex/skills/example') {
     name: 'sandbox_exec',
     argumentsJson: JSON.stringify(arguments_),
     arguments: arguments_,
-  } as const satisfies ParsedSandboxToolCall;
+  } as const satisfies SandboxToolCall;
 }
 
 function fixture(

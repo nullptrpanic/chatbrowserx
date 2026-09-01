@@ -2,7 +2,7 @@ import type {
   ModelFunctionOutput,
   ModelInputItem,
   ModelMessageContent,
-} from '../../providers/provider-types';
+} from '../model/model-provider';
 
 const ITEM_OVERHEAD_TOKENS = 12;
 const ORIGINAL_IMAGE_TOKENS = 4_096;

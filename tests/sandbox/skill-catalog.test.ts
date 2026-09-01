@@ -1,11 +1,7 @@
 import { describe, expect, it, vi } from 'vitest';
 import { DEFAULT_APP_SETTINGS } from '../../src/persistence/settings-store';
 import type { SandboxClientPort, SandboxExecResponse } from '../../src/sandbox/sandbox-client';
-import {
-  SkillCatalog,
-  sandboxCatalogForToolResults,
-  sandboxCatalogInstructions,
-} from '../../src/sandbox/skill-catalog';
+import { SkillCatalog, searchSkillCatalog } from '../../src/sandbox/skill-catalog';
 import type { Clock } from '../../src/shared/time';
 import { MemoryStorageArea } from '../persistence/test-helpers';
 
@@ -224,54 +220,36 @@ describe('SkillCatalog cache', () => {
   });
 });
 
-describe('sandboxCatalogInstructions', () => {
-  it('is empty without entries and otherwise encodes precedence and the compact catalog', () => {
-    expect(sandboxCatalogInstructions({ entries: [], refreshedAt: 1, truncated: false })).toBe('');
+describe('searchSkillCatalog', () => {
+  const snapshot = {
+    entries: [
+      { name: 'browser-audit', description: 'Inspect browser evidence.', path: '/skills/browser' },
+      { name: 'lark-doc', description: 'Read and edit Feishu documents.', path: '/skills/doc' },
+      { name: 'lark-drive', description: 'Manage Feishu Drive files.', path: '/skills/drive' },
+    ],
+    refreshedAt: 1,
+    truncated: false,
+  };
 
-    const instructions = sandboxCatalogInstructions({
-      entries: [{ name: 'a', description: 'A skill.', path: '/skills/a/SKILL.md' }],
-      refreshedAt: 1,
+  it('ranks exact names before description matches and returns only bounded metadata', () => {
+    expect(searchSkillCatalog(snapshot, 'lark-doc', 2)).toEqual({
+      matches: [
+        { name: 'lark-doc', description: 'Read and edit Feishu documents.', path: '/skills/doc' },
+      ],
+      truncated: false,
+    });
+    expect(searchSkillCatalog(snapshot, 'Feishu', 1)).toEqual({
+      matches: [
+        { name: 'lark-doc', description: 'Read and edit Feishu documents.', path: '/skills/doc' },
+      ],
       truncated: true,
     });
-
-    expect(instructions).toContain('Built-in ChatBrowserX tools take priority');
-    expect(instructions).toContain('read its SKILL.md completely');
-    expect(instructions).toContain('catalog is truncated');
-    expect(instructions).toContain(JSON.stringify([['a', 'A skill.', '/skills/a/SKILL.md']]));
   });
 
-  it('keeps only the selected Skill after its SKILL.md was read successfully', () => {
-    const snapshot = {
-      entries: [
-        { name: 'a', description: 'A skill.', path: '/skills/a/SKILL.md' },
-        { name: 'b', description: 'B skill.', path: '/skills/b/SKILL.md' },
-      ],
-      refreshedAt: 1,
-      truncated: false,
-    };
-
-    expect(
-      sandboxCatalogForToolResults(snapshot, [
-        {
-          id: 'result_read',
-          taskId: 'task_1',
-          runId: 'run_1',
-          callId: 'call_read',
-          toolName: 'sandbox_read',
-          argumentsJson: JSON.stringify({
-            path: '/skills/b/SKILL.md',
-            startLine: 1,
-            maxLines: 400,
-          }),
-          output: JSON.stringify({ code: 0, path: '/skills/b/SKILL.md', content: '---' }),
-          attachmentIds: [],
-          createdAt: 1,
-        },
-      ]),
-    ).toEqual({
-      entries: [{ name: 'b', description: 'B skill.', path: '/skills/b/SKILL.md' }],
-      refreshedAt: 1,
-      truncated: false,
+  it('returns no unrelated entries and propagates source truncation', () => {
+    expect(searchSkillCatalog({ ...snapshot, truncated: true }, 'calendar', 10)).toEqual({
+      matches: [],
+      truncated: true,
     });
   });
 });

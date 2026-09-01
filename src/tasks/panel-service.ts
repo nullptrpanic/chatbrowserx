@@ -20,8 +20,9 @@ import type { IdGenerator } from '../shared/ids';
 import { bytesToBase64 } from '../shared/base64';
 import type { Clock } from '../shared/time';
 import type { SkillCatalogPort } from '../sandbox/skill-catalog';
+import type { Agent } from '../agent/agent';
 import type { MessageRecord, MessageSourcePage, TaskMessageDraft } from './message-types';
-import type { TaskSnapshot, TaskSubmissionPort } from './task-command-service';
+import type { TaskSnapshot } from './task-command-service';
 import type { Task, TaskEvent } from './task-types';
 import type { MaterializedToolResult } from './tool-result-types';
 
@@ -61,8 +62,7 @@ export interface PanelServiceDependencies {
     | 'setSandboxToken'
   >;
   readonly sandboxCatalog?: Pick<SkillCatalogPort, 'invalidate'>;
-  readonly commands: TaskSubmissionPort;
-  readonly cancelTask: (taskId: string) => Promise<TaskSnapshot>;
+  readonly agent: Pick<Agent, 'start' | 'supplement' | 'cancel'>;
   readonly tabs: {
     get(tabId: number): Promise<{
       readonly id?: number | undefined;
@@ -79,7 +79,6 @@ export interface PanelServiceDependencies {
   };
   readonly clock: Clock;
   readonly ids: IdGenerator;
-  readonly scheduleTask: (taskId: string) => Promise<void>;
   readonly stateVersion: {
     readonly get: () => number;
     readonly changed: () => void;
@@ -427,27 +426,30 @@ export class PanelService {
       updatedAt: now,
     };
     const goal = taskGoal(text);
-    const snapshot =
-      latestTask?.status === 'cancelled' &&
+    return latestTask?.status === 'cancelled' &&
       !(await this.#dependencies.tasks
         .listEvents(latestTask.id)
         .then((events) => events.some((event) => event.type === 'context.cleared')))
-        ? await this.#dependencies.commands.continueCancelledSubmission({
+      ? this.#dependencies.agent.start({
+          kind: 'continue',
+          submission: {
             sourceTaskId: latestTask.id,
             tabId: input.tabId,
             conversation,
             message,
-          })
-        : await this.#dependencies.commands.createSubmission({
+          },
+        })
+      : this.#dependencies.agent.start({
+          kind: 'create',
+          submission: {
             conversation,
             createConversation: input.conversationId === undefined,
             conversationId: conversation.id,
             tabId: input.tabId,
             goal,
             message,
-          });
-    await this.#dependencies.scheduleTask(snapshot.task.id);
-    return snapshot;
+          },
+        });
   }
 
   /** Resolves one client-supplied lookup hint to a bounded canonical assistant reply reference. */
@@ -523,7 +525,7 @@ export class PanelService {
       createdAt: now,
       updatedAt: now,
     };
-    await this.#dependencies.commands.appendSupplement(message);
+    await this.#dependencies.agent.supplement(message);
     return { accepted: true, id: message.id };
   }
 
@@ -559,7 +561,7 @@ export class PanelService {
     const tasks = await this.#dependencies.tasks.listByConversation(conversationId);
     for (const task of tasks) {
       if (!terminalTaskStatuses.has(task.status)) {
-        await this.#dependencies.cancelTask(task.id);
+        await this.#dependencies.agent.cancel(task.id);
       }
     }
     await this.#dependencies.conversations.clearConversation(conversationId);

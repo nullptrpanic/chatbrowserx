@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from 'vitest';
-import { parseBrowserToolCall } from '../../src/agent/tools/browser-tool-schema';
+import { parseBrowserToolCall } from '../../src/tools/browser/contract';
 import { BrowserToolExecutor } from '../../src/browser/browser-tool-executor';
 import { NetworkCaptureError } from '../../src/browser/network/network-capture-registry';
 import type { BrowserTabPort } from '../../src/browser/tab-service';
@@ -1128,6 +1128,9 @@ describe('BrowserToolExecutor', () => {
           observation: { targetPresent: true },
         };
       }),
+      settle: vi.fn(async () => {
+        order.push('settle');
+      }),
     };
     const executor = new BrowserToolExecutor({
       tabs: tabPort(),
@@ -1153,10 +1156,13 @@ describe('BrowserToolExecutor', () => {
     expect(order).toEqual([
       'inspect:initial',
       'scroll:-3000',
+      'settle',
       'inspect:snapshot_0',
       'scroll:-2000',
+      'settle',
       'inspect:snapshot_1',
       'scroll:-1000',
+      'settle',
       'inspect:snapshot_2',
     ]);
     expect(actions.execute).toHaveBeenCalledTimes(3);
@@ -1176,6 +1182,131 @@ describe('BrowserToolExecutor', () => {
           { snapshot: 'snapshot_1', base: 'snapshot_0' },
           { snapshot: 'snapshot_2', base: 'snapshot_1' },
           { snapshot: 'snapshot_3', base: 'snapshot_2' },
+        ],
+      },
+    });
+  });
+
+  it('reobserves an ordinary scroll when its first settled snapshot has no new content', async () => {
+    const order: string[] = [];
+    const observer = {
+      inspect: vi
+        .fn()
+        .mockImplementationOnce(async () => {
+          order.push('inspect:initial');
+          return {
+            tabId: 7,
+            url: 'https://example.com/history',
+            data: {
+              mode: 'interactive',
+              snapshot: 'snapshot_0',
+              coverage: { contentKey: 'recent' },
+              elements: [{ d: 1, r: 'region', n: 'History', ref: 'ref_history' }],
+            },
+            observation: null,
+            attachmentIds: [],
+            debuggerSession: 'ephemeral' as const,
+            visualFallbackAllowed: false,
+          };
+        })
+        .mockImplementationOnce(async () => {
+          order.push('inspect:first');
+          return {
+            tabId: 7,
+            url: 'https://example.com/history',
+            data: {
+              mode: 'interactive',
+              snapshot: 'snapshot_1',
+              base: 'snapshot_0',
+              unchanged: true,
+              coverage: { contentKey: 'recent' },
+            },
+            observation: null,
+            attachmentIds: [],
+            debuggerSession: 'ephemeral' as const,
+            visualFallbackAllowed: false,
+          };
+        })
+        .mockImplementationOnce(async () => {
+          order.push('inspect:delayed');
+          return {
+            tabId: 7,
+            url: 'https://example.com/history',
+            data: {
+              mode: 'interactive',
+              snapshot: 'snapshot_2',
+              base: 'snapshot_1',
+              upsert: [{ k: 'node:older', e: { d: 2, r: 'statictext', n: 'Older message' } }],
+              coverage: { contentKey: 'older' },
+            },
+            observation: null,
+            attachmentIds: [],
+            debuggerSession: 'ephemeral' as const,
+            visualFallbackAllowed: false,
+          };
+        }),
+    };
+    const actions = {
+      execute: vi.fn(async () => {
+        order.push('scroll');
+        return {
+          tabId: 7,
+          url: 'https://example.com/history',
+          data: {
+            action: 'scroll',
+            actualDeltaX: 0,
+            actualDeltaY: -3_000,
+            remainingDeltaX: 0,
+            remainingDeltaY: 0,
+            requestedDeltaApplied: true,
+            moved: true,
+            contentChanged: false,
+            extentChanged: false,
+            loadedMore: false,
+            boundaryVerified: false,
+            needsBoundaryProbe: false,
+            segments: 1,
+          },
+          observation: { targetPresent: true },
+        };
+      }),
+      settle: vi.fn(async () => {
+        order.push('settle');
+      }),
+    };
+    const executor = new BrowserToolExecutor({ tabs: tabPort(), observer, actions });
+    const signal = new AbortController().signal;
+    const context = { currentTabId: 7 };
+
+    await executor.execute(call('browser_inspect', { mode: 'interactive' }), signal, context);
+    const result = await executor.execute(
+      call('browser_scroll', {
+        target: 'ref_history',
+        deltaX: 0,
+        deltaY: -3_000,
+        maxSegments: 1,
+        stopText: '',
+      }),
+      signal,
+      context,
+    );
+
+    expect(order).toEqual([
+      'inspect:initial',
+      'scroll',
+      'settle',
+      'inspect:first',
+      'settle',
+      'inspect:delayed',
+    ]);
+    expect(JSON.parse(result.output)).toMatchObject({
+      ok: true,
+      data: {
+        contentChanged: true,
+        loadedMore: true,
+        observations: [
+          { snapshot: 'snapshot_1', coverage: { contentKey: 'recent' } },
+          { snapshot: 'snapshot_2', coverage: { contentKey: 'older' } },
         ],
       },
     });
@@ -3613,6 +3744,76 @@ describe('BrowserToolExecutor', () => {
       expect(output.output).not.toContain('private stale node');
     },
   );
+
+  it('attaches fresh interactive state after an unverified image paste without replaying it', async () => {
+    const observer = {
+      inspect: vi
+        .fn()
+        .mockResolvedValueOnce({
+          tabId: 7,
+          url: 'https://example.com/compose',
+          data: {
+            mode: 'interactive',
+            snapshot: 'snapshot_before',
+            elements: [{ r: 'textbox', n: 'Message', ref: 'ref_editor' }],
+          },
+          observation: null,
+          attachmentIds: [],
+          debuggerSession: 'ephemeral' as const,
+          visualFallbackAllowed: false,
+        })
+        .mockResolvedValueOnce({
+          tabId: 7,
+          url: 'https://example.com/compose',
+          data: {
+            mode: 'interactive',
+            snapshot: 'snapshot_after',
+            base: 'snapshot_before',
+            upsert: [{ k: 'node:image', e: { r: 'image', n: 'capture.png' } }],
+          },
+          observation: null,
+          attachmentIds: [],
+          debuggerSession: 'ephemeral' as const,
+          visualFallbackAllowed: false,
+        }),
+    };
+    const actions = {
+      execute: vi.fn(async () => {
+        throw Object.assign(new Error('private preview state'), {
+          code: 'ATTACHMENT_VERIFICATION_FAILED',
+        });
+      }),
+    };
+    const executor = new BrowserToolExecutor({ tabs: tabPort(), observer, actions });
+    const signal = new AbortController().signal;
+    const context = { currentTabId: 7, availableAssetIds: ['attachment_capture'] };
+
+    await executor.execute(call('browser_inspect', { mode: 'interactive' }), signal, context);
+    const output = await executor.execute(
+      call('browser_paste_image', {
+        ref: 'ref_editor',
+        assetId: 'attachment_capture',
+      }),
+      signal,
+      context,
+    );
+
+    expect(actions.execute).toHaveBeenCalledOnce();
+    expect(observer.inspect).toHaveBeenCalledTimes(2);
+    expect(JSON.parse(output.output)).toMatchObject({
+      ok: false,
+      code: 'ATTACHMENT_VERIFICATION_FAILED',
+      needsInspect: false,
+      data: {
+        verification: {
+          snapshot: 'snapshot_after',
+          base: 'snapshot_before',
+          upsert: [{ e: { r: 'image', n: 'capture.png' } }],
+        },
+      },
+    });
+    expect(output.output).not.toContain('private preview state');
+  });
 
   it('preserves only a safe browser action failure stage for diagnosis', async () => {
     const executor = new BrowserToolExecutor({

@@ -1,4 +1,4 @@
-import { providerErrorFromCode } from './provider-errors';
+import { providerErrorFromCode } from '../agent/model/model-provider-error';
 
 const MAX_EVENT_BYTES = 1024 * 1024;
 

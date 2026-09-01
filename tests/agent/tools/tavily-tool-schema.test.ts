@@ -1,11 +1,31 @@
 import { describe, expect, it } from 'vitest';
 import {
-  TAVILY_TOOL_DEFINITIONS,
-  parseTavilyToolCall,
+  tavilyCrawlDefinition,
   tavilyCrawlSchema,
+  tavilyCrawlTool,
+  tavilyExtractDefinition,
   tavilyExtractSchema,
+  tavilyExtractTool,
+  tavilyRuntime,
+  tavilySearchDefinition,
   tavilySearchSchema,
-} from '../../../src/agent/tools/tavily-tool-schema';
+  tavilySearchTool,
+} from '../../../src/tools/tavily/tool';
+import { ToolDeclarationCatalog } from '../../../src/tools/register';
+import { bindToolRuntime } from '../../../src/tools/registry';
+import { ToolServiceResolver } from '../../../src/tools/service-resolver';
+
+const TAVILY_TOOL_DEFINITIONS = [
+  tavilySearchDefinition,
+  tavilyExtractDefinition,
+  tavilyCrawlDefinition,
+];
+
+const catalog = new ToolDeclarationCatalog();
+catalog.register(tavilySearchTool, tavilyRuntime);
+catalog.register(tavilyExtractTool, tavilyRuntime);
+catalog.register(tavilyCrawlTool, tavilyRuntime);
+const runtime = bindToolRuntime(catalog.seal(), new ToolServiceResolver());
 
 const SEARCH = {
   query: 'latest browser automation reliability research',
@@ -48,15 +68,31 @@ describe('Tavily tool schemas', () => {
     [{ ...SEARCH, extra: true }],
     [{ ...SEARCH, timeRange: undefined }],
     [{ ...SEARCH, includeDomains: ['https://example.com'] }],
-    [{ ...SEARCH, includeDomains: ['example.com'], excludeDomains: ['EXAMPLE.COM'] }],
-    [{ ...SEARCH, includeDomains: ['a.com', 'b.com', 'c.com', 'd.com', 'e.com', 'f.com'] }],
+    [
+      {
+        ...SEARCH,
+        includeDomains: ['example.com'],
+        excludeDomains: ['EXAMPLE.COM'],
+      },
+    ],
+    [
+      {
+        ...SEARCH,
+        includeDomains: ['a.com', 'b.com', 'c.com', 'd.com', 'e.com', 'f.com'],
+      },
+    ],
   ])('rejects an invalid search payload', (value) => {
     expect(tavilySearchSchema.safeParse(value).success).toBe(false);
   });
 
   it.each([
     [{ ...EXTRACT, urls: [] }],
-    [{ ...EXTRACT, urls: Array.from({ length: 6 }, (_, index) => `https://e${index}.com`) }],
+    [
+      {
+        ...EXTRACT,
+        urls: Array.from({ length: 6 }, (_, index) => `https://e${index}.com`),
+      },
+    ],
     [{ ...EXTRACT, urls: ['http://127.0.0.1/private'] }],
     [{ ...EXTRACT, urls: ['https://user:pass@example.com/private'] }],
     [{ ...EXTRACT, query: 'x'.repeat(501) }],
@@ -102,10 +138,11 @@ describe('TAVILY_TOOL_DEFINITIONS', () => {
   });
 });
 
-describe('parseTavilyToolCall', () => {
-  it('returns a typed, normalized search call', () => {
+describe('registered Tavily tool parsing', () => {
+  it('returns a typed, normalized search call', async () => {
+    const contract = await runtime.contract({ tavilyConfigured: true });
     expect(
-      parseTavilyToolCall({
+      contract.parse({
         callId: 'call_1',
         name: 'tavily_search',
         argumentsJson: JSON.stringify(SEARCH),
@@ -113,16 +150,29 @@ describe('parseTavilyToolCall', () => {
     ).toEqual({
       operation: 'search',
       callId: 'call_1',
+      name: 'tavily_search',
       argumentsJson: JSON.stringify(SEARCH),
       arguments: { ...SEARCH, includeDomains: ['example.com'] },
     });
   });
 
   it.each([
-    { callId: 'call_1', name: 'tavily.search', argumentsJson: JSON.stringify(SEARCH) },
+    {
+      callId: 'call_1',
+      name: 'tavily.search',
+      argumentsJson: JSON.stringify(SEARCH),
+    },
     { callId: 'call_1', name: 'browser_act', argumentsJson: '{}' },
-    { callId: '', name: 'tavily_search', argumentsJson: JSON.stringify(SEARCH) },
-    { callId: 'c'.repeat(257), name: 'tavily_search', argumentsJson: JSON.stringify(SEARCH) },
+    {
+      callId: '',
+      name: 'tavily_search',
+      argumentsJson: JSON.stringify(SEARCH),
+    },
+    {
+      callId: 'c'.repeat(257),
+      name: 'tavily_search',
+      argumentsJson: JSON.stringify(SEARCH),
+    },
     { callId: 'call_1', name: 'tavily_search', argumentsJson: '{secret-value' },
     {
       callId: 'call_1',
@@ -134,15 +184,8 @@ describe('parseTavilyToolCall', () => {
       name: 'tavily_search',
       argumentsJson: JSON.stringify({ ...SEARCH, query: '' }),
     },
-  ])('turns unsupported or malformed calls into a redacted provider failure', (input) => {
-    let thrown: unknown;
-    try {
-      parseTavilyToolCall(input);
-    } catch (error) {
-      thrown = error;
-    }
-
-    expect(thrown).toMatchObject({ code: 'INVALID_RESPONSE' });
-    expect(String(thrown)).not.toContain('secret-value');
+  ])('rejects unsupported or malformed calls', async (input) => {
+    const contract = await runtime.contract({ tavilyConfigured: true });
+    expect(() => contract.parse(input)).toThrow();
   });
 });

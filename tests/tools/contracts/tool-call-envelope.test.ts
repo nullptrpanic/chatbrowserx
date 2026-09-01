@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { parseToolCallArguments } from '../../../src/tools/contracts/tool-call-envelope';
+import { parseToolCallArguments } from '../../../src/tools/tool-call-envelope';
 
 describe('parseToolCallArguments', () => {
   it('returns parsed JSON for a bounded call envelope', () => {

@@ -27,6 +27,7 @@ const DEEP_INTERACTIVE_BUDGET = {
 const MAX_INTERACTIVE_SNAPSHOT_TABS = 50;
 const MAX_SESSION_OBSERVATION_CONCURRENCY = 3;
 const MAX_RESERVED_EDITABLE_TARGETS = 4;
+const MAX_RESERVED_SCROLL_TARGETS = 4;
 const INTERACTIVE_ENTRY_KEYS =
   'd=depth,r=role(default generic),n=name,s=state,a=extra actions(ref defaults click),f=frame';
 const MAX_CONTENT_CHARACTERS = 40_000;
@@ -173,39 +174,99 @@ function keyedInteractiveDelta(
 }
 
 /** Gives deep inspection's bounded budget to actionable entries and their nearby context first. */
+function reservedEditableEntryIndexes(entries: readonly SemanticPageEntry[]): readonly number[] {
+  const byTarget = new Map<number, { readonly index: number; readonly priority: number }>();
+  entries.forEach((entry, index) => {
+    if (!entry.actions?.includes('type') || entry.targetIndex === undefined) return;
+    const priority = entry.state?.includes('focused') ? 0 : entry.inViewport === true ? 1 : 2;
+    const current = byTarget.get(entry.targetIndex);
+    if (!current || priority < current.priority)
+      byTarget.set(entry.targetIndex, { index, priority });
+  });
+  return [...byTarget.values()]
+    .toSorted((left, right) => left.priority - right.priority || left.index - right.index)
+    .slice(0, MAX_RESERVED_EDITABLE_TARGETS)
+    .map(({ index }) => index);
+}
+
+interface InteractiveRankingTarget {
+  readonly paintOrder?: number;
+  readonly scrollMetrics?: SemanticScrollMetrics;
+}
+
+function reservedScrollEntryIndexes(
+  entries: readonly SemanticPageEntry[],
+  targets: readonly InteractiveRankingTarget[],
+): readonly number[] {
+  const byTarget = new Map<number, { readonly index: number; readonly extent: number }>();
+  entries.forEach((entry, index) => {
+    if (!entry.actions?.includes('scroll') || entry.targetIndex === undefined) return;
+    const metrics = targets[entry.targetIndex]?.scrollMetrics;
+    const extent = metrics
+      ? Math.max(0, metrics.scrollWidth - metrics.clientWidth) +
+        Math.max(0, metrics.scrollHeight - metrics.clientHeight)
+      : 0;
+    const current = byTarget.get(entry.targetIndex);
+    if (!current || extent > current.extent) byTarget.set(entry.targetIndex, { index, extent });
+  });
+  const viewportRank = (index: number): number =>
+    entries[index]?.inViewport === true ? 0 : entries[index]?.inViewport === undefined ? 1 : 2;
+  return [...byTarget.values()]
+    .toSorted(
+      (left, right) =>
+        viewportRank(left.index) - viewportRank(right.index) ||
+        right.extent - left.extent ||
+        left.index - right.index,
+    )
+    .slice(0, MAX_RESERVED_SCROLL_TARGETS)
+    .map(({ index }) => index);
+}
+
 function interactiveCandidateIndexes(
   entries: readonly SemanticPageEntry[],
   deep: boolean,
+  targets: readonly InteractiveRankingTarget[],
 ): readonly number[] {
+  const reservedEditableIndexes = new Set(reservedEditableEntryIndexes(entries));
+  const reservedScrollIndexes = new Set(reservedScrollEntryIndexes(entries, targets));
+  const visualPriority = (left: number, right: number): number => {
+    const leftEntry = entries[left];
+    const rightEntry = entries[right];
+    if (!leftEntry || !rightEntry) return left - right;
+    const viewportRank = (entry: SemanticPageEntry): number =>
+      entry.inViewport === true ? 0 : entry.inViewport === undefined ? 1 : 2;
+    const viewportDifference = viewportRank(leftEntry) - viewportRank(rightEntry);
+    if (viewportDifference !== 0) return viewportDifference;
+    if ((leftEntry.frame ?? 'main') !== (rightEntry.frame ?? 'main')) return left - right;
+    const leftPaintOrder =
+      leftEntry.targetIndex === undefined ? -1 : (targets[leftEntry.targetIndex]?.paintOrder ?? -1);
+    const rightPaintOrder =
+      rightEntry.targetIndex === undefined
+        ? -1
+        : (targets[rightEntry.targetIndex]?.paintOrder ?? -1);
+    return rightPaintOrder - leftPaintOrder || left - right;
+  };
   if (!deep) {
-    const reservedEditableIndexes = new Set<number>();
-    const reservedTargetIndexes = new Set<number>();
-    entries.forEach((entry, index) => {
-      if (
-        reservedTargetIndexes.size >= MAX_RESERVED_EDITABLE_TARGETS ||
-        entry.inViewport === true ||
-        !entry.actions?.includes('type') ||
-        entry.targetIndex === undefined ||
-        reservedTargetIndexes.has(entry.targetIndex)
-      ) {
-        return;
-      }
-      reservedEditableIndexes.add(index);
-      reservedTargetIndexes.add(entry.targetIndex);
-    });
     const priority = (entry: SemanticPageEntry, index: number): number => {
-      if (entry.actions?.includes('scroll')) return -3;
-      if (reservedEditableIndexes.has(index)) return -2;
-      if (entry.inViewport && entry.targetIndex !== undefined) return 0;
-      if (entry.inViewport) return 1;
+      if (reservedEditableIndexes.has(index)) return -4;
+      if (reservedScrollIndexes.has(index)) return -3;
+      if (
+        entry.inViewport &&
+        entry.targetIndex !== undefined &&
+        entry.actions?.some((action) => action !== 'scroll')
+      ) {
+        return -2;
+      }
       if (
         entry.state?.some((state) =>
           ['focused', 'selected', 'checked', 'invalid'].includes(state.split('=', 1)[0] ?? ''),
         )
       ) {
-        return 2;
+        return -1;
       }
-      return entry.targetIndex === undefined ? 4 : 3;
+      if (entry.inViewport && entry.targetIndex !== undefined) return 0;
+      if (entry.inViewport) return 1;
+      return entry.targetIndex === undefined ? 3 : 2;
     };
     return entries
       .map((_entry, index) => index)
@@ -213,7 +274,9 @@ function interactiveCandidateIndexes(
         const leftEntry = entries[left];
         const rightEntry = entries[right];
         if (!leftEntry || !rightEntry) return left - right;
-        return priority(leftEntry, left) - priority(rightEntry, right) || left - right;
+        return (
+          priority(leftEntry, left) - priority(rightEntry, right) || visualPriority(left, right)
+        );
       });
   }
   const indexes: number[] = [];
@@ -223,25 +286,29 @@ function interactiveCandidateIndexes(
     included.add(index);
     indexes.push(index);
   };
-  entries.forEach((entry, index) => {
-    if (entry.targetIndex === undefined) return;
-    include(index - 2);
-    include(index - 1);
-    include(index);
-    include(index + 1);
-  });
+  reservedEditableIndexes.forEach(include);
+  reservedScrollIndexes.forEach(include);
+  entries
+    .flatMap((entry, index) => (entry.targetIndex === undefined ? [] : [index]))
+    .toSorted(visualPriority)
+    .forEach((index) => {
+      include(index - 2);
+      include(index - 1);
+      include(index);
+      include(index + 1);
+    });
   entries.forEach((_entry, index) => include(index));
   return indexes;
 }
 
-function viewportFromLayoutMetrics(
+function snapshotViewportFromLayoutMetrics(
   metrics: Partial<Protocol.Page.GetLayoutMetricsResponse>,
 ): BuildViewport | undefined {
   const viewport =
-    metrics.cssVisualViewport ??
-    metrics.cssLayoutViewport ??
     metrics.visualViewport ??
-    metrics.layoutViewport;
+    metrics.layoutViewport ??
+    metrics.cssVisualViewport ??
+    metrics.cssLayoutViewport;
   if (!viewport) return undefined;
   const { pageX, pageY, clientWidth, clientHeight } = viewport;
   if (
@@ -656,6 +723,7 @@ export class PageObserver {
     throwIfAborted(signal);
     const targets: (ObservedElementTarget & {
       readonly scrollMetrics?: SemanticScrollMetrics;
+      readonly paintOrder?: number;
     })[] = [];
     const entries: SemanticPageEntry[] = [];
     const documentEpochParts: string[] = [];
@@ -705,7 +773,7 @@ export class PageObserver {
             .catch(() => ({}) as Protocol.Page.GetLayoutMetricsResponse),
         ]);
         const loaders = this.#frameLoaders(frameTree.frameTree);
-        const viewport = viewportFromLayoutMetrics(metrics);
+        const viewport = snapshotViewportFromLayoutMetrics(metrics);
         return {
           sessionTarget,
           loaders,
@@ -755,6 +823,7 @@ export class PageObserver {
           actions: target.actions,
           frame: sessionTarget.frame,
           ...(target.scrollMetrics === undefined ? {} : { scrollMetrics: target.scrollMetrics }),
+          ...(target.paintOrder === undefined ? {} : { paintOrder: target.paintOrder }),
         });
       });
       entries.push(
@@ -780,7 +849,7 @@ export class PageObserver {
       mode: 'interactive',
       elements: [],
     }).length;
-    for (const entryIndex of interactiveCandidateIndexes(entries, deep)) {
+    for (const entryIndex of interactiveCandidateIndexes(entries, deep, targets)) {
       if (selectedEntryIndexes.length >= budget.elements) break;
       const entry = entries[entryIndex];
       if (!entry) continue;

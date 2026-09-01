@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { strictFunctionTool } from '../../../src/tools/contracts/model-tool';
+import { strictFunctionTool } from '../../../src/tools/model-tool';
 
 describe('strictFunctionTool', () => {
   it('derives the closed required object contract from its properties', () => {

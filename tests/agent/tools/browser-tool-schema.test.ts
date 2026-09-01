@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest';
 import {
   BROWSER_TOOL_DEFINITIONS,
   parseBrowserToolCall,
-} from '../../../src/agent/tools/browser-tool-schema';
+} from '../../../src/tools/browser/contract';
 
 const CASES = [
   ['browser_get_current_tab', 'get_current_tab', 'safe', {}],

@@ -5,8 +5,8 @@ import {
   CODEX_RESPONSES_URL,
 } from '../../../src/providers/codex/codex-constants';
 import type { CredentialStore } from '../../../src/persistence/credential-store';
-import type { ModelRequest } from '../../../src/providers/provider-types';
-import type { ModelStreamEvent } from '../../../src/providers/stream-events';
+import type { ModelRequest } from '../../../src/agent/model/model-provider';
+import type { ModelStreamEvent } from '../../../src/agent/model/model-stream-event';
 
 /** Builds an unsigned synthetic JWT that cannot be used as a real credential. */
 function jwt(payload: Readonly<Record<string, unknown>>): string {

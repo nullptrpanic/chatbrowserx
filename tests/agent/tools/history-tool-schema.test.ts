@@ -1,8 +1,15 @@
 import { describe, expect, it } from 'vitest';
-import {
-  HISTORY_TOOL_DEFINITIONS,
-  parseHistoryToolCall,
-} from '../../../src/agent/tools/history-tool-schema';
+import { historyReadDefinition, resultReadDefinition } from '../../../src/tools/history/contract';
+import { historyReadTool, historyRuntime, resultReadTool } from '../../../src/tools/history/tool';
+import { ToolDeclarationCatalog } from '../../../src/tools/register';
+import { bindToolRuntime } from '../../../src/tools/registry';
+import { ToolServiceResolver } from '../../../src/tools/service-resolver';
+
+const HISTORY_TOOL_DEFINITIONS = [historyReadDefinition, resultReadDefinition];
+const catalog = new ToolDeclarationCatalog();
+catalog.register(historyReadTool, historyRuntime);
+catalog.register(resultReadTool, historyRuntime);
+const runtime = bindToolRuntime(catalog.seal(), new ToolServiceResolver());
 
 describe('history tool contracts', () => {
   it('uses one strict history tool for relative and stable task reads', () => {
@@ -23,68 +30,64 @@ describe('history tool contracts', () => {
     expect(HISTORY_TOOL_DEFINITIONS[1]?.description).toContain('history_read');
   });
 
-  it('parses relative and exact task selectors through history_read', () => {
+  it('parses relative and exact task selectors through history_read', async () => {
+    const contract = await runtime.contract({ historyAvailable: true });
     expect(
-      parseHistoryToolCall({
+      contract.parse({
         callId: 'call_history',
         name: 'history_read',
         argumentsJson: '{"taskId":null,"offset":1,"cursor":"","limit":50}',
       }),
     ).toMatchObject({
-      family: 'history',
-      operation: 'history',
       name: 'history_read',
       arguments: { taskId: null, offset: 1, cursor: '', limit: 50 },
     });
     expect(
-      parseHistoryToolCall({
+      contract.parse({
         callId: 'call_task_history',
         name: 'history_read',
         argumentsJson: '{"taskId":"task_1","offset":null,"cursor":"","limit":50}',
       }),
     ).toMatchObject({
-      family: 'history',
-      operation: 'history',
       name: 'history_read',
       arguments: { taskId: 'task_1', offset: null, cursor: '', limit: 50 },
     });
     expect(
-      parseHistoryToolCall({
+      contract.parse({
         callId: 'call_result',
         name: 'result_read',
         argumentsJson: '{"resultId":"result_1","offset":0,"limit":20000}',
       }),
     ).toMatchObject({
-      family: 'history',
-      operation: 'result',
       name: 'result_read',
     });
   });
 
-  it('rejects ambiguous selectors, search fields, and invalid bounds', () => {
+  it('rejects ambiguous selectors, search fields, and invalid bounds', async () => {
+    const contract = await runtime.contract({ historyAvailable: true });
     expect(() =>
-      parseHistoryToolCall({
+      contract.parse({
         callId: 'call_bad',
         name: 'history_read',
         argumentsJson: '{"taskId":null,"offset":0,"cursor":"","limit":101}',
       }),
     ).toThrow();
     expect(() =>
-      parseHistoryToolCall({
+      contract.parse({
         callId: 'call_bad',
         name: 'history_read',
         argumentsJson: '{"taskId":"task_1","offset":1,"cursor":"","limit":50}',
       }),
     ).toThrow();
     expect(() =>
-      parseHistoryToolCall({
+      contract.parse({
         callId: 'call_bad',
         name: 'history_read',
         argumentsJson: '{"taskId":null,"offset":null,"cursor":"","limit":50}',
       }),
     ).toThrow();
     expect(() =>
-      parseHistoryToolCall({
+      contract.parse({
         callId: 'call_bad',
         name: 'result_read',
         argumentsJson: '{"resultId":"result_1","offset":0,"limit":1,"query":"x"}',

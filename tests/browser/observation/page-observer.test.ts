@@ -958,14 +958,25 @@ describe('PageObserver', () => {
     expect(JSON.stringify(ordinary.data)).not.toContain('inViewport');
   });
 
-  it('retains an editable target when viewport coordinate spaces differ', async () => {
+  it.each([
+    {
+      name: 'when viewport coordinate spaces differ',
+      editorBounds: [524, 158, 1_792, 48] as const,
+      buttonsInViewport: false,
+    },
+    {
+      name: 'when earlier visible controls exhaust the target budget',
+      editorBounds: [200, 700, 600, 40] as const,
+      buttonsInViewport: true,
+    },
+  ])('retains an editable target $name', async ({ editorBounds, buttonsInViewport }) => {
     const snapshot: BrowserSessionSnapshot = {
       tabId: 7,
       generation: 1,
       root: { tabId: 7 },
       children: new Map(),
     };
-    const buttonCount = 120;
+    const buttonCount = 200;
     const buttonBackendIds = Array.from({ length: buttonCount }, (_, index) => 1_000 + index);
     const editorBackendId = 9_999;
     const strings = [
@@ -1036,13 +1047,25 @@ describe('PageObserver', () => {
                 nodeIndex: Array.from({ length: elementCount }, (_, index) => index + 1),
                 styles: Array.from({ length: elementCount }, () => [7, 8, 9, 7, 10, 10]),
                 bounds: [
-                  ...Array.from({ length: buttonCount }, () => [3_000, 3_000, 100, 30]),
-                  [1_286, 1_674, 1_128, 44],
+                  ...Array.from({ length: buttonCount }, (_unused, index) =>
+                    buttonsInViewport
+                      ? [10 + (index % 12) * 110, 10 + Math.floor(index / 12) * 60, 100, 30]
+                      : index === 0
+                        ? [0, 0, 1_440, 900]
+                        : [3_000, 3_000, 100, 30],
+                  ),
+                  [...editorBounds],
                 ],
                 text: Array.from({ length: elementCount }, () => 2),
                 stackingContexts: { index: [] },
+                paintOrders: [2, ...Array.from({ length: buttonCount - 1 }, () => 0), 1],
               },
-              textBoxes: { layoutIndex: [], bounds: [], start: [], length: [] },
+              textBoxes: {
+                layoutIndex: [],
+                bounds: [],
+                start: [],
+                length: [],
+              },
             },
           ],
         };
@@ -1078,17 +1101,20 @@ describe('PageObserver', () => {
     });
 
     const result = await observer.inspect(7, 'interactive', new AbortController().signal);
+    const deep = await observer.inspect(7, 'interactive_deep', new AbortController().signal);
 
-    expect(result.data.elements).toEqual(
-      expect.arrayContaining([
-        expect.objectContaining({
-          r: 'textbox',
-          n: 'Editable field',
-          a: ['type'],
-          ref: expect.any(String),
-        }),
-      ]),
-    );
+    for (const observation of [result, deep]) {
+      expect(observation.data.elements).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({
+            r: 'textbox',
+            n: 'Editable field',
+            a: ['type'],
+            ref: expect.any(String),
+          }),
+        ]),
+      );
+    }
   });
 
   it('does not let dense editable targets displace a visible action', async () => {
@@ -1215,7 +1241,143 @@ describe('PageObserver', () => {
     );
   });
 
-  it('retains a scrollable traversal target when many in-viewport controls exhaust the target budget', async () => {
+  it('retains a top-layer action after earlier controls exhaust the target budget', async () => {
+    const snapshot: BrowserSessionSnapshot = {
+      tabId: 7,
+      generation: 1,
+      root: { tabId: 7 },
+      children: new Map(),
+    };
+    const underlyingCount = 200;
+    const underlyingBackendIds = Array.from(
+      { length: underlyingCount },
+      (_, index) => 1_000 + index,
+    );
+    const modalBackendId = 9_999;
+    const allBackendIds = [...underlyingBackendIds, modalBackendId];
+    const strings = [
+      'https://top.test/',
+      'Crowded page with modal',
+      '',
+      'frame-main',
+      '#document',
+      'BUTTON',
+      'pointer',
+      'block',
+      'visible',
+      'auto',
+    ];
+    const transport = debuggerTransport((_session, method) => {
+      if (method === 'Accessibility.getFullAXTree') {
+        return {
+          nodes: [
+            {
+              nodeId: 'root',
+              backendDOMNodeId: 1,
+              ignored: false,
+              role: { value: 'RootWebArea' },
+              name: { value: 'Crowded page with modal' },
+              childIds: allBackendIds.map((id) => `button_${String(id)}`),
+            },
+            ...underlyingBackendIds.map((backendDOMNodeId, index) => ({
+              nodeId: `button_${String(backendDOMNodeId)}`,
+              parentId: 'root',
+              backendDOMNodeId,
+              ignored: false,
+              role: { value: 'button' },
+              name: { value: `Underlying action ${String(index)}` },
+            })),
+            {
+              nodeId: `button_${String(modalBackendId)}`,
+              parentId: 'root',
+              backendDOMNodeId: modalBackendId,
+              ignored: false,
+              role: { value: 'button' },
+              name: { value: 'Modal result' },
+            },
+          ],
+        };
+      }
+      if (method === 'DOMSnapshot.captureSnapshot') {
+        return {
+          strings,
+          documents: [
+            {
+              documentURL: 0,
+              title: 1,
+              baseURL: 0,
+              contentLanguage: 2,
+              encodingName: 2,
+              publicId: 2,
+              systemId: 2,
+              frameId: 3,
+              nodes: {
+                parentIndex: [-1, ...Array.from({ length: allBackendIds.length }, () => 0)],
+                nodeType: [9, ...Array.from({ length: allBackendIds.length }, () => 1)],
+                nodeName: [4, ...Array.from({ length: allBackendIds.length }, () => 5)],
+                nodeValue: Array.from({ length: allBackendIds.length + 1 }, () => 2),
+                backendNodeId: [1, ...allBackendIds],
+                attributes: Array.from({ length: allBackendIds.length + 1 }, () => []),
+                isClickable: {
+                  index: Array.from({ length: allBackendIds.length }, (_, index) => index + 1),
+                },
+                inputChecked: { index: [] },
+              },
+              layout: {
+                nodeIndex: Array.from({ length: allBackendIds.length }, (_, index) => index + 1),
+                styles: Array.from({ length: allBackendIds.length }, () => [6, 7, 8, 9, 9, 9]),
+                bounds: [
+                  ...Array.from({ length: underlyingCount }, () => [10, 20, 80, 24]),
+                  [200, 100, 160, 36],
+                ],
+                text: Array.from({ length: allBackendIds.length }, () => 2),
+                stackingContexts: { index: [] },
+                paintOrders: [...Array.from({ length: underlyingCount }, () => 1), 100],
+              },
+              textBoxes: { layoutIndex: [], bounds: [], start: [], length: [] },
+            },
+          ],
+        };
+      }
+      if (method === 'Page.getFrameTree') return mainFrameTree();
+      if (method === 'Page.getLayoutMetrics') {
+        return {
+          visualViewport: {
+            pageX: 0,
+            pageY: 0,
+            clientWidth: 1_000,
+            clientHeight: 800,
+          },
+        };
+      }
+      if (method === 'Page.getNavigationHistory') return { currentIndex: 0, entries: [] };
+      return {};
+    });
+    let refSequence = 0;
+    const observer = new PageObserver({
+      sessions: sessions(snapshot),
+      transport,
+      content: CONTENT,
+      refs: new ElementRefStore({
+        create: () => `ref_${String(++refSequence)}`,
+      }),
+    });
+
+    for (const mode of ['interactive', 'interactive_deep'] as const) {
+      const result = await observer.inspect(7, mode, new AbortController().signal);
+      expect(result.data.elements).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({
+            r: 'button',
+            n: 'Modal result',
+            ref: expect.any(String),
+          }),
+        ]),
+      );
+    }
+  });
+
+  it('retains direct actions and traversal access when scroll targets exhaust the budget', async () => {
     const snapshot: BrowserSessionSnapshot = {
       tabId: 7,
       generation: 1,
@@ -1223,8 +1385,9 @@ describe('PageObserver', () => {
       children: new Map(),
     };
     const buttonCount = 241;
+    const scrollCount = 160;
     const buttonBackendIds = Array.from({ length: buttonCount }, (_, index) => 1_000 + index);
-    const scrollBackendId = 9_999;
+    const scrollBackendIds = Array.from({ length: scrollCount }, (_, index) => 10_000 + index);
     const strings = [
       'https://top.test/',
       'Crowded controls',
@@ -1263,7 +1426,7 @@ describe('PageObserver', () => {
         };
       }
       if (method === 'DOMSnapshot.captureSnapshot') {
-        const elementCount = buttonCount + 1;
+        const elementCount = buttonCount + scrollCount;
         return {
           strings,
           documents: [
@@ -1279,9 +1442,13 @@ describe('PageObserver', () => {
               nodes: {
                 parentIndex: [-1, ...Array.from({ length: elementCount }, () => 0)],
                 nodeType: [9, ...Array.from({ length: elementCount }, () => 1)],
-                nodeName: [4, ...Array.from({ length: buttonCount }, () => 5), 6],
+                nodeName: [
+                  4,
+                  ...Array.from({ length: buttonCount }, () => 5),
+                  ...Array.from({ length: scrollCount }, () => 6),
+                ],
                 nodeValue: Array.from({ length: elementCount + 1 }, () => 2),
-                backendNodeId: [1, ...buttonBackendIds, scrollBackendId],
+                backendNodeId: [1, ...buttonBackendIds, ...scrollBackendIds],
                 attributes: Array.from({ length: elementCount + 1 }, () => []),
                 isClickable: {
                   index: Array.from({ length: buttonCount }, (_, index) => index + 1),
@@ -1292,16 +1459,16 @@ describe('PageObserver', () => {
                 nodeIndex: Array.from({ length: elementCount }, (_, index) => index + 1),
                 styles: [
                   ...Array.from({ length: buttonCount }, () => [7, 8, 9, 7, 10, 10]),
-                  [7, 8, 9, 7, 10, 11],
+                  ...Array.from({ length: scrollCount }, () => [7, 8, 9, 7, 10, 11]),
                 ],
                 bounds: Array.from({ length: elementCount }, () => [10, 20, 100, 30]),
                 clientRects: [
                   ...Array.from({ length: buttonCount }, () => [10, 20, 100, 30]),
-                  [10, 20, 100, 300],
+                  ...Array.from({ length: scrollCount }, () => [10, 20, 100, 300]),
                 ],
                 scrollRects: [
                   ...Array.from({ length: buttonCount }, () => [10, 20, 100, 30]),
-                  [10, 20, 100, 1_000],
+                  ...Array.from({ length: scrollCount }, () => [10, 20, 100, 1_000]),
                 ],
                 text: Array.from({ length: elementCount }, () => 2),
                 stackingContexts: { index: [] },
@@ -1339,6 +1506,11 @@ describe('PageObserver', () => {
 
     expect(result.data.elements).toEqual(
       expect.arrayContaining([
+        expect.objectContaining({
+          r: 'button',
+          n: 'Action 0',
+          ref: expect.any(String),
+        }),
         expect.objectContaining({
           r: 'region',
           a: ['scroll'],

@@ -2,7 +2,7 @@ import type { AttachmentRecord } from '../../attachments/attachment-types';
 import type { AttachmentRepository } from '../../persistence/attachment-repository';
 import type { ConversationRepository } from '../../persistence/conversation-repository';
 import type { TaskRepository } from '../../persistence/task-repository';
-import type { ModelInputItem, ModelMessageContent } from '../../providers/provider-types';
+import type { ModelInputItem, ModelMessageContent } from '../model/model-provider';
 import { bytesToBase64 } from '../../shared/base64';
 import type { Checkpoint } from '../../tasks/checkpoint-types';
 import { materializeContinuationItems } from '../../tasks/continuation-materialization';

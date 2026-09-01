@@ -1,6 +1,9 @@
 import { describe, expect, it, vi } from 'vitest';
-import { CodexAgentPlanner } from '../../src/agent/codex-agent-planner';
-import { BROWSER_EXECUTION_POLICY } from '../../src/agent/browser-execution-policy';
+import {
+  ModelTurnPlanner,
+  type ModelTurnPlannerDependencies,
+} from '../../src/agent/model/model-turn-planner';
+import { BROWSER_EXECUTION_POLICY } from '../../src/tools/browser/policy';
 import type { AgentPlanInput } from '../../src/agent/execution-types';
 import type { AttachmentRepository } from '../../src/persistence/attachment-repository';
 import type { ConversationRepository } from '../../src/persistence/conversation-repository';
@@ -8,13 +11,21 @@ import type { CredentialStore } from '../../src/persistence/credential-store';
 import type { SettingsStore } from '../../src/persistence/settings-store';
 import type { TaskRepository } from '../../src/persistence/task-repository';
 import { CodexProvider } from '../../src/providers/codex/codex-provider';
-import { providerErrorFromCode } from '../../src/providers/provider-errors';
-import type { ModelProvider, ModelRequest } from '../../src/providers/provider-types';
-import type { ModelStreamEvent } from '../../src/providers/stream-events';
+import { CODEX_MODEL } from '../../src/providers/codex/codex-constants';
+import { providerErrorFromCode } from '../../src/agent/model/model-provider-error';
+import type { ModelProviderPort, ModelRequest } from '../../src/agent/model/model-provider';
+import type { ModelStreamEvent } from '../../src/agent/model/model-stream-event';
 import type { Checkpoint } from '../../src/tasks/checkpoint-types';
 import type { MessageRecord } from '../../src/tasks/message-types';
 import type { Task, TaskEvent } from '../../src/tasks/task-types';
 import type { MaterializedToolResult } from '../../src/tasks/tool-result-types';
+import { bindToolRuntime } from '../../src/tools/registry';
+import { discoverTools } from '../../src/tools/discover';
+import { ToolServiceResolver } from '../../src/tools/service-resolver';
+import { tavilyService } from '../../src/tools/tavily/service';
+import { createSandboxToolService, sandboxService } from '../../src/tools/sandbox/service';
+import { historyService } from '../../src/tools/history/service';
+import type { SkillCatalogPort } from '../../src/sandbox/skill-catalog';
 
 const TASK: Task = {
   id: 'task_1',
@@ -83,6 +94,56 @@ const USER_MESSAGE: MessageRecord = {
   updatedAt: 100,
 };
 
+/** Injects the fixed test model while exercising the provider-neutral planner implementation. */
+type TestPlannerDependencies = Omit<ModelTurnPlannerDependencies, 'model' | 'tools'> & {
+  readonly tavilyAvailability: { isConfigured(): Promise<boolean> };
+  readonly skillCatalog?: SkillCatalogPort;
+};
+
+class CodexAgentPlanner extends ModelTurnPlanner {
+  constructor(dependencies: TestPlannerDependencies) {
+    const { tavilyAvailability, skillCatalog, ...plannerDependencies } = dependencies;
+    const services = new ToolServiceResolver();
+    services.bind(tavilyService, {
+      isConfigured: () => tavilyAvailability.isConfigured(),
+      search: async () => ({ results: [], truncated: false }),
+      extract: async () => ({ results: [], truncated: false }),
+      crawl: async () => ({ results: [], truncated: false }),
+    });
+    if (skillCatalog !== undefined) {
+      services.bind(
+        sandboxService,
+        createSandboxToolService(
+          {
+            execute: async () => '',
+            recover: async () => ({ status: 'not_found' }),
+          },
+          skillCatalog,
+        ),
+      );
+    }
+    services.bind(historyService, {
+      readHistory: async () => ({
+        ok: false,
+        code: 'HISTORY_NOT_FOUND',
+        message: 'not used',
+        retryable: false,
+      }),
+      readResult: async () => ({
+        ok: false,
+        code: 'RESULT_NOT_FOUND',
+        message: 'not used',
+        retryable: false,
+      }),
+    });
+    super({
+      ...plannerDependencies,
+      model: CODEX_MODEL,
+      tools: bindToolRuntime(discoverTools(), services),
+    });
+  }
+}
+
 /** Builds the permanent process order expected by a direct planner invocation. */
 function planInputFor(messages: readonly MessageRecord[]): AgentPlanInput {
   const taskMessages = messages.filter(
@@ -125,7 +186,7 @@ function completedResult(
 
 /** Creates an injected Provider stream and captures its normalized request. */
 function provider(events: () => AsyncGenerator<ModelStreamEvent>): {
-  readonly instance: ModelProvider;
+  readonly instance: ModelProviderPort;
   readonly requests: ModelRequest[];
 } {
   const requests: ModelRequest[] = [];
@@ -152,7 +213,7 @@ function syntheticAccessToken(): string {
 /** Creates the real Provider adapter around a deterministic Responses SSE stream. */
 function responsesProvider(
   events: readonly { readonly event: string; readonly data: unknown }[],
-): ModelProvider {
+): ModelProviderPort {
   const credentials: CredentialStore = {
     initialize: vi.fn(async () => undefined),
     getCodexAccessToken: vi.fn(async () => syntheticAccessToken()),
@@ -430,7 +491,10 @@ describe('CodexAgentPlanner', () => {
 
   it('registers bounded history tools only when a readable historical task exists', async () => {
     const model = provider(async function* () {
-      yield { type: 'response.started', responseId: 'resp_without_history_tools' };
+      yield {
+        type: 'response.started',
+        responseId: 'resp_without_history_tools',
+      };
       yield { type: 'text.delta', delta: 'No historical evidence.' };
       yield {
         type: 'response.completed',
@@ -459,17 +523,30 @@ describe('CodexAgentPlanner', () => {
   });
 
   it('parses exact task history selectors using a stable task identifier', async () => {
-    const arguments_ = { taskId: 'task_historical', offset: null, cursor: '', limit: 50 };
+    const arguments_ = {
+      taskId: 'task_historical',
+      offset: null,
+      cursor: '',
+      limit: 50,
+    };
     const model = provider(async function* () {
       yield { type: 'response.started', responseId: 'resp_task_history' };
-      yield { type: 'tool.started', callId: 'call_task_history', name: 'history_read' };
+      yield {
+        type: 'tool.started',
+        callId: 'call_task_history',
+        name: 'history_read',
+      };
       yield {
         type: 'tool.completed',
         callId: 'call_task_history',
         name: 'history_read',
         argumentsJson: JSON.stringify(arguments_),
       };
-      yield { type: 'response.completed', responseId: 'resp_task_history', usage: null };
+      yield {
+        type: 'response.completed',
+        responseId: 'resp_task_history',
+        usage: null,
+      };
     });
     const storage = repositories([], [HISTORICAL_TASK]);
     const planner = new CodexAgentPlanner({
@@ -485,9 +562,8 @@ describe('CodexAgentPlanner', () => {
 
     await expect(collect(planner)).resolves.toMatchObject([
       {
-        type: 'history.call',
+        type: 'tool.call',
         call: {
-          operation: 'history',
           name: 'history_read',
           arguments: arguments_,
         },
@@ -499,14 +575,22 @@ describe('CodexAgentPlanner', () => {
     const arguments_ = { resultId: 'toolResult_1', offset: 0, limit: 20_000 };
     const model = provider(async function* () {
       yield { type: 'response.started', responseId: 'resp_history_read' };
-      yield { type: 'tool.started', callId: 'call_history_read', name: 'result_read' };
+      yield {
+        type: 'tool.started',
+        callId: 'call_history_read',
+        name: 'result_read',
+      };
       yield {
         type: 'tool.completed',
         callId: 'call_history_read',
         name: 'result_read',
         argumentsJson: JSON.stringify(arguments_),
       };
-      yield { type: 'response.completed', responseId: 'resp_history_read', usage: null };
+      yield {
+        type: 'response.completed',
+        responseId: 'resp_history_read',
+        usage: null,
+      };
     });
     const storage = repositories([], [HISTORICAL_TASK]);
     const planner = new CodexAgentPlanner({
@@ -522,11 +606,8 @@ describe('CodexAgentPlanner', () => {
 
     await expect(collect(planner)).resolves.toMatchObject([
       {
-        type: 'history.call',
+        type: 'tool.call',
         call: {
-          family: 'history',
-          operation: 'result',
-          replay: 'safe',
           callId: 'call_history_read',
           name: 'result_read',
           arguments: arguments_,
@@ -543,10 +624,17 @@ describe('CodexAgentPlanner', () => {
     const model = provider(async function* () {
       yield { type: 'response.started', responseId: 'resp_without_sandbox' };
       yield { type: 'text.delta', delta: 'No Sandbox.' };
-      yield { type: 'response.completed', responseId: 'resp_without_sandbox', usage: null };
+      yield {
+        type: 'response.completed',
+        responseId: 'resp_without_sandbox',
+        usage: null,
+      };
     });
     const storage = repositories();
-    const skillCatalog = { get: vi.fn(async () => null), invalidate: vi.fn(async () => undefined) };
+    const skillCatalog = {
+      get: vi.fn(async () => null),
+      invalidate: vi.fn(async () => undefined),
+    };
     const planner = new CodexAgentPlanner({
       provider: model.instance,
       tavilyAvailability: CONFIGURED_TAVILY,
@@ -573,17 +661,28 @@ describe('CodexAgentPlanner', () => {
     ]);
   });
 
-  it('appends a configured catalog, registers fixed tools, and parses Sandbox calls', async () => {
+  it('registers progressive Skill discovery without injecting the catalog', async () => {
     const model = provider(async function* () {
       yield { type: 'response.started', responseId: 'resp_sandbox' };
-      yield { type: 'tool.started', callId: 'call_sandbox', name: 'sandbox_exec' };
+      yield {
+        type: 'tool.started',
+        callId: 'call_sandbox',
+        name: 'sandbox_exec',
+      };
       yield {
         type: 'tool.completed',
         callId: 'call_sandbox',
         name: 'sandbox_exec',
-        argumentsJson: JSON.stringify({ command: 'bash scripts/run.sh', cwd: '/skills/example' }),
+        argumentsJson: JSON.stringify({
+          command: 'bash scripts/run.sh',
+          cwd: '/skills/example',
+        }),
       };
-      yield { type: 'response.completed', responseId: 'resp_sandbox', usage: null };
+      yield {
+        type: 'response.completed',
+        responseId: 'resp_sandbox',
+        usage: null,
+      };
     });
     const storage = repositories();
     const skillCatalog = {
@@ -614,7 +713,7 @@ describe('CodexAgentPlanner', () => {
 
     await expect(collect(planner)).resolves.toMatchObject([
       {
-        type: 'sandbox.call',
+        type: 'tool.call',
         call: {
           family: 'sandbox',
           operation: 'exec',
@@ -628,12 +727,13 @@ describe('CodexAgentPlanner', () => {
       'tavily_search',
       'tavily_extract',
       'tavily_crawl',
+      'skill_search',
       'sandbox_read',
       'sandbox_exec',
     ]);
     expect(model.requests[0]?.systemPrompt.startsWith('Custom safe preference.\n\n')).toBe(true);
     expect(model.requests[0]?.systemPrompt).toContain(BROWSER_EXECUTION_POLICY);
-    expect(model.requests[0]?.systemPrompt).toContain('Run the example workflow.');
+    expect(model.requests[0]?.systemPrompt).not.toContain('Run the example workflow.');
   });
 
   it('replays the complete local task on every model turn', async () => {
@@ -719,7 +819,10 @@ describe('CodexAgentPlanner', () => {
         type: 'response.started',
         responseId: 'resp_without_internal_commit',
       };
-      yield { type: 'text.delta', delta: 'Continue without the internal tool.' };
+      yield {
+        type: 'text.delta',
+        delta: 'Continue without the internal tool.',
+      };
       yield {
         type: 'response.completed',
         responseId: 'resp_without_internal_commit',
@@ -811,7 +914,7 @@ describe('CodexAgentPlanner', () => {
 
     await expect(collect(planner)).resolves.toMatchObject([
       {
-        type: 'browser.call',
+        type: 'tool.call',
         call: {
           family: 'browser',
           operation: 'list_tabs',
@@ -866,7 +969,7 @@ describe('CodexAgentPlanner', () => {
 
     await expect(collect(planner)).resolves.toMatchObject([
       {
-        type: 'browser.call',
+        type: 'tool.call',
         modelOutputItems: [
           {
             type: 'reasoning',
@@ -932,7 +1035,7 @@ describe('CodexAgentPlanner', () => {
   });
 
   it.each([
-    ['tavily_search', SEARCH_ARGUMENTS, 'search'],
+    ['tavily_search', SEARCH_ARGUMENTS],
     [
       'tavily_extract',
       {
@@ -940,7 +1043,6 @@ describe('CodexAgentPlanner', () => {
         query: 'authentication',
         extractDepth: 'basic',
       },
-      'extract',
     ],
     [
       'tavily_crawl',
@@ -950,11 +1052,10 @@ describe('CodexAgentPlanner', () => {
         maxDepth: 2,
         maxPages: 5,
       },
-      'crawl',
     ],
   ] as const)(
     'returns one validated %s call without creating an empty assistant message',
-    async (name, arguments_, operation) => {
+    async (name, arguments_) => {
       const argumentsJson = JSON.stringify(arguments_);
       const model = provider(async function* () {
         yield { type: 'response.started', responseId: 'resp_tool' };
@@ -985,11 +1086,13 @@ describe('CodexAgentPlanner', () => {
 
       await expect(collect(planner)).resolves.toMatchObject([
         {
-          type: 'tavily.call',
-          operation,
-          callId: 'call_1',
-          argumentsJson,
-          arguments: arguments_,
+          type: 'tool.call',
+          call: {
+            callId: 'call_1',
+            name,
+            argumentsJson,
+            arguments: arguments_,
+          },
         },
       ]);
       expect(storage.appendTaskMessage).not.toHaveBeenCalled();
@@ -1268,11 +1371,13 @@ describe('CodexAgentPlanner', () => {
 
     await expect(collect(planner)).resolves.toMatchObject([
       {
-        type: 'tavily.call',
-        operation: 'search',
-        callId: 'call_1',
-        argumentsJson,
-        arguments: SEARCH_ARGUMENTS,
+        type: 'tool.call',
+        call: {
+          callId: 'call_1',
+          name: 'tavily_search',
+          argumentsJson,
+          arguments: SEARCH_ARGUMENTS,
+        },
       },
     ]);
     expect(storage.updateMessage).toHaveBeenLastCalledWith(
@@ -1335,11 +1440,13 @@ describe('CodexAgentPlanner', () => {
 
     await expect(collect(planner)).resolves.toMatchObject([
       {
-        type: 'tavily.call',
-        operation: 'search',
-        callId: 'call_tool_then_text',
-        argumentsJson,
-        arguments: SEARCH_ARGUMENTS,
+        type: 'tool.call',
+        call: {
+          callId: 'call_tool_then_text',
+          name: 'tavily_search',
+          argumentsJson,
+          arguments: SEARCH_ARGUMENTS,
+        },
       },
     ]);
     expect(storage.updateMessage).toHaveBeenLastCalledWith(
@@ -1663,11 +1770,11 @@ describe('CodexAgentPlanner', () => {
   });
 
   it('continues with the existing context instead of initiating provider compaction', async () => {
-    const compact = vi.fn<NonNullable<ModelProvider['compact']>>(async () => ({
+    const compact = vi.fn<NonNullable<ModelProviderPort['compact']>>(async () => ({
       itemId: 'cmp_native',
       encryptedContent: 'opaque-native-context',
     }));
-    const stream = vi.fn<ModelProvider['stream']>(async function* () {
+    const stream = vi.fn<ModelProviderPort['stream']>(async function* () {
       yield { type: 'response.started', responseId: 'resp_without_compaction' };
       yield { type: 'text.delta', delta: 'Continued without compaction.' };
       yield {
@@ -1765,13 +1872,17 @@ describe('CodexAgentPlanner', () => {
         usage: null,
       };
     });
-    const compact = vi.fn<NonNullable<ModelProvider['compact']>>(async () => ({
+    const compact = vi.fn<NonNullable<ModelProviderPort['compact']>>(async () => ({
       itemId: 'cmp_unfinished_scroll',
       encryptedContent: 'opaque-unfinished-scroll',
     }));
     const storage = repositories();
     const skillCatalog = {
-      get: vi.fn(async () => ({ entries: [], truncated: false, refreshedAt: 500 })),
+      get: vi.fn(async () => ({
+        entries: [],
+        truncated: false,
+        refreshedAt: 500,
+      })),
       invalidate: vi.fn(async () => undefined),
     };
     const planner = new CodexAgentPlanner({
@@ -1840,7 +1951,7 @@ describe('CodexAgentPlanner', () => {
 
     await expect(collect(planner, new AbortController().signal, input)).resolves.toMatchObject([
       {
-        type: 'browser.call',
+        type: 'tool.call',
         call: { name: 'browser_inspect', operation: 'inspect' },
       },
     ]);

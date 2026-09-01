@@ -5,7 +5,8 @@ import {
 } from '../../shared/protocol/message-types';
 import { parseExtensionMessage } from '../../shared/protocol/parse-message';
 import type { SandboxConsoleClientPort } from '../../sandbox/sandbox-client';
-import { TaskCommandError, type TaskCommandPort } from '../../tasks/task-command-service';
+import type { Agent } from '../../agent/agent';
+import { TaskCommandError } from '../../tasks/task-command-service';
 import type { PanelService } from '../../tasks/panel-service';
 
 export interface RuntimeMessageContext {
@@ -18,7 +19,10 @@ export type MessageRouter = (
 ) => Promise<ExtensionResponse>;
 
 export interface MessageRouterDependencies {
-  readonly commands: TaskCommandPort;
+  readonly agent: Pick<
+    Agent,
+    'getSnapshot' | 'pause' | 'resume' | 'retry' | 'cancel' | 'clearContext' | 'recover'
+  >;
   readonly panel: Pick<
     PanelService,
     | 'getSnapshot'
@@ -35,8 +39,6 @@ export interface MessageRouterDependencies {
     captureViewport(tabId: number): Promise<{ readonly id: string }>;
     captureRegion(tabId: number): Promise<{ readonly id: string } | null>;
   };
-  readonly requestRecoveryScan: () => Promise<void>;
-  readonly scheduleTask: (taskId: string) => Promise<void>;
   readonly sandboxConsole?: SandboxConsoleClientPort;
   readonly pageFeatures?: {
     ensure(tabId: number): Promise<unknown>;
@@ -93,7 +95,7 @@ async function routeMessage(
 ): Promise<ExtensionResponse> {
   switch (message.type) {
     case 'system.ping':
-      await dependencies.requestRecoveryScan();
+      await dependencies.agent.recover();
       return successResponse(message.requestId, { connected: true });
     case 'panel.getSnapshot':
       return successResponse(
@@ -145,32 +147,32 @@ async function routeMessage(
     case 'task.getSnapshot':
       return successResponse(
         message.requestId,
-        await dependencies.commands.getSnapshot(message.payload.taskId),
+        await dependencies.agent.getSnapshot(message.payload.taskId),
       );
     case 'task.pause':
       return successResponse(
         message.requestId,
-        await dependencies.commands.pause(message.payload.taskId),
+        await dependencies.agent.pause(message.payload.taskId),
       );
-    case 'task.resume': {
-      const snapshot = await dependencies.commands.resume(message.payload.taskId);
-      await dependencies.scheduleTask(snapshot.task.id);
-      return successResponse(message.requestId, snapshot);
-    }
-    case 'task.retry': {
-      const snapshot = await dependencies.commands.retry(message.payload.taskId);
-      await dependencies.scheduleTask(snapshot.task.id);
-      return successResponse(message.requestId, snapshot);
-    }
+    case 'task.resume':
+      return successResponse(
+        message.requestId,
+        await dependencies.agent.resume(message.payload.taskId),
+      );
+    case 'task.retry':
+      return successResponse(
+        message.requestId,
+        await dependencies.agent.retry(message.payload.taskId),
+      );
     case 'task.cancel':
       return successResponse(
         message.requestId,
-        await dependencies.commands.cancel(message.payload.taskId),
+        await dependencies.agent.cancel(message.payload.taskId),
       );
     case 'task.clearContext':
       return successResponse(
         message.requestId,
-        await dependencies.commands.clearContext(message.payload.taskId),
+        await dependencies.agent.clearContext(message.payload.taskId),
       );
     case 'screenshot.capture':
       return successResponse(

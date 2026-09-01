@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest';
 import {
   compactContextAtCommit,
   contextCommitCandidateCallIds,
-} from '../../../src/agent/context/context-commit';
+} from '../../../src/tools/context/compaction';
 import type {
   MaterializedContinuationItem,
   PendingToolCall,

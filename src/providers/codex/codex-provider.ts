@@ -3,11 +3,16 @@ import {
   isProviderError,
   providerErrorFromCode,
   throwWithInvalidResponseStage,
-} from '../provider-errors';
-import { isAbortFailure, throwProviderHttpError } from '../provider-http';
-import type { ModelCompactionResult, ModelProvider, ModelRequest } from '../provider-types';
+} from '../../agent/model/model-provider-error';
+import { isAbortFailure } from '../../shared/net/http-failure';
+import { throwProviderHttpError } from '../provider-http';
+import type {
+  ModelCompactionResult,
+  ModelProviderPort,
+  ModelRequest,
+} from '../../agent/model/model-provider';
 import { decodeSseStream } from '../sse-decoder';
-import type { ModelStreamEvent } from '../stream-events';
+import type { ModelStreamEvent } from '../../agent/model/model-stream-event';
 import { extractChatGptAccountId } from './access-token';
 import { CodexEventTranslator } from './codex-event-translator';
 import { parseCodexCompactResponse } from './codex-compact-response';
@@ -70,7 +75,7 @@ async function readBoundedJson(response: Response): Promise<unknown> {
   }
 }
 
-export class CodexProvider implements ModelProvider {
+export class CodexProvider implements ModelProviderPort {
   readonly #credentials: CredentialStore;
   readonly #fetch: FetchPort;
 

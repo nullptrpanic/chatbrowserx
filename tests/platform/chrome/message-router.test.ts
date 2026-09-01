@@ -1,10 +1,7 @@
 import { describe, expect, it, vi } from 'vitest';
+import type { Agent } from '../../../src/agent/agent';
 import { PROTOCOL_VERSION } from '../../../src/shared/protocol/message-types';
-import {
-  TaskCommandError,
-  type TaskCommandPort,
-  type TaskSnapshot,
-} from '../../../src/tasks/task-command-service';
+import { TaskCommandError, type TaskSnapshot } from '../../../src/tasks/task-command-service';
 import { createMessageRouter } from '../../../src/platform/chrome/message-router';
 import { createTaskRecords } from '../../../src/tasks/task-factory';
 import type { Checkpoint } from '../../../src/tasks/checkpoint-types';
@@ -49,7 +46,12 @@ function buildSnapshot(): TaskSnapshot {
 /**
  * Builds command doubles that return the same valid snapshot by default.
  */
-function buildCommands(snapshot: TaskSnapshot): TaskCommandPort {
+function buildAgent(
+  snapshot: TaskSnapshot,
+): Pick<
+  Agent,
+  'getSnapshot' | 'pause' | 'resume' | 'retry' | 'cancel' | 'clearContext' | 'recover'
+> {
   return {
     getSnapshot: vi.fn(async () => snapshot),
     pause: vi.fn(async () => snapshot),
@@ -57,6 +59,7 @@ function buildCommands(snapshot: TaskSnapshot): TaskCommandPort {
     retry: vi.fn(async () => snapshot),
     cancel: vi.fn(async () => snapshot),
     clearContext: vi.fn(async () => snapshot),
+    recover: vi.fn(async () => undefined),
   };
 }
 
@@ -147,11 +150,9 @@ describe('createMessageRouter', () => {
   it('returns a redacted INVALID_MESSAGE envelope for malformed input', async () => {
     const secret = 'must-not-appear';
     const router = createMessageRouter({
-      commands: buildCommands(buildSnapshot()),
+      agent: buildAgent(buildSnapshot()),
       panel: buildPanel(),
       screenshots: buildScreenshots(),
-      requestRecoveryScan: vi.fn(async () => undefined),
-      scheduleTask: vi.fn(async () => undefined),
     });
 
     const response = await router({
@@ -176,13 +177,11 @@ describe('createMessageRouter', () => {
   });
 
   it('pings the background and requests an ordinary recovery scan', async () => {
-    const requestRecoveryScan = vi.fn(async () => undefined);
+    const agent = buildAgent(buildSnapshot());
     const router = createMessageRouter({
-      commands: buildCommands(buildSnapshot()),
+      agent,
       panel: buildPanel(),
       screenshots: buildScreenshots(),
-      requestRecoveryScan,
-      scheduleTask: vi.fn(async () => undefined),
     });
 
     await expect(
@@ -198,7 +197,7 @@ describe('createMessageRouter', () => {
       ok: true,
       data: { connected: true },
     });
-    expect(requestRecoveryScan).toHaveBeenCalledTimes(1);
+    expect(agent.recover).toHaveBeenCalledTimes(1);
   });
 
   it('returns the Sandbox console URL only to a trusted extension context', async () => {
@@ -206,11 +205,9 @@ describe('createMessageRouter', () => {
       getConsoleUrl: vi.fn(async () => 'http://127.0.0.1:43130/#token=viewer-token'),
     };
     const router = createMessageRouter({
-      commands: buildCommands(buildSnapshot()),
+      agent: buildAgent(buildSnapshot()),
       panel: buildPanel(),
       screenshots: buildScreenshots(),
-      requestRecoveryScan: vi.fn(async () => undefined),
-      scheduleTask: vi.fn(async () => undefined),
       sandboxConsole,
     });
 
@@ -247,11 +244,9 @@ describe('createMessageRouter', () => {
       ensure: vi.fn(async () => ({ status: 'installed' })),
     };
     const router = createMessageRouter({
-      commands: buildCommands(buildSnapshot()),
+      agent: buildAgent(buildSnapshot()),
       panel: buildPanel(),
       screenshots: buildScreenshots(),
-      requestRecoveryScan: vi.fn(async () => undefined),
-      scheduleTask: vi.fn(async () => undefined),
       pageFeatures,
     });
     await router({
@@ -267,11 +262,9 @@ describe('createMessageRouter', () => {
   it('rejects credential settings commands sent from a page context', async () => {
     const panel = buildPanel();
     const router = createMessageRouter({
-      commands: buildCommands(buildSnapshot()),
+      agent: buildAgent(buildSnapshot()),
       panel,
       screenshots: buildScreenshots(),
-      requestRecoveryScan: vi.fn(async () => undefined),
-      scheduleTask: vi.fn(async () => undefined),
     });
 
     const readResponse = await router(
@@ -312,16 +305,13 @@ describe('createMessageRouter', () => {
     expect(panel.saveSettings).not.toHaveBeenCalled();
   });
 
-  it('delegates task commands and schedules resume and retry', async () => {
+  it('delegates every task lifecycle command through the Agent boundary', async () => {
     const snapshot = buildSnapshot();
-    const commands = buildCommands(snapshot);
-    const scheduleTask = vi.fn(async () => undefined);
+    const agent = buildAgent(snapshot);
     const router = createMessageRouter({
-      commands,
+      agent,
       panel: buildPanel(),
       screenshots: buildScreenshots(),
-      requestRecoveryScan: vi.fn(async () => undefined),
-      scheduleTask,
     });
 
     await router({
@@ -361,28 +351,24 @@ describe('createMessageRouter', () => {
       payload: { taskId: snapshot.task.id },
     });
 
-    expect(commands.pause).toHaveBeenCalledWith(snapshot.task.id);
-    expect(commands.getSnapshot).toHaveBeenCalledWith(snapshot.task.id);
-    expect(commands.resume).toHaveBeenCalledWith(snapshot.task.id);
-    expect(commands.retry).toHaveBeenCalledWith(snapshot.task.id);
-    expect(commands.cancel).toHaveBeenCalledWith(snapshot.task.id);
-    expect(commands.clearContext).toHaveBeenCalledWith(snapshot.task.id);
-    expect(scheduleTask).toHaveBeenNthCalledWith(1, snapshot.task.id);
-    expect(scheduleTask).toHaveBeenNthCalledWith(2, snapshot.task.id);
+    expect(agent.pause).toHaveBeenCalledWith(snapshot.task.id);
+    expect(agent.getSnapshot).toHaveBeenCalledWith(snapshot.task.id);
+    expect(agent.resume).toHaveBeenCalledWith(snapshot.task.id);
+    expect(agent.retry).toHaveBeenCalledWith(snapshot.task.id);
+    expect(agent.cancel).toHaveBeenCalledWith(snapshot.task.id);
+    expect(agent.clearContext).toHaveBeenCalledWith(snapshot.task.id);
   });
 
   it('maps known and unexpected command failures to stable public errors', async () => {
-    const commands = buildCommands(buildSnapshot());
-    vi.mocked(commands.getSnapshot).mockRejectedValueOnce(
+    const agent = buildAgent(buildSnapshot());
+    vi.mocked(agent.getSnapshot).mockRejectedValueOnce(
       new TaskCommandError('TASK_NOT_FOUND', 'Task does not exist.'),
     );
-    vi.mocked(commands.pause).mockRejectedValueOnce(new Error('private storage details'));
+    vi.mocked(agent.pause).mockRejectedValueOnce(new Error('private storage details'));
     const router = createMessageRouter({
-      commands,
+      agent,
       panel: buildPanel(),
       screenshots: buildScreenshots(),
-      requestRecoveryScan: vi.fn(async () => undefined),
-      scheduleTask: vi.fn(async () => undefined),
     });
 
     const missing = await router({
@@ -417,11 +403,9 @@ describe('createMessageRouter', () => {
   it('routes viewport and region screenshot capture without exposing image bytes', async () => {
     const screenshots = buildScreenshots();
     const router = createMessageRouter({
-      commands: buildCommands(buildSnapshot()),
+      agent: buildAgent(buildSnapshot()),
       panel: buildPanel(),
       screenshots,
-      requestRecoveryScan: vi.fn(async () => undefined),
-      scheduleTask: vi.fn(async () => undefined),
     });
 
     const viewport = await router({
@@ -452,11 +436,9 @@ describe('createMessageRouter', () => {
   it('routes a trusted side-panel image preview request by attachment reference only', async () => {
     const panel = buildPanel();
     const router = createMessageRouter({
-      commands: buildCommands(buildSnapshot()),
+      agent: buildAgent(buildSnapshot()),
       panel,
       screenshots: buildScreenshots(),
-      requestRecoveryScan: vi.fn(async () => undefined),
-      scheduleTask: vi.fn(async () => undefined),
     });
 
     const response = await router({
@@ -474,11 +456,9 @@ describe('createMessageRouter', () => {
   it('routes panel snapshots and chat submission through the sanitized panel boundary', async () => {
     const panel = buildPanel();
     const router = createMessageRouter({
-      commands: buildCommands(buildSnapshot()),
+      agent: buildAgent(buildSnapshot()),
       panel,
       screenshots: buildScreenshots(),
-      requestRecoveryScan: vi.fn(async () => undefined),
-      scheduleTask: vi.fn(async () => undefined),
     });
 
     await router({

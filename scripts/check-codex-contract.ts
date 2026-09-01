@@ -1,5 +1,5 @@
 import type { CredentialStore } from '../src/persistence/credential-store';
-import { isProviderError } from '../src/providers/provider-errors';
+import { isProviderError } from '../src/agent/model/model-provider-error';
 import { CodexProvider } from '../src/providers/codex/codex-provider';
 import { CODEX_MODEL } from '../src/providers/codex/codex-constants';
 

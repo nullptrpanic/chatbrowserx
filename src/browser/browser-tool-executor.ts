@@ -1,4 +1,4 @@
-import type { ParsedBrowserToolCall } from '../agent/tools/browser-tool-schema';
+import type { ParsedBrowserToolCall } from '../tools/browser/contract';
 import type {
   BrowserExecutionContext,
   BrowserExecutionPort,
@@ -24,6 +24,7 @@ const RELOAD_RECOVERY_FAILURES = new Set<BrowserToolFailureCode>([
 ]);
 const FRESH_OBSERVATION_FAILURES = new Set<BrowserToolFailureCode>([
   'STALE_REF',
+  'ATTACHMENT_VERIFICATION_FAILED',
   'TYPE_VERIFICATION_FAILED',
   'ACTION_STATE_MISMATCH',
   'ACTION_STATE_UNAVAILABLE',
@@ -67,6 +68,7 @@ const POST_ACTION_SETTLE_OPERATIONS = new Set<ParsedBrowserToolCall['operation']
   'click',
   'type',
   'keypress',
+  'scroll',
   'select',
   'drag',
   'click_point',
@@ -156,6 +158,8 @@ function failureMessageWithFreshObservation(code: BrowserToolFailureCode): strin
       return 'The element reference is stale. Fresh interactive state is attached; use only its latest refs.';
     case 'TYPE_VERIFICATION_FAILED':
       return 'The page did not retain the requested text. Fresh interactive state is attached; use it to choose the next action.';
+    case 'ATTACHMENT_VERIFICATION_FAILED':
+      return 'The attachment preview could not be verified. Fresh interactive state is attached; do not paste the same asset again.';
     case 'ACTION_STATE_MISMATCH':
       return 'The page did not retain the requested selection. Fresh interactive state is attached; use it to choose the next action.';
     case 'ACTION_STATE_UNAVAILABLE':
@@ -1574,6 +1578,39 @@ export class BrowserToolExecutor implements BrowserExecutionPort {
     let continuationLimited: string | undefined;
     let continuationFailure: BrowserToolFailure | undefined;
 
+    if (
+      moved &&
+      !contentChanged &&
+      !extentChanged &&
+      !loadedMore &&
+      segmentData.boundaryVerified !== true &&
+      actions.settle
+    ) {
+      try {
+        await actions.settle(tabId_, signal, POST_ACTION_SETTLE_TIMEOUT_MS);
+      } catch (error) {
+        if (signal.aborted || (error instanceof Error && error.name === 'AbortError')) throw error;
+        // The scroll already completed; a delayed observation can still expose virtualized content.
+      }
+      const baseSnapshot = this.#interactiveSnapshotByTab.get(tabId_);
+      if (baseSnapshot !== undefined) {
+        const delayed = await this.#observeAfterAction(tabId_, baseSnapshot, signal, runnerId);
+        if (delayed !== null) {
+          observations.push(delayed);
+          const initialContentKey = semanticObservationContentKey(initialVerification);
+          const delayedContentKey = semanticObservationContentKey(delayed);
+          if (
+            initialContentKey !== null &&
+            delayedContentKey !== null &&
+            initialContentKey !== delayedContentKey
+          ) {
+            contentChanged = true;
+            loadedMore = true;
+          }
+        }
+      }
+    }
+
     while (scrollCanContinue(segmentData)) {
       throwIfAborted(signal);
       if (segments >= MAX_SCROLL_SEGMENTS_PER_CALL) {
@@ -1615,6 +1652,16 @@ export class BrowserToolExecutor implements BrowserExecutionPort {
       contentChanged ||= segmentData.contentChanged === true;
       extentChanged ||= segmentData.extentChanged === true;
       loadedMore ||= segmentData.loadedMore === true;
+
+      if (actions.settle) {
+        try {
+          await actions.settle(tabId_, signal, POST_ACTION_SETTLE_TIMEOUT_MS);
+        } catch (error) {
+          if (signal.aborted || (error instanceof Error && error.name === 'AbortError'))
+            throw error;
+          // The scroll already completed; the following observation is still useful.
+        }
+      }
 
       const baseSnapshot = this.#interactiveSnapshotByTab.get(tabId_);
       if (baseSnapshot === undefined) {

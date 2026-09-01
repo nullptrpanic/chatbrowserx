@@ -8,7 +8,7 @@ import {
   buildCodexCompactRequest,
   buildCodexRequest,
 } from '../../../src/providers/codex/codex-request';
-import type { ModelRequest } from '../../../src/providers/provider-types';
+import type { ModelRequest } from '../../../src/agent/model/model-provider';
 
 const GENERIC_TOOL_NAMES = ['lookup', 'lookup_record', 'lookup-record'] as const;
 

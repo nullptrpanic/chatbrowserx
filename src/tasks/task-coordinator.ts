@@ -26,6 +26,7 @@ interface ActiveTask {
 export class TaskCoordinator {
   readonly #dependencies: TaskCoordinatorDependencies;
   readonly #active = new Map<TaskId, ActiveTask>();
+  #disposed = false;
 
   /** Creates a per-task scheduler that owns abort signals but no durable task state. */
   constructor(dependencies: TaskCoordinatorDependencies) {
@@ -34,6 +35,9 @@ export class TaskCoordinator {
 
   /** Starts one task once and returns the same completion while it remains active. */
   start(taskId: TaskId): Promise<void> {
+    if (this.#disposed) {
+      return Promise.reject(new TaskCommandError('TASK_STATE_INVALID', '任务执行器已关闭'));
+    }
     const existing = this.#active.get(taskId);
     if (existing !== undefined) return existing.completion;
     if (this.#active.size > 0) {
@@ -59,19 +63,21 @@ export class TaskCoordinator {
 
   /** Persists a resume boundary, schedules fresh work, and returns without awaiting the run. */
   async resume(taskId: TaskId): Promise<TaskSnapshot> {
+    this.#assertOpen();
     this.#assertAvailable(taskId);
     await this.#stop(taskId);
     const snapshot = await this.#dependencies.commands.resume(taskId);
-    this.#schedule(taskId);
+    this.schedule(taskId);
     return snapshot;
   }
 
   /** Stops any stale runner, persists a retry boundary, and schedules the same task ID again. */
   async retry(taskId: TaskId): Promise<TaskSnapshot> {
+    this.#assertOpen();
     this.#assertAvailable(taskId);
     await this.#stop(taskId);
     const snapshot = await this.#dependencies.commands.retry(taskId);
-    this.#schedule(taskId);
+    this.schedule(taskId);
     return snapshot;
   }
 
@@ -79,6 +85,21 @@ export class TaskCoordinator {
   async cancel(taskId: TaskId): Promise<TaskSnapshot> {
     await this.#stop(taskId);
     return this.#dependencies.commands.cancel(taskId);
+  }
+
+  /** Starts one detached run and reports terminal scheduler failure through a safe boundary. */
+  schedule(taskId: TaskId): void {
+    void this.start(taskId).catch((error: unknown) => {
+      this.#dependencies.onExecutionError?.(taskId, error);
+    });
+  }
+
+  /** Prevents new work, aborts every active runner, and waits for all executions to settle. */
+  async dispose(): Promise<void> {
+    this.#disposed = true;
+    const active = [...this.#active.values()];
+    for (const task of active) task.controller.abort();
+    await Promise.all(active.map(({ completion }) => completion.catch(() => undefined)));
   }
 
   /** Aborts and joins one active runner while treating its abort rejection as already handled. */
@@ -101,10 +122,10 @@ export class TaskCoordinator {
     }
   }
 
-  /** Starts one detached run and reports any terminal scheduler failure through a safe boundary. */
-  #schedule(taskId: TaskId): void {
-    void this.start(taskId).catch((error: unknown) => {
-      this.#dependencies.onExecutionError?.(taskId, error);
-    });
+  /** Rejects state-changing restarts after the coordinator begins terminal disposal. */
+  #assertOpen(): void {
+    if (this.#disposed) {
+      throw new TaskCommandError('TASK_STATE_INVALID', '任务执行器已关闭');
+    }
   }
 }

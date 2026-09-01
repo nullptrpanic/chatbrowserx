@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { estimateUnmeasuredContextTokens } from '../../../src/agent/context/context-headroom';
-import type { ModelInputItem } from '../../../src/providers/provider-types';
+import type { ModelInputItem } from '../../../src/agent/model/model-provider';
 
 describe('context headroom', () => {
   it('returns zero when the latest completed call is not present', () => {

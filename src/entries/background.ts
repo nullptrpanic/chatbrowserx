@@ -1,5 +1,5 @@
-import { CodexAgentPlanner } from '../agent/codex-agent-planner';
-import { TaskExecutor } from '../agent/task-executor';
+import type { Agent } from '../agent/agent';
+import { createAgent } from '../agent/create-agent';
 import { AttachmentService } from '../attachments/attachment-service';
 import { cropCapturedImage } from '../attachments/crop-captured-image';
 import { BrowserToolExecutor } from '../browser/browser-tool-executor';
@@ -28,16 +28,12 @@ import {
   type BackgroundChromeApi,
   type RecoveryTriggerPort,
 } from '../platform/chrome/register-background';
-import { CodexProvider } from '../providers/codex/codex-provider';
-import { TavilyClient } from '../providers/tavily/tavily-client';
+import { TavilyClient } from '../tools/tavily/client';
 import { SandboxClient } from '../sandbox/sandbox-client';
 import { SandboxToolExecutor } from '../sandbox/sandbox-tool-executor';
 import { SkillCatalog } from '../sandbox/skill-catalog';
-import type { IdGenerator, TaskId } from '../shared/ids';
+import type { IdGenerator } from '../shared/ids';
 import type { Clock } from '../shared/time';
-import { RecoveryScanner } from '../tasks/recovery-scanner';
-import { TaskCommandService } from '../tasks/task-command-service';
-import { TaskCoordinator } from '../tasks/task-coordinator';
 import { PanelService } from '../tasks/panel-service';
 import { PanelChangeNotifier } from '../tasks/panel-change-notifier';
 import { ScreenshotController } from '../tasks/screenshot-controller';
@@ -45,7 +41,7 @@ import { TaskHistoryReader } from '../tasks/task-history-reader';
 
 interface BackgroundServices {
   readonly router: MessageRouter;
-  readonly recovery: RecoveryScanner;
+  readonly agent: Pick<Agent, 'recover' | 'handleBrowserStartup'>;
 }
 
 const systemClock: Clock = {
@@ -83,7 +79,6 @@ async function createBackgroundServices(
     ids: cryptoIds,
   });
   const settings = new ChromeSettingsStore();
-  const commands = new TaskCommandService(repository, systemClock, cryptoIds, conversations);
   const installer = new ContentScriptInstaller();
   const screenshotPage = new ChromeScreenshotPagePort({
     installer,
@@ -99,7 +94,6 @@ async function createBackgroundServices(
       return { id: attachment.id };
     },
   });
-  const codex = new CodexProvider(credentials);
   const tavily = new TavilyClient(credentials);
   const sandboxClient = new SandboxClient(settings, credentials);
   const sandboxCatalog = new SkillCatalog(
@@ -149,44 +143,21 @@ async function createBackgroundServices(
     network: browserNetwork,
     sessions: browserSessions,
   });
-  const planner = new CodexAgentPlanner({
-    provider: codex,
-    skillCatalog: sandboxCatalog,
-    tavilyAvailability: {
-      async isConfigured() {
-        try {
-          return Boolean((await credentials.getTavilyKey())?.trim());
-        } catch {
-          return false;
-        }
-      },
-    },
-    settings,
-    conversations,
+  const agent = await createAgent({
     tasks: repository,
-    attachments,
-    ids: cryptoIds,
-    clock: systemClock,
-  });
-  const executor = new TaskExecutor({
-    repository,
     conversations,
-    planner,
+    attachments,
+    credentials,
+    settings,
+    skillCatalog: sandboxCatalog,
+    browser,
     tavily,
     sandbox,
     history,
-    browser,
     clock: systemClock,
     ids: cryptoIds,
-  });
-  const coordinator = new TaskCoordinator({
-    executor,
-    commands,
     onExecutionError: reportTaskExecutionFailure,
   });
-  const scheduleTask = async (taskId: TaskId): Promise<void> => {
-    void coordinator.start(taskId).catch(reportTaskExecutionFailure);
-  };
   const panel = new PanelService({
     conversations,
     tasks: repository,
@@ -194,7 +165,7 @@ async function createBackgroundServices(
     settings,
     credentials,
     sandboxCatalog,
-    commands,
+    agent,
     tabs: chrome.tabs,
     permissions: {
       contains: (permissions) => chrome.permissions.contains({ origins: [...permissions.origins] }),
@@ -204,32 +175,16 @@ async function createBackgroundServices(
     },
     clock: systemClock,
     ids: cryptoIds,
-    scheduleTask,
     stateVersion: {
       get: () => panelChanges.getVersion(),
       changed: () => panelChanges.changed(),
     },
-    cancelTask: (taskId) => coordinator.cancel(taskId),
-  });
-  const recovery = new RecoveryScanner({
-    repository,
-    clock: systemClock,
-    startTask: scheduleTask,
   });
   const router = createMessageRouter({
-    commands: {
-      getSnapshot: (taskId) => commands.getSnapshot(taskId),
-      pause: (taskId) => coordinator.pause(taskId),
-      resume: (taskId) => coordinator.resume(taskId),
-      retry: (taskId) => coordinator.retry(taskId),
-      cancel: (taskId) => coordinator.cancel(taskId),
-      clearContext: (taskId) => commands.clearContext(taskId),
-    },
+    agent,
     panel,
     screenshots,
     sandboxConsole: sandboxClient,
-    requestRecoveryScan: () => recovery.requestRecoveryScan(),
-    scheduleTask,
     pageFeatures: {
       /** Installs only the isolated page feature bundle after optional origin access exists. */
       async ensure(tabId) {
@@ -238,15 +193,15 @@ async function createBackgroundServices(
       },
     },
   });
-  return { router, recovery };
+  return { router, agent };
 }
 
 const credentialStore = new ChromeCredentialStore();
 const services = createBackgroundServices(credentialStore);
 const lazyRouter: MessageRouter = async (value) => (await services).router(value);
 const lazyRecovery: RecoveryTriggerPort = {
-  requestRecoveryScan: async () => (await services).recovery.requestRecoveryScan(),
-  handleBrowserStartup: async () => (await services).recovery.handleBrowserStartup(),
+  requestRecoveryScan: async () => (await services).agent.recover(),
+  handleBrowserStartup: async () => (await services).agent.handleBrowserStartup(),
 };
 
 const registration = registerBackground({

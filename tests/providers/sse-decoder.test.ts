@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import type { ProviderError } from '../../src/providers/provider-errors';
+import type { ProviderError } from '../../src/agent/model/model-provider-error';
 import { decodeSseStream, type DecodedSseEvent } from '../../src/providers/sse-decoder';
 
 /** Creates a byte stream whose boundaries are controlled by the test. */

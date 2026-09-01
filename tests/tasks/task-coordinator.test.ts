@@ -95,6 +95,62 @@ describe('TaskCoordinator', () => {
     fixture.resolve();
   });
 
+  it('schedules detached work through the coordinator error boundary', async () => {
+    const onExecutionError = vi.fn();
+    const error = new Error('execution failed');
+    const commands = {
+      pause: vi.fn(),
+      resume: vi.fn(),
+      retry: vi.fn(),
+      cancel: vi.fn(),
+    };
+    const coordinator = new TaskCoordinator({
+      executor: { run: vi.fn(async () => Promise.reject(error)) },
+      commands,
+      onExecutionError,
+    });
+
+    coordinator.schedule('task_1');
+
+    await vi.waitFor(() => expect(onExecutionError).toHaveBeenCalledWith('task_1', error));
+  });
+
+  it('aborts and joins active execution when disposed', async () => {
+    let finish: (() => void) | undefined;
+    const run = vi.fn(
+      (_taskId: string, signal: AbortSignal) =>
+        new Promise<void>((resolve) => {
+          finish = resolve;
+          signal.addEventListener('abort', () => undefined, { once: true });
+        }),
+    );
+    const commands = {
+      pause: vi.fn(),
+      resume: vi.fn(),
+      retry: vi.fn(),
+      cancel: vi.fn(),
+    };
+    const coordinator = new TaskCoordinator({ executor: { run }, commands });
+    const running = coordinator.start('task_1');
+
+    const disposal = coordinator.dispose();
+    await Promise.resolve();
+    expect(run.mock.calls[0]?.[1].aborted).toBe(true);
+    let disposed = false;
+    void disposal.then(() => {
+      disposed = true;
+    });
+    await Promise.resolve();
+    expect(disposed).toBe(false);
+
+    finish?.();
+    await running;
+    await disposal;
+    await expect(coordinator.start('task_2')).rejects.toMatchObject({
+      code: 'TASK_STATE_INVALID',
+    });
+  });
+
   it('persists pause without waiting for an executor that ignores abort', async () => {
     let finish: (() => void) | undefined;
     const run = vi.fn(

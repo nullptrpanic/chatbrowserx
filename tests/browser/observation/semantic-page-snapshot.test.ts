@@ -204,6 +204,31 @@ function labeledCheckboxSnapshot(checked: boolean) {
 }
 
 describe('buildSemanticPageSnapshot', () => {
+  it('does not split a surrogate pair when bounding semantic text', () => {
+    const result = buildSemanticPageSnapshot({
+      axNodes: [
+        axNode('root', 1, 'RootWebArea', 'Document', { childIds: ['text'] }),
+        axNode('text', 2, 'StaticText', `${'x'.repeat(199)}😊`, { parentId: 'root' }),
+      ],
+      domSnapshot: domSnapshot([
+        { backendNodeId: 1, nodeName: '#document', parentIndex: -1 },
+        {
+          backendNodeId: 2,
+          nodeName: 'SPAN',
+          parentIndex: 0,
+          text: `${'x'.repeat(199)}😊`,
+          bounds: [0, 0, 200, 20],
+        },
+      ]),
+      frame: 'main',
+      viewport: { x: 0, y: 0, width: 300, height: 200 },
+    });
+
+    const name = result.entries.find((entry) => entry.name.startsWith('x'))?.name;
+    expect(name).toBe('x'.repeat(199));
+    expect(JSON.stringify(result.entries)).not.toContain('\\ud83d"');
+  });
+
   it.each(['generic', 'link'] as const)(
     'recovers same-page link semantics when AX exposes an anchor as %s',
     (axRole) => {
@@ -447,10 +472,14 @@ describe('buildSemanticPageSnapshot', () => {
     );
   });
 
-  it('binds editable AX descendants to their nearest contenteditable host', () => {
+  it('binds rich-text editable AX descendants to their nearest contenteditable host', () => {
+    const focusable = {
+      name: 'focusable',
+      value: { type: 'boolean', value: true },
+    } satisfies Protocol.Accessibility.AXProperty;
     const editable = {
       name: 'editable',
-      value: { type: 'boolean', value: true },
+      value: { type: 'token', value: 'richtext' },
     } satisfies Protocol.Accessibility.AXProperty;
     const result = buildSemanticPageSnapshot({
       axNodes: [
@@ -458,7 +487,7 @@ describe('buildSemanticPageSnapshot', () => {
         axNode('editor', 20, 'generic', '', {
           parentId: 'root',
           childIds: ['editor-text'],
-          properties: [editable],
+          properties: [focusable, editable],
         }),
         axNode('editor-text', 23, 'StaticText', '\u200b', {
           parentId: 'editor',
@@ -647,6 +676,43 @@ describe('buildSemanticPageSnapshot', () => {
     );
   });
 
+  it('preserves scrolling when AX first exposes the container as clickable', () => {
+    const focusable = {
+      name: 'focusable',
+      value: { type: 'boolean', value: true },
+    } satisfies Protocol.Accessibility.AXProperty;
+    const result = buildSemanticPageSnapshot({
+      axNodes: [
+        axNode('root', 1, 'RootWebArea', 'Document', { childIds: ['document-pages'] }),
+        axNode('document-pages', 10, 'generic', 'Document pages', {
+          parentId: 'root',
+          properties: [focusable],
+        }),
+      ],
+      domSnapshot: domSnapshot([
+        { backendNodeId: 1, nodeName: '#document', parentIndex: -1 },
+        {
+          backendNodeId: 10,
+          nodeName: 'DIV',
+          parentIndex: 0,
+          overflowY: 'scroll',
+          bounds: [0, 50, 1_440, 800],
+          clientRect: [0, 0, 1_440, 800],
+          scrollRect: [0, 0, 1_440, 20_000],
+        },
+      ]),
+      frame: 'main',
+    });
+
+    expect(result.targets).toContainEqual(
+      expect.objectContaining({
+        backendNodeId: 10,
+        name: 'Document pages',
+        actions: ['click', 'scroll'],
+      }),
+    );
+  });
+
   it('treats measurable overflow hidden as a programmatically scrollable target', () => {
     const result = buildSemanticPageSnapshot({
       axNodes: [axNode('root', 1, 'RootWebArea', 'Virtual document')],
@@ -725,6 +791,50 @@ describe('buildSemanticPageSnapshot', () => {
         role: 'button',
         name: 'Add new event',
         state: [],
+        actions: ['click'],
+      }),
+    ]);
+  });
+
+  it('recovers an unnamed native button from a nearby semantic action hint', () => {
+    const result = buildSemanticPageSnapshot({
+      axNodes: [axNode('root', 1, 'RootWebArea', 'Composer')],
+      domSnapshot: domSnapshot([
+        { backendNodeId: 1, nodeName: '#document', parentIndex: -1 },
+        {
+          backendNodeId: 10,
+          nodeName: 'DIV',
+          parentIndex: 0,
+          attributes: { class: 'toolbar-item toolbar-item-submit-button' },
+          cursor: 'pointer',
+          bounds: [1_360, 830, 44, 32],
+        },
+        {
+          backendNodeId: 20,
+          nodeName: 'BUTTON',
+          parentIndex: 1,
+          attributes: { class: 'ui-button ui-button-icon ui-button-default' },
+          cursor: 'pointer',
+          bounds: [1_377, 835, 26, 26],
+        },
+        {
+          backendNodeId: 21,
+          nodeName: 'SPAN',
+          parentIndex: 2,
+          attributes: { class: 'universe-icon send-button send-colorful' },
+          cursor: 'pointer',
+          bounds: [1_381, 839, 18, 18],
+        },
+      ]),
+      frame: 'main',
+      viewport: { x: 0, y: 0, width: 1_440, height: 900 },
+    });
+
+    expect(result.targets).toEqual([
+      expect.objectContaining({
+        backendNodeId: 20,
+        role: 'button',
+        name: 'Submit',
         actions: ['click'],
       }),
     ]);
@@ -1699,6 +1809,108 @@ describe('buildSemanticPageSnapshot', () => {
       ]);
     },
   );
+
+  it('keeps a clickable container separate from its nested checkbox control', () => {
+    const result = buildSemanticPageSnapshot({
+      axNodes: [axNode('row-container', 2, 'generic', 'Me test message Inbox')],
+      domSnapshot: domSnapshot([
+        { backendNodeId: 1, nodeName: '#document', parentIndex: -1 },
+        {
+          backendNodeId: 2,
+          nodeName: 'LI',
+          parentIndex: 0,
+          clickable: true,
+          bounds: [10, 20, 400, 90],
+        },
+        {
+          backendNodeId: 3,
+          nodeName: 'DIV',
+          parentIndex: 1,
+          bounds: [50, 20, 360, 90],
+        },
+        {
+          backendNodeId: 4,
+          nodeName: '#text',
+          parentIndex: 2,
+          text: 'Me test message Inbox',
+          bounds: [50, 30, 240, 24],
+        },
+        {
+          backendNodeId: 5,
+          nodeName: 'INPUT',
+          parentIndex: 1,
+          attributes: { type: 'checkbox' },
+          clickable: true,
+          cursor: 'pointer',
+          bounds: [18, 48, 20, 20],
+        },
+      ]),
+      frame: 'main',
+    });
+
+    expect(result.targets).toEqual([
+      expect.objectContaining({
+        backendNodeId: 5,
+        role: 'checkbox',
+        name: 'Me test message Inbox',
+        state: ['checked=false'],
+        actions: ['click', 'set_checked'],
+      }),
+      expect.objectContaining({
+        backendNodeId: 2,
+        role: 'listitem',
+        name: 'Me test message Inbox',
+        state: [],
+        actions: ['click'],
+      }),
+    ]);
+  });
+
+  it('preserves container-click semantics when its nested checkbox is hidden', () => {
+    const result = buildSemanticPageSnapshot({
+      axNodes: [axNode('row-container', 2, 'generic', 'Me test message Inbox')],
+      domSnapshot: domSnapshot([
+        { backendNodeId: 1, nodeName: '#document', parentIndex: -1 },
+        {
+          backendNodeId: 2,
+          nodeName: 'LI',
+          parentIndex: 0,
+          clickable: true,
+          bounds: [10, 20, 400, 90],
+        },
+        {
+          backendNodeId: 3,
+          nodeName: 'DIV',
+          parentIndex: 1,
+          bounds: [50, 20, 360, 90],
+        },
+        {
+          backendNodeId: 4,
+          nodeName: '#text',
+          parentIndex: 2,
+          text: 'Me test message Inbox',
+          bounds: [50, 30, 240, 24],
+        },
+        {
+          backendNodeId: 5,
+          nodeName: 'INPUT',
+          parentIndex: 1,
+          attributes: { type: 'checkbox' },
+        },
+      ]),
+      frame: 'main',
+    });
+
+    expect(result.targets).toEqual([
+      expect.objectContaining({
+        backendNodeId: 2,
+        role: 'listitem',
+        name: 'Me test message Inbox',
+        state: [],
+        actions: ['click'],
+      }),
+    ]);
+  });
 
   it('marks viewport membership for local prioritization without changing page semantics', () => {
     const result = buildSemanticPageSnapshot({

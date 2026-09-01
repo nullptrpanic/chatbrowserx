@@ -2,12 +2,13 @@
 
 import 'fake-indexeddb/auto';
 import { describe, expect, it, vi } from 'vitest';
-import { TaskExecutor } from '../../src/agent/task-executor';
+import {
+  TaskExecutor as ProductionTaskExecutor,
+  type TaskExecutorDependencies,
+} from '../../src/agent/task-executor';
 import type { AgentEvent, AgentPlanInput } from '../../src/agent/execution-types';
-import { parseBrowserToolCall } from '../../src/agent/tools/browser-tool-schema';
-import { parseContextCommitToolCall } from '../../src/agent/tools/context-commit-tool-schema';
-import { parseHistoryToolCall } from '../../src/agent/tools/history-tool-schema';
-import { parseSandboxToolCall } from '../../src/agent/tools/sandbox-tool-schema';
+import { parseBrowserToolCall } from '../../src/tools/browser/contract';
+import { parseContextCommitToolCall } from '../../src/tools/context/contract';
 import type { BrowserExecutionPort } from '../../src/browser/browser-execution-types';
 import { openChatBrowserDatabase } from '../../src/persistence/open-database';
 import {
@@ -15,14 +16,23 @@ import {
   type ConversationRepository,
 } from '../../src/persistence/conversation-repository';
 import { IndexedDbTaskRepository } from '../../src/persistence/task-repository';
-import { providerErrorFromCode } from '../../src/providers/provider-errors';
-import type { TavilyExecutionPort } from '../../src/providers/tavily/tavily-types';
+import { providerErrorFromCode } from '../../src/agent/model/model-provider-error';
+import type { TavilyExecutionPort } from '../../src/tools/tavily/types';
+import { tavilyErrorFromCode } from '../../src/tools/tavily/error';
 import { SandboxClientError } from '../../src/sandbox/sandbox-client';
 import type { SandboxExecutionPort } from '../../src/sandbox/sandbox-tool-executor';
 import { TaskCommandService as DurableTaskCommandService } from '../../src/tasks/task-command-service';
 import type { CreateTaskInput } from '../../src/tasks/task-factory';
 import type { MessageRecord, TaskMessageDraft } from '../../src/tasks/message-types';
 import { createTestDatabaseName, seedConversation } from '../persistence/test-helpers';
+import type { TaskHistoryReaderPort } from '../../src/tasks/task-history-reader';
+import { bindToolRuntime } from '../../src/tools/registry';
+import { discoverTools } from '../../src/tools/discover';
+import { ToolServiceResolver } from '../../src/tools/service-resolver';
+import { historyService } from '../../src/tools/history/service';
+import { tavilyService } from '../../src/tools/tavily/service';
+import { createSandboxToolService, sandboxService } from '../../src/tools/sandbox/service';
+import { browserService } from '../../src/tools/browser/service';
 
 function sources() {
   let now = 1_000;
@@ -88,7 +98,12 @@ class TaskCommandService extends DurableTaskCommandService {
       updatedAt: now,
     };
     const submit = (createConversation: boolean) =>
-      this.createSubmission({ ...input, conversation, createConversation, message });
+      this.createSubmission({
+        ...input,
+        conversation,
+        createConversation,
+        message,
+      });
     let snapshot;
     try {
       snapshot = await submit(true);
@@ -104,7 +119,10 @@ class TaskCommandService extends DurableTaskCommandService {
         ({ id }) => id === message.id,
       )
     ) {
-      await this.#conversations.appendMessage({ ...message, taskId: snapshot.task.id });
+      await this.#conversations.appendMessage({
+        ...message,
+        taskId: snapshot.task.id,
+      });
     }
     return snapshot;
   }
@@ -126,11 +144,37 @@ async function seedExecutorConversation(
 
 function tavilyPort(overrides: Partial<TavilyExecutionPort> = {}): TavilyExecutionPort {
   return {
+    isConfigured: vi.fn(async () => true),
     search: vi.fn(async () => ({ results: [], truncated: false })),
     extract: vi.fn(async () => ({ results: [], truncated: false })),
     crawl: vi.fn(async () => ({ results: [], truncated: false })),
     ...overrides,
   };
+}
+
+type TestTaskExecutorDependencies = Omit<TaskExecutorDependencies, 'tools'> & {
+  readonly tavily: TavilyExecutionPort;
+  readonly history?: TaskHistoryReaderPort;
+  readonly sandbox?: SandboxExecutionPort;
+  readonly browser: BrowserExecutionPort;
+};
+
+/** Binds legacy test doubles through the same registered runtime used by production Agent setup. */
+class TaskExecutor extends ProductionTaskExecutor {
+  constructor(dependencies: TestTaskExecutorDependencies) {
+    const { tavily, history, sandbox, browser, ...executorDependencies } = dependencies;
+    const services = new ToolServiceResolver();
+    services.bind(tavilyService, tavily);
+    services.bind(browserService, browser);
+    if (history !== undefined) services.bind(historyService, history);
+    if (sandbox !== undefined) {
+      services.bind(sandboxService, createSandboxToolService(sandbox));
+    }
+    super({
+      ...executorDependencies,
+      tools: bindToolRuntime(discoverTools(), services),
+    });
+  }
 }
 
 function browserPort(overrides: Partial<BrowserExecutionPort> = {}): BrowserExecutionPort {
@@ -142,10 +186,7 @@ function browserPort(overrides: Partial<BrowserExecutionPort> = {}): BrowserExec
   };
 }
 
-const SEARCH_ARGUMENTS: Extract<
-  AgentEvent,
-  { readonly type: 'tavily.call'; readonly operation: 'search' }
->['arguments'] = {
+const SEARCH_ARGUMENTS = {
   query: 'browser reliability',
   searchDepth: 'basic',
   topic: 'general',
@@ -157,17 +198,19 @@ const SEARCH_ARGUMENTS: Extract<
 
 function searchCall(callId: string): AgentEvent {
   return {
-    type: 'tavily.call',
-    operation: 'search',
-    callId,
-    argumentsJson: JSON.stringify(SEARCH_ARGUMENTS),
-    arguments: SEARCH_ARGUMENTS,
+    type: 'tool.call',
+    call: {
+      callId,
+      name: 'tavily_search',
+      argumentsJson: JSON.stringify(SEARCH_ARGUMENTS),
+      arguments: SEARCH_ARGUMENTS,
+    },
   };
 }
 
 function browserCall(callId: string, name: string, arguments_: unknown): AgentEvent {
   return {
-    type: 'browser.call',
+    type: 'tool.call',
     call: parseBrowserToolCall({
       callId,
       name,
@@ -178,7 +221,7 @@ function browserCall(callId: string, name: string, arguments_: unknown): AgentEv
 
 function contextCommitCall(callId: string, state: string, throughCallId: string): AgentEvent {
   return {
-    type: 'context.commit',
+    type: 'tool.call',
     call: parseContextCommitToolCall({
       callId,
       name: 'commit_context',
@@ -189,12 +232,13 @@ function contextCommitCall(callId: string, state: string, throughCallId: string)
 
 function sandboxCall(callId: string, name: string, arguments_: unknown): AgentEvent {
   return {
-    type: 'sandbox.call',
-    call: parseSandboxToolCall({
+    type: 'tool.call',
+    call: {
       callId,
       name,
       argumentsJson: JSON.stringify(arguments_),
-    }),
+      arguments: arguments_,
+    },
   };
 }
 
@@ -296,12 +340,18 @@ describe('TaskExecutor', () => {
           (async function* () {
             if (turn++ === 0) {
               yield {
-                type: 'history.call',
-                call: parseHistoryToolCall({
+                type: 'tool.call',
+                call: {
                   callId: 'call_exact_history',
                   name: 'history_read',
                   argumentsJson: '{"taskId":"task_old","offset":null,"cursor":"","limit":50}',
-                }),
+                  arguments: {
+                    taskId: 'task_old',
+                    offset: null,
+                    cursor: '',
+                    limit: 50,
+                  },
+                },
               } as const;
               return;
             }
@@ -1732,7 +1782,10 @@ describe('TaskExecutor', () => {
         (async function* () {
           turn += 1;
           if (turn === 1) {
-            yield sandboxCall('call_exec', 'sandbox_exec', { command: 'touch marker', cwd: null });
+            yield sandboxCall('call_exec', 'sandbox_exec', {
+              command: 'touch marker',
+              cwd: null,
+            });
           } else {
             yield {
               type: 'task.completed',
@@ -1747,7 +1800,12 @@ describe('TaskExecutor', () => {
     });
     const recover = vi.fn<SandboxExecutionPort['recover']>(async () => ({
       status: 'finished',
-      output: JSON.stringify({ code: 0, stdout: 'done', stderr: '', truncated: false }),
+      output: JSON.stringify({
+        code: 0,
+        stdout: 'done',
+        stderr: '',
+        truncated: false,
+      }),
     }));
     const executor = new TaskExecutor({
       repository,
@@ -1811,7 +1869,12 @@ describe('TaskExecutor', () => {
       if (executionIds.length === 1) {
         throw new DOMException('Stopped after dispatch.', 'AbortError');
       }
-      return JSON.stringify({ code: 0, stdout: 'done', stderr: '', truncated: false });
+      return JSON.stringify({
+        code: 0,
+        stdout: 'done',
+        stderr: '',
+        truncated: false,
+      });
     });
     const recover = vi.fn<SandboxExecutionPort['recover']>(async () => ({
       status: 'not_found',
@@ -1876,7 +1939,9 @@ describe('TaskExecutor', () => {
     const execute = vi.fn<SandboxExecutionPort['execute']>(async () => {
       throw new DOMException('Stopped after dispatch.', 'AbortError');
     });
-    const recover = vi.fn<SandboxExecutionPort['recover']>(async () => ({ status: 'running' }));
+    const recover = vi.fn<SandboxExecutionPort['recover']>(async () => ({
+      status: 'running',
+    }));
     const executor = new TaskExecutor({
       repository,
       conversations: dependencies.conversations,
@@ -1943,7 +2008,10 @@ describe('TaskExecutor', () => {
       planner: {
         plan: () =>
           (async function* () {
-            yield sandboxCall('call_exec', 'sandbox_exec', { command: 'true', cwd: null });
+            yield sandboxCall('call_exec', 'sandbox_exec', {
+              command: 'true',
+              cwd: null,
+            });
           })(),
       },
       tavily: tavilyPort(),
@@ -2502,15 +2570,17 @@ describe('TaskExecutor', () => {
           yield searchCall('call_search');
         } else if (turn === 2) {
           yield {
-            type: 'tavily.call',
-            operation: 'extract',
-            callId: 'call_extract',
-            argumentsJson:
-              '{"urls":["https://example.com/a"],"query":"auth","extractDepth":"basic"}',
-            arguments: {
-              urls: ['https://example.com/a'],
-              query: 'auth',
-              extractDepth: 'basic',
+            type: 'tool.call',
+            call: {
+              callId: 'call_extract',
+              name: 'tavily_extract',
+              argumentsJson:
+                '{"urls":["https://example.com/a"],"query":"auth","extractDepth":"basic"}',
+              arguments: {
+                urls: ['https://example.com/a'],
+                query: 'auth',
+                extractDepth: 'basic',
+              },
             },
           };
         } else {
@@ -3369,7 +3439,10 @@ describe('TaskExecutor', () => {
     expect(turn).toBe(9);
     expect(tavily.search).toHaveBeenCalledTimes(8);
     expect(result.task.status).toBe('failed');
-    expect(result.run.error).toMatchObject({ code: 'ToolCallLimitError', retryable: false });
+    expect(result.run.error).toMatchObject({
+      code: 'ToolCallLimitError',
+      retryable: false,
+    });
     expect(result.toolResults).toHaveLength(8);
     database.close();
   });
@@ -3423,7 +3496,10 @@ describe('TaskExecutor', () => {
     expect(turn).toBe(257);
     expect(browser.execute).toHaveBeenCalledTimes(256);
     expect(result.task.status).toBe('failed');
-    expect(result.run.error).toMatchObject({ code: 'ToolCallLimitError', retryable: false });
+    expect(result.run.error).toMatchObject({
+      code: 'ToolCallLimitError',
+      retryable: false,
+    });
     expect(result.checkpoint).toMatchObject({ browserToolCallsInAttempt: 256 });
     database.close();
   });
@@ -3558,7 +3634,9 @@ describe('TaskExecutor', () => {
       executor.run(created.task.id, new AbortController().signal),
     ).resolves.toMatchObject({
       task: { status: 'waiting_for_auth' },
-      run: { error: { code: 'AuthError', recoveryAction: 'update_credentials' } },
+      run: {
+        error: { code: 'AuthError', recoveryAction: 'update_credentials' },
+      },
     });
     database.close();
   });
@@ -3838,7 +3916,7 @@ describe('TaskExecutor', () => {
         },
         tavily: tavilyPort({
           search: vi.fn(async () => {
-            throw providerErrorFromCode(code);
+            throw tavilyErrorFromCode(code);
           }),
         }),
         browser: browserPort(),
@@ -3884,7 +3962,7 @@ describe('TaskExecutor', () => {
       },
       tavily: tavilyPort({
         search: vi.fn(async () => {
-          throw providerErrorFromCode('ABORTED');
+          throw tavilyErrorFromCode('ABORTED');
         }),
       }),
       browser: browserPort(),

@@ -4,7 +4,7 @@ import {
   AUTO_COMPACT_INPUT_TOKEN_HIGH_WATER,
   createNativeCompactionContinuation,
   shouldUseNativeContextCompaction,
-} from '../../../src/agent/context/native-context-compaction';
+} from '../../../src/tools/context/native-compaction';
 import { CODEX_EFFECTIVE_CONTEXT_WINDOW_TOKENS } from '../../../src/providers/codex/codex-constants';
 import type { Checkpoint } from '../../../src/tasks/checkpoint-types';
 import type { ContinuationItem } from '../../../src/tasks/continuation-types';

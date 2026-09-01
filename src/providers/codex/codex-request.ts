@@ -1,5 +1,9 @@
-import type { ModelInputItem, ModelMessageContent, ModelRequest } from '../provider-types';
-import { providerErrorFromCode } from '../provider-errors';
+import type {
+  ModelInputItem,
+  ModelMessageContent,
+  ModelRequest,
+} from '../../agent/model/model-provider';
+import { providerErrorFromCode } from '../../agent/model/model-provider-error';
 import { CODEX_COMPACT_URL, CODEX_MODEL, CODEX_RESPONSES_URL } from './codex-constants';
 import { toCodexToolName } from './codex-tool-name';
 

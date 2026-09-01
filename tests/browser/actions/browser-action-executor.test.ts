@@ -1,7 +1,8 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { parseBrowserToolCall } from '../../../src/agent/tools/browser-tool-schema';
+import { parseBrowserToolCall } from '../../../src/tools/browser/contract';
 import {
   BrowserActionExecutor,
+  findImageFileInputTrigger,
   inspectEditorTarget,
   pasteImageIntoEditor,
   type BrowserActionExecutorDependencies,
@@ -636,6 +637,70 @@ describe('pasteImageIntoEditor', () => {
     }
   });
 
+  it('finds only a visible image trigger associated with an accepting file input', () => {
+    document.body.innerHTML = `
+      <main id="composer">
+        <div id="editor" contenteditable="true">
+          <span id="editor-text">ChatBrowserX image diagnostic</span>
+        </div>
+        <span id="misleading-text">Insert photo</span>
+        <button id="image-trigger" data-action="insert-image">Insert photo</button>
+        <input type="file" accept="image/png" hidden>
+        <button data-action="attach-file">Attach file</button>
+      </main>
+    `;
+    const editor = document.querySelector<HTMLElement>('#editor');
+    const editorText = document.querySelector<HTMLElement>('#editor-text');
+    const misleadingText = document.querySelector<HTMLElement>('#misleading-text');
+    const trigger = document.querySelector<HTMLButtonElement>('#image-trigger');
+    if (!editor || !editorText || !misleadingText || !trigger) {
+      throw new Error('Test composer was not created.');
+    }
+    editorText.getBoundingClientRect = () =>
+      ({
+        x: 300,
+        y: 300,
+        width: 200,
+        height: 24,
+        top: 300,
+        right: 500,
+        bottom: 324,
+        left: 300,
+        toJSON: () => ({}),
+      }) as DOMRect;
+    misleadingText.getBoundingClientRect = () =>
+      ({
+        x: 200,
+        y: 260,
+        width: 100,
+        height: 24,
+        top: 260,
+        right: 300,
+        bottom: 284,
+        left: 200,
+        toJSON: () => ({}),
+      }) as DOMRect;
+    trigger.getBoundingClientRect = () =>
+      ({
+        x: 100,
+        y: 200,
+        width: 30,
+        height: 24,
+        top: 200,
+        right: 130,
+        bottom: 224,
+        left: 100,
+        toJSON: () => ({}),
+      }) as DOMRect;
+
+    expect(findImageFileInputTrigger.call(editor, 'image/png')).toEqual({
+      found: true,
+      x: 115,
+      y: 212,
+    });
+    document.body.innerHTML = '';
+  });
+
   it('does not treat a retained file-input selection as attachment preview evidence', async () => {
     const originalDataTransfer = window.DataTransfer;
     const originalClipboardEvent = window.ClipboardEvent;
@@ -981,6 +1046,130 @@ describe('BrowserActionExecutor', () => {
         modifiers: 4,
         commands: ['Paste'],
       }),
+    );
+  });
+
+  it('uses a trusted local image trigger before falling back to the system clipboard', async () => {
+    let pasteCalls = 0;
+    let eventListener: Parameters<DebuggerTransport['onEvent']>[0] | undefined;
+    const { executor, send } = harness({
+      onEvent: (listener) => {
+        eventListener = listener;
+        return () => undefined;
+      },
+      attachments: {
+        get: vi.fn(async () => ({
+          id: 'attachment_capture',
+          blob: new Blob(['image-bytes'], { type: 'image/png' }),
+          mimeType: 'image/png',
+          byteSize: 11,
+          width: 640,
+          height: 480,
+          source: 'viewport_capture' as const,
+          createdAt: 1,
+          fileName: 'capture.png',
+        })),
+      },
+      targets: [
+        {
+          frameTargetId: null,
+          documentFrameId: 'frame-main',
+          loaderId: 'loader-1',
+          backendNodeId: 42,
+          role: 'textbox',
+          name: 'Message',
+          state: ['editable'],
+          actions: ['type'],
+          frame: 'main',
+        },
+      ],
+      responder: (_session, method, params) => {
+        if (method === 'Input.dispatchMouseEvent' && params?.type === 'mouseReleased') {
+          queueMicrotask(() =>
+            eventListener?.(SNAPSHOT.root, 'Page.fileChooserOpened', { backendNodeId: 99 }),
+          );
+          return {};
+        }
+        if (method === 'DOM.resolveNode' && params?.backendNodeId === 99) {
+          return { object: { objectId: 'file_input' } };
+        }
+        if (
+          method !== 'Runtime.callFunctionOn' ||
+          typeof params?.functionDeclaration !== 'string'
+        ) {
+          return undefined;
+        }
+        if (params.functionDeclaration.includes('__chatbrowserxPasteImage')) {
+          pasteCalls += 1;
+          return {
+            result: {
+              type: 'object',
+              value:
+                pasteCalls === 1
+                  ? {
+                      dispatched: true,
+                      strategy: 'clipboard_event',
+                      fileCount: 1,
+                      handled: true,
+                      verified: false,
+                      previewCount: 0,
+                    }
+                  : {
+                      dispatched: true,
+                      strategy: 'file_input',
+                      fileCount: 1,
+                      handled: true,
+                      verified: true,
+                      mutations: 4,
+                      previewCount: 1,
+                    },
+            },
+          };
+        }
+        if (params.functionDeclaration.includes('__chatbrowserxImageFileInputTrigger')) {
+          return {
+            result: { type: 'object', value: { found: true, x: 80, y: 120 } },
+          };
+        }
+        return undefined;
+      },
+    });
+
+    await expect(
+      executor.execute(
+        call('browser_paste_image', {
+          tabId: 7,
+          ref: 'ref_1',
+          assetId: 'attachment_capture',
+        }),
+        new AbortController().signal,
+      ),
+    ).resolves.toMatchObject({
+      data: {
+        action: 'paste_image',
+        strategy: 'file_input',
+        fileCount: 1,
+        handled: true,
+        verified: true,
+        previewCount: 1,
+      },
+    });
+    expect(pasteCalls).toBe(2);
+    expect(send).toHaveBeenCalledWith(SNAPSHOT.root, 'Page.setInterceptFileChooserDialog', {
+      enabled: true,
+    });
+    expect(send).toHaveBeenCalledWith(SNAPSHOT.root, 'Page.setInterceptFileChooserDialog', {
+      enabled: false,
+    });
+    expect(send).toHaveBeenCalledWith(
+      SNAPSHOT.root,
+      'Input.dispatchMouseEvent',
+      expect.objectContaining({ type: 'mousePressed', x: 80, y: 120 }),
+    );
+    expect(send).not.toHaveBeenCalledWith(
+      SNAPSHOT.root,
+      'Input.dispatchKeyEvent',
+      expect.objectContaining({ commands: ['Paste'] }),
     );
   });
 
@@ -1670,6 +1859,172 @@ describe('BrowserActionExecutor', () => {
     });
   });
 
+  it('accepts a complete rich-text replacement when the editor collapses line boundaries', async () => {
+    const text = 'Summary title\n| Chat | Recent content |\n|---|---|\n| Alpha | Updated |';
+    const normalizedEditorValue =
+      'Summary title | Chat | Recent content | |---|---| | Alpha | Updated |';
+    let editorInfoReads = 0;
+    const { executor } = harness({
+      targets: [
+        {
+          frameTargetId: null,
+          documentFrameId: 'frame-main',
+          loaderId: 'loader-1',
+          backendNodeId: 42,
+          role: 'textbox',
+          name: 'Message',
+          state: [],
+          actions: ['type'],
+          frame: 'main',
+        },
+      ],
+      responder: (_session, method, params) => {
+        if (method === 'DOM.resolveNode') {
+          return { object: { objectId: 'editor_node' } };
+        }
+        if (
+          method === 'Runtime.callFunctionOn' &&
+          params?.objectId === 'editor_node' &&
+          typeof params.functionDeclaration === 'string' &&
+          params.functionDeclaration.includes('__chatbrowserxEditorTargetInfo')
+        ) {
+          editorInfoReads += 1;
+          return {
+            result: {
+              type: 'object',
+              value: {
+                editor: true,
+                custom: true,
+                connected: true,
+                value: editorInfoReads === 1 ? '' : normalizedEditorValue,
+              },
+            },
+          };
+        }
+        if (
+          method === 'Runtime.callFunctionOn' &&
+          params?.objectId === 'editor_node' &&
+          typeof params.functionDeclaration === 'string' &&
+          params.functionDeclaration.includes('__chatbrowserxInsertText')
+        ) {
+          return { result: { type: 'object', value: { dispatched: true } } };
+        }
+        if (method === 'Accessibility.getFullAXTree') {
+          return { nodes: [] };
+        }
+        return undefined;
+      },
+    });
+
+    await expect(
+      executor.execute(
+        call('browser_type', {
+          tabId: 7,
+          ref: 'ref_1',
+          text,
+          replace: true,
+          submit: false,
+        }),
+        new AbortController().signal,
+      ),
+    ).resolves.toMatchObject({
+      data: {
+        action: 'type',
+        replaced: true,
+        submitted: false,
+        verified: true,
+      },
+    });
+  });
+
+  it('waits for a trusted submitted editor to stabilize before pressing Enter', async () => {
+    vi.useFakeTimers();
+    const text = 'message whose rich-text paste settles asynchronously';
+    let editorInfoReads = 0;
+    let readyForSubmit = false;
+    let sent = false;
+    const { executor } = harness({
+      targets: [
+        {
+          frameTargetId: null,
+          documentFrameId: 'frame-main',
+          loaderId: 'loader-1',
+          backendNodeId: 42,
+          role: 'textbox',
+          name: 'Message',
+          state: [],
+          actions: ['type'],
+          frame: 'main',
+        },
+      ],
+      responder: (_session, method, params) => {
+        if (
+          method === 'Input.dispatchKeyEvent' &&
+          params?.type === 'keyDown' &&
+          params.key === 'Enter'
+        ) {
+          sent = readyForSubmit;
+          return {};
+        }
+        if (method === 'DOM.resolveNode') {
+          return { object: { objectId: 'editor_node' } };
+        }
+        if (
+          method === 'Runtime.callFunctionOn' &&
+          params?.objectId === 'editor_node' &&
+          typeof params.functionDeclaration === 'string' &&
+          params.functionDeclaration.includes('__chatbrowserxEditorTargetInfo')
+        ) {
+          editorInfoReads += 1;
+          if (editorInfoReads >= 4) readyForSubmit = true;
+          return {
+            result: {
+              type: 'object',
+              value: {
+                editor: true,
+                custom: true,
+                connected: true,
+                value: editorInfoReads === 1 || sent ? '' : text,
+              },
+            },
+          };
+        }
+        if (
+          method === 'Runtime.callFunctionOn' &&
+          params?.objectId === 'editor_node' &&
+          typeof params.functionDeclaration === 'string' &&
+          params.functionDeclaration.includes('__chatbrowserxInsertText')
+        ) {
+          return { result: { type: 'object', value: { dispatched: true } } };
+        }
+        return undefined;
+      },
+    });
+
+    const operation = executor.execute(
+      call('browser_type', {
+        tabId: 7,
+        ref: 'ref_1',
+        text,
+        replace: true,
+        submit: true,
+      }),
+      new AbortController().signal,
+    );
+    const resolution = expect(operation).resolves.toMatchObject({
+      data: {
+        action: 'type',
+        submitted: true,
+        submissionVerified: true,
+        verified: true,
+      },
+    });
+    await vi.advanceTimersByTimeAsync(6_000);
+    await resolution;
+    expect(sent).toBe(true);
+    expect(editorInfoReads).toBeGreaterThanOrEqual(5);
+  });
+
   it('rejects a normalized rich-text replacement when a substantive line is missing', async () => {
     vi.useFakeTimers();
     const text = 'Summary title\n\n| Chat | Recent content |\n|---|---|\n| Alpha | Updated |';
@@ -1790,7 +2145,7 @@ describe('BrowserActionExecutor', () => {
       code: 'ACTION_STATE_MISMATCH',
       stage: 'submit',
     });
-    await vi.advanceTimersByTimeAsync(2_000);
+    await vi.advanceTimersByTimeAsync(6_000);
     await rejection;
   });
 
@@ -4898,6 +5253,20 @@ describe('BrowserActionExecutor', () => {
     });
     expect(sessions.ensure).not.toHaveBeenCalled();
     expect(send.mock.calls.some(([, method]) => method.startsWith('Input.'))).toBe(false);
+  });
+
+  it('accepts DOM stability when the quiet window exactly matches the timeout', async () => {
+    vi.useFakeTimers();
+    const { executor } = harness();
+    const waiting = executor.execute(
+      call('browser_wait', { tabId: 7, condition: 'dom_stable', timeoutMs: 500 }),
+      new AbortController().signal,
+    );
+    await vi.advanceTimersByTimeAsync(500);
+
+    await expect(waiting).resolves.toMatchObject({
+      data: { action: 'wait', condition: 'dom_stable', completed: true },
+    });
   });
 
   it('waits for in-flight requests to finish before declaring network idle', async () => {

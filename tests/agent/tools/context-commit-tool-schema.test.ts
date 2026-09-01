@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { parseRecordedContextCommitToolCall } from '../../../src/agent/tools/context-commit-tool-schema';
+import { parseRecordedContextCommitToolCall } from '../../../src/tools/context/contract';
 
 function recorded(arguments_: object, overrides: Partial<{ callId: string; name: string }> = {}) {
   return {

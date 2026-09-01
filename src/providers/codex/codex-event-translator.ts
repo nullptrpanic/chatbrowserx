@@ -1,7 +1,7 @@
 import { z } from 'zod';
-import { providerErrorFromCode } from '../provider-errors';
+import { providerErrorFromCode } from '../../agent/model/model-provider-error';
 import type { DecodedSseEvent } from '../sse-decoder';
-import type { ModelStreamEvent, ModelUsage } from '../stream-events';
+import type { ModelStreamEvent, ModelUsage } from '../../agent/model/model-stream-event';
 import { fromCodexToolName } from './codex-tool-name';
 
 const objectSchema = z.object({ type: z.string().optional() }).passthrough();

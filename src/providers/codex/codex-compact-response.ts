@@ -1,6 +1,6 @@
 import { z } from 'zod';
-import { providerErrorFromCode } from '../provider-errors';
-import type { ModelCompactionResult } from '../provider-types';
+import { providerErrorFromCode } from '../../agent/model/model-provider-error';
+import type { ModelCompactionResult } from '../../agent/model/model-provider';
 
 const MAX_COMPACT_OUTPUT_ITEMS = 256;
 const MAX_COMPACT_ENCRYPTED_CHARACTERS = 8 * 1024 * 1024;
