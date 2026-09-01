@@ -4,7 +4,6 @@ import type { ValidatedToolCall } from '../types';
 
 const MAX_PATH_CHARACTERS = 4_096;
 const MAX_COMMAND_CHARACTERS = 20_000;
-const MAX_SKILL_QUERY_CHARACTERS = 200;
 const absolutePathSchema = z
   .string()
   .min(1)
@@ -16,17 +15,6 @@ export const sandboxReadSchema = z
     path: absolutePathSchema,
     startLine: z.number().int().min(1),
     maxLines: z.number().int().min(1).max(400),
-  })
-  .strict();
-
-export const skillSearchSchema = z
-  .object({
-    query: z
-      .string()
-      .min(1)
-      .max(MAX_SKILL_QUERY_CHARACTERS)
-      .refine((value) => value.trim().length > 0),
-    limit: z.number().int().min(1).max(10),
   })
   .strict();
 
@@ -48,16 +36,6 @@ export const sandboxExecSchema = z
 
 export type SandboxReadInput = z.infer<typeof sandboxReadSchema>;
 export type SandboxExecInput = z.infer<typeof sandboxExecSchema>;
-export type SandboxSkillSearchInput = z.infer<typeof skillSearchSchema>;
-
-export const skillSearchDefinition = strictFunctionTool(
-  'skill_search',
-  'Search installed Sandbox Skills by a concise capability query. Use only when no built-in ChatBrowserX tool covers the task or the user explicitly requests a Skill. Do not use it for current-page content or actions. Read a selected SKILL.md completely with sandbox_read before following it.',
-  {
-    query: { type: 'string', minLength: 1, maxLength: MAX_SKILL_QUERY_CHARACTERS },
-    limit: { type: 'integer', minimum: 1, maximum: 10 },
-  },
-);
 
 export const sandboxReadDefinition = strictFunctionTool(
   'sandbox_read',

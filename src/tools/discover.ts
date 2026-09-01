@@ -13,7 +13,7 @@ export function discoverTools(
   return catalog.seal();
 }
 
-/** Projects stable model-callable declarations for audits without becoming a composition list. */
+/** Projects stable registered declarations for audits without becoming a composition list. */
 export function discoverToolDeclarations(
   catalog: ToolDeclarationCatalog = registeredToolCatalog,
 ): readonly ToolDeclaration[] {

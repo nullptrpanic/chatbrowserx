@@ -19,7 +19,6 @@ import type {
 import type { IdGenerator } from '../shared/ids';
 import { bytesToBase64 } from '../shared/base64';
 import type { Clock } from '../shared/time';
-import type { SkillCatalogPort } from '../sandbox/skill-catalog';
 import type { Agent } from '../agent/agent';
 import type { MessageRecord, MessageSourcePage, TaskMessageDraft } from './message-types';
 import type { TaskSnapshot } from './task-command-service';
@@ -61,7 +60,6 @@ export interface PanelServiceDependencies {
     | 'getSandboxToken'
     | 'setSandboxToken'
   >;
-  readonly sandboxCatalog?: Pick<SkillCatalogPort, 'invalidate'>;
   readonly agent: Pick<Agent, 'start' | 'supplement' | 'cancel'>;
   readonly tabs: {
     get(tabId: number): Promise<{
@@ -592,9 +590,6 @@ export class PanelService {
     }
     if (input.sandboxToken !== undefined) {
       await this.#dependencies.credentials.setSandboxToken(input.sandboxToken);
-    }
-    if (sandboxServer !== currentSandboxServer || input.sandboxToken !== undefined) {
-      await this.#dependencies.sandboxCatalog?.invalidate();
     }
     this.#dependencies.stateVersion.changed();
     return this.#readSettings();

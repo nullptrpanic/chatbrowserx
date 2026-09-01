@@ -626,13 +626,10 @@ export function browserPreflight(
 ): ToolExecutionResult | null {
   const checkpoint = context.checkpoint;
   const toolResults = context.toolResults;
-  if (typeof checkpoint !== 'object' || checkpoint === null || !Array.isArray(toolResults)) {
+  if (checkpoint === undefined || toolResults === undefined) {
     throw new Error('Browser execution context is unavailable.');
   }
-  const snapshot: ActiveTaskSnapshot = {
-    checkpoint: checkpoint as Checkpoint,
-    toolResults: toolResults as readonly MaterializedToolResult[],
-  };
+  const snapshot: ActiveTaskSnapshot = { checkpoint, toolResults };
   const parsed = call as ParsedBrowserToolCall;
   const executionState =
     context.executionState === 'may_have_dispatched' ? 'may_have_dispatched' : 'recorded';
@@ -673,14 +670,12 @@ export function browserCheckpointAfterExecution(
   output: string,
 ): NonNullable<ToolExecutionResult['checkpoint']> {
   const checkpoint = context.checkpoint;
-  if (typeof checkpoint !== 'object' || checkpoint === null) {
+  if (checkpoint === undefined) {
     throw new Error('Browser execution context is unavailable.');
   }
   const snapshot: ActiveTaskSnapshot = {
-    checkpoint: checkpoint as Checkpoint,
-    toolResults: Array.isArray(context.toolResults)
-      ? (context.toolResults as readonly MaterializedToolResult[])
-      : [],
+    checkpoint,
+    toolResults: context.toolResults ?? [],
   };
   const browserTargetTabId = browserTargetAfterCall(
     snapshot,

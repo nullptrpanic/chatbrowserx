@@ -9,11 +9,16 @@ import { fileURLToPath } from 'node:url';
 import { promisify } from 'node:util';
 import { SandboxClient, type SandboxClientPort } from '../src/sandbox/sandbox-client';
 import { SandboxToolExecutor } from '../src/sandbox/sandbox-tool-executor';
-import { SkillCatalog } from '../src/sandbox/skill-catalog';
-import { sandboxExecTool, sandboxReadTool, sandboxRuntime } from '../src/tools/sandbox/tool';
+import {
+  sandboxExecTool,
+  skillLoaderTool,
+  sandboxReadTool,
+  sandboxRuntime,
+} from '../src/tools/sandbox/tool';
 import { ToolDeclarationCatalog } from '../src/tools/register';
 import { bindToolRuntime } from '../src/tools/registry';
 import { ToolServiceResolver } from '../src/tools/service-resolver';
+import { createSandboxToolService, sandboxService } from '../src/tools/sandbox/service';
 import type { SandboxToolCall } from '../src/tools/sandbox/contract';
 
 const execFileAsync = promisify(execFile);
@@ -27,28 +32,6 @@ const sandboxBinary = join(
   process.platform === 'win32' ? 'chatbrowserx-sandbox.exe' : 'chatbrowserx-sandbox',
 );
 let currentStage = 'initialize';
-
-class MemoryStorage {
-  readonly #values = new Map<string, unknown>();
-
-  async get(keys?: string | readonly string[]): Promise<Record<string, unknown>> {
-    const selected =
-      keys === undefined ? [...this.#values.keys()] : typeof keys === 'string' ? [keys] : [...keys];
-    return Object.fromEntries(
-      selected.flatMap((key) =>
-        this.#values.has(key) ? ([[key, this.#values.get(key)]] as const) : [],
-      ),
-    );
-  }
-
-  async set(items: Record<string, unknown>): Promise<void> {
-    for (const [key, value] of Object.entries(items)) this.#values.set(key, value);
-  }
-
-  async remove(keys: string | readonly string[]): Promise<void> {
-    for (const key of typeof keys === 'string' ? [keys] : keys) this.#values.delete(key);
-  }
-}
 
 async function availablePort(): Promise<number> {
   const server = createServer();
@@ -177,26 +160,27 @@ async function checkSandbox(): Promise<void> {
       },
       getExecution: (executionId, signal) => client.getExecution(executionId, signal),
     };
-    const clock = { now: () => Date.now() };
-    const catalog = new SkillCatalog(countedClient, settings, new MemoryStorage(), clock);
     const executor = new SandboxToolExecutor(countedClient);
     const signal = new AbortController().signal;
     const toolCatalog = new ToolDeclarationCatalog();
+    toolCatalog.register(skillLoaderTool, sandboxRuntime);
     toolCatalog.register(sandboxReadTool, sandboxRuntime);
     toolCatalog.register(sandboxExecTool, sandboxRuntime);
-    const toolContract = await bindToolRuntime(
-      toolCatalog.seal(),
-      new ToolServiceResolver(),
-    ).contract({ sandboxAvailable: true });
+    const services = new ToolServiceResolver();
+    services.bind(sandboxService, createSandboxToolService(executor));
+    const runtime = bindToolRuntime(toolCatalog.seal(), services);
 
-    currentStage = 'discover catalog';
-    const firstCatalog = await catalog.get(signal);
-    assert.equal(firstCatalog?.entries.length, 1);
-    assert.equal(firstCatalog.entries[0]?.name, 'fixture-skill');
-    assert.equal(firstCatalog.entries[0]?.path, skillPath);
+    currentStage = 'load Skill prompt';
+    const toolContract = await runtime.contract({}, signal);
+    assert.deepEqual(
+      toolContract.definitions.map(({ name }) => name),
+      ['sandbox_read', 'sandbox_exec'],
+    );
+    assert.match(toolContract.systemPrompt, /fixture-skill/);
+    assert.equal(toolContract.systemPrompt.includes(skillPath), true);
     assert.equal(requestCount, 1);
-    const cachedCatalog = await catalog.get(signal);
-    assert.deepEqual(cachedCatalog, firstCatalog);
+    const nextContract = await runtime.contract({}, signal);
+    assert.equal(nextContract.systemPrompt, toolContract.systemPrompt);
     assert.equal(requestCount, 1);
 
     currentStage = 'read Skill';

@@ -17,15 +17,7 @@ export function bindToolRuntime(
   services: ToolServiceResolver,
 ): ToolRuntimePort {
   const declarations = tools.map((tool) => tool.declaration);
-  const byName = new Map(declarations.map((declaration) => [declaration.name, declaration]));
-  const runtimeByDeclaration = new Map(
-    tools.flatMap(({ declaration, runtime }) =>
-      runtime === undefined ? [] : [[declaration.name, runtime] as const],
-    ),
-  );
-  const runtimes = [
-    ...new Set(tools.flatMap(({ runtime }) => (runtime === undefined ? [] : [runtime]))),
-  ];
+  const byName = new Map(tools.map((tool) => [tool.declaration.name, tool]));
   const grouped = new Map<ToolRuntimeHooks, ErasedDeclaration[]>();
   const groups: {
     readonly runtime?: ToolRuntimeHooks;
@@ -45,6 +37,7 @@ export function bindToolRuntime(
       declarationsForRuntime.push(declaration);
     }
   }
+  const runtimes = groups.flatMap(({ runtime }) => (runtime === undefined ? [] : [runtime]));
 
   const parse = (
     declaration: ErasedDeclaration,
@@ -59,9 +52,9 @@ export function bindToolRuntime(
   };
 
   const declarationFor = (name: string): ErasedDeclaration => {
-    const declaration = byName.get(name);
-    if (declaration === undefined) throw new Error(`Tool is not registered: ${name}`);
-    return declaration;
+    const tool = byName.get(name);
+    if (tool === undefined) throw new Error(`Tool is not registered: ${name}`);
+    return tool.declaration;
   };
 
   return {
@@ -77,8 +70,7 @@ export function bindToolRuntime(
 
     async preflight(call, context, signal) {
       return (
-        (await runtimeByDeclaration.get(call.name)?.preflight?.(call, context, services, signal)) ??
-        null
+        (await byName.get(call.name)?.runtime?.preflight?.(call, context, services, signal)) ?? null
       );
     },
 
@@ -91,7 +83,7 @@ export function bindToolRuntime(
     },
 
     policyFor(name) {
-      return byName.get(name)?.policy ?? null;
+      return byName.get(name)?.declaration.policy ?? null;
     },
 
     canRecover(name) {
@@ -101,14 +93,11 @@ export function bindToolRuntime(
     callsUsed(name, context) {
       const declaration = declarationFor(name);
       if (declaration.callsUsed !== undefined) return declaration.callsUsed(context);
-      const results = Array.isArray(context.toolResults) ? context.toolResults : [];
+      const results = context.toolResults ?? [];
       return results.filter(
         (result) =>
-          typeof result === 'object' &&
-          result !== null &&
-          'toolName' in result &&
-          typeof result.toolName === 'string' &&
-          byName.get(result.toolName)?.policy.budgetGroup === declaration.policy.budgetGroup,
+          byName.get(result.toolName)?.declaration.policy.budgetGroup ===
+          declaration.policy.budgetGroup,
       ).length;
     },
 
@@ -120,15 +109,13 @@ export function bindToolRuntime(
       const available = new Map<string, ErasedDeclaration>();
       const definitions = [];
       const forced: string[] = [];
-      const instructions = new Set<string>();
+      const toolSystemPrompts: string[] = [];
       let preparedContext = context;
       for (const group of groups) {
         const preparation = await group.runtime?.prepare?.(preparedContext, services, signal);
         if (preparation?.context !== undefined) {
           preparedContext = { ...preparedContext, ...preparation.context };
         }
-        for (const instruction of preparation?.instructions ?? []) instructions.add(instruction);
-        let exposed = false;
         for (const declaration of group.declarations) {
           if ((await declaration.available?.(preparedContext)) === false) continue;
           const exposure =
@@ -136,16 +123,15 @@ export function bindToolRuntime(
               ? { definition: declaration.definition }
               : await declaration.model(preparedContext);
           if (exposure === null) continue;
-          exposed = true;
           available.set(declaration.name, declaration);
           definitions.push(exposure.definition);
           if (exposure.force === true) forced.push(declaration.name);
-          for (const instruction of exposure.instructions ?? []) instructions.add(instruction);
         }
-        if (exposed) {
-          for (const instruction of group.runtime?.instructions ?? []) {
-            instructions.add(instruction);
-          }
+        if (group.runtime?.system_prompt !== undefined) {
+          const prompt = (
+            await group.runtime.system_prompt(preparedContext, services, signal)
+          )?.trim();
+          if (prompt) toolSystemPrompts.push(prompt);
         }
         if (forced.length > 0) break;
       }
@@ -156,7 +142,7 @@ export function bindToolRuntime(
         ...(forced[0] === undefined
           ? {}
           : { toolChoice: { type: 'function' as const, name: forced[0] } }),
-        instructions: Object.freeze([...instructions]),
+        systemPrompt: toolSystemPrompts.join('\n\n'),
         parse(source) {
           const declaration = available.get(source.name);
           if (declaration === undefined) {

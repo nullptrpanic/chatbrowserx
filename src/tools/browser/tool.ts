@@ -1,13 +1,11 @@
 import { register } from '../register';
 import type { ToolRuntimeHooks } from '../types';
-import { BROWSER_TOOL_DEFINITIONS, type BrowserToolName } from './contract';
+import { BROWSER_TOOL_SPECS } from './contract';
 import { browserTool } from './declaration';
 import { browserPreflight } from './lifecycle';
-import { BROWSER_EXECUTION_POLICY } from './policy';
 import { browserService } from './service';
 
 export const browserRuntime = {
-  instructions: [BROWSER_EXECUTION_POLICY],
   preflight(call, context) {
     return browserPreflight(call, context);
   },
@@ -23,6 +21,6 @@ export const browserRuntime = {
   },
 } satisfies ToolRuntimeHooks;
 
-for (const { name } of BROWSER_TOOL_DEFINITIONS) {
-  register(browserTool(name as BrowserToolName), browserRuntime);
+for (const [order, spec] of BROWSER_TOOL_SPECS.entries()) {
+  register(browserTool(spec, order), browserRuntime);
 }

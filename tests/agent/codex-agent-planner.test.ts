@@ -3,7 +3,6 @@ import {
   ModelTurnPlanner,
   type ModelTurnPlannerDependencies,
 } from '../../src/agent/model/model-turn-planner';
-import { BROWSER_EXECUTION_POLICY } from '../../src/tools/browser/policy';
 import type { AgentPlanInput } from '../../src/agent/execution-types';
 import type { AttachmentRepository } from '../../src/persistence/attachment-repository';
 import type { ConversationRepository } from '../../src/persistence/conversation-repository';
@@ -25,7 +24,7 @@ import { ToolServiceResolver } from '../../src/tools/service-resolver';
 import { tavilyService } from '../../src/tools/tavily/service';
 import { createSandboxToolService, sandboxService } from '../../src/tools/sandbox/service';
 import { historyService } from '../../src/tools/history/service';
-import type { SkillCatalogPort } from '../../src/sandbox/skill-catalog';
+import type { SandboxExecutionPort } from '../../src/sandbox/sandbox-tool-executor';
 
 const TASK: Task = {
   id: 'task_1',
@@ -97,12 +96,12 @@ const USER_MESSAGE: MessageRecord = {
 /** Injects the fixed test model while exercising the provider-neutral planner implementation. */
 type TestPlannerDependencies = Omit<ModelTurnPlannerDependencies, 'model' | 'tools'> & {
   readonly tavilyAvailability: { isConfigured(): Promise<boolean> };
-  readonly skillCatalog?: SkillCatalogPort;
+  readonly sandbox?: SandboxExecutionPort;
 };
 
 class CodexAgentPlanner extends ModelTurnPlanner {
   constructor(dependencies: TestPlannerDependencies) {
-    const { tavilyAvailability, skillCatalog, ...plannerDependencies } = dependencies;
+    const { tavilyAvailability, sandbox, ...plannerDependencies } = dependencies;
     const services = new ToolServiceResolver();
     services.bind(tavilyService, {
       isConfigured: () => tavilyAvailability.isConfigured(),
@@ -110,17 +109,8 @@ class CodexAgentPlanner extends ModelTurnPlanner {
       extract: async () => ({ results: [], truncated: false }),
       crawl: async () => ({ results: [], truncated: false }),
     });
-    if (skillCatalog !== undefined) {
-      services.bind(
-        sandboxService,
-        createSandboxToolService(
-          {
-            execute: async () => '',
-            recover: async () => ({ status: 'not_found' }),
-          },
-          skillCatalog,
-        ),
-      );
+    if (sandbox !== undefined) {
+      services.bind(sandboxService, createSandboxToolService(sandbox));
     }
     services.bind(historyService, {
       readHistory: async () => ({
@@ -198,6 +188,25 @@ function provider(events: () => AsyncGenerator<ModelStreamEvent>): {
         return events();
       },
     },
+  };
+}
+
+/** Returns the Sandbox discovery envelope consumed by the hidden Skill loader. */
+function sandboxWithSkills(
+  entries: readonly Readonly<{ name: string; description: string; path: string }>[],
+): SandboxExecutionPort & { readonly execute: ReturnType<typeof vi.fn> } {
+  const stdout = [
+    ...entries.flatMap(({ name, description, path }) => [
+      path,
+      `name: ${name}\ndescription: ${JSON.stringify(description)}`,
+    ]),
+    '__CHATBROWSERX_SCAN_END__',
+    '0',
+    '',
+  ].join('\0');
+  return {
+    execute: vi.fn(async () => JSON.stringify({ code: 0, stdout, stderr: '', truncated: false })),
+    recover: async () => ({ status: 'not_found' }),
   };
 }
 
@@ -431,7 +440,7 @@ describe('CodexAgentPlanner', () => {
     expect(model.requests[0]).toMatchObject({
       model: 'gpt-5.6-terra',
       reasoningEffort: 'medium',
-      systemPrompt: `Custom safe preference.\n\n${BROWSER_EXECUTION_POLICY}`,
+      systemPrompt: 'Custom safe preference.',
       input: [
         {
           type: 'message',
@@ -620,7 +629,7 @@ describe('CodexAgentPlanner', () => {
     ]);
   });
 
-  it('adds the shared browser policy once when Sandbox is not configured', async () => {
+  it('sends only the custom prompt when Sandbox Skills are unavailable', async () => {
     const model = provider(async function* () {
       yield { type: 'response.started', responseId: 'resp_without_sandbox' };
       yield { type: 'text.delta', delta: 'No Sandbox.' };
@@ -631,14 +640,9 @@ describe('CodexAgentPlanner', () => {
       };
     });
     const storage = repositories();
-    const skillCatalog = {
-      get: vi.fn(async () => null),
-      invalidate: vi.fn(async () => undefined),
-    };
     const planner = new CodexAgentPlanner({
       provider: model.instance,
       tavilyAvailability: CONFIGURED_TAVILY,
-      skillCatalog,
       settings: settings(),
       conversations: storage.conversations,
       tasks: storage.tasks,
@@ -649,10 +653,7 @@ describe('CodexAgentPlanner', () => {
 
     await collect(planner);
 
-    expect(skillCatalog.get).toHaveBeenCalledOnce();
-    expect(model.requests[0]?.systemPrompt).toBe(
-      `Custom safe preference.\n\n${BROWSER_EXECUTION_POLICY}`,
-    );
+    expect(model.requests[0]?.systemPrompt).toBe('Custom safe preference.');
     expect(model.requests[0]?.tools.map(({ name }) => name)).toEqual([
       ...FIRST_TURN_BROWSER_TOOL_NAMES,
       'tavily_search',
@@ -661,7 +662,7 @@ describe('CodexAgentPlanner', () => {
     ]);
   });
 
-  it('registers progressive Skill discovery without injecting the catalog', async () => {
+  it('adds all available Sandbox Skills to the custom prompt', async () => {
     const model = provider(async function* () {
       yield { type: 'response.started', responseId: 'resp_sandbox' };
       yield {
@@ -685,24 +686,22 @@ describe('CodexAgentPlanner', () => {
       };
     });
     const storage = repositories();
-    const skillCatalog = {
-      get: vi.fn(async () => ({
-        entries: [
-          {
-            name: 'example',
-            description: 'Run the example workflow.',
-            path: '/skills/example/SKILL.md',
-          },
-        ],
-        truncated: false,
-        refreshedAt: 500,
-      })),
-      invalidate: vi.fn(async () => undefined),
-    };
+    const sandbox = sandboxWithSkills([
+      {
+        name: 'example',
+        description: 'Run the example workflow.',
+        path: '/home/test/.codex/skills/example/SKILL.md',
+      },
+      {
+        name: 'other',
+        description: 'Run an unrelated workflow.',
+        path: '/home/test/.codex/skills/other/SKILL.md',
+      },
+    ]);
     const planner = new CodexAgentPlanner({
       provider: model.instance,
       tavilyAvailability: CONFIGURED_TAVILY,
-      skillCatalog,
+      sandbox,
       settings: settings(),
       conversations: storage.conversations,
       tasks: storage.tasks,
@@ -727,13 +726,34 @@ describe('CodexAgentPlanner', () => {
       'tavily_search',
       'tavily_extract',
       'tavily_crawl',
-      'skill_search',
       'sandbox_read',
       'sandbox_exec',
     ]);
-    expect(model.requests[0]?.systemPrompt.startsWith('Custom safe preference.\n\n')).toBe(true);
-    expect(model.requests[0]?.systemPrompt).toContain(BROWSER_EXECUTION_POLICY);
-    expect(model.requests[0]?.systemPrompt).not.toContain('Run the example workflow.');
+    expect(model.requests[0]?.systemPrompt).toMatch(/^Custom safe preference\.\n\nSandbox Skills/);
+    expect(model.requests[0]?.systemPrompt).toContain('Run the example workflow.');
+    expect(model.requests[0]?.systemPrompt).toContain('/home/test/.codex/skills/example/SKILL.md');
+    expect(model.requests[0]?.systemPrompt).toContain('Run an unrelated workflow.');
+    expect(model.requests[0]?.systemPrompt).not.toContain('Browser evidence scope');
+
+    await collect(planner, new AbortController().signal, {
+      ...PLAN_INPUT,
+      toolResults: [
+        completedResult({
+          resultId: 'toolResult_skill',
+          callId: 'call_skill',
+          toolName: 'sandbox_read',
+          argumentsJson: JSON.stringify({
+            path: '/home/test/.codex/skills/example/SKILL.md',
+            startLine: 1,
+            maxLines: 400,
+          }),
+          output: JSON.stringify({ code: 0, stdout: '# Example', stderr: '' }),
+        }),
+      ],
+    });
+
+    expect(model.requests[1]?.systemPrompt).toContain('Run the example workflow.');
+    expect(model.requests[1]?.systemPrompt).toContain('Run an unrelated workflow.');
   });
 
   it('replays the complete local task on every model turn', async () => {
@@ -1877,18 +1897,11 @@ describe('CodexAgentPlanner', () => {
       encryptedContent: 'opaque-unfinished-scroll',
     }));
     const storage = repositories();
-    const skillCatalog = {
-      get: vi.fn(async () => ({
-        entries: [],
-        truncated: false,
-        refreshedAt: 500,
-      })),
-      invalidate: vi.fn(async () => undefined),
-    };
+    const sandbox = sandboxWithSkills([]);
     const planner = new CodexAgentPlanner({
       provider: { ...model.instance, compact },
       tavilyAvailability: CONFIGURED_TAVILY,
-      skillCatalog,
+      sandbox,
       settings: settings(),
       conversations: storage.conversations,
       tasks: storage.tasks,
@@ -1957,7 +1970,7 @@ describe('CodexAgentPlanner', () => {
     ]);
 
     expect(compact).not.toHaveBeenCalled();
-    expect(skillCatalog.get).not.toHaveBeenCalled();
+    expect(sandbox.execute).not.toHaveBeenCalled();
     expect(model.requests).toHaveLength(1);
     expect(model.requests[0]?.toolChoice).toEqual({
       type: 'function',

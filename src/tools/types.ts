@@ -1,5 +1,8 @@
 import type { z } from 'zod';
-import type { ContinuationItem } from '../tasks/continuation-types';
+import type { Checkpoint } from '../tasks/checkpoint-types';
+import type { ContinuationItem, PendingToolCall } from '../tasks/continuation-types';
+import type { MaterializedToolResult } from '../tasks/tool-result-types';
+import type { Task } from '../tasks/task-types';
 import type { ModelToolChoice, ModelToolDefinition } from './model-tool';
 import type { ModelToolCallSource } from './tool-call-envelope';
 import type { ToolServiceResolver } from './service-resolver';
@@ -14,7 +17,19 @@ export interface ToolExecutionPolicy {
   readonly ambiguousMessage?: string;
 }
 
-export type ToolRuntimeContext = Readonly<Record<string, unknown>>;
+export interface ToolRuntimeContext {
+  readonly task?: Task;
+  readonly checkpoint?: Checkpoint;
+  readonly toolResults?: readonly MaterializedToolResult[];
+  readonly conversationTasks?: readonly Task[];
+  readonly executionState?: PendingToolCall['executionState'];
+  readonly resultId?: string;
+  readonly currentTabId?: number | null;
+  readonly sessionOwnerId?: string;
+  readonly availableAssetIds?: readonly string[];
+  readonly executionId?: string;
+  readonly [name: string]: unknown;
+}
 
 export interface ValidatedToolCall<TArguments = unknown> extends ModelToolCallSource {
   readonly arguments: TArguments;
@@ -23,7 +38,6 @@ export interface ValidatedToolCall<TArguments = unknown> extends ModelToolCallSo
 export interface ToolModelExposure {
   readonly definition: ModelToolDefinition;
   readonly force?: boolean;
-  readonly instructions?: readonly string[];
 }
 
 export interface ToolExecutionResult {
@@ -107,12 +121,15 @@ export interface ToolDeclaration<TArguments = unknown> {
 
 export interface ToolPreparation {
   readonly context?: ToolRuntimeContext;
-  readonly instructions?: readonly string[];
 }
 
 /** Shared lifecycle for independently registered tools from the same directory. */
 export interface ToolRuntimeHooks {
-  readonly instructions?: readonly string[];
+  system_prompt?(
+    context: ToolRuntimeContext,
+    services: ToolServiceResolver,
+    signal: AbortSignal,
+  ): string | null | Promise<string | null>;
   prepare?(
     context: ToolRuntimeContext,
     services: ToolServiceResolver,
@@ -141,7 +158,7 @@ export interface RegisteredTool {
 export interface ModelToolContract {
   readonly definitions: readonly ModelToolDefinition[];
   readonly toolChoice?: ModelToolChoice;
-  readonly instructions: readonly string[];
+  readonly systemPrompt: string;
   parse(source: ModelToolCallSource): ValidatedToolCall;
 }
 

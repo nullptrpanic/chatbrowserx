@@ -5,7 +5,7 @@ import type { MaterializedToolResult } from '../../tasks/tool-result-types';
 import type { ModelToolChoice, ModelToolDefinition } from '../model-tool';
 import {
   BROWSER_TOOL_DEFINITIONS,
-  BROWSER_TOOL_DEFINITION_BY_NAME,
+  BROWSER_TOOL_SPEC_BY_NAME,
   type BrowserToolName,
 } from './contract';
 
@@ -493,7 +493,7 @@ function coverageScrollTargets(data: Readonly<Record<string, unknown>>): readonl
 }
 
 function browserToolName(value: string): BrowserToolName | null {
-  return Object.hasOwn(BROWSER_TOOL_DEFINITION_BY_NAME, value) ? (value as BrowserToolName) : null;
+  return Object.hasOwn(BROWSER_TOOL_SPEC_BY_NAME, value) ? (value as BrowserToolName) : null;
 }
 
 function selectableRefFromEntry(value: unknown): string | null {
@@ -708,7 +708,7 @@ function constrainedContinuationDefinition(
   continuation: BrowserScrollContinuation,
 ): ModelToolDefinition {
   const name = continuation.next === 'inspect' ? 'browser_inspect' : 'browser_scroll';
-  const definition = BROWSER_TOOL_DEFINITION_BY_NAME[name];
+  const definition = BROWSER_TOOL_SPEC_BY_NAME[name].definition;
   const properties = definition.parameters.properties as Readonly<Record<string, unknown>>;
   const hasRemainingDistance =
     continuation.remainingDeltaX !== 0 || continuation.remainingDeltaY !== 0;

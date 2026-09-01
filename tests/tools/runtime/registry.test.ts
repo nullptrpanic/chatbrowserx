@@ -108,4 +108,49 @@ describe('bindToolRuntime', () => {
       second.execute((await second.contract({})).parse(source), {}, AbortSignal.timeout(1_000)),
     ).resolves.toEqual({ output: 'second' });
   });
+
+  it('combines tool-owned system prompt contributions in registration order', async () => {
+    const catalog = new ToolDeclarationCatalog();
+    for (const [name, prompt] of [
+      ['first_tool', 'First prompt.'],
+      ['second_tool', 'Second prompt.'],
+    ] as const) {
+      catalog.register(
+        {
+          name,
+          definition: strictFunctionTool(name, name, {}),
+          schema: z.object({}).strict(),
+          policy: { budgetGroup: name, maxCalls: 1 },
+          execute: async () => ({ output: '' }),
+        },
+        { system_prompt: () => prompt },
+      );
+    }
+    const runtime = bindToolRuntime(catalog.seal(), new ToolServiceResolver());
+
+    await expect(runtime.contract({})).resolves.toMatchObject({
+      systemPrompt: 'First prompt.\n\nSecond prompt.',
+    });
+  });
+
+  it('keeps an unavailable prompt-only tool hidden while retaining its system prompt', async () => {
+    const catalog = new ToolDeclarationCatalog();
+    catalog.register(
+      {
+        name: 'hidden_prompt_tool',
+        definition: strictFunctionTool('hidden_prompt_tool', 'hidden prompt tool', {}),
+        schema: z.object({}).strict(),
+        policy: { budgetGroup: 'hidden_prompt', maxCalls: 1 },
+        available: () => false,
+        execute: async () => ({ output: '' }),
+      },
+      { system_prompt: () => 'Hidden prompt.' },
+    );
+    const runtime = bindToolRuntime(catalog.seal(), new ToolServiceResolver());
+
+    await expect(runtime.contract({})).resolves.toMatchObject({
+      definitions: [],
+      systemPrompt: 'Hidden prompt.',
+    });
+  });
 });

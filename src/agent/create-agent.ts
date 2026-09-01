@@ -10,7 +10,6 @@ import {
 } from '../providers/codex/codex-constants';
 import { CodexProvider } from '../providers/codex/codex-provider';
 import type { TavilyExecutionPort } from '../tools/tavily/types';
-import type { SkillCatalogPort } from '../sandbox/skill-catalog';
 import type { SandboxExecutionPort } from '../sandbox/sandbox-tool-executor';
 import type { IdGenerator } from '../shared/ids';
 import type { Clock } from '../shared/time';
@@ -37,7 +36,6 @@ export interface AgentHost {
   readonly attachments: Pick<AttachmentRepository, 'get'>;
   readonly credentials: CredentialStore;
   readonly settings: Pick<SettingsStore, 'get'>;
-  readonly skillCatalog?: SkillCatalogPort;
   readonly browser: BrowserExecutionPort;
   readonly tavily: TavilyExecutionPort;
   readonly sandbox?: SandboxExecutionPort;
@@ -57,7 +55,7 @@ export async function createAgent(host: AgentHost): Promise<Agent> {
   services.bind(tavilyService, host.tavily);
   if (host.history !== undefined) services.bind(historyService, host.history);
   if (host.sandbox !== undefined) {
-    services.bind(sandboxService, createSandboxToolService(host.sandbox, host.skillCatalog));
+    services.bind(sandboxService, createSandboxToolService(host.sandbox));
   }
   const tools = bindToolRuntime(discoverTools(), services);
   const commands = new TaskCommandService(host.tasks, host.clock, host.ids, host.conversations);

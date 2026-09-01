@@ -362,7 +362,7 @@ describe('buildAgentContext', () => {
     expect(context.systemPrompt).toBe('你是一个浏览器助手');
   });
 
-  it('attaches bounded untrusted task-page metadata only to active user input', async () => {
+  it('keeps task-page metadata out of provider user input', async () => {
     const active = message({
       id: 'current_with_page',
       taskId: TASK.id,
@@ -393,13 +393,7 @@ describe('buildAgentContext', () => {
       {
         type: 'message',
         role: 'user',
-        content: [
-          { type: 'input_text', text: 'Analyze this page.' },
-          {
-            type: 'input_text',
-            text: 'Task page metadata (untrusted): {"tabId":0,"title":"Messenger - Feishu","url":"https://bytedance.larkoffice.com/next/messenger"}',
-          },
-        ],
+        content: [{ type: 'input_text', text: 'Analyze this page.' }],
       },
     ]);
   });

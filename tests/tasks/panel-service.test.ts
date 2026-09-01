@@ -1295,7 +1295,7 @@ describe('PanelService', () => {
     );
   });
 
-  it('saves optional Sandbox settings and invalidates metadata', async () => {
+  it('saves optional Sandbox settings and credentials', async () => {
     const fixture = buildFixture();
     fixture.dependencies.settings.get.mockResolvedValue({
       model: 'gpt-5.6-terra',
@@ -1306,11 +1306,7 @@ describe('PanelService', () => {
       sandboxServer: 'https://old-sandbox.example.com',
     });
     fixture.dependencies.credentials.getSandboxToken.mockResolvedValue('stored-sandbox-token');
-    const invalidate = vi.fn(async () => undefined);
-    const service = new PanelService({
-      ...fixture.dependencies,
-      sandboxCatalog: { invalidate },
-    });
+    const service = new PanelService(fixture.dependencies);
 
     await service.saveSettings({
       reasoningEffort: 'high',
@@ -1329,7 +1325,6 @@ describe('PanelService', () => {
     expect(fixture.dependencies.credentials.setSandboxToken).toHaveBeenCalledWith(
       'new-sandbox-token',
     );
-    expect(invalidate).toHaveBeenCalledOnce();
   });
 
   it('cancels unfinished work before deleting the complete conversation aggregate', async () => {

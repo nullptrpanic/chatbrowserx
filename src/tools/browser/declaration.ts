@@ -1,12 +1,10 @@
 import { browserService } from './service';
 import {
-  BROWSER_OPERATIONS,
-  BROWSER_SCHEMAS,
-  BROWSER_TOOL_DEFINITION_BY_NAME,
-  BROWSER_TOOL_DEFINITIONS,
   SAFE_TO_REPLAY_BROWSER_TOOLS,
+  browserOperationForName,
   type BrowserToolInput,
   type BrowserToolName,
+  type BrowserToolSpec,
   type ParsedBrowserToolCall,
 } from './contract';
 import type { ModelToolDefinition } from '../model-tool';
@@ -25,20 +23,8 @@ const contractCache = new WeakMap<
 >();
 
 function browserState(context: ToolRuntimeContext): BrowserToolState | null {
-  const checkpoint = context.checkpoint;
-  if (
-    typeof checkpoint !== 'object' ||
-    checkpoint === null ||
-    !('continuationItems' in checkpoint) ||
-    !Array.isArray(checkpoint.continuationItems) ||
-    !Array.isArray(context.toolResults)
-  ) {
-    return null;
-  }
-  return {
-    checkpoint: checkpoint as BrowserToolState['checkpoint'],
-    toolResults: context.toolResults as BrowserToolState['toolResults'],
-  };
+  if (context.checkpoint === undefined || context.toolResults === undefined) return null;
+  return { checkpoint: context.checkpoint, toolResults: context.toolResults };
 }
 
 function browserContract(context: ToolRuntimeContext): BrowserToolContract | null {
@@ -72,13 +58,17 @@ function browserDefinition(
 }
 
 /** Builds one independently registered browser call over the shared browser state machine. */
-export function browserTool(name: BrowserToolName): ToolDeclaration<BrowserToolInput> {
+export function browserTool(
+  spec: BrowserToolSpec,
+  order: number,
+): ToolDeclaration<BrowserToolInput> {
+  const { name } = spec;
   const replay = SAFE_TO_REPLAY_BROWSER_TOOLS.has(name) ? 'safe' : 'forbidden';
   return {
     name,
-    definition: BROWSER_TOOL_DEFINITION_BY_NAME[name],
-    schema: BROWSER_SCHEMAS[name],
-    order: BROWSER_TOOL_DEFINITIONS.findIndex((definition) => definition.name === name),
+    definition: spec.definition,
+    schema: spec.schema,
+    order,
     policy: {
       budgetGroup: 'browser',
       maxCalls: 256,
@@ -98,7 +88,7 @@ export function browserTool(name: BrowserToolName): ToolDeclaration<BrowserToolI
           : {}),
       };
     },
-    ...(name === BROWSER_TOOL_DEFINITIONS[0]?.name
+    ...(order === 0
       ? {
           blocksCompletion(context: ToolRuntimeContext) {
             const state = browserState(context);
@@ -107,36 +97,26 @@ export function browserTool(name: BrowserToolName): ToolDeclaration<BrowserToolI
         }
       : {}),
     callsUsed(context) {
-      const checkpoint = context.checkpoint;
-      return typeof checkpoint === 'object' &&
-        checkpoint !== null &&
-        'browserToolCallsInAttempt' in checkpoint &&
-        typeof checkpoint.browserToolCallsInAttempt === 'number'
-        ? checkpoint.browserToolCallsInAttempt
-        : 0;
+      return context.checkpoint?.browserToolCallsInAttempt ?? 0;
     },
     createCall: (call) => ({
       ...call,
       family: 'browser' as const,
-      operation: BROWSER_OPERATIONS[name],
+      operation: browserOperationForName(name),
       replay: replay === 'safe' ? ('safe' as const) : ('mutation' as const),
     }),
     async execute(call, context, services, signal) {
-      const currentTabId =
-        typeof context.currentTabId === 'number' || context.currentTabId === null
-          ? context.currentTabId
-          : null;
-      const sessionOwnerId =
-        typeof context.sessionOwnerId === 'string' ? context.sessionOwnerId : undefined;
-      const availableAssetIds = Array.isArray(context.availableAssetIds)
-        ? context.availableAssetIds.filter((value): value is string => typeof value === 'string')
-        : undefined;
+      const currentTabId = context.currentTabId ?? null;
       const result = await services
         .get(browserService)
         .execute(call as ParsedBrowserToolCall, signal, {
           currentTabId,
-          ...(sessionOwnerId === undefined ? {} : { sessionOwnerId }),
-          ...(availableAssetIds === undefined ? {} : { availableAssetIds }),
+          ...(context.sessionOwnerId === undefined
+            ? {}
+            : { sessionOwnerId: context.sessionOwnerId }),
+          ...(context.availableAssetIds === undefined
+            ? {}
+            : { availableAssetIds: context.availableAssetIds }),
         });
       return {
         ...result,

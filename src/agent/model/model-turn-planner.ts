@@ -151,7 +151,7 @@ export class ModelTurnPlanner implements AgentPlanner {
         attachments: this.#dependencies.attachments,
       },
     );
-    const systemPrompt = [context.systemPrompt, ...registeredContract.instructions]
+    const systemPrompt = [context.systemPrompt, registeredContract.systemPrompt]
       .filter((section) => section.length > 0)
       .join('\n\n');
     const reusableMessage = await this.#prepareReusableMessage(input, conversationView);

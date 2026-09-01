@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest';
 import { discoverToolDeclarations } from '../../../src/tools/discover';
 
 describe('built-in tool discovery', () => {
-  it('discovers built-in tools in stable model-visible order', async () => {
+  it('discovers registered tools in stable order', async () => {
     const declarations = await discoverToolDeclarations();
 
     expect(declarations.map(({ name }) => name)).toEqual([
@@ -36,7 +36,7 @@ describe('built-in tool discovery', () => {
       'tavily_search',
       'tavily_extract',
       'tavily_crawl',
-      'skill_search',
+      'skill_loader',
       'sandbox_read',
       'sandbox_exec',
       'history_read',

@@ -23,17 +23,16 @@ function contextState(context: ToolRuntimeContext): {
   readonly resultId: string;
 } {
   if (
-    typeof context.checkpoint !== 'object' ||
-    context.checkpoint === null ||
-    !Array.isArray(context.toolResults) ||
-    typeof context.resultId !== 'string' ||
+    context.checkpoint === undefined ||
+    context.toolResults === undefined ||
+    context.resultId === undefined ||
     context.resultId.length === 0
   ) {
     throw new Error('Context commit execution state is unavailable.');
   }
   return {
-    checkpoint: context.checkpoint as Checkpoint,
-    toolResults: context.toolResults as readonly MaterializedToolResult[],
+    checkpoint: context.checkpoint,
+    toolResults: context.toolResults,
     resultId: context.resultId,
   };
 }

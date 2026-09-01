@@ -1,29 +1,36 @@
-import { describe, expect, it } from 'vitest';
-import {
-  sandboxExecDefinition,
-  sandboxReadDefinition,
-  skillSearchDefinition,
-} from '../../../src/tools/sandbox/contract';
+import { describe, expect, it, vi } from 'vitest';
+import { sandboxExecDefinition, sandboxReadDefinition } from '../../../src/tools/sandbox/contract';
 import {
   sandboxExecTool,
+  skillLoaderTool,
   sandboxReadTool,
   sandboxRuntime,
-  skillSearchTool,
 } from '../../../src/tools/sandbox/tool';
 import { ToolDeclarationCatalog } from '../../../src/tools/register';
 import { bindToolRuntime } from '../../../src/tools/registry';
 import { ToolServiceResolver } from '../../../src/tools/service-resolver';
+import { createSandboxToolService, sandboxService } from '../../../src/tools/sandbox/service';
 
-const SANDBOX_TOOL_DEFINITIONS = [
-  skillSearchDefinition,
-  sandboxReadDefinition,
-  sandboxExecDefinition,
-];
+const SANDBOX_TOOL_DEFINITIONS = [sandboxReadDefinition, sandboxExecDefinition];
 const catalog = new ToolDeclarationCatalog();
-catalog.register(skillSearchTool, sandboxRuntime);
+catalog.register(skillLoaderTool, sandboxRuntime);
 catalog.register(sandboxReadTool, sandboxRuntime);
 catalog.register(sandboxExecTool, sandboxRuntime);
-const runtime = bindToolRuntime(catalog.seal(), new ToolServiceResolver());
+const services = new ToolServiceResolver();
+services.bind(
+  sandboxService,
+  createSandboxToolService({
+    execute: async () =>
+      JSON.stringify({
+        code: 0,
+        stdout: '__CHATBROWSERX_SCAN_END__\0' + '0\0',
+        stderr: '',
+        truncated: false,
+      }),
+    recover: async () => ({ status: 'not_found' }),
+  }),
+);
+const runtime = bindToolRuntime(catalog.seal(), services);
 
 const READ = {
   path: '/home/test/.codex/skills/example/SKILL.md',
@@ -34,12 +41,9 @@ const EXEC = {
   command: 'bash scripts/run.sh',
   cwd: '/home/test/.codex/skills/example',
 } as const;
-const SEARCH = { query: 'lark document', limit: 5 } as const;
-
 describe('SANDBOX_TOOL_DEFINITIONS', () => {
-  it('exposes exactly three strict fixed contracts with every property required', () => {
+  it('exposes exactly two strict fixed contracts with every property required', () => {
     expect(SANDBOX_TOOL_DEFINITIONS.map(({ name }) => name)).toEqual([
-      'skill_search',
       'sandbox_read',
       'sandbox_exec',
     ]);
@@ -62,7 +66,7 @@ describe('SANDBOX_TOOL_DEFINITIONS', () => {
 
     expect(serialized).not.toContain('"env"');
     expect(serialized).not.toContain('"uniqueItems"');
-    expect(SANDBOX_TOOL_DEFINITIONS[2]?.parameters).toMatchObject({
+    expect(SANDBOX_TOOL_DEFINITIONS[1]?.parameters).toMatchObject({
       properties: {
         command: { type: 'string', maxLength: 20_000 },
         cwd: { type: ['string', 'null'], maxLength: 4_096 },
@@ -73,23 +77,8 @@ describe('SANDBOX_TOOL_DEFINITIONS', () => {
 });
 
 describe('registered Sandbox tool parsing', () => {
-  it('parses searches and reads as replay-safe and execs as mutations', async () => {
-    const contract = await runtime.contract({ sandboxAvailable: true, skillSearchAvailable: true });
-    expect(
-      contract.parse({
-        callId: 'call_search',
-        name: 'skill_search',
-        argumentsJson: JSON.stringify(SEARCH),
-      }),
-    ).toEqual({
-      family: 'sandbox',
-      operation: 'skill_search',
-      replay: 'safe',
-      callId: 'call_search',
-      name: 'skill_search',
-      argumentsJson: JSON.stringify(SEARCH),
-      arguments: SEARCH,
-    });
+  it('parses reads as replay-safe and execs as mutations', async () => {
+    const contract = await runtime.contract({ sandboxAvailable: true });
     expect(
       contract.parse({
         callId: 'call_read',
@@ -176,18 +165,90 @@ describe('registered Sandbox tool parsing', () => {
       name: 'sandbox_exec',
       argumentsJson: JSON.stringify({ ...EXEC, env: { SECRET: 'value' } }),
     },
-    {
-      callId: 'call_1',
-      name: 'skill_search',
-      argumentsJson: JSON.stringify({ ...SEARCH, query: '   ' }),
-    },
-    {
-      callId: 'call_1',
-      name: 'skill_search',
-      argumentsJson: JSON.stringify({ ...SEARCH, limit: 11 }),
-    },
   ])('rejects unsupported or malformed calls', async (input) => {
-    const contract = await runtime.contract({ sandboxAvailable: true, skillSearchAvailable: true });
+    const contract = await runtime.contract({ sandboxAvailable: true });
     expect(() => contract.parse(input)).toThrow();
+  });
+
+  it('loads every Sandbox Skill into the prompt without exposing a loader or search tool', async () => {
+    const services = new ToolServiceResolver();
+    services.bind(
+      sandboxService,
+      createSandboxToolService({
+        execute: async () =>
+          JSON.stringify({
+            code: 0,
+            stdout: [
+              '/home/test/.codex/skills/example/SKILL.md',
+              'name: example\ndescription: Run the example workflow.',
+              '/home/test/.agents/skills/other/SKILL.md',
+              'name: other\ndescription: Run another workflow.',
+              '__CHATBROWSERX_SCAN_END__',
+              '0',
+              '',
+            ].join('\0'),
+            stderr: '',
+            truncated: false,
+          }),
+        recover: async () => ({ status: 'not_found' }),
+      }),
+    );
+    const availableRuntime = bindToolRuntime(catalog.seal(), services);
+
+    const contract = await availableRuntime.contract({ sandboxAvailable: false });
+
+    expect(contract.definitions.map(({ name }) => name)).toEqual(['sandbox_read', 'sandbox_exec']);
+    expect(contract.systemPrompt).toContain('Run the example workflow.');
+    expect(contract.systemPrompt).toContain('/home/test/.codex/skills/example/SKILL.md');
+    expect(contract.systemPrompt).toContain('Run another workflow.');
+    expect(contract.systemPrompt).not.toContain('skill_search');
+    expect(contract.definitions.map(({ name }) => name)).not.toContain('skill_loader');
+  });
+
+  it('stops exposing Sandbox Skills and tools when an expired snapshot cannot refresh', async () => {
+    const now = vi.spyOn(Date, 'now').mockReturnValue(10_000);
+    const execute = vi
+      .fn()
+      .mockResolvedValueOnce(
+        JSON.stringify({
+          code: 0,
+          stdout: [
+            '/home/test/.codex/skills/example/SKILL.md',
+            'name: example\ndescription: Run the example workflow.',
+            '__CHATBROWSERX_SCAN_END__',
+            '0',
+            '',
+          ].join('\0'),
+          stderr: '',
+          truncated: false,
+        }),
+      )
+      .mockRejectedValueOnce(new Error('Sandbox unavailable'));
+    const changingServices = new ToolServiceResolver();
+    changingServices.bind(
+      sandboxService,
+      createSandboxToolService({
+        execute,
+        recover: async () => ({ status: 'not_found' }),
+      }),
+    );
+    const changingRuntime = bindToolRuntime(catalog.seal(), changingServices);
+
+    try {
+      const available = await changingRuntime.contract({});
+      now.mockReturnValue(310_000);
+      const unavailable = await changingRuntime.contract({});
+
+      expect(available.definitions.map(({ name }) => name)).toEqual([
+        'sandbox_read',
+        'sandbox_exec',
+      ]);
+      expect(available.systemPrompt).toContain('Run the example workflow.');
+      expect(unavailable.definitions).toEqual([]);
+      expect(unavailable.systemPrompt).toBe('');
+      expect(execute).toHaveBeenCalledTimes(2);
+    } finally {
+      now.mockRestore();
+    }
   });
 });

@@ -3,7 +3,6 @@ import type { RegisteredTool, ToolDeclaration, ToolRuntimeHooks } from './types'
 /** Collects independently registered tools before sealing one deterministic process catalog. */
 export class ToolDeclarationCatalog {
   readonly #tools = new Map<string, RegisteredTool>();
-  readonly #declarations = new Map<string, ToolDeclaration>();
   readonly #budgetLimits = new Map<string, number>();
   #sealed: readonly RegisteredTool[] | null = null;
 
@@ -29,7 +28,7 @@ export class ToolDeclarationCatalog {
     if (declaration.name !== declaration.definition.name) {
       throw new Error('Tool declaration name must match its model definition name.');
     }
-    if (this.#declarations.has(declaration.name)) {
+    if (this.#tools.has(declaration.name)) {
       throw new Error(`Duplicate tool declaration: ${declaration.name}`);
     }
     if (
@@ -50,7 +49,6 @@ export class ToolDeclarationCatalog {
     }
 
     this.#budgetLimits.set(declaration.policy.budgetGroup, declaration.policy.maxCalls);
-    this.#declarations.set(declaration.name, declaration);
   }
 
   seal(): readonly RegisteredTool[] {

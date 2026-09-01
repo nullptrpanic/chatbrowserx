@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import {
   BROWSER_TOOL_DEFINITIONS,
+  browserOperationForName,
   parseBrowserToolCall,
 } from '../../../src/tools/browser/contract';
 
@@ -264,12 +265,11 @@ describe('BROWSER_TOOL_DEFINITIONS', () => {
     expect(mode.enum).toEqual(['content', 'interactive', 'interactive_deep', 'screenshot']);
   });
 
-  it('keeps page-wide action guards beside the tools that enforce them', () => {
+  it('keeps page-wide action guards beside the action tools that enforce them', () => {
     const definitions = new Map(
       BROWSER_TOOL_DEFINITIONS.map((definition) => [definition.name, definition.description]),
     );
 
-    expect(definitions.get('browser_inspect')).toContain('shared browser evidence-scope policy');
     expect(definitions.get('browser_click')).toContain(
       'never click same-page or table-of-contents links',
     );
@@ -342,6 +342,10 @@ describe('BROWSER_TOOL_DEFINITIONS', () => {
 });
 
 describe('parseBrowserToolCall', () => {
+  it.each(CASES)('derives the internal %s operation from its name', (name, operation) => {
+    expect(browserOperationForName(name)).toBe(operation);
+  });
+
   it.each([
     ['browser_navigate', { url: 'https://example.com/a' }],
     ['browser_reload', {}],

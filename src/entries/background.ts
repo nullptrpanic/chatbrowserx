@@ -15,7 +15,6 @@ import { IndexedDbConversationRepository } from '../persistence/conversation-rep
 import { ChromeCredentialStore } from '../persistence/credential-store';
 import { openChatBrowserDatabase } from '../persistence/open-database';
 import { ChromeSettingsStore } from '../persistence/settings-store';
-import { ChromeLocalStorageArea } from '../persistence/storage-area';
 import { IndexedDbTaskRepository } from '../persistence/task-repository';
 import { ContentScriptInstaller } from '../platform/chrome/content-script-installer';
 import { ChromePageObservationPort } from '../platform/chrome/page-observation-port';
@@ -31,7 +30,6 @@ import {
 import { TavilyClient } from '../tools/tavily/client';
 import { SandboxClient } from '../sandbox/sandbox-client';
 import { SandboxToolExecutor } from '../sandbox/sandbox-tool-executor';
-import { SkillCatalog } from '../sandbox/skill-catalog';
 import type { IdGenerator } from '../shared/ids';
 import type { Clock } from '../shared/time';
 import { PanelService } from '../tasks/panel-service';
@@ -96,12 +94,6 @@ async function createBackgroundServices(
   });
   const tavily = new TavilyClient(credentials);
   const sandboxClient = new SandboxClient(settings, credentials);
-  const sandboxCatalog = new SkillCatalog(
-    sandboxClient,
-    settings,
-    new ChromeLocalStorageArea(),
-    systemClock,
-  );
   const sandbox = new SandboxToolExecutor(sandboxClient);
   const debuggerTransport = new ChromeDebuggerTransport();
   const browserSessions = new TargetSessionRegistry(debuggerTransport);
@@ -149,7 +141,6 @@ async function createBackgroundServices(
     attachments,
     credentials,
     settings,
-    skillCatalog: sandboxCatalog,
     browser,
     tavily,
     sandbox,
@@ -164,7 +155,6 @@ async function createBackgroundServices(
     attachments,
     settings,
     credentials,
-    sandboxCatalog,
     agent,
     tabs: chrome.tabs,
     permissions: {
