@@ -41,6 +41,7 @@ extensionTest(
         contractVersion: 1,
         name: 'environment-rebuild-smoke',
         description: 'Verifies the complete reconstructed environment boundary.',
+        exclusiveResources: [],
         startUrl: `${origin}/workspace`,
         expectedOrigin: origin,
         taskText: 'Do not submit this fixture task.',

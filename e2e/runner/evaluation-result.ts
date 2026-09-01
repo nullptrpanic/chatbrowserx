@@ -1,7 +1,8 @@
 import { mkdir, stat, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { z } from 'zod';
-import { parseJsonContract } from './json-contract';
+import { createEvaluationBatchReport, writeEvaluationBatchReport } from './evaluation-batch-report';
+import { parseJsonContract, readJsonFile } from './json-contract';
 import type { LiveRunReport, LiveScenario } from './live-types';
 
 const SAFE_ID = /^[a-zA-Z0-9][a-zA-Z0-9_-]*$/;
@@ -369,6 +370,7 @@ export async function writeEvaluationResult(
   );
   const path = join(directory, evaluationResultFilename(attempt));
   await mkdir(directory, { recursive: true });
+  const priorResults: EvaluationResult[] = [];
   if (attempt > 1) {
     const previousFilename = evaluationResultFilename(attempt - 1);
     const previousExists = await stat(join(directory, previousFilename))
@@ -377,14 +379,26 @@ export async function writeEvaluationResult(
     if (!previousExists) {
       throw new Error(`Evaluation previous batch attempt ${previousFilename} is missing.`);
     }
+    for (let index = 1; index < attempt; index += 1) {
+      const filename = evaluationResultFilename(index);
+      priorResults.push(
+        parseEvaluationResult(
+          await readJsonFile(join(directory, filename)),
+          scenario.name,
+          batch.id,
+          filename,
+        ),
+      );
+    }
   }
-  await writeFile(
-    path,
-    `${JSON.stringify(createEvaluationResult(scenario, batch, attempt, report), null, 2)}\n`,
-    {
-      encoding: 'utf8',
-      flag: 'wx',
-    },
+  const result = createEvaluationResult(scenario, batch, attempt, report);
+  await writeFile(path, `${JSON.stringify(result, null, 2)}\n`, {
+    encoding: 'utf8',
+    flag: 'wx',
+  });
+  await writeEvaluationBatchReport(
+    directory,
+    createEvaluationBatchReport([...priorResults, result]),
   );
   return path;
 }

@@ -26,6 +26,7 @@ describe('self-contained E2E samples', () => {
       contractVersion: 3,
       name: sample.id,
       description: 'Reads one complete example page.',
+      exclusiveResources: [],
       startUrl: 'https://example.com/document',
       expectedOrigin: 'https://example.com',
       taskText: 'Read the complete page without changing it.',
@@ -108,6 +109,22 @@ describe('self-contained E2E samples', () => {
     });
   });
 
+  it('materializes named mutation readback requirements', async () => {
+    const value = structuredClone(sample) as unknown as {
+      evaluation: { policy: Record<string, unknown> };
+    };
+    value.evaluation.policy.requiredMutationReadbacks = [
+      { actionName: 'Save', includes: ['unique event', 'Saved'] },
+    ];
+    const root = await createSampleRoot(value);
+
+    const loaded = await loadEvaluationSample(root, sample.id);
+
+    expect(loaded.scenario).toMatchObject({
+      requiredMutationReadbacks: [{ actionName: 'Save', includes: ['unique event', 'Saved'] }],
+    });
+  });
+
   it('materializes the navigation keypress allowlist', async () => {
     const value = structuredClone(sample) as unknown as {
       evaluation: { policy: Record<string, unknown> };
@@ -118,6 +135,26 @@ describe('self-contained E2E samples', () => {
     const loaded = await loadEvaluationSample(root, sample.id);
 
     expect(loaded.scenario).toMatchObject({ allowedKeypresses: ['HOME'] });
+  });
+
+  it('materializes exclusive remote resource keys', async () => {
+    const value = structuredClone(sample);
+    value.resources.exclusive = ['lark:chat:self', 'lark:mailbox:self'];
+    const root = await createSampleRoot(value);
+
+    const loaded = await loadEvaluationSample(root, sample.id);
+
+    expect(loaded.scenario.exclusiveResources).toEqual(['lark:chat:self', 'lark:mailbox:self']);
+  });
+
+  it('rejects duplicate exclusive resource keys', async () => {
+    const value = structuredClone(sample);
+    value.resources.exclusive = ['lark:chat:self', 'lark:chat:self'];
+    const root = await createSampleRoot(value);
+
+    await expect(loadEvaluationSample(root, sample.id)).rejects.toThrow(
+      'resources.exclusive must not contain duplicate resource keys',
+    );
   });
 
   it('rejects an interactive environment without setup instructions', async () => {
@@ -160,11 +197,11 @@ describe('self-contained E2E samples', () => {
     const value = structuredClone(sample) as unknown as {
       schemaVersion: number;
     };
-    value.schemaVersion = 2;
+    value.schemaVersion = 3;
     const root = await createSampleRoot(value);
 
     await expect(loadEvaluationSample(root, sample.id)).rejects.toThrow(
-      'schemaVersion must equal 3',
+      'schemaVersion must equal 4',
     );
   });
 

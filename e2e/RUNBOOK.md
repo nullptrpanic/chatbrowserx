@@ -18,10 +18,14 @@ e2e/
 ├── samples/                   # Ignored; transported outside Git
 │   └── <sample-id>/
 │       ├── sample.json
-│       ├── results/
-│       │   └── <UTC-batch-timestamp>/01.json
-│       └── benchmark/
-│           └── <UTC-batch-timestamp>/01.json ...
+│       ├── results/                 # Created by the first ordinary run
+│       │   └── <UTC-batch-timestamp>/
+│       │       ├── 01.json
+│       │       └── report.json
+│       └── benchmark/               # Created by the first formal batch
+│           └── <UTC-batch-timestamp>/
+│               ├── 01.json ...
+│               └── report.json
 └── .runtime/                  # Ignored machine-local state
     ├── profile/
     └── playwright/
@@ -54,8 +58,7 @@ npm run e2e:env:doctor
 
 # Receive or create:
 # e2e/samples/<sample-id>/sample.json
-# e2e/samples/<sample-id>/results/
-# e2e/samples/<sample-id>/benchmark/  # optional until the first formal batch
+# Result directories are created only when their first report is written.
 
 npm run e2e:catalog:validate
 npm run e2e:live:setup -- <sample-id>
@@ -95,8 +98,40 @@ npm run e2e:live:provider-diagnose -- <sample-id>
 The benchmark stops on its first failure. An ordinary run creates one timestamped directory below
 `results/`. A benchmark creates one timestamped directory below `benchmark/` and writes its
 completed attempts as `01.json`, `02.json`, and so on. Each file is one complete bounded and
-redacted report containing its run ID; no second raw-report copy is written. Summaries are printed,
-not persisted.
+redacted report containing its run ID; no second raw-report copy is written. After every attempt,
+the runner atomically replaces the batch's `report.json` with aggregate counts and averages derived
+from all completed attempt files. It contains no per-attempt detail.
+
+## Concurrent Correctness Runs
+
+Live correctness runs may use at most five workers. Each worker requires a different absolute
+Profile path that was created and authenticated through the normal setup flow; never copy an
+authenticated Profile. Run setup and verification once for every worker Profile before using it.
+
+Build exactly once before fan-out. During the concurrent phase, do not invoke an npm live command,
+edit the product, or rebuild `dist`; invoke the runner directly with a worker-specific Profile and
+log path instead:
+
+```bash
+npm run build
+
+CHATBROWSERX_LIVE_E2E_PROFILE=/absolute/e2e-profile-01 \
+./node_modules/.bin/tsx e2e/runner/run.ts <sample-id> \
+> e2e/.runtime/<sample-id>-01.log 2>&1
+```
+
+Set `CHATBROWSERX_LIVE_ALLOW_MUTATION=1` for a mutation sample. Do not run the same sample twice at
+the same time. Serialize samples that share a remote resource, including the same chat composer,
+mail production/readback chain, editor draft, calendar object, or exam attempt. Each worker owns its
+Profile, browser process, extension storage, task state, active Tab, log, and result batch; the
+frozen build is the only shared runtime input.
+
+The runner enforces the five-worker cap, one-run-per-sample rule, and the exclusive resource keys in
+`sample.json`. A conflict fails before browser launch; it never waits while holding another
+resource. These locks do not replace independently created Profiles or worker-specific logs.
+
+Concurrency is for correctness throughput only. Run baseline/candidate performance batches without
+other E2E load so elapsed time and Provider latency remain comparable.
 
 ## Reproducible Baselines
 

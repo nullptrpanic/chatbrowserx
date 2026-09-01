@@ -1,9 +1,14 @@
-import { mkdir, mkdtemp, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, readdir, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
+import {
+  createEvaluationBatchReport,
+  writeEvaluationBatchReport,
+} from '../../runner/evaluation-batch-report';
 import { validateEvaluationCatalog } from '../../runner/evaluation-catalog';
 import { loadEvaluationResults } from '../../runner/evaluation-result-loader';
+import type { EvaluationResult } from '../../runner/evaluation-result';
 import { evaluationResult, evaluationSampleDefinition } from './fixtures';
 
 const validDefinition = evaluationSampleDefinition({ contractVersion: 2 });
@@ -83,6 +88,29 @@ async function writeResult(
     join(directory, `${String(attempt).padStart(2, '0')}.json`),
     `${JSON.stringify({ ...result, schemaVersion: input.schemaVersion ?? 4 })}\n`,
     'utf8',
+  );
+  const attempts = await Promise.all(
+    (await readdir(directory))
+      .filter((entry) => /^\d{2}\.json$/.test(entry))
+      .toSorted()
+      .map(
+        async (entry) =>
+          JSON.parse(await readFile(join(directory, entry), 'utf8')) as EvaluationResult,
+      ),
+  );
+  await writeEvaluationBatchReport(
+    directory,
+    createEvaluationBatchReport(
+      attempts.map((entry) => ({
+        ...entry,
+        execution: {
+          ...entry.execution,
+          // Malformed-attempt tests still need a syntactically valid derived file so
+          // the loader reaches the attempt contract before checking the summary.
+          toolCalls: Math.max(0, entry.execution.toolCalls),
+        },
+      })),
+    ),
   );
 }
 
@@ -178,11 +206,23 @@ describe('evaluation catalog', () => {
     ).rejects.toThrow('schemaVersion must equal 4');
   });
 
-  it('rejects a sample without its own results directory', async () => {
+  it('treats a sample without a results directory as having no historical attempts', async () => {
     const root = await createRoot();
     await createSample(root, 'example-read', validDefinition, false);
 
-    await expect(validateEvaluationCatalog(root)).rejects.toThrow('results directory is missing');
+    await expect(validateEvaluationCatalog(root)).resolves.toMatchObject({
+      samples: [
+        {
+          results: {
+            attempts: 0,
+            passed: 0,
+            currentContractAttempts: 0,
+            currentContractPassed: 0,
+            revisionBatches: [],
+          },
+        },
+      ],
+    });
   });
 
   it('rejects zero required attempts', async () => {
@@ -260,6 +300,76 @@ describe('evaluation catalog', () => {
       results: { attempts: 1 },
       benchmark: { attempts: 2, passed: 2 },
     });
+  });
+
+  it('loads attempt files alongside their aggregate-only batch report', async () => {
+    const root = await createRoot();
+    await createSample(root);
+    await writeResult(root, {
+      runId: 'live_summary',
+      startedAt: '2026-08-27T10:00:00.000Z',
+      contractVersion: 2,
+      productRevision: 'revision_current',
+      success: true,
+    });
+    await expect(
+      loadEvaluationResults(
+        join(root, 'e2e', 'samples', 'example-read', 'results'),
+        'example-read',
+      ),
+    ).resolves.toHaveLength(1);
+  });
+
+  it('rejects a batch report that no longer matches its immutable attempts', async () => {
+    const root = await createRoot();
+    await createSample(root);
+    await writeResult(root, {
+      runId: 'live_summary_mismatch',
+      startedAt: '2026-08-27T10:00:00.000Z',
+      contractVersion: 2,
+      productRevision: 'revision_current',
+      success: true,
+    });
+    const reportPath = join(
+      root,
+      'e2e',
+      'samples',
+      'example-read',
+      'results',
+      '20260827T100000.000Z',
+      'report.json',
+    );
+    const report = JSON.parse(await readFile(reportPath, 'utf8')) as Record<string, unknown>;
+    await writeFile(reportPath, `${JSON.stringify({ ...report, averageToolCalls: 99 })}\n`, 'utf8');
+
+    await expect(validateEvaluationCatalog(root)).rejects.toThrow(
+      'report.json does not match its attempts',
+    );
+  });
+
+  it('rejects a batch without its aggregate report', async () => {
+    const root = await createRoot();
+    await createSample(root);
+    await writeResult(root, {
+      runId: 'live_summary_missing',
+      startedAt: '2026-08-27T10:00:00.000Z',
+      contractVersion: 2,
+      productRevision: 'revision_current',
+      success: true,
+    });
+    await rm(
+      join(
+        root,
+        'e2e',
+        'samples',
+        'example-read',
+        'results',
+        '20260827T100000.000Z',
+        'report.json',
+      ),
+    );
+
+    await expect(validateEvaluationCatalog(root)).rejects.toThrow('report.json is missing');
   });
 
   it('rejects a batch whose persisted attempt sequence starts after 01', async () => {

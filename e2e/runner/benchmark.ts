@@ -38,7 +38,15 @@ async function main(): Promise<void> {
   const productRevision = productTarget.productRevision;
   const batch = createEvaluationBatch('benchmark', new Date().toISOString(), parsed.runs);
   const benchmark = await withExistingLiveSession(
-    { repositoryRoot, environment: process.env, productTarget },
+    {
+      repositoryRoot,
+      environment: process.env,
+      productTarget,
+      execution: {
+        sampleId: scenario.name,
+        exclusiveResources: scenario.exclusiveResources,
+      },
+    },
     async (session) => {
       const runtime = createPlaywrightLiveRuntime(session);
       return runLiveBenchmark({

@@ -61,6 +61,8 @@ describe('evaluation result', () => {
           reasoningOutputTokens: 10,
         },
         execution: expect.objectContaining({
+          modelElapsedMs: 9_000,
+          providerRequests: 2,
           firstEventMs: 0,
           firstTextMs: 0,
           providerRetries: 1,
@@ -168,7 +170,10 @@ describe('evaluation result', () => {
       }),
     );
 
-    expect(result.evidence).toMatchObject({ taskId: null, conversationId: null });
+    expect(result.evidence).toMatchObject({
+      taskId: null,
+      conversationId: null,
+    });
     expect(() => parseEvaluationResult(result, scenario.name, batch.id, '01.json')).not.toThrow();
   });
 
@@ -193,6 +198,61 @@ describe('evaluation result', () => {
         batch: expect.objectContaining({ attempt: 2 }),
       }),
     );
+  });
+
+  it('updates one aggregate-only report after every persisted attempt', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'chatbrowserx-e2e-summary-'));
+    const first = report({ runId: 'live_first' });
+    const secondBase = report();
+    const second = report({
+      runId: 'live_second',
+      elapsedMs: 8_500,
+      modelMetrics: {
+        ...secondBase.modelMetrics,
+        inputTokens: 200,
+        outputTokens: 50,
+        totalTokens: 250,
+        elapsedMs: 6_000,
+      },
+      executionMetrics: {
+        ...secondBase.executionMetrics,
+        modelRounds: 3,
+        toolCalls: 3,
+        toolCounts: { browser_inspect: 3 },
+      },
+      providerTrace: { requestCount: 3, requests: [] },
+      acceptance: { passed: false, checks: [] },
+      harnessError: 'Synthetic harness failure.',
+    });
+
+    await writeEvaluationResult(root, scenario, batch, 1, first);
+    await writeEvaluationResult(root, scenario, batch, 2, second);
+
+    const summaryPath = join(
+      root,
+      'e2e',
+      'samples',
+      'example-read',
+      'results',
+      '20260827T123000.000Z',
+      'report.json',
+    );
+    expect(JSON.parse(await readFile(summaryPath, 'utf8'))).toEqual({
+      schemaVersion: 1,
+      sampleId: 'example-read',
+      collection: 'results',
+      batchId: '20260827T123000.000Z',
+      requestedRuns: 5,
+      completedRuns: 2,
+      successfulRuns: 1,
+      failedRuns: 1,
+      totalProviderRequests: 5,
+      totalProviderRequestElapsedMs: 15_000,
+      averageTotalTokens: 200,
+      averageElapsedMs: 10_000,
+      averageToolCalls: 2,
+      averageProviderRequestElapsedMs: 3_000,
+    });
   });
 
   it('rejects an attempt that would create a gap in its batch', async () => {

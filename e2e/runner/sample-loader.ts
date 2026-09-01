@@ -5,9 +5,9 @@ import { parseJsonContract, readJsonFile } from './json-contract';
 import type { LiveScenario } from './live-types';
 
 const SAFE_ID = /^[a-z0-9][a-z0-9-]*$/;
-const nonEmptyString = z
-  .string()
-  .refine((value) => value.trim().length > 0, { message: 'must be a non-empty string.' });
+const nonEmptyString = z.string().refine((value) => value.trim().length > 0, {
+  message: 'must be a non-empty string.',
+});
 const positiveInteger = z.number().refine((value) => Number.isSafeInteger(value) && value >= 1, {
   message: 'must be a positive safe integer.',
 });
@@ -17,6 +17,27 @@ const nonNegativeInteger = z.number().refine((value) => Number.isSafeInteger(val
 const nonEmptyStrings = z
   .array(nonEmptyString)
   .min(1, { message: 'must contain one or more non-empty strings.' });
+const resourceKey = nonEmptyString.regex(/^[a-z0-9][a-z0-9._:/-]*$/, {
+  message: 'must use lowercase resource-key characters.',
+});
+const resourcesSchema = z
+  .object({ exclusive: z.array(resourceKey) })
+  .strict()
+  .superRefine(({ exclusive }, context) => {
+    if (new Set(exclusive).size !== exclusive.length) {
+      context.addIssue({
+        code: 'custom',
+        path: ['exclusive'],
+        message: 'must not contain duplicate resource keys.',
+      });
+    }
+  });
+const mutationReadbackSchema = z
+  .object({
+    actionName: nonEmptyString,
+    includes: nonEmptyStrings,
+  })
+  .strict();
 
 const readinessCheckSchema = z.discriminatedUnion('kind', [
   z
@@ -65,6 +86,7 @@ const policySchema = z
     allowedKeypresses: nonEmptyStrings.optional(),
     requiredToolResultIncludes: z.array(nonEmptyString).optional(),
     requiredToolOutputIncludes: z.array(nonEmptyString).optional(),
+    requiredMutationReadbacks: z.array(mutationReadbackSchema).min(1).optional(),
     finalTextIncludes: nonEmptyStrings,
     finalTextIncludesAny: z.array(nonEmptyStrings).min(1).optional(),
     requireFreshProviderContext: z.boolean().optional(),
@@ -76,11 +98,14 @@ const policySchema = z
 
 const sampleSchema = z
   .object({
-    schemaVersion: z.literal(3, { error: 'must equal 3.' }),
-    id: nonEmptyString.regex(SAFE_ID, { message: 'must use lowercase kebab-case.' }),
+    schemaVersion: z.literal(4, { error: 'must equal 4.' }),
+    id: nonEmptyString.regex(SAFE_ID, {
+      message: 'must use lowercase kebab-case.',
+    }),
     contractVersion: positiveInteger,
     description: nonEmptyString,
     requiredRuns: positiveInteger,
+    resources: resourcesSchema,
     target: z
       .object({
         url: nonEmptyString,
@@ -101,7 +126,9 @@ const sampleSchema = z
     sideEffects: z.object({ mode: z.enum(['read_only', 'page_state_mutation']) }).strict(),
     evaluation: z
       .object({
-        method: z.literal('deterministic', { error: 'must equal deterministic.' }),
+        method: z.literal('deterministic', {
+          error: 'must equal deterministic.',
+        }),
         policy: policySchema,
       })
       .strict(),
@@ -174,6 +201,7 @@ export function materializeLiveScenario(sample: EvaluationSampleDefinition): Liv
     contractVersion: sample.contractVersion,
     name: sample.id,
     description: sample.description,
+    exclusiveResources: sample.resources.exclusive,
     startUrl: sample.target.url,
     expectedOrigin: sample.target.expectedOrigin,
     taskText: sample.input.text,
@@ -201,10 +229,14 @@ export function materializeLiveScenario(sample: EvaluationSampleDefinition): Liv
       : { maxScrollSegmentsPerCall: policy.maxScrollSegmentsPerCall }),
     ...(policy.stopScrollingAfterActiveElementNames === undefined
       ? {}
-      : { stopScrollingAfterActiveElementNames: policy.stopScrollingAfterActiveElementNames }),
+      : {
+          stopScrollingAfterActiveElementNames: policy.stopScrollingAfterActiveElementNames,
+        }),
     ...(policy.requireVerticalBoundaryCoverage === undefined
       ? {}
-      : { requireVerticalBoundaryCoverage: policy.requireVerticalBoundaryCoverage }),
+      : {
+          requireVerticalBoundaryCoverage: policy.requireVerticalBoundaryCoverage,
+        }),
     ...(policy.maxAttachmentCount === undefined
       ? {}
       : { maxAttachmentCount: policy.maxAttachmentCount }),
@@ -220,6 +252,9 @@ export function materializeLiveScenario(sample: EvaluationSampleDefinition): Liv
     ...(policy.requiredToolOutputIncludes === undefined
       ? {}
       : { requiredToolOutputIncludes: policy.requiredToolOutputIncludes }),
+    ...(policy.requiredMutationReadbacks === undefined
+      ? {}
+      : { requiredMutationReadbacks: policy.requiredMutationReadbacks }),
     ...(policy.finalTextIncludesAny === undefined
       ? {}
       : { finalTextIncludesAny: policy.finalTextIncludesAny }),
@@ -243,7 +278,11 @@ export async function loadEvaluationSample(
   if (!SAFE_ID.test(id)) throw new Error('Sample ID must use lowercase kebab-case.');
   const directory = join(repositoryRoot, 'e2e', 'samples', id);
   const definition = parseEvaluationSample(await readJsonFile(join(directory, 'sample.json')), id);
-  return { directory, definition, scenario: materializeLiveScenario(definition) };
+  return {
+    directory,
+    definition,
+    scenario: materializeLiveScenario(definition),
+  };
 }
 
 export async function listEvaluationSamples(
@@ -251,7 +290,9 @@ export async function listEvaluationSamples(
 ): Promise<readonly LoadedEvaluationSample[]> {
   const samplesRoot = join(repositoryRoot, 'e2e', 'samples');
   const entries = await readdir(samplesRoot, { withFileTypes: true }).catch((error: unknown) => {
-    throw new Error('The e2e samples directory is missing.', { cause: error });
+    throw new Error('The e2e samples directory is missing.', {
+      cause: error,
+    });
   });
   const ids = entries
     .filter((entry) => entry.isDirectory())

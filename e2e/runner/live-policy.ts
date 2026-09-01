@@ -79,6 +79,45 @@ function postActionVerificationElements(
   });
 }
 
+function observedElements(
+  value: Readonly<Record<string, unknown>> | null,
+): readonly Readonly<Record<string, unknown>>[] {
+  return [...structuralElements(value), ...postActionVerificationElements(value)];
+}
+
+function isSubmitLikeElement(element: Readonly<Record<string, unknown>> | undefined): boolean {
+  if (element === undefined || element.r !== 'button' || typeof element.n !== 'string') {
+    return false;
+  }
+  return /(?:^|\s)(?:send|submit|save|create|publish|post|confirm)(?:\s|$)|发送|提交|保存|创建|发布|确认/iu.test(
+    element.n,
+  );
+}
+
+function hasAccessibleName(
+  element: Readonly<Record<string, unknown>> | undefined,
+  expected: string,
+): boolean {
+  return (
+    element?.r === 'button' &&
+    typeof element.n === 'string' &&
+    element.n.trim().toLocaleLowerCase() === expected.trim().toLocaleLowerCase()
+  );
+}
+
+function containsStructuralReadback(
+  elements: readonly Readonly<Record<string, unknown>>[],
+  value: string,
+): boolean {
+  return elements.some(
+    (element) =>
+      element.r !== 'textbox' &&
+      element.r !== 'searchbox' &&
+      typeof element.n === 'string' &&
+      element.n.includes(value),
+  );
+}
+
 function check(name: string, passed: boolean, detail: string): LiveAcceptanceCheck {
   return { name, passed, detail };
 }
@@ -246,27 +285,95 @@ export function evaluateLiveRun(scenario: LiveScenario, input: LiveRunInput): Li
   const missingToolResultContent = (scenario.requiredToolResultIncludes ?? []).filter(
     (value) => !input.toolResults.some((result) => result.output.includes(value)),
   );
-  const lastSubmittedIndex = parsedCalls.findLastIndex(
-    ({ result, arguments_ }) => result.toolName === 'browser_type' && arguments_?.submit === true,
+  const submittedTypeIndices = parsedCalls.flatMap(({ result, arguments_ }, index) =>
+    result.toolName === 'browser_type' && arguments_?.submit === true ? [index] : [],
   );
+  const elementsByRef = new Map<string, Readonly<Record<string, unknown>>>();
+  const submitClickIndices: number[] = [];
+  const clickedElements = new Map<number, Readonly<Record<string, unknown>>>();
+  for (const [index, { result, arguments_, output }] of parsedCalls.entries()) {
+    if (result.toolName === 'browser_click' && typeof arguments_?.ref === 'string') {
+      const target = elementsByRef.get(arguments_.ref);
+      if (target !== undefined) clickedElements.set(index, target);
+      if (isSubmitLikeElement(target)) submitClickIndices.push(index);
+    }
+    for (const element of observedElements(output)) {
+      if (typeof element.ref === 'string') elementsByRef.set(element.ref, element);
+    }
+  }
+  const submissionIndices = [...new Set([...submittedTypeIndices, ...submitClickIndices])].toSorted(
+    (left, right) => left - right,
+  );
+  const readbackElementsBySubmission = new Map(
+    submissionIndices.map((submissionIndex, index) => {
+      const nextSubmissionIndex = submissionIndices[index + 1] ?? parsedCalls.length;
+      return [
+        submissionIndex,
+        [
+          ...postActionVerificationElements(parsedCalls[submissionIndex]?.output ?? null),
+          ...parsedCalls
+            .slice(submissionIndex + 1, nextSubmissionIndex)
+            .flatMap(({ output }) => observedElements(output)),
+        ],
+      ] as const;
+    }),
+  );
+  const readbackObservedFor = (value: string): boolean => {
+    const typedAt = parsedCalls.flatMap(({ result, arguments_ }, index) =>
+      result.toolName === 'browser_type' &&
+      typeof arguments_?.text === 'string' &&
+      arguments_.text.includes(value)
+        ? [index]
+        : [],
+    );
+    const relevantSubmissions =
+      typedAt.length === 0
+        ? submissionIndices
+        : [
+            ...new Set(
+              typedAt.flatMap((typeIndex) => {
+                const submissionIndex = submissionIndices.find((index) => index >= typeIndex);
+                return submissionIndex === undefined ? [] : [submissionIndex];
+              }),
+            ),
+          ];
+    return relevantSubmissions.some((submissionIndex) =>
+      containsStructuralReadback(readbackElementsBySubmission.get(submissionIndex) ?? [], value),
+    );
+  };
+  const lastSubmissionIndex = submissionIndices.at(-1) ?? -1;
   const submittedVerificationElements =
-    lastSubmittedIndex < 0
+    lastSubmissionIndex < 0
       ? []
-      : postActionVerificationElements(parsedCalls[lastSubmittedIndex]?.output ?? null);
+      : postActionVerificationElements(parsedCalls[lastSubmissionIndex]?.output ?? null);
   const postSubmitElements = [
     ...submittedVerificationElements,
-    ...parsedCalls
-      .slice(lastSubmittedIndex + 1)
-      .filter(({ result }) => result.toolName === 'browser_inspect')
-      .flatMap(({ output }) => structuralElements(output)),
+    ...(lastSubmissionIndex < 0
+      ? []
+      : parsedCalls
+          .slice(lastSubmissionIndex + 1)
+          .flatMap(({ output }) => observedElements(output))),
   ];
   const requiredReadback = scenario.requiredToolOutputIncludes ?? [];
-  const missingToolOutput = requiredReadback.filter(
-    (value) =>
-      !postSubmitElements.some(
-        (element) =>
-          element.r === 'statictext' && typeof element.n === 'string' && element.n.includes(value),
-      ),
+  const missingToolOutput = requiredReadback.filter((value) => !readbackObservedFor(value));
+  const missingMutationReadbacks = (scenario.requiredMutationReadbacks ?? []).flatMap(
+    (requirement) => {
+      const matchingActions = [...clickedElements.entries()].filter(([, element]) =>
+        hasAccessibleName(element, requirement.actionName),
+      );
+      const satisfied = matchingActions.some(([actionIndex]) => {
+        const nextSubmissionIndex =
+          submitClickIndices.find((index) => index > actionIndex) ?? parsedCalls.length;
+        const elements = [
+          ...postActionVerificationElements(parsedCalls[actionIndex]?.output ?? null),
+          ...parsedCalls
+            .slice(actionIndex + 1, nextSubmissionIndex)
+            .flatMap(({ output }) => observedElements(output)),
+        ];
+        return requirement.includes.every((value) => containsStructuralReadback(elements, value));
+      });
+      return satisfied ? [] : [requirement.actionName];
+    },
   );
   const retainedSubmittedText = requiredReadback.filter((value) =>
     postSubmitElements.some(
@@ -677,6 +784,13 @@ export function evaluateLiveRun(scenario: LiveScenario, input: LiveRunInput): Li
       missingToolOutput.length === 0
         ? 'Every required value was observed as post-submit static text.'
         : `${String(missingToolOutput.length)} required values were not observed as post-submit static text.`,
+    ),
+    check(
+      'required-mutation-readback',
+      missingMutationReadbacks.length === 0,
+      missingMutationReadbacks.length === 0
+        ? 'Every named mutation was independently read back after its action.'
+        : `Missing verified readback after: ${missingMutationReadbacks.join(', ')}.`,
     ),
     check(
       'submitted-state-readback',

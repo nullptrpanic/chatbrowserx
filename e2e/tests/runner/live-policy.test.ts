@@ -6,6 +6,7 @@ const scenario: LiveScenario = {
   contractVersion: 1,
   name: 'read-chat',
   description: 'Reads one chat.',
+  exclusiveResources: [],
   startUrl: 'https://example.com/chat',
   expectedOrigin: 'https://example.com',
   taskText: 'Read the latest messages without changing anything.',
@@ -588,6 +589,269 @@ describe('live E2E acceptance policy', () => {
     });
 
     expect(result.passed).toBe(true);
+  });
+
+  it('requires structural readback after a submit-like click', () => {
+    const marker = 'ChatBrowserX mail self-check live_123';
+    const mutationScenario: LiveScenario = {
+      ...scenario,
+      allowRemoteMutation: true,
+      forbidSubmittedType: true,
+      requiredTools: ['browser_inspect', 'browser_click'],
+      requiredToolOutputIncludes: [marker],
+      finalTextIncludes: [marker],
+    };
+    const beforeSubmit = [
+      tool(
+        'browser_inspect',
+        { tabId: 0, mode: 'interactive', since: '' },
+        {
+          output: JSON.stringify({
+            ok: true,
+            data: {
+              elements: [
+                { r: 'button', n: 'Send', ref: 'send-button' },
+                { r: 'statictext', n: marker },
+              ],
+            },
+          }),
+        },
+      ),
+      tool('browser_click', {
+        tabId: 0,
+        ref: 'send-button',
+        button: 'left',
+        count: 1,
+      }),
+    ];
+
+    const notReadBack = evaluateLiveRun(mutationScenario, {
+      terminalStatus: 'completed',
+      finalText: `Sent and verified ${marker}`,
+      toolResults: beforeSubmit,
+    });
+    expect(notReadBack.checks).toContainEqual(
+      expect.objectContaining({
+        name: 'required-tool-readback',
+        passed: false,
+      }),
+    );
+
+    const readBack = evaluateLiveRun(mutationScenario, {
+      terminalStatus: 'completed',
+      finalText: `Sent and verified ${marker}`,
+      toolResults: [
+        ...beforeSubmit,
+        tool(
+          'browser_click',
+          { tabId: 0, ref: 'sent-message', button: 'left', count: 1 },
+          {
+            output: JSON.stringify({
+              ok: true,
+              data: {
+                verification: {
+                  upsert: [{ e: { r: 'statictext', n: marker } }],
+                },
+              },
+            }),
+          },
+        ),
+      ],
+    });
+    expect(readBack.checks).toContainEqual(
+      expect.objectContaining({ name: 'required-tool-readback', passed: true }),
+    );
+  });
+
+  it('retains structural readback evidence across multiple submit-like clicks', () => {
+    const firstMarker = 'ChatBrowserX first message live_123';
+    const secondMarker = 'ChatBrowserX second message live_123';
+    const mutationScenario: LiveScenario = {
+      ...scenario,
+      allowRemoteMutation: true,
+      forbidSubmittedType: true,
+      requiredTools: ['browser_inspect', 'browser_type', 'browser_click'],
+      requiredToolOutputIncludes: [firstMarker, secondMarker],
+      finalTextIncludes: [firstMarker, secondMarker],
+    };
+    const result = evaluateLiveRun(mutationScenario, {
+      terminalStatus: 'completed',
+      finalText: `${firstMarker}\n${secondMarker}`,
+      toolResults: [
+        tool(
+          'browser_inspect',
+          { tabId: 0, mode: 'interactive', since: '' },
+          {
+            output: JSON.stringify({
+              ok: true,
+              data: {
+                elements: [{ r: 'button', n: 'Send', ref: 'send-button' }],
+              },
+            }),
+          },
+        ),
+        tool('browser_type', {
+          tabId: 0,
+          ref: 'message-editor',
+          text: firstMarker,
+          replace: true,
+          submit: false,
+        }),
+        tool(
+          'browser_click',
+          { tabId: 0, ref: 'send-button', button: 'left', count: 1 },
+          {
+            output: JSON.stringify({
+              ok: true,
+              data: {
+                verification: {
+                  upsert: [{ e: { r: 'statictext', n: firstMarker } }],
+                },
+              },
+            }),
+          },
+        ),
+        tool('browser_type', {
+          tabId: 0,
+          ref: 'message-editor',
+          text: secondMarker,
+          replace: true,
+          submit: false,
+        }),
+        tool(
+          'browser_click',
+          { tabId: 0, ref: 'send-button', button: 'left', count: 1 },
+          {
+            output: JSON.stringify({
+              ok: true,
+              data: {
+                verification: {
+                  upsert: [{ e: { r: 'statictext', n: secondMarker } }],
+                },
+              },
+            }),
+          },
+        ),
+      ],
+    });
+
+    expect(result.checks).toContainEqual(
+      expect.objectContaining({ name: 'required-tool-readback', passed: true }),
+    );
+  });
+
+  it('requires each declared mutation to be read back after its named action', () => {
+    const calendarMarker = 'ChatBrowserX calendar live_123';
+    const mailMarker = 'ChatBrowserX mail live_123';
+    const mutationScenario = {
+      ...scenario,
+      allowRemoteMutation: true,
+      forbidSubmittedType: true,
+      requiredTools: ['browser_inspect', 'browser_click'],
+      requiredMutationReadbacks: [
+        { actionName: 'Save', includes: [calendarMarker, 'Saved'] },
+        { actionName: 'Send', includes: [mailMarker, 'Me', 'Content image'] },
+      ],
+      finalTextIncludes: [calendarMarker, mailMarker],
+    } as LiveScenario & {
+      readonly requiredMutationReadbacks: readonly {
+        readonly actionName: string;
+        readonly includes: readonly string[];
+      }[];
+    };
+    const controls = tool(
+      'browser_inspect',
+      { tabId: 0, mode: 'interactive', since: '' },
+      {
+        output: JSON.stringify({
+          ok: true,
+          data: {
+            elements: [
+              { r: 'button', n: 'Save', ref: 'save-button' },
+              { r: 'button', n: 'Send', ref: 'send-button' },
+              { r: 'statictext', n: calendarMarker },
+              { r: 'statictext', n: mailMarker },
+              { r: 'image', n: 'Content image' },
+            ],
+          },
+        }),
+      },
+    );
+    const save = tool(
+      'browser_click',
+      { tabId: 0, ref: 'save-button', button: 'left', count: 1 },
+      {
+        output: JSON.stringify({
+          ok: true,
+          data: {
+            verification: {
+              upsert: [
+                { e: { r: 'statictext', n: calendarMarker } },
+                { e: { r: 'statictext', n: 'Saved' } },
+              ],
+            },
+          },
+        }),
+      },
+    );
+    const send = tool(
+      'browser_click',
+      { tabId: 0, ref: 'send-button', button: 'left', count: 1 },
+      {
+        output: JSON.stringify({
+          ok: true,
+          data: {
+            verification: {
+              upsert: [{ e: { r: 'statictext', n: 'Sending...' } }],
+            },
+          },
+        }),
+      },
+    );
+
+    const missingSentReadback = evaluateLiveRun(mutationScenario, {
+      terminalStatus: 'completed',
+      finalText: `${calendarMarker}; ${mailMarker}`,
+      toolResults: [controls, save, send],
+    });
+    expect(missingSentReadback.checks).toContainEqual(
+      expect.objectContaining({
+        name: 'required-mutation-readback',
+        passed: false,
+      }),
+    );
+
+    const completeReadback = evaluateLiveRun(mutationScenario, {
+      terminalStatus: 'completed',
+      finalText: `${calendarMarker}; ${mailMarker}`,
+      toolResults: [
+        controls,
+        save,
+        send,
+        tool(
+          'browser_inspect',
+          { tabId: 0, mode: 'interactive', since: '' },
+          {
+            output: JSON.stringify({
+              ok: true,
+              data: {
+                elements: [
+                  { r: 'statictext', n: mailMarker },
+                  { r: 'statictext', n: 'Me' },
+                  { r: 'image', n: 'Content image' },
+                ],
+              },
+            }),
+          },
+        ),
+      ],
+    });
+    expect(completeReadback.checks).toContainEqual(
+      expect.objectContaining({
+        name: 'required-mutation-readback',
+        passed: true,
+      }),
+    );
   });
 
   it('accepts a required typed marker contained inside a longer submitted message', () => {

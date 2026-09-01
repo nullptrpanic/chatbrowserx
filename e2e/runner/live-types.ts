@@ -11,10 +11,18 @@ export interface LiveEnvironmentDefinition {
   readonly readinessChecks: readonly LiveEnvironmentReadinessCheck[];
 }
 
+export interface LiveMutationReadbackRequirement {
+  /** Exact accessible name of the button that commits the mutation. */
+  readonly actionName: string;
+  /** Structural values that must be visible after that action and before the next commit action. */
+  readonly includes: readonly string[];
+}
+
 export interface LiveScenario {
   readonly contractVersion: number;
   readonly name: string;
   readonly description: string;
+  readonly exclusiveResources: readonly string[];
   readonly startUrl: string;
   readonly expectedOrigin: string;
   readonly taskText: string;
@@ -45,6 +53,8 @@ export interface LiveScenario {
   readonly requiredToolResultIncludes?: readonly string[];
   /** Literals that must be observed as post-submit static page text. */
   readonly requiredToolOutputIncludes?: readonly string[];
+  /** Independent structural readback required after each named mutation action. */
+  readonly requiredMutationReadbacks?: readonly LiveMutationReadbackRequirement[];
   readonly finalTextIncludes: readonly string[];
   /** Every inner group requires at least one normalized alternative to be present. */
   readonly finalTextIncludesAny?: readonly (readonly string[])[];

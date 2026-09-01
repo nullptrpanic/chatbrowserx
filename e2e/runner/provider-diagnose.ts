@@ -36,7 +36,15 @@ async function main(): Promise<void> {
   try {
     validateEvaluationSampleAuthorization(scenario, process.env);
     report = await withExistingLiveSession(
-      { repositoryRoot, environment: process.env, productTarget },
+      {
+        repositoryRoot,
+        environment: process.env,
+        productTarget,
+        execution: {
+          sampleId: scenario.name,
+          exclusiveResources: scenario.exclusiveResources,
+        },
+      },
       async (session) => {
         const probe = new ResponsesRequestReplayProbe(session.context, session.extensionId);
         probe.start(scenario.taskText);

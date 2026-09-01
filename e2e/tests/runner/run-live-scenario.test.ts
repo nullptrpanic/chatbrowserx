@@ -7,6 +7,7 @@ const scenario: LiveScenario = {
   contractVersion: 1,
   name: 'read-chat',
   description: 'Reads one chat without changing it.',
+  exclusiveResources: [],
   startUrl: 'https://example.com/chat',
   expectedOrigin: 'https://example.com',
   taskText: 'Read the latest messages without changing anything.',
@@ -300,21 +301,71 @@ describe('live scenario orchestration', () => {
       ...scenario,
       taskText: 'Send marker {{RUN_ID}} once.',
       finalTextIncludes: ['{{RUN_ID}}'],
+      requiredMutationReadbacks: [{ actionName: 'Save', includes: ['{{RUN_ID}}'] }],
     };
+    const snapshot = structuredClone(taskSnapshot('completed', true));
+    const inspectResult = snapshot.toolResults[0];
+    if (inspectResult === undefined) throw new Error('Missing tool-result fixture.');
+    inspectResult.output = JSON.stringify({
+      ok: true,
+      data: { elements: [{ r: 'button', n: 'Save', ref: 'save-button' }] },
+    });
+    snapshot.events.push(
+      {
+        id: 'event_call_2',
+        taskId: 'task_live',
+        runId: 'run_task_live',
+        sequence: 5,
+        type: 'tool.call',
+        at: 1_500,
+        callId: 'call_2',
+        name: 'browser_click',
+        argumentsJson: JSON.stringify({ ref: 'save-button' }),
+      },
+      {
+        id: 'event_result_2',
+        taskId: 'task_live',
+        runId: 'run_task_live',
+        sequence: 6,
+        type: 'tool.result',
+        at: 1_600,
+        callId: 'call_2',
+        resultId: 'result_2',
+      },
+    );
+    snapshot.toolResults.push({
+      id: 'result_2',
+      taskId: 'task_live',
+      runId: 'run_task_live',
+      callId: 'call_2',
+      toolName: 'browser_click',
+      argumentsJson: JSON.stringify({ ref: 'save-button' }),
+      output: JSON.stringify({
+        ok: true,
+        data: {
+          verification: {
+            upsert: [{ e: { r: 'statictext', n: 'run_unique_123' } }],
+          },
+        },
+      }),
+      modelOutput: JSON.stringify({ ok: true }),
+      attachmentIds: [],
+      createdAt: 1_600,
+    });
     const runtime = liveRuntime((message) => {
       switch (message.type) {
         case 'panel.getSnapshot':
           return panelSnapshot();
         case 'chat.submit':
-          return taskSnapshot('completed');
+          return snapshot;
         case 'panel.getTaskDetails':
-          return panelTaskDetails(0);
+          return panelTaskDetails(2);
         default:
           throw new Error(`Unexpected message: ${message.type}`);
       }
     });
 
-    await runLiveScenario(runtime, templatedScenario, {
+    const report = await runLiveScenario(runtime, templatedScenario, {
       now: () => 10_000,
       sleep: vi.fn(),
       createRunId: () => 'run_unique_123',
@@ -323,6 +374,9 @@ describe('live scenario orchestration', () => {
     expect(runtime.messages.find(({ type }) => type === 'chat.submit')).toMatchObject({
       payload: { text: 'Send marker run_unique_123 once.' },
     });
+    expect(report.acceptance.checks).toContainEqual(
+      expect.objectContaining({ name: 'required-mutation-readback', passed: true }),
+    );
   });
 
   it('submits exactly once, captures bounded evidence, and aggregates numeric model metrics', async () => {

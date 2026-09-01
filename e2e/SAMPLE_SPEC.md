@@ -8,34 +8,38 @@ immutable report per attempt; it does not describe a particular sample.
 ```text
 e2e/samples/<sample-id>/
 ├── sample.json
-├── results/
+├── results/                         # Created by the first ordinary run
 │   └── <UTC-batch-timestamp>/
-│       └── 01.json
-└── benchmark/
+│       ├── 01.json
+│       └── report.json
+└── benchmark/                       # Created by the first formal batch
     └── <UTC-batch-timestamp>/
         ├── 01.json
-        └── ...
+        ├── ...
+        └── report.json
 ```
 
 The directory name and sample.json id must be identical lowercase kebab-case values. Do not add a
 per-sample README or code-owned scenario registry.
 
 A sample can be created, generated, or delivered through any controlled channel outside Git.
-Transfer `sample.json` plus an empty `results/` directory for a new history, or the complete sample
-directory to preserve history. `benchmark/` is created by the first formal batch. A normal live run
-writes one report below `results/`; one benchmark command writes all of its ordered attempts below
-one timestamped `benchmark/` directory. Never overwrite a report with different bytes. After
-creation or import, run `npm run e2e:catalog:validate`, then follow `RUNBOOK.md`.
+Transfer `sample.json` for a new history, or the complete sample directory to preserve history.
+`results/` and `benchmark/` are created by their first runs and must not be kept as empty
+placeholders. A normal live run writes one report below `results/`; one benchmark command writes
+all of its ordered attempts below one timestamped `benchmark/` directory. Never overwrite an
+attempt report with different bytes. After creation or import, run
+`npm run e2e:catalog:validate`, then follow `RUNBOOK.md`.
 
-## Sample Schema Version 3
+## Sample Schema Version 4
 
 | Field           | Type             | Meaning                                                   |
 | --------------- | ---------------- | --------------------------------------------------------- |
-| schemaVersion   | integer          | Exactly 3.                                                |
+| schemaVersion   | integer          | Exactly 4.                                                |
 | id              | string           | Stable ID matching the directory name.                    |
 | contractVersion | positive integer | Acceptance version separating incomparable histories.     |
 | description     | string           | Concise English objective.                                |
 | requiredRuns    | positive integer | Predeclared comparable attempts per revision.             |
+| resources       | object           | Cross-process remote-resource isolation keys.             |
 | target          | object           | Initial page, origin, and readiness timeout.              |
 | environment     | object           | Setup instructions and machine-readable readiness checks. |
 | input           | object           | Exact user request sent to a fresh WorkSession.           |
@@ -45,6 +49,14 @@ creation or import, run `npm run e2e:catalog:validate`, then follow `RUNBOOK.md`
 
 Human metadata and setup instructions use English. Exact input and literal evidence may use the
 target page's language.
+
+### resources
+
+`resources.exclusive` is a required array of unique lowercase resource keys. Use the same key for
+samples that cannot safely overlap, such as one chat, mailbox, calendar, editor state, or exam
+attempt; use an empty array when the sample has no shared mutable resource. The runner also adds an
+implicit sample key, caps live execution at five workers, and acquires all keys atomically before
+opening the browser. Keys coordinate execution only and must not contain credentials.
 
 ### target
 
@@ -120,20 +132,29 @@ acceptance checks, and product safety rules.
 | allowedKeypresses                    | non-empty string array | no       | Exact navigation key sequences allowed for `browser_keypress`.     |
 | requiredToolResultIncludes           | string array           | no       | Literals required in at least one complete durable tool result.    |
 | requiredToolOutputIncludes           | string array           | no       | Literals required as post-submit static page text.                 |
+| requiredMutationReadbacks            | object array           | no       | Structural values required after each named commit button.         |
 | finalTextIncludesAny                 | array of string arrays | no       | Require one alternative from every inner group.                    |
 | requireFreshProviderContext          | boolean                | no       | Require only the active request in the first Provider context.     |
 | finalTextExcludes                    | string array           | no       | Any normalized matching literal fails output.                      |
 | minimumMarkdownTableRows             | positive integer       | no       | Minimum Markdown data-row count.                                   |
 
+Each `requiredMutationReadbacks` item contains an exact accessible button `actionName` and a
+non-empty `includes` array. Draft/editor values and evidence observed before the named action do
+not satisfy it. Every value must be structurally visible after that action and before the next
+submit-like action; named non-text evidence such as a content image is allowed.
+
 ## Complete Sample
 
 ```json
 {
-  "schemaVersion": 3,
+  "schemaVersion": 4,
   "id": "example-read",
   "contractVersion": 1,
   "description": "Reads one example page without changing remote data.",
   "requiredRuns": 3,
+  "resources": {
+    "exclusive": []
+  },
   "target": {
     "url": "https://example.com/",
     "expectedOrigin": "https://example.com",
@@ -174,7 +195,7 @@ acceptance checks, and product safety rules.
 }
 ```
 
-## Evaluation Report Schema Version 4
+## Evaluation Attempt Report Schema Version 4
 
 All fields below are required. failure is null for a pass and an object for a failure.
 
@@ -196,12 +217,12 @@ All fields below are required. failure is null for a pass and an object for a fa
 | tokenUsage.cachedInputTokens                      | Cached input tokens.                                                                                |
 | tokenUsage.cacheWriteInputTokens                  | Cache-write input tokens reported by the Provider.                                                  |
 | tokenUsage.reasoningOutputTokens                  | Reasoning output tokens.                                                                            |
-| execution.modelElapsedMs / modelRounds            | Cumulative model time and round count.                                                              |
+| execution.modelElapsedMs / modelRounds            | Cumulative model-call time and logical model-turn count for this attempt.                           |
 | execution.firstEventMs / firstTextMs              | First turn event latency and first text-producing turn latency; zero when unavailable.              |
 | execution.providerRetries / providerRetryCounts   | Total retries and counts by persisted reason.                                                       |
 | execution.toolCalls / toolCounts                  | Total Tool Calls and counts by tool name.                                                           |
 | execution.fullInteractiveObservations             | Full interactive browser observations.                                                              |
-| execution.providerRequests / compactionRequests   | Provider requests and unsupported compact calls.                                                    |
+| execution.providerRequests / compactionRequests   | Actual Provider-call count, including retries, and unsupported compact calls for this attempt.      |
 | execution.traversalSegments / screenshotFallbacks | Structured traversal and screenshot fallback counts.                                                |
 | execution.screenshotFallbackReasons               | Screenshot fallback counts grouped by reason.                                                       |
 | execution.staleRefs / stateMismatches             | Stale semantic references and post-action mismatches.                                               |
@@ -231,9 +252,33 @@ benchmark/20260827T130000.000Z/01.json
 benchmark/20260827T130000.000Z/02.json
 ```
 
-Every report contains its `runId`; run IDs are never directory names. Attempt files are contiguous
-from `01.json`, use exclusive creation, and share collection, batch, contract, revision, and
-requested-run metadata. A stopped benchmark may contain fewer files than `requestedRuns`, but it
-cannot contain a gap. The report is the complete portable comparison and diagnostic record, so no
-second raw-report file or `sourceReport` pointer exists. Flat files and older schemas are rejected;
-the harness has one current layout and one current report contract.
+Every attempt report contains its `runId`; run IDs are never directory names. Attempt files are
+contiguous from `01.json`, use exclusive creation, and share collection, batch, contract, revision,
+and requested-run metadata. A stopped benchmark may contain fewer files than `requestedRuns`, but
+it cannot contain a gap. Each attempt report is the complete portable comparison and diagnostic
+record, so no second raw-report file or `sourceReport` pointer exists. Flat files and older schemas
+are rejected; the harness has one current layout and one current attempt-report contract.
+
+## Batch Summary Schema Version 1
+
+Every batch directory also contains one derived `report.json`. It is atomically replaced after each
+completed attempt and contains aggregate values only:
+
+| Field                           | Meaning                                                                |
+| ------------------------------- | ---------------------------------------------------------------------- |
+| schemaVersion                   | Exactly 1.                                                             |
+| sampleId / collection / batchId | Identity copied from the batch attempts and directory.                 |
+| requestedRuns / completedRuns   | Declared count and number of persisted attempts.                       |
+| successfulRuns / failedRuns     | Counts across all completed attempts, including harness failures.      |
+| totalProviderRequests           | Sum of actual Provider requests across all completed attempts.         |
+| totalProviderRequestElapsedMs   | Sum of `execution.modelElapsedMs` across all completed attempts.       |
+| averageTotalTokens              | Mean `tokenUsage.totalTokens` across all completed attempts.           |
+| averageElapsedMs                | Mean wall-clock `elapsedMs` across all completed attempts.             |
+| averageToolCalls                | Mean `execution.toolCalls` across all completed attempts.              |
+| averageProviderRequestElapsedMs | Sum of model elapsed time divided by the total Provider request count. |
+
+All averages include successful and failed attempts. When there are no Provider requests,
+`averageProviderRequestElapsedMs` is zero. Values are rounded to at most six decimal places. The
+summary contains no run IDs, input, output, evidence, or tool detail. Attempt files remain the
+immutable factual source; catalog validation rejects a missing summary or one that cannot be
+recomputed exactly from those attempts.

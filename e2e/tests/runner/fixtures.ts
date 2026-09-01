@@ -10,11 +10,12 @@ export function evaluationSampleDefinition(
   overrides: Partial<EvaluationSampleDefinition> = {},
 ): EvaluationSampleDefinition {
   return {
-    schemaVersion: 3,
+    schemaVersion: 4,
     id: 'example-read',
     contractVersion: 3,
     description: 'Reads one complete example page.',
     requiredRuns: 5,
+    resources: { exclusive: [] },
     target: {
       url: 'https://example.com/document',
       expectedOrigin: 'https://example.com',
@@ -62,6 +63,7 @@ export function liveScenario(overrides: Partial<LiveScenario> = {}): LiveScenari
     contractVersion: 3,
     name: 'example-read',
     description: 'Reads one example page.',
+    exclusiveResources: [],
     startUrl: 'https://example.com/',
     expectedOrigin: 'https://example.com',
     taskText: 'Read marker {{RUN_ID}} without changing anything.',

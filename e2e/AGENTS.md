@@ -23,3 +23,8 @@ These rules apply to every file and operation under `e2e/`.
   close that defect.
 - Never persist secrets or private raw traffic in samples or standard results.
 - Require `CHATBROWSERX_LIVE_ALLOW_MUTATION=1` for `page_state_mutation` samples.
+- Cap live execution at five concurrent samples. Before fan-out, freeze one read-only build and give
+  every worker an independently authenticated Profile, browser process, extension/task storage,
+  active Tab, runtime/log path, and result batch; never copy an authenticated Profile. Serialize
+  samples that read or mutate the same remote resource, and do not collect comparable performance
+  metrics under concurrent load. Follow the canonical concurrency procedure in `RUNBOOK.md`.

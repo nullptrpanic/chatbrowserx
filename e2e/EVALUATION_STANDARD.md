@@ -9,7 +9,9 @@ owns environment reconstruction and commands. SAMPLE_SPEC.md owns data formats.
   acceptance policy.
 - An attempt starts one fresh WorkSession and ends with one immutable report.
 - A batch is one command's ordered attempts for one product revision and one timestamp directory.
-- `results/` stores ordinary runs; `benchmark/` stores formal comparable batches.
+- A batch summary is a replaceable aggregate derived from its immutable attempt reports.
+- When created, `results/` stores ordinary runs and `benchmark/` stores formal comparable batches;
+  do not retain empty placeholder directories.
 
 Freeze `sample.json` before the first attempt. Increment `contractVersion` when task, input,
 side-effect, or acceptance semantics change. Never loosen a check after observing a result.
@@ -28,7 +30,8 @@ Rebuild and verify the environment with `RUNBOOK.md`, then:
 5. Compare immutable attempt facts; never cherry-pick retries.
 
 Once a run ID exists, persist exactly one immutable report for every terminal outcome. A fix creates
-a new attempt; it never replaces the old report.
+a new attempt; it never replaces the old report. Atomically refresh `report.json` after each
+persisted attempt. The summary is convenient output, not a substitute for attempt evidence.
 
 ## Evidence and Pass Decision
 
@@ -47,6 +50,8 @@ An attempt passes only when all applicable facts agree:
 - Output, tool, count, traversal, attachment, and Provider checks satisfy policy.
 - Required tools are present, forbidden tools are absent, and required verified tools succeeded.
 - Read-only samples made no remote mutation; declared mutations have verified readback.
+- A declared mutation checkpoint is satisfied only by structural evidence observed after its
+  named commit action; draft state and model claims are not completion evidence.
 - Provider continuation is complete and compactionRequests is zero.
 - No unexplained fallback, stale reference, mismatch, loop, unsafe traversal, or ambiguous mutation
   makes the evidence untrustworthy.

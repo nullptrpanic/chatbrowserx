@@ -10,16 +10,26 @@ import {
   type LiveProfileLock,
 } from './live-profile';
 import type { LiveProductTarget } from './product-revision';
+import { acquireLiveExecutionLease, type LiveExecutionLease } from './live-resources';
 
 export interface ExistingLiveSessionInput {
   readonly repositoryRoot: string;
   readonly environment: Readonly<Record<string, string | undefined>>;
   readonly productTarget: LiveProductTarget;
+  readonly execution?: {
+    readonly sampleId: string;
+    readonly exclusiveResources: readonly string[];
+  };
 }
 
 export interface LiveSessionDependencies {
   profileExists(path: string): Promise<boolean>;
   acquireProfileLock(path: string): Promise<LiveProfileLock>;
+  acquireExecutionLease(
+    repositoryRoot: string,
+    sampleId: string,
+    exclusiveResources: readonly string[],
+  ): Promise<LiveExecutionLease>;
   createSession(options: LoadedExtensionSessionOptions): Promise<ExtensionSession>;
 }
 
@@ -30,6 +40,7 @@ const defaultDependencies: LiveSessionDependencies = {
       .catch(() => false);
   },
   acquireProfileLock: acquireLiveProfileLock,
+  acquireExecutionLease: acquireLiveExecutionLease,
   createSession: createLoadedExtensionSession,
 };
 
@@ -46,9 +57,17 @@ export async function withExistingLiveSession<Result>(
     throw new Error('Dedicated Live E2E Profile is missing. Run npm run e2e:live:setup first.');
   }
 
-  const lock = await dependencies.acquireProfileLock(profilePath);
+  const executionLease = input.execution
+    ? await dependencies.acquireExecutionLease(
+        input.repositoryRoot,
+        input.execution.sampleId,
+        input.execution.exclusiveResources,
+      )
+    : null;
+  let lock: LiveProfileLock | null = null;
   let session: ExtensionSession | null = null;
   try {
+    lock = await dependencies.acquireProfileLock(profilePath);
     session = await dependencies.createSession({
       profilePath,
       removeProfileOnClose: false,
@@ -60,6 +79,7 @@ export async function withExistingLiveSession<Result>(
     return await operation(session);
   } finally {
     await session?.close().catch(() => undefined);
-    await lock.release();
+    await lock?.release();
+    await executionLease?.release();
   }
 }

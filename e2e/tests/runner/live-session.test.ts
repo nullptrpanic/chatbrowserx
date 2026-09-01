@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from 'vitest';
 import type { ExtensionSession } from '../../runner/extension-session';
 import type { LiveProfileLock } from '../../runner/live-profile';
+import type { LiveExecutionLease } from '../../runner/live-resources';
 import { withExistingLiveSession, type LiveSessionDependencies } from '../../runner/live-session';
 
 const input = {
@@ -9,6 +10,10 @@ const input = {
   productTarget: {
     extensionPath: '/repo/chatbrowserx/dist',
     productRevision: 'revision',
+  },
+  execution: {
+    sampleId: 'example-read',
+    exclusiveResources: ['example:document'],
   },
 };
 
@@ -33,6 +38,11 @@ function dependencies(
       events.push('close');
     },
   } as ExtensionSession;
+  const executionLease = {
+    async release() {
+      events.push('execution-release');
+    },
+  } satisfies LiveExecutionLease;
   return {
     events,
     dependencies: {
@@ -43,6 +53,10 @@ function dependencies(
       async acquireProfileLock(path) {
         events.push(`lock:${path}`);
         return lock;
+      },
+      async acquireExecutionLease(repositoryRoot, sampleId, exclusiveResources) {
+        events.push(`execution-lock:${repositoryRoot}:${sampleId}:${exclusiveResources.join(',')}`);
+        return executionLease;
       },
       async createSession(sessionOptions) {
         events.push(
@@ -71,11 +85,13 @@ describe('existing live E2E session', () => {
     expect(value).toBe('done');
     expect(fixture.events).toEqual([
       'profile:/repo/chatbrowserx/e2e/.runtime/profile',
+      'execution-lock:/repo/chatbrowserx:example-read:example:document',
       'lock:/repo/chatbrowserx/e2e/.runtime/profile',
       'session:/repo/chatbrowserx/e2e/.runtime/profile:/repo/chatbrowserx/dist:chromium:1440x900',
       'operation',
       'close',
       'release',
+      'execution-release',
     ]);
   });
 
@@ -94,7 +110,7 @@ describe('existing live E2E session', () => {
     await expect(withExistingLiveSession(input, vi.fn(), fixture.dependencies)).rejects.toThrow(
       'launch failed',
     );
-    expect(fixture.events.at(-1)).toBe('release');
+    expect(fixture.events.slice(-2)).toEqual(['release', 'execution-release']);
     expect(fixture.events).not.toContain('close');
   });
 
@@ -110,6 +126,6 @@ describe('existing live E2E session', () => {
         fixture.dependencies,
       ),
     ).rejects.toThrow('operation failed');
-    expect(fixture.events.slice(-2)).toEqual(['close', 'release']);
+    expect(fixture.events.slice(-3)).toEqual(['close', 'release', 'execution-release']);
   });
 });

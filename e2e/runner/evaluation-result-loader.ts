@@ -1,5 +1,7 @@
 import { readdir, stat } from 'node:fs/promises';
 import { basename, join } from 'node:path';
+import { isDeepStrictEqual } from 'node:util';
+import { createEvaluationBatchReport, parseEvaluationBatchReport } from './evaluation-batch-report';
 import { parseEvaluationResult, type EvaluationResult } from './evaluation-result';
 import { readJsonFile } from './json-contract';
 
@@ -11,14 +13,19 @@ export async function loadEvaluationResults(
   directory: string,
   sampleId: string,
 ): Promise<readonly EvaluationResult[]> {
-  const exists = await stat(directory)
-    .then((entry) => entry.isDirectory())
-    .catch(() => false);
-  if (!exists) throw new Error(`Sample "${sampleId}" results directory is missing.`);
-
   const collection = basename(directory);
   if (collection !== 'results' && collection !== 'benchmark') {
     throw new Error(`Sample "${sampleId}" result collection must be results or benchmark.`);
+  }
+  const entry = await stat(directory).catch((error: unknown) => {
+    if (typeof error === 'object' && error !== null && 'code' in error && error.code === 'ENOENT') {
+      return null;
+    }
+    throw error;
+  });
+  if (entry === null) return [];
+  if (!entry.isDirectory()) {
+    throw new Error(`Sample "${sampleId}" result collection must be a directory.`);
   }
   const entries = await readdir(directory, { withFileTypes: true });
   const batchDirectories: string[] = [];
@@ -34,9 +41,15 @@ export async function loadEvaluationResults(
   const results: EvaluationResult[] = [];
   for (const batchId of batchDirectories.toSorted()) {
     const batchDirectory = join(directory, batchId);
-    const attempts = (await readdir(batchDirectory, { withFileTypes: true })).toSorted(
+    const batchEntries = (await readdir(batchDirectory, { withFileTypes: true })).toSorted(
       (left, right) => left.name.localeCompare(right.name),
     );
+    const reportEntry = batchEntries.find((entry) => entry.name === 'report.json');
+    if (reportEntry === undefined || !reportEntry.isFile()) {
+      throw new Error(`Sample "${sampleId}" batch "${batchId}" report.json is missing.`);
+    }
+    const attempts = batchEntries.filter((entry) => entry.name !== 'report.json');
+    const batchResults: EvaluationResult[] = [];
     let firstResult: EvaluationResult | undefined;
     const runIds = new Set<string>();
     for (const [index, entry] of attempts.entries()) {
@@ -81,7 +94,19 @@ export async function loadEvaluationResults(
         throw new Error(`Sample "${sampleId}" batch "${batchId}" run IDs must be unique.`);
       }
       runIds.add(result.runId);
+      batchResults.push(result);
       results.push(result);
+    }
+    const report = parseEvaluationBatchReport(
+      await readJsonFile(join(batchDirectory, 'report.json')),
+      sampleId,
+      batchId,
+    );
+    const expectedReport = createEvaluationBatchReport(batchResults);
+    if (!isDeepStrictEqual(report, expectedReport)) {
+      throw new Error(
+        `Sample "${sampleId}" batch "${batchId}" report.json does not match its attempts.`,
+      );
     }
   }
   return results;

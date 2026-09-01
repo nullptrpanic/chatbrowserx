@@ -33,7 +33,15 @@ async function main(): Promise<void> {
   try {
     validateEvaluationSampleAuthorization(scenario, process.env);
     report = await withExistingLiveSession(
-      { repositoryRoot, environment: process.env, productTarget },
+      {
+        repositoryRoot,
+        environment: process.env,
+        productTarget,
+        execution: {
+          sampleId: scenario.name,
+          exclusiveResources: scenario.exclusiveResources,
+        },
+      },
       (session) => runLiveScenario(createPlaywrightLiveRuntime(session), scenario, dependencies),
     );
   } catch (error) {

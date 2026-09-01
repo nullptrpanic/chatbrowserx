@@ -736,6 +736,14 @@ function expandScenario(scenario: LiveScenario, runId: string): LiveScenario {
       : {
           requiredToolOutputIncludes: expandAll(scenario.requiredToolOutputIncludes),
         }),
+    ...(scenario.requiredMutationReadbacks === undefined
+      ? {}
+      : {
+          requiredMutationReadbacks: scenario.requiredMutationReadbacks.map((requirement) => ({
+            actionName: expandRunMarker(requirement.actionName, runId),
+            includes: expandAll(requirement.includes),
+          })),
+        }),
   };
 }
 

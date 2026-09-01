@@ -6,8 +6,9 @@ sample, result, or evaluation contracts; those remain owned by `RUNBOOK.md`, `SA
 
 ## Admission Rule
 
-The frozen product baseline for this program is commit `59f6906`. Each candidate changes one
-behavior and is evaluated independently against that baseline or the latest admitted candidate.
+The original product baseline for this program is commit `59f6906`. Later architecture work uses
+the explicitly frozen revision recorded in its decision entry. Each candidate changes one behavior
+and is evaluated independently against its declared baseline or the latest admitted candidate.
 
 A candidate is admitted only when:
 
@@ -88,7 +89,7 @@ for a new baseline run when a later candidate is compared.
 | 2D    | Stabilize common browser schemas and validate dynamic refs in the executor                                                                       | Fewer schema changes and potentially better cache reuse                           | Medium          | Medium         | queued   |
 | 2E    | Prioritize editable targets in the bounded interactive ref budget and disclose deferred image delivery after capture                             | Keeps dense-page editors actionable without broadening the page snapshot          | Very small      | Low            | admitted |
 | 2F    | Classify fragment links as `same-page` from native DOM link semantics                                                                            | Gives generic navigation policy reliable table-of-contents evidence               | Small           | Low            | admitted |
-| 3A    | Tier large Sandbox Skill catalogs while keeping a visible manifest                                                                               | Lower prompt cost when many Skills are installed                                  | Medium          | Low to medium  | queued   |
+| 3A    | Discover optional Sandbox Skills through `skill_search` instead of injecting the complete catalog, while keeping browser tools visible           | Lower prompt cost and prevent unrelated Skills from displacing browser execution  | Medium          | Low to medium  | admitted |
 | 3B    | Native deferred discovery for optional, non-browser tool families                                                                                | Lower large-tool-set prompt cost without hiding browser core tools                | Medium to large | Medium         | queued   |
 | 3C    | Read-only programmatic orchestration for many independent network or history reads                                                               | Fewer model round trips on proven fan-out workloads                               | Large           | Medium to high | queued   |
 | 3D    | Cross-conversation FTS retrieval with search-then-read IDs, excluding automatic memory                                                           | Reuse prior task evidence without replaying full conversations                    | Medium to large | Medium         | queued   |
@@ -236,3 +237,23 @@ duplicate them here.
   first-event tails varied and are not claimed as a product gain. A harness-only correction also
   recognizes an explicitly failed HTTP response followed by its successful durable retry; no
   production retry or acceptance rule was relaxed.
+- 2026-09-01 — Phase 3A and the decoupled Agent/Provider/tool registry were retained against frozen
+  baseline `384db2b20c901d65a16fd9765eac5861d9de91a5+baseline`. The final functional candidate
+  `384db2b20c901d65a16fd9765eac5861d9de91a5-dirty-81dfd29184960080` passed every current
+  contract (16/16); the baseline passed 9/16. Full-document and named-section candidate batches
+  passed 5/5 each, while the fail-fast baseline stopped at 0/1 in both because its always-present
+  Skill catalog redirected the task from browser tools to the local `lark-doc` Skill. Messenger
+  global search remained 5/5 on both sides; candidate mean total Tokens fell from 98,768.6 to
+  70,828.2 (28.3%), while mean elapsed time rose from 30,083 ms to 32,169 ms (6.9%) alongside a
+  5.3% increase in mean Provider request latency, so no speed gain is claimed for that batch. The
+  repeated baseline prompt carried 17,966 instruction characters per request versus 1,612 for the
+  candidate. Across the nine one-attempt contracts that succeeded on both revisions, aggregate
+  total Tokens, elapsed time, Tool Calls, and model rounds fell 50.9%, 12.8%, 9.2%, and 8.1%; these
+  aggregate single-attempt figures support direction only, not per-sample stability claims. The
+  other baseline failures reproduced missing native send/search controls, image-paste verification,
+  and page-content instruction interference; current attempts completed their required readbacks.
+  After lint-only equivalent loop/constant cleanup changed the dirty fingerprint to
+  `384db2b20c901d65a16fd9765eac5861d9de91a5-dirty-0daba3c3913dcaf0`, native-button send and
+  virtualized multi-group scrolling passed fresh live smokes. Repository gates passed 1348/1348
+  unit tests, 8/8 Playwright tests, formatting, lint, TypeScript/build, bundle audit, Sandbox
+  integration, and all 16 catalog contracts.
