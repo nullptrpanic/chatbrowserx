@@ -1,5 +1,9 @@
 import type { ConversationRepository } from '../persistence/conversation-repository';
-import { TaskRepositoryBusyError, type TaskRepository } from '../persistence/task-repository';
+import {
+  TaskRepositoryBusyError,
+  TaskRepositoryConflictError,
+  type TaskRepository,
+} from '../persistence/task-repository';
 import type { IdGenerator, MessageId, TaskId } from '../shared/ids';
 import type { Clock } from '../shared/time';
 import type { Checkpoint } from './checkpoint-types';
@@ -37,7 +41,7 @@ export interface CreateTaskSubmissionInput extends CreateTaskInput {
   readonly message: TaskMessageDraft;
 }
 
-export interface ContinueCancelledTaskSubmissionInput {
+export interface ContinueTaskSubmissionInput {
   readonly sourceTaskId: TaskId;
   readonly tabId: number;
   readonly conversation: Conversation;
@@ -55,7 +59,7 @@ export interface TaskCommandPort {
 
 export interface TaskSubmissionPort {
   createSubmission(input: CreateTaskSubmissionInput): Promise<TaskSnapshot>;
-  continueCancelledSubmission(input: ContinueCancelledTaskSubmissionInput): Promise<TaskSnapshot>;
+  continueSubmission(input: ContinueTaskSubmissionInput): Promise<TaskSnapshot>;
   appendSupplement(message: MessageRecord): Promise<void>;
 }
 
@@ -206,10 +210,8 @@ export class TaskCommandService implements TaskCommandPort, TaskSubmissionPort {
     return { task, run, checkpoint, events, toolResults: [] };
   }
 
-  /** Stores a new user message while keeping the same logical cancelled task. */
-  async continueCancelledSubmission(
-    input: ContinueCancelledTaskSubmissionInput,
-  ): Promise<TaskSnapshot> {
+  /** Stores a new user message while keeping the same recoverable logical task. */
+  async continueSubmission(input: ContinueTaskSubmissionInput): Promise<TaskSnapshot> {
     if (input.message.conversationId !== input.conversation.id) {
       throw new TaskCommandError(
         'TASK_STATE_INVALID',
@@ -242,10 +244,13 @@ export class TaskCommandService implements TaskCommandPort, TaskSubmissionPort {
 
   async #createContinuationSnapshot(input: ContinuationSnapshotInput): Promise<TaskSnapshot> {
     const source = await this.getSnapshot(input.sourceTaskId);
-    if (source.task.status !== 'cancelled' || source.run.status !== 'cancelled') {
+    const recoverableStatus =
+      source.task.status === source.run.status &&
+      (source.task.status === 'cancelled' || source.task.status === 'failed');
+    if (!recoverableStatus) {
       throw new TaskCommandError(
         'TASK_STATE_INVALID',
-        'Only a cancelled task can start another execution attempt.',
+        'Only a failed or cancelled task can start another execution attempt.',
       );
     }
     if (source.events.some((event) => event.type === 'context.cleared')) {
@@ -373,9 +378,25 @@ export class TaskCommandService implements TaskCommandPort, TaskSubmissionPort {
   }
 
   async pause(taskId: TaskId): Promise<TaskSnapshot> {
-    const snapshot = await this.getSnapshot(taskId);
-    if (snapshot.task.status === 'paused') return snapshot;
-    return this.#saveStatusTransition(snapshot, 'task.paused', 'user_pause');
+    for (let attempt = 0; attempt < 3; attempt += 1) {
+      const snapshot = await this.getSnapshot(taskId);
+      if (
+        snapshot.task.status === 'paused' ||
+        snapshot.task.status === 'completed' ||
+        snapshot.task.status === 'failed' ||
+        snapshot.task.status === 'cancelled'
+      ) {
+        return snapshot;
+      }
+      try {
+        return await this.#saveStatusTransition(snapshot, 'task.paused', 'user_pause');
+      } catch (error) {
+        if (!(error instanceof TaskRepositoryConflictError) || error.code !== 'STALE_BOUNDARY') {
+          throw error;
+        }
+      }
+    }
+    throw new TaskCommandError('TASK_STATE_INVALID', 'Task changed while pause was being applied.');
   }
 
   async resume(taskId: TaskId): Promise<TaskSnapshot> {

@@ -1,5 +1,3 @@
-const MAX_ERROR_BODY_BYTES = 8 * 1024;
-
 export interface HttpFailure {
   readonly status: number;
   readonly retryAfterMs: number | null;
@@ -20,23 +18,14 @@ function retryAfterMs(value: string | null, now = Date.now()): number | null {
   return Number.isFinite(date) ? Math.max(0, date - now) : null;
 }
 
-/** Discards a bounded error body and returns only safe transport metadata. */
+/** Cancels an untrusted error body without delaying status-based classification. */
 export async function inspectHttpFailure(response: Response): Promise<HttpFailure> {
   const retryAfter = retryAfterMs(response.headers.get('Retry-After'));
   if (response.body !== null) {
-    const reader = response.body.getReader();
-    let consumed = 0;
     try {
-      while (consumed < MAX_ERROR_BODY_BYTES) {
-        const next = await reader.read();
-        if (next.done) break;
-        consumed += next.value.byteLength;
-      }
-      if (consumed >= MAX_ERROR_BODY_BYTES) await reader.cancel().catch(() => undefined);
+      void response.body.cancel().catch(() => undefined);
     } catch {
-      // HTTP status remains authoritative when an unsafe body cannot be discarded.
-    } finally {
-      reader.releaseLock();
+      // HTTP status remains authoritative when cancellation itself is unavailable.
     }
   }
   return { status: response.status, retryAfterMs: retryAfter };

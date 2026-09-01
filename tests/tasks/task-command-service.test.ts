@@ -1,6 +1,6 @@
 // @vitest-environment node
 import 'fake-indexeddb/auto';
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import { IndexedDbConversationRepository } from '../../src/persistence/conversation-repository';
 import { openChatBrowserDatabase } from '../../src/persistence/open-database';
 import { IndexedDbTaskRepository } from '../../src/persistence/task-repository';
@@ -152,6 +152,60 @@ describe('TaskCommandService', () => {
     fixture.database.close();
   });
 
+  it('reloads and retries pause when an executor boundary wins the first write', async () => {
+    const fixture = await setup('command-pause-conflict');
+    const created = await createSubmission(fixture);
+    if (created.checkpoint === null) throw new Error('Expected a checkpoint.');
+    const saveTransition = fixture.repository.saveTransition.bind(fixture.repository);
+    let injected = false;
+    const spy = vi.spyOn(fixture.repository, 'saveTransition').mockImplementation(async (input) => {
+      if (
+        !injected &&
+        input.events.some(
+          (event) => event.type === 'status.changed' && event.reason === 'user_pause',
+        )
+      ) {
+        injected = true;
+        const at = fixture.clock.now();
+        const sequence = created.task.lastEventSequence + 1;
+        await saveTransition({
+          task: {
+            ...created.task,
+            status: 'planning',
+            lastEventSequence: sequence,
+            updatedAt: at,
+          },
+          run: { ...created.run, status: 'planning' },
+          events: [
+            {
+              id: fixture.ids.create('event'),
+              taskId: created.task.id,
+              runId: created.run.id,
+              sequence,
+              at,
+              type: 'status.changed',
+              taskStatus: 'planning',
+              runStatus: 'planning',
+              reason: 'model_request_started',
+              error: null,
+            },
+          ],
+          checkpoint: created.checkpoint,
+        });
+      }
+      return saveTransition(input);
+    });
+
+    const paused = await fixture.commands.pause(created.task.id);
+
+    expect(paused).toMatchObject({
+      task: { status: 'paused', lastEventSequence: created.task.lastEventSequence + 2 },
+      run: { status: 'paused' },
+    });
+    expect(spy).toHaveBeenCalledTimes(2);
+    fixture.database.close();
+  });
+
   it('cancels a paused task and releases the global submission slot', async () => {
     const fixture = await setup('command-cancel-paused');
     const created = await createSubmission(fixture);
@@ -240,7 +294,7 @@ describe('TaskCommandService', () => {
     const created = await createSubmission(fixture);
     const cancelled = await fixture.commands.cancel(created.task.id);
     const nextMessage = userMessage(created.task.conversationId, 'message_continue');
-    const continued = await fixture.commands.continueCancelledSubmission({
+    const continued = await fixture.commands.continueSubmission({
       sourceTaskId: created.task.id,
       tabId: 9,
       conversation: conversation(created.task.conversationId),
@@ -268,6 +322,35 @@ describe('TaskCommandService', () => {
     fixture.database.close();
   });
 
+  it('continues a failed task with a new run and preserves its checkpoint history', async () => {
+    const fixture = await setup('command-failed-continuation');
+    const created = await createSubmission(fixture);
+    await markFailed(fixture, created);
+    const failed = await fixture.commands.getSnapshot(created.task.id);
+    const nextMessage = userMessage(created.task.conversationId, 'message_continue_failed');
+
+    const continued = await fixture.commands.continueSubmission({
+      sourceTaskId: created.task.id,
+      tabId: 9,
+      conversation: conversation(created.task.conversationId),
+      message: { ...nextMessage, text: '继续' },
+    });
+
+    expect(continued).toMatchObject({
+      task: {
+        id: created.task.id,
+        status: 'queued',
+        lastEventSequence: failed.task.lastEventSequence + 2,
+      },
+      run: { attempt: 2, status: 'queued', error: null },
+    });
+    expect(continued.checkpoint?.continuationItems).toEqual([
+      { type: 'message_ref', messageId: 'message_user' },
+      { type: 'message_ref', messageId: nextMessage.id },
+    ]);
+    fixture.database.close();
+  });
+
   it('records pending supplements as applied when a cancelled task starts its next run', async () => {
     const fixture = await setup('command-cancel-supplement-continuation');
     const created = await createSubmission(fixture);
@@ -287,7 +370,7 @@ describe('TaskCommandService', () => {
     const cancelled = await fixture.commands.cancel(created.task.id);
     const nextMessage = userMessage(created.task.conversationId, 'message_after_supplement');
 
-    const continued = await fixture.commands.continueCancelledSubmission({
+    const continued = await fixture.commands.continueSubmission({
       sourceTaskId: created.task.id,
       tabId: 9,
       conversation: conversation(created.task.conversationId),
@@ -368,7 +451,7 @@ describe('TaskCommandService', () => {
       ]),
     });
     await expect(
-      fixture.commands.continueCancelledSubmission({
+      fixture.commands.continueSubmission({
         sourceTaskId: created.task.id,
         tabId: 7,
         conversation: conversation(created.task.conversationId),

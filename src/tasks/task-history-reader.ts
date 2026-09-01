@@ -24,6 +24,20 @@ export interface ResultReadInput {
   readonly limit: number;
 }
 
+export interface HistoryDetailReadInput {
+  readonly detailId: string;
+  readonly offset: number;
+  readonly limit: number;
+}
+
+export type HistoryDetailField =
+  | 'task_goal'
+  | 'message_text'
+  | 'reasoning_summary'
+  | 'tool_arguments'
+  | 'status_reason'
+  | 'status_error';
+
 export type HistoryItem =
   | {
       readonly sequence: number;
@@ -34,6 +48,8 @@ export type HistoryItem =
       readonly role: MessageRecord['role'];
       readonly status: MessageRecord['status'];
       readonly text: string;
+      readonly textLength: number;
+      readonly textDetailId: string | null;
       readonly attachmentCount: number;
       readonly applied?: boolean;
       readonly replyTo?: {
@@ -47,6 +63,8 @@ export type HistoryItem =
       readonly runId: string;
       readonly type: 'reasoning_summary';
       readonly summary: string;
+      readonly summaryLength: number;
+      readonly summaryDetailId: string | null;
     }
   | {
       readonly sequence: number;
@@ -56,6 +74,8 @@ export type HistoryItem =
       readonly callId: string;
       readonly name: string;
       readonly argumentsJson: string;
+      readonly argumentsLength: number;
+      readonly argumentsDetailId: string | null;
     }
   | {
       readonly sequence: number;
@@ -77,12 +97,16 @@ export type HistoryItem =
       readonly taskStatus: TaskStatus;
       readonly runStatus: TaskStatus;
       readonly reason: string;
+      readonly reasonLength: number;
+      readonly reasonDetailId: string | null;
       readonly error: string | null;
+      readonly errorLength: number;
+      readonly errorDetailId: string | null;
     };
 
 interface HistoryReadError {
   readonly ok: false;
-  readonly code: 'HISTORY_NOT_FOUND' | 'INVALID_CURSOR' | 'RESULT_NOT_FOUND';
+  readonly code: 'HISTORY_NOT_FOUND' | 'INVALID_CURSOR' | 'DETAIL_NOT_FOUND' | 'RESULT_NOT_FOUND';
   readonly message: string;
   readonly retryable: false;
 }
@@ -90,8 +114,16 @@ interface HistoryReadError {
 export type HistoryReadResponse =
   | {
       readonly ok: true;
-      readonly task: Pick<Task, 'id' | 'ordinal' | 'goal' | 'status' | 'createdAt' | 'updatedAt'>;
+      readonly task: Pick<
+        Task,
+        'id' | 'ordinal' | 'goal' | 'status' | 'createdAt' | 'updatedAt'
+      > & {
+        readonly goalLength: number;
+        readonly goalDetailId: string | null;
+      };
       readonly items: readonly HistoryItem[];
+      readonly itemsCharacterCount: number;
+      readonly itemsCharacterLimit: number;
       readonly returnedCount: number;
       readonly consumedCount: number;
       readonly totalCount: number;
@@ -118,8 +150,30 @@ export type ResultReadResponse =
     }
   | HistoryReadError;
 
+export type HistoryDetailReadResponse =
+  | {
+      readonly ok: true;
+      readonly detailId: string;
+      readonly taskId: TaskId;
+      readonly sequence: number;
+      readonly field: HistoryDetailField;
+      readonly content: string;
+      readonly offset: number;
+      readonly returnedCount: number;
+      readonly consumedCount: number;
+      readonly totalCount: number;
+      readonly remainingCount: number;
+      readonly nextOffset: number | null;
+      readonly hasMore: boolean;
+    }
+  | HistoryReadError;
+
 export interface TaskHistoryReaderPort {
   readHistory(context: TaskHistoryContext, input: HistoryReadInput): Promise<HistoryReadResponse>;
+  readDetail(
+    context: TaskHistoryContext,
+    input: HistoryDetailReadInput,
+  ): Promise<HistoryDetailReadResponse>;
   readResult(context: TaskHistoryContext, input: ResultReadInput): Promise<ResultReadResponse>;
 }
 
@@ -129,8 +183,18 @@ interface CursorPayload {
   readonly lastSequence: number;
 }
 
+interface DetailPayload {
+  readonly version: 1;
+  readonly taskId: TaskId;
+  readonly sequence: number;
+  readonly field: HistoryDetailField;
+}
+
 const HISTORY_PROJECTION_VERSION = 1;
+const HISTORY_DETAIL_VERSION = 1;
 const TOOL_RESULT_PREVIEW_CHARACTERS = 1_000;
+const HISTORY_FIELD_PREVIEW_CHARACTERS = 2_000;
+const HISTORY_ITEMS_CHARACTER_LIMIT = 40_000;
 
 function historyNotFound(): HistoryReadError {
   return {
@@ -155,6 +219,15 @@ function resultNotFound(): HistoryReadError {
     ok: false,
     code: 'RESULT_NOT_FOUND',
     message: 'The requested tool result is unavailable in this conversation history.',
+    retryable: false,
+  };
+}
+
+function detailNotFound(): HistoryReadError {
+  return {
+    ok: false,
+    code: 'DETAIL_NOT_FOUND',
+    message: 'The requested history detail is unavailable in this conversation history.',
     retryable: false,
   };
 }
@@ -193,6 +266,68 @@ function decodeCursor(value: string): CursorPayload | null {
   }
 }
 
+function encodeDetail(payload: DetailPayload): string {
+  const bytes = new TextEncoder().encode(JSON.stringify(payload));
+  let binary = '';
+  for (const byte of bytes) binary += String.fromCharCode(byte);
+  return btoa(binary).replaceAll('+', '-').replaceAll('/', '_').replace(/=+$/u, '');
+}
+
+function isHistoryDetailField(value: unknown): value is HistoryDetailField {
+  return (
+    value === 'task_goal' ||
+    value === 'message_text' ||
+    value === 'reasoning_summary' ||
+    value === 'tool_arguments' ||
+    value === 'status_reason' ||
+    value === 'status_error'
+  );
+}
+
+function decodeDetail(value: string): DetailPayload | null {
+  try {
+    const padded = value
+      .replaceAll('-', '+')
+      .replaceAll('_', '/')
+      .padEnd(Math.ceil(value.length / 4) * 4, '=');
+    const binary = atob(padded);
+    const bytes = Uint8Array.from(binary, (character) => character.charCodeAt(0));
+    const parsed: unknown = JSON.parse(new TextDecoder().decode(bytes));
+    if (
+      typeof parsed !== 'object' ||
+      parsed === null ||
+      !('version' in parsed) ||
+      parsed.version !== HISTORY_DETAIL_VERSION ||
+      !('taskId' in parsed) ||
+      typeof parsed.taskId !== 'string' ||
+      !('sequence' in parsed) ||
+      !Number.isSafeInteger(parsed.sequence) ||
+      !('field' in parsed) ||
+      !isHistoryDetailField(parsed.field)
+    ) {
+      return null;
+    }
+    return parsed as unknown as DetailPayload;
+  } catch {
+    return null;
+  }
+}
+
+function projectedField(
+  value: string,
+  payload: DetailPayload,
+): {
+  readonly preview: string;
+  readonly length: number;
+  readonly detailId: string | null;
+} {
+  return {
+    preview: value.slice(0, HISTORY_FIELD_PREVIEW_CHARACTERS),
+    length: value.length,
+    detailId: value.length > HISTORY_FIELD_PREVIEW_CHARACTERS ? encodeDetail(payload) : null,
+  };
+}
+
 function messageItem(
   event: Pick<TaskEvent, 'sequence' | 'at' | 'runId'> & {
     readonly type: 'message.recorded' | 'supplement.queued';
@@ -201,6 +336,12 @@ function messageItem(
   appliedSupplements: ReadonlySet<string>,
 ): HistoryItem {
   const supplement = event.type === 'supplement.queued';
+  const text = projectedField(message.text, {
+    version: HISTORY_DETAIL_VERSION,
+    taskId: message.taskId,
+    sequence: event.sequence,
+    field: 'message_text',
+  });
   return {
     sequence: event.sequence,
     at: event.at,
@@ -209,7 +350,9 @@ function messageItem(
     messageId: message.id,
     role: message.role,
     status: message.status,
-    text: message.text,
+    text: text.preview,
+    textLength: text.length,
+    textDetailId: text.detailId,
     attachmentCount: message.attachmentIds.length,
     ...(supplement ? { applied: appliedSupplements.has(message.id) } : {}),
     ...(message.replyTo === undefined
@@ -306,17 +449,31 @@ function historyItems(
       return [messageItem({ ...event, type: 'supplement.queued' }, message, appliedSupplements)];
     }
     if (event.type === 'reasoning.summary') {
+      const summary = projectedField(event.summary, {
+        version: HISTORY_DETAIL_VERSION,
+        taskId: event.taskId,
+        sequence: event.sequence,
+        field: 'reasoning_summary',
+      });
       return [
         {
           sequence: event.sequence,
           at: event.at,
           runId: event.runId,
           type: 'reasoning_summary',
-          summary: event.summary,
+          summary: summary.preview,
+          summaryLength: summary.length,
+          summaryDetailId: summary.detailId,
         },
       ];
     }
     if (event.type === 'tool.call') {
+      const argumentsJson = projectedField(event.argumentsJson, {
+        version: HISTORY_DETAIL_VERSION,
+        taskId: event.taskId,
+        sequence: event.sequence,
+        field: 'tool_arguments',
+      });
       return [
         {
           sequence: event.sequence,
@@ -325,7 +482,9 @@ function historyItems(
           type: 'tool_call',
           callId: event.callId,
           name: event.name,
-          argumentsJson: event.argumentsJson,
+          argumentsJson: argumentsJson.preview,
+          argumentsLength: argumentsJson.length,
+          argumentsDetailId: argumentsJson.detailId,
         },
       ];
     }
@@ -359,6 +518,21 @@ function historyItems(
       ];
     }
     if (event.type === 'status.changed') {
+      const reason = projectedField(event.reason, {
+        version: HISTORY_DETAIL_VERSION,
+        taskId: event.taskId,
+        sequence: event.sequence,
+        field: 'status_reason',
+      });
+      const error =
+        event.error == null
+          ? null
+          : projectedField(event.error.userMessage, {
+              version: HISTORY_DETAIL_VERSION,
+              taskId: event.taskId,
+              sequence: event.sequence,
+              field: 'status_error',
+            });
       return [
         {
           sequence: event.sequence,
@@ -367,13 +541,55 @@ function historyItems(
           type: 'status',
           taskStatus: event.taskStatus,
           runStatus: event.runStatus,
-          reason: event.reason,
-          error: event.error?.userMessage ?? null,
+          reason: reason.preview,
+          reasonLength: reason.length,
+          reasonDetailId: reason.detailId,
+          error: error?.preview ?? null,
+          errorLength: error?.length ?? 0,
+          errorDetailId: error?.detailId ?? null,
         },
       ];
     }
     return [];
   });
+}
+
+function boundedHistoryItems(items: readonly HistoryItem[]): readonly HistoryItem[] {
+  const page: HistoryItem[] = [];
+  for (const item of items) {
+    const candidate = [...page, item];
+    if (page.length > 0 && JSON.stringify(candidate).length > HISTORY_ITEMS_CHARACTER_LIMIT) {
+      break;
+    }
+    page.push(item);
+  }
+  return page;
+}
+
+function characterRange(
+  detailId: string,
+  payload: DetailPayload,
+  value: string,
+  input: Pick<HistoryDetailReadInput, 'offset' | 'limit'>,
+): HistoryDetailReadResponse {
+  const content = value.slice(input.offset, input.offset + input.limit);
+  const consumedCount = Math.min(input.offset + content.length, value.length);
+  const remainingCount = value.length - consumedCount;
+  return {
+    ok: true,
+    detailId,
+    taskId: payload.taskId,
+    sequence: payload.sequence,
+    field: payload.field,
+    content,
+    offset: input.offset,
+    returnedCount: content.length,
+    consumedCount,
+    totalCount: value.length,
+    remainingCount,
+    nextOffset: remainingCount > 0 ? consumedCount : null,
+    hasMore: remainingCount > 0,
+  };
 }
 
 export class TaskHistoryReader implements TaskHistoryReaderPort {
@@ -456,22 +672,40 @@ export class TaskHistoryReader implements TaskHistoryReaderPort {
         event.type === 'tool.call' ? [[event.callId, event] as const] : [],
       ),
     );
-    const page = historyItems(pageEvents, messageById, resultById, appliedSupplements, callsById);
+    const projectedItems = historyItems(
+      pageEvents,
+      messageById,
+      resultById,
+      appliedSupplements,
+      callsById,
+    );
+    const page = boundedHistoryItems(projectedItems);
     const consumedCount = start + page.length;
     const remainingCount = visibleEvents.length - consumedCount;
     const hasMore = remainingCount > 0;
     const lastSequence = page.at(-1)?.sequence;
+    const goal = projectedField(selected.goal, {
+      version: HISTORY_DETAIL_VERSION,
+      taskId: selected.id,
+      sequence: 0,
+      field: 'task_goal',
+    });
+    const itemsCharacterCount = JSON.stringify(page).length;
     return {
       ok: true,
       task: {
         id: selected.id,
         ordinal: selected.ordinal,
-        goal: selected.goal,
+        goal: goal.preview,
+        goalLength: goal.length,
+        goalDetailId: goal.detailId,
         status: selected.status,
         createdAt: selected.createdAt,
         updatedAt: selected.updatedAt,
       },
       items: page,
+      itemsCharacterCount,
+      itemsCharacterLimit: HISTORY_ITEMS_CHARACTER_LIMIT,
       returnedCount: page.length,
       consumedCount,
       totalCount: visibleEvents.length,
@@ -486,6 +720,47 @@ export class TaskHistoryReader implements TaskHistoryReaderPort {
           : null,
       hasMore,
     };
+  }
+
+  async readDetail(
+    context: TaskHistoryContext,
+    input: HistoryDetailReadInput,
+  ): Promise<HistoryDetailReadResponse> {
+    const payload = decodeDetail(input.detailId);
+    if (payload === null) return detailNotFound();
+    const selected = await this.#tasks.get(payload.taskId);
+    if (selected === undefined || !isHistoricalTask(selected, context)) return detailNotFound();
+    if (payload.field === 'task_goal' && payload.sequence === 0) {
+      return characterRange(input.detailId, payload, selected.goal, input);
+    }
+
+    const [storedEvents, messages] = await Promise.all([
+      this.#tasks.listEvents(selected.id),
+      this.#conversations.listTaskMessages(selected.id),
+    ]);
+    const events = orderedTaskEvents(selected, storedEvents);
+    const event = events.find(({ sequence }) => sequence === payload.sequence);
+    if (event === undefined) return detailNotFound();
+
+    let value: string | null = null;
+    if (
+      payload.field === 'message_text' &&
+      (event.type === 'message.recorded' || event.type === 'supplement.queued')
+    ) {
+      const messageById = validatedTaskMessages(selected, events, messages);
+      value = messageById.get(event.messageId)?.text ?? null;
+    } else if (payload.field === 'reasoning_summary' && event.type === 'reasoning.summary') {
+      value = event.summary;
+    } else if (payload.field === 'tool_arguments' && event.type === 'tool.call') {
+      value = event.argumentsJson;
+    } else if (payload.field === 'status_reason' && event.type === 'status.changed') {
+      value = event.reason;
+    } else if (payload.field === 'status_error' && event.type === 'status.changed') {
+      value = event.error?.userMessage ?? null;
+    }
+    return value === null
+      ? detailNotFound()
+      : characterRange(input.detailId, payload, value, input);
   }
 
   async readResult(

@@ -1,13 +1,6 @@
 import { describe, expect, it } from 'vitest';
-import {
-  CODEX_COMPACT_URL,
-  CODEX_MODEL,
-  CODEX_RESPONSES_URL,
-} from '../../../src/providers/codex/codex-constants';
-import {
-  buildCodexCompactRequest,
-  buildCodexRequest,
-} from '../../../src/providers/codex/codex-request';
+import { CODEX_MODEL, CODEX_RESPONSES_URL } from '../../../src/providers/codex/codex-constants';
+import { buildCodexRequest } from '../../../src/providers/codex/codex-request';
 import type { ModelRequest } from '../../../src/agent/model/model-provider';
 
 const GENERIC_TOOL_NAMES = ['lookup', 'lookup_record', 'lookup-record'] as const;
@@ -90,27 +83,6 @@ describe('buildCodexRequest', () => {
         encrypted_content: 'opaque-compacted-context',
       },
     ]);
-  });
-
-  it('builds the native compact contract without response-stream state fields', () => {
-    const request = buildCodexCompactRequest({
-      accessToken: 'synthetic-token-value',
-      accountId: 'acct_123',
-      request: MODEL_REQUEST,
-    });
-
-    expect(request.url).toBe(CODEX_COMPACT_URL);
-    expect(request.headers.Accept).toBe('application/json');
-    expect(request.body).toMatchObject({
-      model: CODEX_MODEL,
-      instructions: MODEL_REQUEST.systemPrompt,
-      parallel_tool_calls: false,
-      reasoning: { effort: MODEL_REQUEST.reasoningEffort, summary: 'auto' },
-    });
-    expect(request.body).not.toHaveProperty('store');
-    expect(request.body).not.toHaveProperty('stream');
-    expect(request.body).not.toHaveProperty('include');
-    expect(request.body).not.toHaveProperty('tool_choice');
   });
 
   it('replays encrypted reasoning output items for stateless continuation', () => {

@@ -1,9 +1,6 @@
 import { describe, expect, it, vi } from 'vitest';
 import { CodexProvider } from '../../../src/providers/codex/codex-provider';
-import {
-  CODEX_COMPACT_URL,
-  CODEX_RESPONSES_URL,
-} from '../../../src/providers/codex/codex-constants';
+import { CODEX_RESPONSES_URL } from '../../../src/providers/codex/codex-constants';
 import type { CredentialStore } from '../../../src/persistence/credential-store';
 import type { ModelRequest } from '../../../src/agent/model/model-provider';
 import type { ModelStreamEvent } from '../../../src/agent/model/model-stream-event';
@@ -74,101 +71,6 @@ const ACCESS_TOKEN = jwt({
 });
 
 describe('CodexProvider', () => {
-  it('compacts through the fixed unary endpoint and returns only the opaque boundary', async () => {
-    const fetchMock = vi.fn<typeof fetch>(
-      async () =>
-        new Response(
-          JSON.stringify({
-            output: [
-              {
-                type: 'message',
-                role: 'user',
-                content: [{ type: 'input_text', text: 'Click the result.' }],
-              },
-              {
-                type: 'compaction',
-                id: 'cmp_1',
-                encrypted_content: 'opaque-compacted-context',
-              },
-            ],
-          }),
-          { status: 200, headers: { 'Content-Type': 'application/json' } },
-        ),
-    );
-    const provider = new CodexProvider(credentialStore(ACCESS_TOKEN), fetchMock);
-
-    await expect(provider.compact(REQUEST, new AbortController().signal)).resolves.toEqual({
-      itemId: 'cmp_1',
-      encryptedContent: 'opaque-compacted-context',
-    });
-    expect(fetchMock).toHaveBeenCalledWith(
-      CODEX_COMPACT_URL,
-      expect.objectContaining({ method: 'POST' }),
-    );
-    const init = fetchMock.mock.calls[0]?.[1];
-    const body = JSON.parse(String(init?.body)) as Record<string, unknown>;
-    expect(body).not.toHaveProperty('store');
-    expect(body).not.toHaveProperty('stream');
-  });
-
-  it.each([
-    { output: [] },
-    {
-      output: [
-        { type: 'compaction', id: 'cmp_1', encrypted_content: 'first' },
-        { type: 'compaction', id: 'cmp_2', encrypted_content: 'second' },
-      ],
-    },
-    {
-      output: [
-        { type: 'compaction', id: 'cmp_1', encrypted_content: 'opaque' },
-        { type: 'message', role: 'user', content: [] },
-      ],
-    },
-    {
-      output: [{ type: 'compaction', id: 'cmp_1', encrypted_content: '' }],
-    },
-  ])('rejects malformed native compact output %#', async (payload) => {
-    const provider = new CodexProvider(
-      credentialStore(ACCESS_TOKEN),
-      vi.fn<typeof fetch>(
-        async () =>
-          new Response(JSON.stringify(payload), {
-            status: 200,
-            headers: { 'Content-Type': 'application/json' },
-          }),
-      ),
-    );
-
-    await expect(provider.compact(REQUEST, new AbortController().signal)).rejects.toMatchObject({
-      code: 'INVALID_RESPONSE',
-      invalidResponseStage: 'compaction_schema',
-    });
-  });
-
-  it('treats a compact response body read failure as transient', async () => {
-    const body = new ReadableStream<Uint8Array>({
-      start(controller) {
-        controller.error(new Error('synthetic connection reset'));
-      },
-    });
-    const provider = new CodexProvider(
-      credentialStore(ACCESS_TOKEN),
-      vi.fn<typeof fetch>(
-        async () =>
-          new Response(body, {
-            status: 200,
-            headers: { 'Content-Type': 'application/json' },
-          }),
-      ),
-    );
-
-    await expect(provider.compact(REQUEST, new AbortController().signal)).rejects.toMatchObject({
-      code: 'TRANSIENT',
-      retryable: true,
-    });
-  });
-
   it('streams valid SSE when the fixed endpoint omits Content-Type', async () => {
     const events = [
       {
@@ -744,6 +646,51 @@ describe('CodexProvider', () => {
       { type: 'response.started', responseId: 'resp_text_done' },
       { type: 'text.delta', delta: 'Final text without a preceding delta.' },
       { type: 'response.completed', responseId: 'resp_text_done', usage: null },
+    ]);
+  });
+
+  it('adopts an identityless text delta when the canonical done event adds its identity', async () => {
+    const text = 'One canonical answer.';
+    const provider = new CodexProvider(
+      credentialStore(ACCESS_TOKEN),
+      vi.fn<typeof fetch>(async () =>
+        sseResponse([
+          {
+            event: 'response.created',
+            data: {
+              type: 'response.created',
+              response: { id: 'resp_identityless_text' },
+            },
+          },
+          {
+            event: 'response.output_text.delta',
+            data: { type: 'response.output_text.delta', delta: text },
+          },
+          {
+            event: 'response.output_text.done',
+            data: {
+              type: 'response.output_text.done',
+              item_id: 'message_identityless_text',
+              output_index: 0,
+              content_index: 0,
+              text,
+            },
+          },
+          {
+            event: 'response.completed',
+            data: {
+              type: 'response.completed',
+              response: { id: 'resp_identityless_text' },
+            },
+          },
+        ]),
+      ),
+    );
+
+    await expect(collect(provider.stream(REQUEST, new AbortController().signal))).resolves.toEqual([
+      { type: 'response.started', responseId: 'resp_identityless_text' },
+      { type: 'text.delta', delta: text },
+      { type: 'response.completed', responseId: 'resp_identityless_text', usage: null },
     ]);
   });
 

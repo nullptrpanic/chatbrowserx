@@ -4,10 +4,7 @@ import type { ConversationRepository } from '../persistence/conversation-reposit
 import type { CredentialStore } from '../persistence/credential-store';
 import type { SettingsStore } from '../persistence/settings-store';
 import type { TaskRepository } from '../persistence/task-repository';
-import {
-  CODEX_EFFECTIVE_CONTEXT_WINDOW_TOKENS,
-  CODEX_MODEL,
-} from '../providers/codex/codex-constants';
+import { CODEX_MODEL } from '../providers/codex/codex-constants';
 import { CodexProvider } from '../providers/codex/codex-provider';
 import type { TavilyExecutionPort } from '../tools/tavily/types';
 import type { SandboxExecutionPort } from '../sandbox/sandbox-tool-executor';
@@ -25,7 +22,6 @@ import { historyService } from '../tools/history/service';
 import { createSandboxToolService, sandboxService } from '../tools/sandbox/service';
 import { tavilyService } from '../tools/tavily/service';
 import { AgentFacade, type Agent } from './agent';
-import { AUTO_COMPACT_INPUT_TOKEN_HARD_WATER } from '../tools/context/native-compaction';
 import { ModelTurnPlanner } from './model/model-turn-planner';
 import { TaskExecutor } from './task-executor';
 
@@ -47,9 +43,6 @@ export interface AgentHost {
 
 /** Creates the Provider, planner, executor, scheduler, and recovery services behind one Agent. */
 export async function createAgent(host: AgentHost): Promise<Agent> {
-  if (AUTO_COMPACT_INPUT_TOKEN_HARD_WATER >= CODEX_EFFECTIVE_CONTEXT_WINDOW_TOKENS) {
-    throw new Error('Native compaction hard water must remain below the effective context window.');
-  }
   const services = new ToolServiceResolver();
   services.bind(browserService, host.browser);
   services.bind(tavilyService, host.tavily);

@@ -113,12 +113,12 @@ export const sandboxRuntime = {
     return typeof context.sandboxSkillPrompt === 'string' ? context.sandboxSkillPrompt : null;
   },
   async prepare(context, services, signal) {
+    if (!services.has(sandboxService)) return { context: { sandboxAvailable: false } };
     const prompt = await loadSandboxSkillPrompt(services, signal);
-    if (prompt === null) return { context: { sandboxAvailable: false } };
     return {
       context: {
         sandboxAvailable: true,
-        sandboxSkillPrompt: prompt,
+        ...(prompt === null ? {} : { sandboxSkillPrompt: prompt }),
       },
     };
   },

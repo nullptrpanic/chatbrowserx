@@ -34,6 +34,27 @@ const MAX_PANEL_SUPPLEMENTS = 100;
 const MAX_SOURCE_FAVICON_URL = 8_192;
 const terminalTaskStatuses = new Set<Task['status']>(['completed', 'failed', 'cancelled']);
 const previewImageTypes = new Set<string>(IMAGE_POLICY.acceptedMimeTypes);
+const explicitContinuationRequests = new Set([
+  'continue',
+  'continue please',
+  'go on',
+  'resume',
+  '继续',
+  '继续吧',
+  '继续执行',
+  '继续完成',
+  '接着做',
+]);
+
+function isExplicitContinuationRequest(text: string): boolean {
+  return explicitContinuationRequests.has(
+    text
+      .trim()
+      .toLowerCase()
+      .replace(/[。.!！]+$/u, '')
+      .trim(),
+  );
+}
 
 export interface PanelServiceDependencies {
   readonly conversations: Pick<
@@ -424,11 +445,16 @@ export class PanelService {
       updatedAt: now,
     };
     const goal = taskGoal(text);
-    return latestTask?.status === 'cancelled' &&
-      !(await this.#dependencies.tasks
-        .listEvents(latestTask.id)
-        .then((events) => events.some((event) => event.type === 'context.cleared')))
-      ? this.#dependencies.agent.start({
+    if (
+      latestTask !== undefined &&
+      (latestTask.status === 'cancelled' ||
+        (latestTask.status === 'failed' && isExplicitContinuationRequest(text)))
+    ) {
+      const contextWasCleared = (await this.#dependencies.tasks.listEvents(latestTask.id)).some(
+        (event) => event.type === 'context.cleared',
+      );
+      if (!contextWasCleared) {
+        return this.#dependencies.agent.start({
           kind: 'continue',
           submission: {
             sourceTaskId: latestTask.id,
@@ -436,18 +462,20 @@ export class PanelService {
             conversation,
             message,
           },
-        })
-      : this.#dependencies.agent.start({
-          kind: 'create',
-          submission: {
-            conversation,
-            createConversation: input.conversationId === undefined,
-            conversationId: conversation.id,
-            tabId: input.tabId,
-            goal,
-            message,
-          },
         });
+      }
+    }
+    return this.#dependencies.agent.start({
+      kind: 'create',
+      submission: {
+        conversation,
+        createConversation: input.conversationId === undefined,
+        conversationId: conversation.id,
+        tabId: input.tabId,
+        goal,
+        message,
+      },
+    });
   }
 
   /** Resolves one client-supplied lookup hint to a bounded canonical assistant reply reference. */

@@ -16,6 +16,7 @@ export interface TaskCoordinatorDependencies {
   readonly executor: CoordinatedTaskExecutor;
   readonly commands: CoordinatedTaskCommands;
   readonly onExecutionError?: (taskId: TaskId, error: unknown) => void;
+  readonly abortJoinTimeoutMs?: number;
 }
 
 interface ActiveTask {
@@ -57,7 +58,7 @@ export class TaskCoordinator {
 
   /** Stops active work before persisting a user pause boundary. */
   async pause(taskId: TaskId): Promise<TaskSnapshot> {
-    this.#abort(taskId);
+    await this.#stopBounded(taskId);
     return this.#dependencies.commands.pause(taskId);
   }
 
@@ -110,9 +111,23 @@ export class TaskCoordinator {
     await active.completion.catch(() => undefined);
   }
 
-  /** Signals one runner without delaying the durable pause or cancellation command. */
-  #abort(taskId: TaskId): void {
-    this.#active.get(taskId)?.controller.abort();
+  /** Gives an aborted runner a bounded chance to finish its current durable boundary. */
+  async #stopBounded(taskId: TaskId): Promise<void> {
+    const active = this.#active.get(taskId);
+    if (active === undefined) return;
+    active.controller.abort();
+    const timeoutMs = this.#dependencies.abortJoinTimeoutMs ?? 250;
+    let timer: ReturnType<typeof globalThis.setTimeout> | undefined;
+    try {
+      await Promise.race([
+        active.completion.catch(() => undefined),
+        new Promise<void>((resolve) => {
+          timer = globalThis.setTimeout(resolve, Math.max(0, timeoutMs));
+        }),
+      ]);
+    } finally {
+      if (timer !== undefined) globalThis.clearTimeout(timer);
+    }
   }
 
   /** Preserves the single global executor slot while allowing same-task restarts. */

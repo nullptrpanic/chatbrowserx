@@ -4,7 +4,7 @@ import type {
   ModelRequest,
 } from '../../agent/model/model-provider';
 import { providerErrorFromCode } from '../../agent/model/model-provider-error';
-import { CODEX_COMPACT_URL, CODEX_MODEL, CODEX_RESPONSES_URL } from './codex-constants';
+import { CODEX_MODEL, CODEX_RESPONSES_URL } from './codex-constants';
 import { toCodexToolName } from './codex-tool-name';
 
 export interface BuildCodexRequestInput {
@@ -14,7 +14,7 @@ export interface BuildCodexRequestInput {
 }
 
 export interface CodexHttpRequest {
-  readonly url: typeof CODEX_RESPONSES_URL | typeof CODEX_COMPACT_URL;
+  readonly url: typeof CODEX_RESPONSES_URL;
   readonly headers: Readonly<Record<string, string>>;
   readonly body: Readonly<Record<string, unknown>>;
 }
@@ -126,33 +126,6 @@ export function buildCodexRequest(input: BuildCodexRequestInput): CodexHttpReque
       store: false,
       stream: true,
       include: ['reasoning.encrypted_content'],
-      reasoning: { effort: input.request.reasoningEffort, summary: 'auto' },
-    },
-  };
-}
-
-/** Builds the fixed unary native-compaction request without response-stream state fields. */
-export function buildCodexCompactRequest(input: BuildCodexRequestInput): CodexHttpRequest {
-  const toolContract =
-    input.request.tools.length === 0
-      ? {}
-      : {
-          tools: mappedTools(input.request),
-          parallel_tool_calls: false,
-        };
-  return {
-    url: CODEX_COMPACT_URL,
-    headers: {
-      Authorization: `Bearer ${input.accessToken}`,
-      'ChatGPT-Account-ID': input.accountId,
-      'Content-Type': 'application/json',
-      Accept: 'application/json',
-    },
-    body: {
-      model: CODEX_MODEL,
-      instructions: input.request.systemPrompt,
-      input: input.request.input.map(mapInputItem),
-      ...toolContract,
       reasoning: { effort: input.request.reasoningEffort, summary: 'auto' },
     },
   };

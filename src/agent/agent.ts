@@ -2,7 +2,7 @@ import type { TaskId } from '../shared/ids';
 import type { MessageRecord } from '../tasks/message-types';
 import type { RecoveryScanner } from '../tasks/recovery-scanner';
 import type {
-  ContinueCancelledTaskSubmissionInput,
+  ContinueTaskSubmissionInput,
   CreateTaskSubmissionInput,
   TaskCommandPort,
   TaskSnapshot,
@@ -12,7 +12,7 @@ import type { TaskCoordinator } from '../tasks/task-coordinator';
 
 export type AgentStartInput =
   | { readonly kind: 'create'; readonly submission: CreateTaskSubmissionInput }
-  | { readonly kind: 'continue'; readonly submission: ContinueCancelledTaskSubmissionInput };
+  | { readonly kind: 'continue'; readonly submission: ContinueTaskSubmissionInput };
 
 /** Public task lifecycle boundary used by every production adapter outside Agent composition. */
 export interface Agent {
@@ -52,7 +52,7 @@ export class AgentFacade implements Agent {
     const snapshot =
       input.kind === 'create'
         ? await this.#dependencies.submissions.createSubmission(input.submission)
-        : await this.#dependencies.submissions.continueCancelledSubmission(input.submission);
+        : await this.#dependencies.submissions.continueSubmission(input.submission);
     this.#dependencies.coordinator.schedule(snapshot.task.id);
     return snapshot;
   }

@@ -12,7 +12,7 @@ function buildFixture() {
       order.push('persist.create');
       return snapshot;
     }),
-    continueCancelledSubmission: vi.fn(async () => {
+    continueSubmission: vi.fn(async () => {
       order.push('persist.continue');
       return snapshot;
     }),
@@ -59,7 +59,7 @@ describe('AgentFacade', () => {
 
     await fixture.agent.start({ kind: 'continue', submission: {} as never });
 
-    expect(fixture.submissions.continueCancelledSubmission).toHaveBeenCalledOnce();
+    expect(fixture.submissions.continueSubmission).toHaveBeenCalledOnce();
     expect(fixture.submissions.createSubmission).not.toHaveBeenCalled();
     expect(fixture.order).toEqual(['persist.continue', 'schedule']);
   });

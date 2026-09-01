@@ -509,6 +509,48 @@ describe('PanelService', () => {
     expect(fixture.dependencies.agent.start).toHaveBeenCalledOnce();
   });
 
+  it('continues the latest failed logical task only for an explicit continuation request', async () => {
+    const fixture = buildFixture();
+    const failedTask = { ...fixture.task, status: 'failed' as const };
+    fixture.dependencies.tasks.listByConversation.mockResolvedValue([failedTask]);
+    const service = new PanelService(fixture.dependencies);
+
+    await service.submit({
+      tabId: 9,
+      conversationId: fixture.conversation.id,
+      text: '继续',
+      attachmentIds: [],
+    });
+
+    expect(fixture.dependencies.agent.start).toHaveBeenCalledWith(
+      expect.objectContaining({
+        kind: 'continue',
+        submission: expect.objectContaining({ sourceTaskId: failedTask.id }),
+      }),
+    );
+  });
+
+  it('starts a new logical task for an unrelated request after a failure', async () => {
+    const fixture = buildFixture();
+    const failedTask = { ...fixture.task, status: 'failed' as const };
+    fixture.dependencies.tasks.listByConversation.mockResolvedValue([failedTask]);
+    const service = new PanelService(fixture.dependencies);
+
+    await service.submit({
+      tabId: 9,
+      conversationId: fixture.conversation.id,
+      text: '打开另一个页面查看天气',
+      attachmentIds: [],
+    });
+
+    expect(fixture.dependencies.agent.start).toHaveBeenCalledWith(
+      expect.objectContaining({
+        kind: 'create',
+        submission: expect.objectContaining({ goal: '打开另一个页面查看天气' }),
+      }),
+    );
+  });
+
   it('creates a fresh logical task after the cancelled task context was cleared', async () => {
     const fixture = buildFixture();
     const cancelledTask = { ...fixture.task, status: 'cancelled' as const };

@@ -5,6 +5,10 @@ import {
   type AgentContextInput,
 } from '../../../src/agent/context/agent-context';
 import { IMAGE_POLICY } from '../../../src/attachments/attachment-policy';
+import {
+  MAX_MODEL_HISTORY_TEXT_CHARACTERS,
+  MAX_MODEL_REPLY_TEXT_CHARACTERS,
+} from '../../../src/agent/context/context-budget';
 import type { AttachmentRepository } from '../../../src/persistence/attachment-repository';
 import type { ConversationRepository } from '../../../src/persistence/conversation-repository';
 import type { TaskRepository } from '../../../src/persistence/task-repository';
@@ -1157,8 +1161,16 @@ describe('buildAgentContext', () => {
     });
   });
 
-  it('does not truncate a selected historical message by character count', async () => {
-    const longHistory = `LONG HISTORY ${'长'.repeat(150_000)}`;
+  it('keeps whole newest historical messages within the shared text budget', async () => {
+    const historicalMessages = Array.from({ length: 50 }, (_, index) =>
+      message({
+        id: `long-history-${String(index)}`,
+        taskId: `task_old_${String(index)}`,
+        role: 'user',
+        text: `HISTORY_${String(index).padStart(2, '0')}_${'长'.repeat(9_990)}`,
+        createdAt: 100 + index,
+      }),
+    );
     const context = await buildAgentContext(
       {
         task: TASK,
@@ -1168,17 +1180,11 @@ describe('buildAgentContext', () => {
         },
         toolResults: [],
         customSystemPrompt: '',
-        historyMessageLimit: 1,
+        historyMessageLimit: 50,
       },
       contextDependencies(
         [
-          message({
-            id: 'long-history',
-            taskId: 'task_old',
-            role: 'user',
-            text: longHistory,
-            createdAt: 100,
-          }),
+          ...historicalMessages,
           message({
             id: 'current',
             taskId: 'task_1',
@@ -1191,11 +1197,21 @@ describe('buildAgentContext', () => {
       ),
     );
 
-    expect(context.input[0]).toMatchObject({
-      type: 'message',
-      role: 'user',
-      content: [{ type: 'input_text', text: longHistory }],
-    });
+    const historicalInput = context.input.slice(0, -1);
+    const historyText = historicalInput.flatMap((item) =>
+      item.type === 'message'
+        ? item.content.flatMap((part) => (part.type === 'input_text' ? [part.text] : []))
+        : [],
+    );
+    expect(historyText.reduce((total, text) => total + text.length, 0)).toBeLessThanOrEqual(
+      MAX_MODEL_HISTORY_TEXT_CHARACTERS,
+    );
+    expect(historyText.length).toBeGreaterThan(0);
+    expect(historyText.length).toBeLessThan(50);
+    expect(
+      historyText.every((text) => historicalMessages.some(({ text: value }) => value === text)),
+    ).toBe(true);
+    expect(historyText.at(-1)).toBe(historicalMessages.at(-1)?.text);
   });
 
   it('prioritizes current images and fills the remaining budget from newest history', async () => {
@@ -1491,7 +1507,7 @@ describe('buildAgentContext', () => {
     ]);
   });
 
-  it('projects the full reply target outside the ordinary history limit with stable identifiers', async () => {
+  it('projects a bounded reply target outside the ordinary history limit with stable identifiers', async () => {
     const targetTask: Task = {
       ...TASK,
       id: 'task_reply_target',
@@ -1507,7 +1523,7 @@ describe('buildAgentContext', () => {
       latestRunId: 'run_recent',
     };
     const activeTask: Task = { ...TASK, ordinal: 3 };
-    const targetAnswer = 'FULL TARGET ANSWER OUTSIDE THE TWO-MESSAGE HISTORY WINDOW';
+    const targetAnswer = `FULL TARGET ANSWER OUTSIDE THE TWO-MESSAGE HISTORY WINDOW ${'x'.repeat(150_000)}`;
     const target = message({
       id: 'reply_target',
       taskId: targetTask.id,
@@ -1526,7 +1542,7 @@ describe('buildAgentContext', () => {
       replyTo: {
         messageId: target.id,
         taskId: target.taskId,
-        excerpt: target.text,
+        excerpt: target.text.slice(0, 1_000),
         attachmentCount: 0,
         createdAt: target.createdAt,
       },
@@ -1584,12 +1600,15 @@ describe('buildAgentContext', () => {
       .filter((item) => item.type === 'input_text')
       .map((item) => item.text)
       .join('\n');
-    expect(projectedText).toContain(targetAnswer);
+    expect(projectedText).toContain(targetAnswer.slice(0, MAX_MODEL_REPLY_TEXT_CHARACTERS));
+    expect(projectedText).not.toContain(targetAnswer.slice(-10_000));
+    expect(projectedText).toContain(`"targetTextLength":${String(targetAnswer.length)}`);
+    expect(projectedText).toContain('"targetTextTruncated":true');
     expect(projectedText).toContain(`"targetTaskId":"${targetTask.id}"`);
     expect(projectedText).toContain(`"targetMessageId":"${target.id}"`);
     expect(projectedText).not.toContain('historyTaskOffset');
     expect(projectedText).not.toContain('availableHistoryTaskCount');
     expect(projectedText).toContain('Why is the second point necessary?');
-    expect(JSON.stringify(context.input).match(new RegExp(targetAnswer, 'g'))).toHaveLength(1);
+    expect(JSON.stringify(context.input).length).toBeLessThan(20_000);
   });
 });

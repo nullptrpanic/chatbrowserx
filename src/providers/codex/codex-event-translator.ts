@@ -266,6 +266,8 @@ export class CodexEventTranslator {
   readonly #itemIdsByOutputIndex = new Map<number, string>();
   readonly #outputIndexesByItemId = new Map<string, number>();
   readonly #contentPartKinds = new Map<string, ContentPartKind>();
+  #anonymousOutputText: string | null = null;
+  #anonymousOutputTextKey: string | null = null;
   #responseId: string | null = null;
   #responseCompleted = false;
   #terminalKind: 'completed' | 'incomplete' | 'failed' | null = null;
@@ -386,12 +388,28 @@ export class CodexEventTranslator {
     return key;
   }
 
+  /** Associates one previously emitted identityless text stream with its first canonical part. */
+  #registerOutputTextPart(identity: {
+    readonly item_id: string;
+    readonly output_index: number;
+    readonly content_index: number;
+  }): string {
+    const key = this.#registerContentPart(identity, 'output_text');
+    if (this.#anonymousOutputText === null || this.#anonymousOutputTextKey !== null) return key;
+    if (this.#outputTexts.size > 0) {
+      throw providerErrorFromCode('INVALID_RESPONSE');
+    }
+    this.#outputTexts.set(key, { text: this.#anonymousOutputText, completed: false });
+    this.#anonymousOutputTextKey = key;
+    return key;
+  }
+
   /** Converts a text delta without buffering model content in the adapter. */
   #textDelta(data: unknown): readonly ModelStreamEvent[] {
     const delta = parsePayload(textDeltaSchema, data);
     const identity = optionalContentPartIdentity(delta);
     if (identity !== null) {
-      const key = this.#registerContentPart(identity, 'output_text');
+      const key = this.#registerOutputTextPart(identity);
       const current = this.#outputTexts.get(key);
       if (current?.completed) {
         throw providerErrorFromCode('INVALID_RESPONSE');
@@ -400,6 +418,11 @@ export class CodexEventTranslator {
         text: `${current?.text ?? ''}${delta.delta}`,
         completed: false,
       });
+    } else if (delta.delta.length > 0) {
+      if (this.#outputTexts.size > 0 || this.#anonymousOutputTextKey !== null) {
+        throw providerErrorFromCode('INVALID_RESPONSE');
+      }
+      this.#anonymousOutputText = `${this.#anonymousOutputText ?? ''}${delta.delta}`;
     }
     return delta.delta.length === 0 ? [] : [{ type: 'text.delta', delta: delta.delta }];
   }
@@ -407,7 +430,7 @@ export class CodexEventTranslator {
   /** Reconciles canonical finalized text without duplicating deltas already delivered. */
   #textDone(data: unknown): readonly ModelStreamEvent[] {
     const done = parsePayload(textDoneSchema, data);
-    const key = this.#registerContentPart(done, 'output_text');
+    const key = this.#registerOutputTextPart(done);
     return this.#completeTextPart(this.#outputTexts, key, done.text);
   }
 
@@ -438,7 +461,7 @@ export class CodexEventTranslator {
     const done = parsePayload(contentPartDoneSchema, data);
     if (done.part.type === 'output_text') {
       const part = parsePayload(outputTextPartSchema, done.part);
-      const key = this.#registerContentPart(done, 'output_text');
+      const key = this.#registerOutputTextPart(done);
       return this.#completeTextPart(this.#outputTexts, key, part.text);
     }
     if (done.part.type === 'refusal') {
@@ -629,7 +652,7 @@ export class CodexEventTranslator {
       };
       if (content.type === 'output_text') {
         const part = parsePayload(outputTextPartSchema, content);
-        const key = this.#registerContentPart(identity, 'output_text');
+        const key = this.#registerOutputTextPart(identity);
         events.push(...this.#completeTextPart(this.#outputTexts, key, part.text));
       } else if (content.type === 'refusal') {
         const part = parsePayload(refusalPartSchema, content);

@@ -61,6 +61,34 @@ async function loadPrompt(home: string): Promise<string | null> {
 }
 
 describe('Sandbox Skill loader', () => {
+  it('uses one bounded shell scan without per-file head or wc subprocesses', async () => {
+    const execute = vi.fn<SandboxExecutionPort['execute']>(async () =>
+      JSON.stringify({
+        code: 0,
+        stdout: '__CHATBROWSERX_SCAN_END__\0\0',
+        stderr: '',
+        truncated: false,
+      }),
+    );
+    const services = new ToolServiceResolver();
+    services.bind(
+      sandboxService,
+      createSandboxToolService({
+        execute,
+        recover: async () => ({ status: 'not_found' as const }),
+      }),
+    );
+
+    await loadSandboxSkillPrompt(services, new AbortController().signal);
+
+    const firstCall = execute.mock.calls[0]?.[0];
+    if (firstCall?.operation !== 'exec') throw new Error('Expected one Sandbox scan command.');
+    const command = firstCall.arguments.command;
+    expect(command).toContain('find -L');
+    expect(command).not.toContain('head -c');
+    expect(command).not.toContain('wc -c');
+  });
+
   it('budgets compact metadata instead of long SKILL.md bodies', async () => {
     await withSandboxHome(async (home) => {
       await Promise.all(
@@ -226,12 +254,46 @@ describe('Sandbox Skill loader', () => {
         expect(cached).not.toContain('refreshed-description');
 
         now.mockReturnValue(310_000);
-        const refreshed = await loadSandboxSkillPrompt(services, new AbortController().signal);
-        expect(refreshed).toContain('refreshed-description');
-        expect(refreshed).not.toContain('first-description');
+        const stale = await loadSandboxSkillPrompt(services, new AbortController().signal);
+        expect(stale).toContain('first-description');
+        await vi.waitFor(async () => {
+          const refreshed = await loadSandboxSkillPrompt(services, new AbortController().signal);
+          expect(refreshed).toContain('refreshed-description');
+          expect(refreshed).not.toContain('first-description');
+        });
       } finally {
         now.mockRestore();
       }
     });
+  });
+
+  it('coalesces concurrent cold catalog loads for one Sandbox configuration', async () => {
+    let resolveExecution: ((output: string) => void) | undefined;
+    const pendingExecution = new Promise<string>((resolve) => {
+      resolveExecution = resolve;
+    });
+    const execute = vi.fn(() => pendingExecution);
+    const services = new ToolServiceResolver();
+    services.bind(
+      sandboxService,
+      createSandboxToolService({
+        execute,
+        recover: async () => ({ status: 'not_found' as const }),
+      }),
+    );
+
+    const first = loadSandboxSkillPrompt(services, new AbortController().signal);
+    const second = loadSandboxSkillPrompt(services, new AbortController().signal);
+    expect(execute).toHaveBeenCalledOnce();
+    resolveExecution?.(
+      JSON.stringify({
+        code: 0,
+        stdout: '__CHATBROWSERX_SCAN_END__\0\0',
+        stderr: '',
+        truncated: false,
+      }),
+    );
+
+    await expect(Promise.all([first, second])).resolves.toEqual(['', '']);
   });
 });

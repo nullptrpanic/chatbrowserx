@@ -14,6 +14,7 @@ const SNAPSHOT_TTL_MS = 5 * 60 * 1_000;
 const SCAN_END = '__CHATBROWSERX_SCAN_END__';
 
 const DISCOVERY_COMMAND = `set -euo pipefail
+export LC_ALL=C
 count=0
 bytes=0
 truncated=0
@@ -30,8 +31,14 @@ for root in "$HOME/.codex/skills" "$HOME/.agents/skills"; do
     closed=0
     frontmatter=''
     separator=''
-    while IFS= read -r line || [ -n "$line" ]; do
+    remaining=${MAX_FRONTMATTER_BYTES}
+    while [ "$remaining" -gt 0 ]; do
+      line=''
+      if ! IFS= read -r -n "$remaining" line && [ -z "$line" ]; then break; fi
       line="\${line%$'\r'}"
+      line_bytes=\${#line}
+      if [ "$line_bytes" -ge "$remaining" ]; then break; fi
+      remaining=$((remaining - line_bytes - 1))
       line_number=$((line_number + 1))
       if [ "$line_number" -eq 1 ]; then
         if [ "$line" != '---' ]; then break; fi
@@ -40,14 +47,14 @@ for root in "$HOME/.codex/skills" "$HOME/.agents/skills"; do
       if [ "$line" = '---' ]; then closed=1; break; fi
       frontmatter="$frontmatter$separator$line"
       separator=$'\n'
-    done < <(head -c ${MAX_FRONTMATTER_BYTES} -- "$file")
+    done < "$file"
 
     if [ "$closed" -ne 1 ]; then
       continue
     fi
 
-    path_bytes=$(printf '%s' "$file" | wc -c)
-    frontmatter_bytes=$(printf '%s' "$frontmatter" | wc -c)
+    path_bytes=\${#file}
+    frontmatter_bytes=\${#frontmatter}
     record_bytes=$((path_bytes + frontmatter_bytes + 2))
     if [ $((bytes + record_bytes)) -gt ${MAX_DISCOVERY_BYTES} ]; then
       truncated=1
@@ -65,6 +72,7 @@ type LoadedSkills = Readonly<{ entries: readonly SkillEntry[]; truncated: boolea
 type SkillSnapshot = Readonly<{ prompt: string; scannedAt: number }>;
 
 const snapshots = new WeakMap<SandboxExecutionPort, SkillSnapshot>();
+const refreshes = new WeakMap<SandboxExecutionPort, Promise<string | null>>();
 
 const outputSchema = z
   .object({
@@ -222,6 +230,24 @@ async function discoverSkillPrompt(
   }
 }
 
+function refreshSkillPrompt(
+  execution: SandboxExecutionPort,
+  signal: AbortSignal,
+): Promise<string | null> {
+  const existing = refreshes.get(execution);
+  if (existing !== undefined) return existing;
+  const refresh = discoverSkillPrompt(execution, signal)
+    .then((prompt) => {
+      if (prompt !== null) snapshots.set(execution, { prompt, scannedAt: Date.now() });
+      return prompt;
+    })
+    .finally(() => {
+      if (refreshes.get(execution) === refresh) refreshes.delete(execution);
+    });
+  refreshes.set(execution, refresh);
+  return refresh;
+}
+
 /** Loads the bounded Sandbox Skill prompt without exposing a model-callable tool. */
 export async function loadSandboxSkillPrompt(
   services: ToolServiceResolver,
@@ -238,8 +264,9 @@ export async function loadSandboxSkillPrompt(
   ) {
     return snapshot.prompt;
   }
-
-  const prompt = await discoverSkillPrompt(execution, signal);
-  if (prompt !== null) snapshots.set(execution, { prompt, scannedAt: Date.now() });
-  return prompt;
+  if (snapshot !== undefined) {
+    void refreshSkillPrompt(execution, signal);
+    return snapshot.prompt;
+  }
+  return refreshSkillPrompt(execution, signal);
 }

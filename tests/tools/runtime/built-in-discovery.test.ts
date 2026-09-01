@@ -40,6 +40,7 @@ describe('built-in tool discovery', () => {
       'sandbox_read',
       'sandbox_exec',
       'history_read',
+      'history_detail_read',
       'result_read',
     ]);
     for (const { name, definition } of declarations) {

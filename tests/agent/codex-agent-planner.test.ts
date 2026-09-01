@@ -119,6 +119,12 @@ class CodexAgentPlanner extends ModelTurnPlanner {
         message: 'not used',
         retryable: false,
       }),
+      readDetail: async () => ({
+        ok: false,
+        code: 'DETAIL_NOT_FOUND',
+        message: 'not used',
+        retryable: false,
+      }),
       readResult: async () => ({
         ok: false,
         code: 'RESULT_NOT_FOUND',
@@ -386,6 +392,61 @@ const FIRST_TURN_BROWSER_TOOL_NAMES = [
 const CONFIGURED_TAVILY = { isConfigured: async () => true } as const;
 
 describe('CodexAgentPlanner', () => {
+  it('prepares the tool contract and message context concurrently', async () => {
+    const model = provider(async function* () {
+      yield { type: 'response.started', responseId: 'resp_parallel_prepare' };
+      yield { type: 'text.delta', delta: 'Ready.' };
+      yield { type: 'response.completed', responseId: 'resp_parallel_prepare', usage: null };
+    });
+    const storage = repositories();
+    storage.messages[0] = { ...USER_MESSAGE, attachmentIds: ['attachment_parallel'] };
+    let resolveDiscovery: ((output: string) => void) | undefined;
+    const discovery = new Promise<string>((resolve) => {
+      resolveDiscovery = resolve;
+    });
+    const sandbox: SandboxExecutionPort = {
+      execute: vi.fn(() => discovery),
+      recover: async () => ({ status: 'not_found' }),
+    };
+    const attachmentGet = vi.fn(async () => ({
+      id: 'attachment_parallel',
+      blob: new Blob([new Uint8Array([1])], { type: 'image/png' }),
+      mimeType: 'image/png',
+      byteSize: 1,
+      width: 1,
+      height: 1,
+      source: 'file' as const,
+      createdAt: 100,
+    }));
+    const planner = new CodexAgentPlanner({
+      provider: model.instance,
+      tavilyAvailability: CONFIGURED_TAVILY,
+      sandbox,
+      settings: settings(),
+      conversations: storage.conversations,
+      tasks: storage.tasks,
+      attachments: { ...storage.attachments, get: attachmentGet },
+      ids: { create: (prefix) => `${prefix}_parallel` },
+      clock: { now: () => 500 },
+    });
+
+    const running = collect(planner);
+    await vi.waitFor(() => expect(sandbox.execute).toHaveBeenCalledOnce());
+    await Promise.resolve();
+    const contextStartedBeforeContractSettled = attachmentGet.mock.calls.length > 0;
+    resolveDiscovery?.(
+      JSON.stringify({
+        code: 0,
+        stdout: '__CHATBROWSERX_SCAN_END__\0\0',
+        stderr: '',
+        truncated: false,
+      }),
+    );
+    await running;
+
+    expect(contextStartedBeforeContractSettled).toBe(true);
+  });
+
   it('persists streamed text and completes a text-only turn', async () => {
     const model = provider(async function* () {
       yield { type: 'response.started', responseId: 'resp_1' };
@@ -525,8 +586,9 @@ describe('CodexAgentPlanner', () => {
 
     await collect(planner);
 
-    expect(model.requests[0]?.tools.map(({ name }) => name).slice(-2)).toEqual([
+    expect(model.requests[0]?.tools.map(({ name }) => name).slice(-3)).toEqual([
       'history_read',
+      'history_detail_read',
       'result_read',
     ]);
   });
@@ -623,8 +685,9 @@ describe('CodexAgentPlanner', () => {
         },
       },
     ]);
-    expect(model.requests[0]?.tools.map(({ name }) => name).slice(-2)).toEqual([
+    expect(model.requests[0]?.tools.map(({ name }) => name).slice(-3)).toEqual([
       'history_read',
+      'history_detail_read',
       'result_read',
     ]);
   });
@@ -1789,11 +1852,7 @@ describe('CodexAgentPlanner', () => {
     );
   });
 
-  it('continues with the existing context instead of initiating provider compaction', async () => {
-    const compact = vi.fn<NonNullable<ModelProviderPort['compact']>>(async () => ({
-      itemId: 'cmp_native',
-      encryptedContent: 'opaque-native-context',
-    }));
+  it('continues with the existing context without a second provider request', async () => {
     const stream = vi.fn<ModelProviderPort['stream']>(async function* () {
       yield { type: 'response.started', responseId: 'resp_without_compaction' };
       yield { type: 'text.delta', delta: 'Continued without compaction.' };
@@ -1805,7 +1864,7 @@ describe('CodexAgentPlanner', () => {
     });
     const storage = repositories();
     const planner = new CodexAgentPlanner({
-      provider: { compact, stream },
+      provider: { stream },
       tavilyAvailability: CONFIGURED_TAVILY,
       settings: settings(),
       conversations: storage.conversations,
@@ -1849,7 +1908,6 @@ describe('CodexAgentPlanner', () => {
     await expect(collect(planner, new AbortController().signal, input)).resolves.toMatchObject([
       { type: 'task.completed', reason: 'model_response_completed' },
     ]);
-    expect(compact).not.toHaveBeenCalled();
     expect(stream).toHaveBeenCalledOnce();
     expect(stream.mock.calls[0]?.[0].input).toEqual([
       {
@@ -1868,7 +1926,7 @@ describe('CodexAgentPlanner', () => {
     ]);
   });
 
-  it('forces inspection before compaction or final text while a virtualized scroll is incomplete', async () => {
+  it('forces inspection before final text while a virtualized scroll is incomplete', async () => {
     const model = provider(async function* () {
       yield { type: 'response.started', responseId: 'resp_forced_inspect' };
       yield {
@@ -1892,14 +1950,10 @@ describe('CodexAgentPlanner', () => {
         usage: null,
       };
     });
-    const compact = vi.fn<NonNullable<ModelProviderPort['compact']>>(async () => ({
-      itemId: 'cmp_unfinished_scroll',
-      encryptedContent: 'opaque-unfinished-scroll',
-    }));
     const storage = repositories();
     const sandbox = sandboxWithSkills([]);
     const planner = new CodexAgentPlanner({
-      provider: { ...model.instance, compact },
+      provider: model.instance,
       tavilyAvailability: CONFIGURED_TAVILY,
       sandbox,
       settings: settings(),
@@ -1969,7 +2023,6 @@ describe('CodexAgentPlanner', () => {
       },
     ]);
 
-    expect(compact).not.toHaveBeenCalled();
     expect(sandbox.execute).not.toHaveBeenCalled();
     expect(model.requests).toHaveLength(1);
     expect(model.requests[0]?.toolChoice).toEqual({

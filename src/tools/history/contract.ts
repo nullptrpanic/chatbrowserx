@@ -18,12 +18,30 @@ export const historyReadSchema = z
 
 export const historyReadDefinition = strictFunctionTool(
   'history_read',
-  'Read one bounded page from a previous logical task. Set taskId to a stable task identifier and offset to null for an exact read. Set taskId to null and offset to a one-based relative position when no stable identifier is available; offset 1 is the immediately previous task. Exactly one selector must be non-null. Start with an empty cursor and continue with nextCursor while hasMore is true.',
+  'Read one item- and character-bounded page from a previous logical task. Set taskId to a stable task identifier and offset to null for an exact read. Set taskId to null and offset to a one-based relative position when no stable identifier is available; offset 1 is the immediately previous task. Exactly one selector must be non-null. Start with an empty cursor and continue with nextCursor while hasMore is true. Oversized fields include a detail identifier for history_detail_read.',
   {
     taskId: { type: ['string', 'null'], minLength: 1, maxLength: MAX_IDENTIFIER_CHARACTERS },
     offset: { type: ['integer', 'null'], minimum: 1, maximum: Number.MAX_SAFE_INTEGER },
     cursor: { type: 'string', maxLength: MAX_CURSOR_CHARACTERS },
     limit: { type: 'integer', minimum: 1, maximum: MAX_HISTORY_ITEMS },
+  },
+);
+
+export const historyDetailReadSchema = z
+  .object({
+    detailId: z.string().min(1).max(MAX_CURSOR_CHARACTERS),
+    offset: z.number().int().min(0).max(Number.MAX_SAFE_INTEGER),
+    limit: z.number().int().min(1).max(MAX_RESULT_CHARACTERS),
+  })
+  .strict();
+
+export const historyDetailReadDefinition = strictFunctionTool(
+  'history_detail_read',
+  'Read an exact bounded character range from an oversized field referenced by history_read. Pass its detailId and continue from nextOffset while hasMore is true.',
+  {
+    detailId: { type: 'string', minLength: 1, maxLength: MAX_CURSOR_CHARACTERS },
+    offset: { type: 'integer', minimum: 0, maximum: Number.MAX_SAFE_INTEGER },
+    limit: { type: 'integer', minimum: 1, maximum: MAX_RESULT_CHARACTERS },
   },
 );
 

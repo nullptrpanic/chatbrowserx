@@ -176,22 +176,18 @@ function taskErrorFromProvider(error: ProviderError): TaskError {
   }
 }
 
-/** Counts bounded automatic invalid-response retries in the current planning attempt. */
+/** Counts consecutive automatic invalid-response retries since the latest valid model turn. */
 function invalidModelResponseRetryCount(events: readonly TaskEvent[]): number {
-  let planningStartIndex = -1;
+  let count = 0;
   for (let index = events.length - 1; index >= 0; index -= 1) {
     const event = events[index];
-    if (event?.type === 'status.changed' && event.reason === 'model_request_started') {
-      planningStartIndex = index;
-      break;
+    if (event?.type === 'model.turn') break;
+    if (event?.type === 'status.changed') {
+      if (event.reason === 'model_request_started') break;
+      if (event.reason.startsWith('invalid_model_response_retry:')) count += 1;
     }
   }
-  return events
-    .slice(planningStartIndex + 1)
-    .filter(
-      (event) =>
-        event.type === 'status.changed' && event.reason.startsWith('invalid_model_response_retry:'),
-    ).length;
+  return count;
 }
 
 /** Projects one completed provider turn onto bounded numeric task telemetry. */

@@ -77,6 +77,42 @@ describe('TaskCoordinator', () => {
     expect(fixture.commands.cancel).toHaveBeenCalledWith('task_2');
   });
 
+  it('joins an aborting executor boundary before persisting pause', async () => {
+    const order: string[] = [];
+    const run = vi.fn(
+      (_taskId: string, signal: AbortSignal) =>
+        new Promise<void>((resolve) => {
+          signal.addEventListener(
+            'abort',
+            () => {
+              queueMicrotask(() => {
+                order.push('executor.settled');
+                resolve();
+              });
+            },
+            { once: true },
+          );
+        }),
+    );
+    const snapshot = { task: { id: 'task_1' } } as TaskSnapshot;
+    const commands = {
+      pause: vi.fn(async () => {
+        order.push('pause.persisted');
+        return snapshot;
+      }),
+      resume: vi.fn(),
+      retry: vi.fn(),
+      cancel: vi.fn(),
+    };
+    const coordinator = new TaskCoordinator({ executor: { run }, commands });
+    const running = coordinator.start('task_1');
+
+    await coordinator.pause('task_1');
+    await running;
+
+    expect(order).toEqual(['executor.settled', 'pause.persisted']);
+  });
+
   it('returns resume after the durable command while fresh work runs in background', async () => {
     const fixture = buildFixture();
 
@@ -165,15 +201,16 @@ describe('TaskCoordinator', () => {
       retry: vi.fn(),
       cancel: vi.fn(),
     };
-    const coordinator = new TaskCoordinator({ executor: { run }, commands });
+    const coordinator = new TaskCoordinator({
+      executor: { run },
+      commands,
+      abortJoinTimeoutMs: 0,
+    });
     const running = coordinator.start('task_1');
 
     const pausing = coordinator.pause('task_1');
-    await Promise.resolve();
-    await Promise.resolve();
-
-    expect(commands.pause).toHaveBeenCalledWith('task_1');
     await expect(pausing).resolves.toMatchObject({ task: { id: 'task_1' } });
+    expect(commands.pause).toHaveBeenCalledWith('task_1');
     finish?.();
     await running;
   });

@@ -129,16 +129,11 @@ export class ModelTurnPlanner implements AgentPlanner {
       settingsPromise,
       conversationViewPromise,
     ]);
-    const registeredContract = await this.#dependencies.tools.contract(
+    const contractPromise = this.#dependencies.tools.contract(
       { ...toolContext, conversationTasks: conversationView.tasks },
       signal,
     );
-    const tools = registeredContract.definitions;
-    const availableToolNames = new Set(tools.map(({ name }) => name));
-    if (availableToolNames.size !== tools.length) {
-      throw new Error('Model tool definitions contain duplicate names.');
-    }
-    const context = await buildAgentContext(
+    const contextPromise = buildAgentContext(
       {
         task: input.task,
         checkpoint: input.checkpoint,
@@ -151,10 +146,20 @@ export class ModelTurnPlanner implements AgentPlanner {
         attachments: this.#dependencies.attachments,
       },
     );
+    const reusableMessagePromise = this.#prepareReusableMessage(input, conversationView);
+    const [registeredContract, context, reusableMessage] = await Promise.all([
+      contractPromise,
+      contextPromise,
+      reusableMessagePromise,
+    ]);
+    const tools = registeredContract.definitions;
+    const availableToolNames = new Set(tools.map(({ name }) => name));
+    if (availableToolNames.size !== tools.length) {
+      throw new Error('Model tool definitions contain duplicate names.');
+    }
     const systemPrompt = [context.systemPrompt, registeredContract.systemPrompt]
       .filter((section) => section.length > 0)
       .join('\n\n');
-    const reusableMessage = await this.#prepareReusableMessage(input, conversationView);
     const state: ModelTurnState = {
       responseId: null,
       completed: false,

@@ -16,9 +16,11 @@ import type { Task } from '../../tasks/task-types';
 import type { MaterializedToolResult } from '../../tasks/tool-result-types';
 import { loadConversationView, type ConversationView } from '../conversation-view';
 import {
+  MAX_MODEL_HISTORY_TEXT_CHARACTERS,
   MAX_MODEL_IMAGE_BYTES,
   MAX_MODEL_IMAGE_COUNT,
   MAX_MODEL_IMAGE_TOTAL_BYTES,
+  MAX_MODEL_REPLY_TEXT_CHARACTERS,
 } from './context-budget';
 
 const APPROVED_IMAGE_TYPES = new Set(['image/gif', 'image/jpeg', 'image/png', 'image/webp']);
@@ -71,7 +73,7 @@ function selectedHistoryMessages(
   const completedTaskIds = new Set(
     tasks.filter((task) => task.status === 'completed').map((task) => task.id),
   );
-  const selected = messages
+  const candidates = messages
     .filter((message) => {
       if (
         message.kind !== 'conversation' ||
@@ -100,6 +102,18 @@ function selectedHistoryMessages(
       );
     })
     .slice(-limit);
+
+  let selectedStart = candidates.length;
+  let selectedCharacters = 0;
+  for (let index = candidates.length - 1; index >= 0; index -= 1) {
+    const candidate = candidates[index];
+    if (candidate === undefined) continue;
+    const nextCharacters = selectedCharacters + candidate.text.length;
+    if (nextCharacters > MAX_MODEL_HISTORY_TEXT_CHARACTERS) break;
+    selectedStart = index;
+    selectedCharacters = nextCharacters;
+  }
+  const selected = candidates.slice(selectedStart);
 
   return selected[0]?.role === 'assistant' ? selected.slice(1) : selected;
 }
@@ -219,14 +233,17 @@ function modelMessage(
 ): ModelInputItem | undefined {
   const content: ModelMessageContent[] = [];
   if (reply !== undefined) {
-    const targetText =
+    const completeTargetText =
       reply.target.text.length > 0
         ? reply.target.text
         : `[The replied assistant message contains ${String(reply.target.attachmentIds.length)} attachment(s) and no text.]`;
+    const targetTextExcerpt = completeTargetText.slice(0, MAX_MODEL_REPLY_TEXT_CHARACTERS);
     const replyContext = JSON.stringify({
       targetMessageId: reply.target.id,
       targetTaskId: reply.target.taskId,
-      targetText,
+      targetTextExcerpt,
+      targetTextLength: completeTargetText.length,
+      targetTextTruncated: targetTextExcerpt.length < completeTargetText.length,
     });
     content.push({
       type: 'input_text',

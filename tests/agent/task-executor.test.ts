@@ -366,6 +366,7 @@ describe('TaskExecutor', () => {
       browser: browserPort(),
       history: {
         readHistory,
+        readDetail: vi.fn(),
         readResult: vi.fn(),
       },
       clock: dependencies.clock,
@@ -3815,6 +3816,75 @@ describe('TaskExecutor', () => {
         }),
       ]),
     );
+    database.close();
+  });
+
+  it('resets the invalid-response retry budget after a successful model turn', async () => {
+    const database = await openChatBrowserDatabase(
+      createTestDatabaseName('invalid-model-retry-reset'),
+    );
+    const repository = new IndexedDbTaskRepository(database);
+    const dependencies = sources();
+    const commands = new TaskCommandService(
+      repository,
+      dependencies.clock,
+      dependencies.ids,
+      dependencies.conversations,
+    );
+    const created = await commands.create({
+      conversationId: 'conversation_1',
+      tabId: 7,
+      goal: 'Reset malformed response retries after valid progress',
+    });
+    let attempts = 0;
+    const executor = new TaskExecutor({
+      repository,
+      conversations: dependencies.conversations,
+      planner: {
+        plan: () =>
+          (async function* () {
+            attempts += 1;
+            if (attempts <= 3 || (attempts >= 5 && attempts <= 7)) {
+              throw providerErrorFromCode('INVALID_RESPONSE', {
+                invalidResponseStage: 'sse_protocol',
+              });
+            }
+            if (attempts === 4) {
+              yield {
+                ...searchCall('call_valid_progress'),
+                modelTurn: {
+                  inputItemCount: 1,
+                  elapsedMs: 20,
+                  firstEventMs: 5,
+                  usage: null,
+                },
+              };
+              return;
+            }
+            yield {
+              type: 'task.completed',
+              reason: 'model_response_completed',
+              messageId: 'message_answer',
+            } as const;
+          })(),
+      },
+      tavily: tavilyPort(),
+      browser: browserPort(),
+      clock: dependencies.clock,
+      ids: dependencies.ids,
+    });
+
+    const result = await executor.run(created.task.id, new AbortController().signal);
+
+    expect(result.task.status).toBe('completed');
+    expect(attempts).toBe(8);
+    expect(
+      result.events.filter(
+        (event) =>
+          event.type === 'status.changed' &&
+          event.reason === 'invalid_model_response_retry:sse_protocol',
+      ),
+    ).toHaveLength(6);
     database.close();
   });
 

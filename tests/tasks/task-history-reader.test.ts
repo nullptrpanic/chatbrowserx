@@ -186,6 +186,94 @@ describe('TaskHistoryReader', () => {
     });
   });
 
+  it('bounds serialized history pages and exposes exact ranges for oversized fields', async () => {
+    const oversizedText = 'm'.repeat(32_000);
+    const oversizedArguments = JSON.stringify({ value: 'a'.repeat(31_000) });
+    const oversizedMessage: MessageRecord = {
+      id: 'message_oversized',
+      kind: 'conversation',
+      conversationId,
+      taskId: 'task_2',
+      role: 'user',
+      status: 'complete',
+      text: oversizedText,
+      attachmentIds: [],
+      createdAt: 200,
+      updatedAt: 200,
+    };
+    const oversizedEvents: TaskEvent[] = [
+      {
+        id: 'event_oversized_message',
+        taskId: 'task_2',
+        runId: 'run_2',
+        sequence: 1,
+        at: 200,
+        type: 'message.recorded',
+        messageId: oversizedMessage.id,
+      },
+      ...Array.from({ length: 100 }, (_, index): TaskEvent => ({
+        id: `event_oversized_call_${index + 1}`,
+        taskId: 'task_2',
+        runId: 'run_2',
+        sequence: index + 2,
+        at: 201 + index,
+        type: 'tool.call',
+        callId: `call_oversized_${index + 1}`,
+        name: 'browser_inspect',
+        argumentsJson: oversizedArguments,
+      })),
+    ];
+    const archiveTask = {
+      ...task('task_2', 2),
+      lastEventSequence: oversizedEvents.length,
+    };
+    const history = reader({
+      archiveTask,
+      archiveEvents: oversizedEvents,
+      archiveResults: [],
+      messages: [oversizedMessage],
+    });
+
+    const page = await history.readHistory(
+      { conversationId, currentTaskId },
+      { taskId: null, offset: 1, cursor: '', limit: 100 },
+    );
+    expect(page).toMatchObject({ ok: true, totalCount: 101, hasMore: true });
+    if (!page.ok) throw new Error('Expected a history page.');
+    expect(page.returnedCount).toBeLessThan(100);
+    expect(JSON.stringify(page.items).length).toBeLessThanOrEqual(page.itemsCharacterLimit);
+    expect(page.itemsCharacterCount).toBe(JSON.stringify(page.items).length);
+    expect(page.items[0]).toMatchObject({
+      type: 'message',
+      textLength: oversizedText.length,
+    });
+    const firstItem = page.items[0];
+    if (firstItem?.type !== 'message' || firstItem.textDetailId === null) {
+      throw new Error('Expected an oversized message detail reference.');
+    }
+    expect(firstItem.text.length).toBeLessThan(oversizedText.length);
+
+    const detail = await history.readDetail(
+      { conversationId, currentTaskId },
+      { detailId: firstItem.textDetailId, offset: 10_000, limit: 20_000 },
+    );
+    expect(detail).toEqual({
+      ok: true,
+      detailId: firstItem.textDetailId,
+      taskId: 'task_2',
+      sequence: 1,
+      field: 'message_text',
+      content: oversizedText.slice(10_000, 30_000),
+      offset: 10_000,
+      returnedCount: 20_000,
+      consumedCount: 30_000,
+      totalCount: oversizedText.length,
+      remainingCount: 2_000,
+      nextOffset: 30_000,
+      hasMore: true,
+    });
+  });
+
   it('projects chained reply references with stable task and message identifiers', async () => {
     const previous = { ...task('task_2', 2), lastEventSequence: 1 };
     const replyMessage: MessageRecord = {

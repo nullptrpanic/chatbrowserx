@@ -205,7 +205,7 @@ describe('registered Sandbox tool parsing', () => {
     expect(contract.definitions.map(({ name }) => name)).not.toContain('skill_loader');
   });
 
-  it('stops exposing Sandbox Skills and tools when an expired snapshot cannot refresh', async () => {
+  it('keeps Sandbox tools and the last catalog when an expired snapshot cannot refresh', async () => {
     const now = vi.spyOn(Date, 'now').mockReturnValue(10_000);
     const execute = vi
       .fn()
@@ -237,15 +237,15 @@ describe('registered Sandbox tool parsing', () => {
     try {
       const available = await changingRuntime.contract({});
       now.mockReturnValue(310_000);
-      const unavailable = await changingRuntime.contract({});
+      const stale = await changingRuntime.contract({});
 
       expect(available.definitions.map(({ name }) => name)).toEqual([
         'sandbox_read',
         'sandbox_exec',
       ]);
       expect(available.systemPrompt).toContain('Run the example workflow.');
-      expect(unavailable.definitions).toEqual([]);
-      expect(unavailable.systemPrompt).toBe('');
+      expect(stale.definitions.map(({ name }) => name)).toEqual(['sandbox_read', 'sandbox_exec']);
+      expect(stale.systemPrompt).toContain('Run the example workflow.');
       expect(execute).toHaveBeenCalledTimes(2);
     } finally {
       now.mockRestore();

@@ -24,7 +24,7 @@ export interface CreateSubmissionInput {
   readonly run: TaskRun;
   readonly events: readonly TaskEvent[];
   readonly checkpoint: Checkpoint;
-  /** Present only when this message starts another run of an existing cancelled task. */
+  /** Present only when this message starts another run of an existing recoverable task. */
   readonly continuationSourceTaskId?: TaskId;
 }
 
@@ -79,11 +79,16 @@ export interface PersistedTaskDetailWindow extends PersistedTaskTimeline {
 }
 
 export class TaskRepositoryConflictError extends Error {
-  readonly code = 'UNAPPLIED_SUPPLEMENTS' as const;
+  readonly code: 'STALE_BOUNDARY' | 'UNAPPLIED_SUPPLEMENTS';
 
-  constructor() {
-    super('Task completion requires every accepted supplement to be applied.');
+  constructor(code: 'STALE_BOUNDARY' | 'UNAPPLIED_SUPPLEMENTS' = 'UNAPPLIED_SUPPLEMENTS') {
+    super(
+      code === 'STALE_BOUNDARY'
+        ? 'Task state changed before the durable boundary was committed.'
+        : 'Task completion requires every accepted supplement to be applied.',
+    );
     this.name = 'TaskRepositoryConflictError';
+    this.code = code;
   }
 }
 
@@ -421,22 +426,22 @@ export class IndexedDbTaskRepository implements TaskRepository {
           input.continuationSourceTaskId !== input.task.id ||
           existingTask === undefined ||
           !sameTaskIdentity(existingTask, input.task) ||
-          existingTask.status !== 'cancelled' ||
+          (existingTask.status !== 'cancelled' && existingTask.status !== 'failed') ||
           existingTask.latestRunId === null ||
           input.run.attempt < 2
         ) {
-          throw new Error('Continuation must start another run of the cancelled task.');
+          throw new Error('Continuation must start another run of a failed or cancelled task.');
         }
         const previousRun = await transaction
           .objectStore('task-runs')
           .get(existingTask.latestRunId);
         if (
           previousRun === undefined ||
-          previousRun.status !== 'cancelled' ||
+          previousRun.status !== existingTask.status ||
           input.run.attempt !== previousRun.attempt + 1 ||
           input.events[0]?.sequence !== existingTask.lastEventSequence + 1
         ) {
-          throw new Error('Continuation run does not follow the latest cancelled attempt.');
+          throw new Error('Continuation run does not follow the latest recoverable attempt.');
         }
         for (const event of appliedSupplementEvents) {
           if (event.type !== 'supplement.applied') continue;
@@ -1014,11 +1019,15 @@ export class IndexedDbTaskRepository implements TaskRepository {
       if (
         existingTask.latestRunId !== existingRun.id ||
         !sameTaskIdentity(existingTask, input.task) ||
-        !sameRunIdentity(existingRun, input.run) ||
+        !sameRunIdentity(existingRun, input.run)
+      ) {
+        throw new Error(`Task event sequence must be ${existingTask.lastEventSequence + 1}.`);
+      }
+      if (
         firstEvent.sequence !== existingTask.lastEventSequence + 1 ||
         input.events.some((event, index) => event.sequence !== firstEvent.sequence + index)
       ) {
-        throw new Error(`Task event sequence must be ${existingTask.lastEventSequence + 1}.`);
+        throw new TaskRepositoryConflictError('STALE_BOUNDARY');
       }
       if (input.checkpoint !== null && existingRun.checkpointId !== input.checkpoint.id) {
         throw new Error('A run cannot replace its durable checkpoint identity.');

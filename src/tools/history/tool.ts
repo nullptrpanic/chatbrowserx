@@ -1,7 +1,13 @@
-import type { HistoryReadInput, ResultReadInput } from '../../tasks/task-history-reader';
+import type {
+  HistoryDetailReadInput,
+  HistoryReadInput,
+  ResultReadInput,
+} from '../../tasks/task-history-reader';
 import { register } from '../register';
 import type { ToolDeclaration, ToolRuntimeContext, ToolRuntimeHooks } from '../types';
 import {
+  historyDetailReadDefinition,
+  historyDetailReadSchema,
   historyReadDefinition,
   historyReadSchema,
   resultReadDefinition,
@@ -44,13 +50,28 @@ export const resultReadTool: ToolDeclaration<ResultReadInput> = {
   name: 'result_read',
   definition: resultReadDefinition,
   schema: resultReadSchema,
-  order: 301,
+  order: 302,
   policy: historyPolicy,
   available: historyAvailable,
   async execute(call, context, services) {
     const result = await services
       .get(historyService)
       .readResult(taskIdentity(context), call.arguments);
+    return { output: JSON.stringify(result) };
+  },
+};
+
+export const historyDetailReadTool: ToolDeclaration<HistoryDetailReadInput> = {
+  name: 'history_detail_read',
+  definition: historyDetailReadDefinition,
+  schema: historyDetailReadSchema,
+  order: 301,
+  policy: historyPolicy,
+  available: historyAvailable,
+  async execute(call, context, services) {
+    const result = await services
+      .get(historyService)
+      .readDetail(taskIdentity(context), call.arguments);
     return { output: JSON.stringify(result) };
   },
 };
@@ -75,4 +96,5 @@ export const historyRuntime = {
 } satisfies ToolRuntimeHooks;
 
 register(historyReadTool, historyRuntime);
+register(historyDetailReadTool, historyRuntime);
 register(resultReadTool, historyRuntime);

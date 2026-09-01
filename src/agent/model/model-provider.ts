@@ -60,10 +60,4 @@ export interface ModelRequest {
 
 export interface ModelProviderPort {
   stream(request: ModelRequest, signal: AbortSignal): AsyncIterable<ModelStreamEvent>;
-  compact?(request: ModelRequest, signal: AbortSignal): Promise<ModelCompactionResult>;
-}
-
-export interface ModelCompactionResult {
-  readonly itemId: string;
-  readonly encryptedContent: string;
 }
