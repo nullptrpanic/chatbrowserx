@@ -104,6 +104,70 @@ describe('live E2E acceptance policy', () => {
     expect(oversizedTraversal.passed).toBe(false);
   });
 
+  it('limits actual traversal across every scroll call instead of the requested per-call budget', () => {
+    const input = {
+      ...completedInput(),
+      toolResults: [
+        ...completedInput().toolResults,
+        tool(
+          'browser_scroll',
+          {
+            tabId: 0,
+            target: 'ref_document',
+            deltaX: 0,
+            deltaY: 600,
+            maxSegments: 24,
+            stopText: '',
+          },
+          {
+            output: JSON.stringify({
+              ok: true,
+              data: { observations: [{ segment: 1 }, { segment: 2 }] },
+            }),
+          },
+        ),
+        tool(
+          'browser_scroll',
+          {
+            tabId: 0,
+            target: 'ref_document',
+            deltaX: 0,
+            deltaY: 600,
+            maxSegments: 24,
+            stopText: '',
+          },
+          {
+            output: JSON.stringify({
+              ok: true,
+              data: { observations: [{ segment: 3 }, { segment: 4 }] },
+            }),
+          },
+        ),
+      ],
+    } satisfies LiveRunInput;
+    const boundedScenario: LiveScenario = {
+      ...scenario,
+      requiredTools: ['browser_inspect', 'browser_scroll'],
+      maxTraversalSegments: 4,
+    };
+
+    const accepted = evaluateLiveRun(boundedScenario, input);
+    const rejected = evaluateLiveRun({ ...boundedScenario, maxTraversalSegments: 3 }, input);
+
+    expect(accepted.checks).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ name: 'scroll-traversal-limit', passed: true }),
+      ]),
+    );
+    expect(accepted.passed).toBe(true);
+    expect(rejected.checks).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ name: 'scroll-traversal-limit', passed: false }),
+      ]),
+    );
+    expect(rejected.passed).toBe(false);
+  });
+
   it('rejects screenshot inspection and submitted typing', () => {
     const input: LiveRunInput = {
       ...completedInput(),

@@ -40,6 +40,8 @@ export interface LiveScenario {
   readonly requiredVerifiedTools?: readonly string[];
   /** Rejects scroll calls that can traverse more segments than this before model reassessment. */
   readonly maxScrollSegmentsPerCall?: number;
+  /** Rejects runs whose browser_scroll results traverse more than this many segments in total. */
+  readonly maxTraversalSegments?: number;
   /** Allows boundary overlap, but rejects any later scroll after a declared section becomes active. */
   readonly stopScrollingAfterActiveElementNames?: readonly string[];
   /** Requires ordered evidence that a vertical read reached its top before reaching its bottom. */

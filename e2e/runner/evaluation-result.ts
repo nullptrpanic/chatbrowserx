@@ -24,7 +24,7 @@ const failureCheckSchema = z.object({ name: nonEmptyString, detail: nonEmptyStri
 const positiveInteger = z.number().refine((value) => Number.isSafeInteger(value) && value >= 1, {
   message: 'must be a positive safe integer.',
 });
-const evaluationCollectionSchema = z.enum(['results', 'benchmark']);
+const evaluationCollectionSchema = z.literal('benchmark');
 const batchSchema = z
   .object({
     collection: evaluationCollectionSchema,
@@ -139,10 +139,9 @@ const evaluationResultSchema = z
   .strict();
 
 export type EvaluationResult = z.infer<typeof evaluationResultSchema>;
-export type EvaluationCollection = z.infer<typeof evaluationCollectionSchema>;
 
 export interface EvaluationBatch {
-  readonly collection: EvaluationCollection;
+  readonly collection: 'benchmark';
   readonly id: string;
   readonly startedAt: string;
   readonly requestedRuns: number;
@@ -205,16 +204,12 @@ export function evaluationTimestamp(value: string): string {
   return timestamp.toISOString().replaceAll('-', '').replaceAll(':', '');
 }
 
-export function createEvaluationBatch(
-  collection: EvaluationCollection,
-  startedAt: string,
-  requestedRuns: number,
-): EvaluationBatch {
+export function createEvaluationBatch(startedAt: string, requestedRuns: number): EvaluationBatch {
   if (!Number.isSafeInteger(requestedRuns) || requestedRuns < 1 || requestedRuns > 20) {
     throw new RangeError('Evaluation batch runs must be an integer between 1 and 20.');
   }
   return {
-    collection,
+    collection: 'benchmark',
     id: evaluationTimestamp(startedAt),
     startedAt: new Date(startedAt).toISOString(),
     requestedRuns,
@@ -400,5 +395,23 @@ export async function writeEvaluationResult(
     directory,
     createEvaluationBatchReport([...priorResults, result]),
   );
+  return path;
+}
+
+/** Persists one bounded provider diagnostic outside comparable benchmark results. */
+export async function writeDiagnosticEvaluationResult(
+  repositoryRoot: string,
+  scenario: LiveScenario,
+  batch: EvaluationBatch,
+  report: LiveRunReport,
+): Promise<string> {
+  const directory = join(repositoryRoot, 'e2e', '.runtime', 'provider-diagnose', scenario.name);
+  const path = join(directory, `${batch.id}.json`);
+  const result = createEvaluationResult(scenario, batch, 1, report);
+  await mkdir(directory, { recursive: true });
+  await writeFile(path, `${JSON.stringify(result, null, 2)}\n`, {
+    encoding: 'utf8',
+    flag: 'wx',
+  });
   return path;
 }

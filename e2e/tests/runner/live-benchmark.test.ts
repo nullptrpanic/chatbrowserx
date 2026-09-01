@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from 'vitest';
-import { runLiveBenchmark } from '../../runner/live-benchmark';
+import { parseLiveBenchmarkArguments, runLiveBenchmark } from '../../runner/live-benchmark';
 import type { LiveRunReport } from '../../runner/live-types';
 import { liveRunReport } from './fixtures';
 
@@ -16,6 +16,13 @@ function report(passed: boolean, runId: string): LiveRunReport {
 }
 
 describe('live benchmark', () => {
+  it('defaults an omitted run count to one attempt', () => {
+    expect(parseLiveBenchmarkArguments(['example-read'])).toEqual({
+      scenario: 'example-read',
+      runs: 1,
+    });
+  });
+
   it('stops on the first failed attempt and preserves completed reports', async () => {
     const runAttempt = vi
       .fn<(attempt: number) => Promise<LiveRunReport>>()

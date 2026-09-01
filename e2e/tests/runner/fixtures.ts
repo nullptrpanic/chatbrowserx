@@ -150,7 +150,7 @@ export function evaluationResult(overrides: Partial<EvaluationResult> = {}): Eva
   return {
     ...createEvaluationResult(
       liveScenario(),
-      createEvaluationBatch('results', '2026-08-27T12:30:00.000Z', 1),
+      createEvaluationBatch('2026-08-27T12:30:00.000Z', 1),
       1,
       liveRunReport(),
     ),

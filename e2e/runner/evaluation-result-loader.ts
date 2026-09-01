@@ -14,8 +14,8 @@ export async function loadEvaluationResults(
   sampleId: string,
 ): Promise<readonly EvaluationResult[]> {
   const collection = basename(directory);
-  if (collection !== 'results' && collection !== 'benchmark') {
-    throw new Error(`Sample "${sampleId}" result collection must be results or benchmark.`);
+  if (collection !== 'benchmark') {
+    throw new Error(`Sample "${sampleId}" result collection must be benchmark.`);
   }
   const entry = await stat(directory).catch((error: unknown) => {
     if (typeof error === 'object' && error !== null && 'code' in error && error.code === 'ENOENT') {

@@ -415,6 +415,21 @@ export function evaluateLiveRun(scenario: LiveScenario, input: LiveRunInput): Li
             arguments_.maxSegments < 1 ||
             arguments_.maxSegments > maxScrollSegmentsPerCall,
         );
+  const measuredScrollSegments = scrollCalls.map(({ output }) => {
+    const data = output?.data;
+    if (typeof data !== 'object' || data === null || Array.isArray(data)) return null;
+    const observations = (data as Readonly<Record<string, unknown>>).observations;
+    return Array.isArray(observations) ? observations.length : null;
+  });
+  const traversalSegments = measuredScrollSegments.reduce<number>(
+    (total, count) => total + (count ?? 0),
+    0,
+  );
+  const unmeasuredScrollCalls = measuredScrollSegments.filter((count) => count === null).length;
+  const maxTraversalSegments = scenario.maxTraversalSegments;
+  const traversalWithinLimit =
+    maxTraversalSegments === undefined ||
+    (unmeasuredScrollCalls === 0 && traversalSegments <= maxTraversalSegments);
   const activeNamesByScroll = scrollCalls.map(({ index, output }) => ({
     index,
     names: postActionVerificationElements(output).flatMap((element) => {
@@ -725,6 +740,15 @@ export function evaluateLiveRun(scenario: LiveScenario, input: LiveRunInput): Li
         : oversizedScrollCalls.length === 0
           ? `${String(scrollCalls.length)} scroll calls stayed within ${String(maxScrollSegmentsPerCall)} segment(s) per call.`
           : `${String(oversizedScrollCalls.length)} of ${String(scrollCalls.length)} scroll calls exceeded ${String(maxScrollSegmentsPerCall)} segment(s) before model reassessment.`,
+    ),
+    check(
+      'scroll-traversal-limit',
+      traversalWithinLimit,
+      maxTraversalSegments === undefined
+        ? 'No total traversal segment limit declared.'
+        : unmeasuredScrollCalls > 0
+          ? `${String(unmeasuredScrollCalls)} of ${String(scrollCalls.length)} scroll calls lacked measurable traversal observations.`
+          : `${String(traversalSegments)} total traversal segments; maximum ${String(maxTraversalSegments)}.`,
     ),
     check(
       'scroll-active-boundary',

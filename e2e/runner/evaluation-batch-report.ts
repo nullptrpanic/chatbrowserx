@@ -12,7 +12,7 @@ const evaluationBatchReportSchema = z
   .object({
     schemaVersion: z.literal(1),
     sampleId: nonEmptyString,
-    collection: z.enum(['results', 'benchmark']),
+    collection: z.literal('benchmark'),
     batchId: nonEmptyString,
     requestedRuns: z.number().int().positive(),
     completedRuns: z.number().int().positive(),

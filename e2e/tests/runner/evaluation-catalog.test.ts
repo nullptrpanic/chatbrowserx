@@ -21,12 +21,12 @@ async function createSample(
   root: string,
   directoryName = 'example-read',
   definition: unknown = validDefinition,
-  createResults = true,
+  createBenchmark = true,
 ): Promise<void> {
   const directory = join(root, 'e2e', 'samples', directoryName);
   await mkdir(directory, { recursive: true });
   await writeFile(join(directory, 'sample.json'), `${JSON.stringify(definition)}\n`, 'utf8');
-  if (createResults) await mkdir(join(directory, 'results'));
+  if (createBenchmark) await mkdir(join(directory, 'benchmark'));
 }
 
 async function writeResult(
@@ -39,7 +39,6 @@ async function writeResult(
     readonly success: boolean;
     readonly toolCalls?: number;
     readonly schemaVersion?: number;
-    readonly collection?: 'results' | 'benchmark';
     readonly batchStartedAt?: string;
     readonly requestedRuns?: number;
     readonly attempt?: number;
@@ -47,12 +46,11 @@ async function writeResult(
 ): Promise<void> {
   const batchStartedAt = input.batchStartedAt ?? input.startedAt;
   const batchId = batchStartedAt.replaceAll('-', '').replaceAll(':', '');
-  const collection = input.collection ?? 'results';
   const attempt = input.attempt ?? 1;
   const base = evaluationResult();
   const result = evaluationResult({
     batch: {
-      collection,
+      collection: 'benchmark',
       id: batchId,
       startedAt: batchStartedAt,
       requestedRuns: input.requestedRuns ?? 1,
@@ -82,7 +80,7 @@ async function writeResult(
           failedChecks: [],
         },
   });
-  const directory = join(root, 'e2e', 'samples', 'example-read', collection, batchId);
+  const directory = join(root, 'e2e', 'samples', 'example-read', 'benchmark', batchId);
   await mkdir(directory, { recursive: true });
   await writeFile(
     join(directory, `${String(attempt).padStart(2, '0')}.json`),
@@ -115,6 +113,18 @@ async function writeResult(
 }
 
 describe('evaluation catalog', () => {
+  it('rejects the removed results collection directory', async () => {
+    const root = await createRoot();
+    await createSample(root);
+
+    await expect(
+      loadEvaluationResults(
+        join(root, 'e2e', 'samples', 'example-read', 'results'),
+        'example-read',
+      ),
+    ).rejects.toThrow('must be benchmark');
+  });
+
   it('loads a self-contained sample and its reconstructed scenario', async () => {
     const root = await createRoot();
     await createSample(root);
@@ -131,13 +141,6 @@ describe('evaluation catalog', () => {
           startUrl: 'https://example.com/document',
           taskText: 'Read the complete page without changing it.',
         }),
-        results: {
-          attempts: 0,
-          passed: 0,
-          currentContractAttempts: 0,
-          currentContractPassed: 0,
-          revisionBatches: [],
-        },
         benchmark: {
           attempts: 0,
           passed: 0,
@@ -147,6 +150,7 @@ describe('evaluation catalog', () => {
         },
       }),
     ]);
+    expect(catalog.samples[0]).not.toHaveProperty('results');
   });
 
   it('indexes only schema-v4 batch attempts and groups results by product revision', async () => {
@@ -170,7 +174,7 @@ describe('evaluation catalog', () => {
     const catalog = await validateEvaluationCatalog(root);
 
     expect(catalog.samples[0]).toMatchObject({
-      results: {
+      benchmark: {
         attempts: 2,
         passed: 1,
         currentContractAttempts: 2,
@@ -200,20 +204,20 @@ describe('evaluation catalog', () => {
 
     await expect(
       loadEvaluationResults(
-        join(root, 'e2e', 'samples', 'example-read', 'results'),
+        join(root, 'e2e', 'samples', 'example-read', 'benchmark'),
         'example-read',
       ),
     ).rejects.toThrow('schemaVersion must equal 4');
   });
 
-  it('treats a sample without a results directory as having no historical attempts', async () => {
+  it('treats a sample without a benchmark directory as having no historical attempts', async () => {
     const root = await createRoot();
     await createSample(root, 'example-read', validDefinition, false);
 
     await expect(validateEvaluationCatalog(root)).resolves.toMatchObject({
       samples: [
         {
-          results: {
+          benchmark: {
             attempts: 0,
             passed: 0,
             currentContractAttempts: 0,
@@ -241,7 +245,7 @@ describe('evaluation catalog', () => {
     const root = await createRoot();
     await createSample(root);
     await writeFile(
-      join(root, 'e2e', 'samples', 'example-read', 'results', 'live_abc.json'),
+      join(root, 'e2e', 'samples', 'example-read', 'benchmark', 'live_abc.json'),
       '{}\n',
       'utf8',
     );
@@ -251,16 +255,9 @@ describe('evaluation catalog', () => {
     );
   });
 
-  it('loads benchmark attempts independently from ordinary results', async () => {
+  it('loads all attempts from one benchmark batch', async () => {
     const root = await createRoot();
     await createSample(root);
-    await writeResult(root, {
-      runId: 'live_result',
-      startedAt: '2026-08-27T10:00:00.000Z',
-      contractVersion: 2,
-      productRevision: 'revision_result',
-      success: true,
-    });
     await writeResult(root, {
       runId: 'live_benchmark_1',
       startedAt: '2026-08-27T10:01:00.000Z',
@@ -268,7 +265,6 @@ describe('evaluation catalog', () => {
       contractVersion: 2,
       productRevision: 'revision_benchmark',
       success: true,
-      collection: 'benchmark',
       requestedRuns: 2,
       attempt: 1,
     });
@@ -279,25 +275,18 @@ describe('evaluation catalog', () => {
       contractVersion: 2,
       productRevision: 'revision_benchmark',
       success: true,
-      collection: 'benchmark',
       requestedRuns: 2,
       attempt: 2,
     });
 
-    const results = await loadEvaluationResults(
-      join(root, 'e2e', 'samples', 'example-read', 'results'),
-      'example-read',
-    );
     const benchmark = await loadEvaluationResults(
       join(root, 'e2e', 'samples', 'example-read', 'benchmark'),
       'example-read',
     );
 
-    expect(results.map(({ runId }) => runId)).toEqual(['live_result']);
     expect(benchmark.map(({ runId }) => runId)).toEqual(['live_benchmark_1', 'live_benchmark_2']);
     const catalog = await validateEvaluationCatalog(root);
     expect(catalog.samples[0]).toMatchObject({
-      results: { attempts: 1 },
       benchmark: { attempts: 2, passed: 2 },
     });
   });
@@ -314,7 +303,7 @@ describe('evaluation catalog', () => {
     });
     await expect(
       loadEvaluationResults(
-        join(root, 'e2e', 'samples', 'example-read', 'results'),
+        join(root, 'e2e', 'samples', 'example-read', 'benchmark'),
         'example-read',
       ),
     ).resolves.toHaveLength(1);
@@ -335,7 +324,7 @@ describe('evaluation catalog', () => {
       'e2e',
       'samples',
       'example-read',
-      'results',
+      'benchmark',
       '20260827T100000.000Z',
       'report.json',
     );
@@ -363,7 +352,7 @@ describe('evaluation catalog', () => {
         'e2e',
         'samples',
         'example-read',
-        'results',
+        'benchmark',
         '20260827T100000.000Z',
         'report.json',
       ),

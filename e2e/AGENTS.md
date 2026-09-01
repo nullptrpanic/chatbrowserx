@@ -16,6 +16,8 @@ These rules apply to every file and operation under `e2e/`.
   the root `AGENTS.md` pointer are the only integration exceptions.
 - Use the shared runner and self-contained `sample.json`. Do not add sample-specific authentication,
   scripts, hidden prompts, or code-owned scenario registries.
+- Use `e2e/samples/<sample-id>/benchmark/` as the sole evaluation collection, including for a
+  one-attempt smoke run.
 - Keep `e2e/samples` and `e2e/.runtime` ignored and move them only through a controlled non-Git
   channel.
 - Never change product code merely to make E2E pass or improve metrics. A product change requires a

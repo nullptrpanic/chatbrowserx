@@ -79,6 +79,7 @@ const policySchema = z
     forbidScreenshotInspect: z.boolean(),
     forbidSubmittedType: z.boolean(),
     maxScrollSegmentsPerCall: positiveInteger.optional(),
+    maxTraversalSegments: positiveInteger.optional(),
     stopScrollingAfterActiveElementNames: z.array(nonEmptyString).optional(),
     requireVerticalBoundaryCoverage: z.boolean().optional(),
     maxAttachmentCount: nonNegativeInteger.optional(),
@@ -227,6 +228,9 @@ export function materializeLiveScenario(sample: EvaluationSampleDefinition): Liv
     ...(policy.maxScrollSegmentsPerCall === undefined
       ? {}
       : { maxScrollSegmentsPerCall: policy.maxScrollSegmentsPerCall }),
+    ...(policy.maxTraversalSegments === undefined
+      ? {}
+      : { maxTraversalSegments: policy.maxTraversalSegments }),
     ...(policy.stopScrollingAfterActiveElementNames === undefined
       ? {}
       : {

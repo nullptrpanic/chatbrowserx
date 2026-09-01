@@ -15,6 +15,24 @@ export interface LiveBenchmarkStatus {
   readonly stoppedOnFailure: boolean;
 }
 
+export function parseLiveBenchmarkArguments(arguments_: readonly string[]): {
+  readonly scenario: string;
+  readonly runs: number;
+} {
+  const normalized = arguments_[0] === '--' ? arguments_.slice(1) : [...arguments_];
+  const scenario = normalized[0]?.trim() ?? '';
+  const runs = normalized[1] === undefined ? 1 : Number(normalized[1]);
+  if (
+    normalized.length < 1 ||
+    normalized.length > 2 ||
+    scenario.length === 0 ||
+    !Number.isSafeInteger(runs)
+  ) {
+    throw new Error('Usage: npm run e2e:live:benchmark -- <scenario> [runs].');
+  }
+  return { scenario, runs };
+}
+
 /** Runs sequential first-attempt validations and stops on the first material failure. */
 export async function runLiveBenchmark(input: LiveBenchmarkInput): Promise<LiveBenchmarkStatus> {
   if (!Number.isSafeInteger(input.runs) || input.runs < 1 || input.runs > 20) {

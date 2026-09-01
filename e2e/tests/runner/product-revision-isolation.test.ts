@@ -30,10 +30,10 @@ describe('evaluation result revision isolation', () => {
   it('does not change the product revision when an untracked evaluation result is added', async () => {
     const root = await repository();
     const before = await resolveProductRevision(root);
-    const results = join(root, 'e2e', 'samples', 'example-read', 'results');
-    await mkdir(results, { recursive: true });
+    const benchmark = join(root, 'e2e', 'samples', 'example-read', 'benchmark');
+    await mkdir(benchmark, { recursive: true });
     await writeFile(
-      join(results, '20260827T123346.514Z__live_abc.json'),
+      join(benchmark, '20260827T123346.514Z__live_abc.json'),
       '{"success":false}\n',
       'utf8',
     );

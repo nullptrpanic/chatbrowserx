@@ -18,11 +18,7 @@ e2e/
 ├── samples/                   # Ignored; transported outside Git
 │   └── <sample-id>/
 │       ├── sample.json
-│       ├── results/                 # Created by the first ordinary run
-│       │   └── <UTC-batch-timestamp>/
-│       │       ├── 01.json
-│       │       └── report.json
-│       └── benchmark/               # Created by the first formal batch
+│       └── benchmark/               # Created by the first evaluation run
 │           └── <UTC-batch-timestamp>/
 │               ├── 01.json ...
 │               └── report.json
@@ -63,7 +59,7 @@ npm run e2e:env:doctor
 npm run e2e:catalog:validate
 npm run e2e:live:setup -- <sample-id>
 npm run e2e:live:verify -- <sample-id>
-npm run e2e:live:run -- <sample-id>
+npm run e2e:live:benchmark -- <sample-id>
 ```
 
 The doctor checks the toolchain and starts the built extension in a disposable Profile. Setup opens
@@ -76,15 +72,15 @@ dedicated Profile path.
 ## Evaluation Commands
 
 ```bash
-npm run e2e:live:run -- <sample-id>
+npm run e2e:live:benchmark -- <sample-id>
 ```
 
 ```bash
-CHATBROWSERX_LIVE_ALLOW_MUTATION=1 npm run e2e:live:run -- <sample-id>
+CHATBROWSERX_LIVE_ALLOW_MUTATION=1 npm run e2e:live:benchmark -- <sample-id>
 ```
 
 ```bash
-npm run e2e:live:benchmark -- <sample-id> <required-runs>
+npm run e2e:live:benchmark -- <sample-id> [runs]
 ```
 
 ```bash
@@ -95,12 +91,13 @@ npm run --silent e2e:benchmark:compare -- <sample-id> <left-revision> <right-rev
 npm run e2e:live:provider-diagnose -- <sample-id>
 ```
 
-The benchmark stops on its first failure. An ordinary run creates one timestamped directory below
-`results/`. A benchmark creates one timestamped directory below `benchmark/` and writes its
-completed attempts as `01.json`, `02.json`, and so on. Each file is one complete bounded and
-redacted report containing its run ID; no second raw-report copy is written. After every attempt,
-the runner atomically replaces the batch's `report.json` with aggregate counts and averages derived
-from all completed attempt files. It contains no per-attempt detail.
+The optional `runs` argument defaults to one. Every invocation creates one timestamped directory
+below `benchmark/` and writes its completed attempts as `01.json`, `02.json`, and so on. The runner
+stops on its first failure. Each file is one complete bounded and redacted report containing its run
+ID; no second raw-report copy is written. After every attempt, the runner atomically replaces the
+batch's `report.json` with aggregate counts and averages derived from all completed attempt files.
+It contains no per-attempt detail. Provider diagnostics are stored separately below
+`e2e/.runtime/provider-diagnose/` and never enter comparable benchmark history.
 
 ## Concurrent Correctness Runs
 
@@ -116,7 +113,7 @@ log path instead:
 npm run build
 
 CHATBROWSERX_LIVE_E2E_PROFILE=/absolute/e2e-profile-01 \
-./node_modules/.bin/tsx e2e/runner/run.ts <sample-id> \
+./node_modules/.bin/tsx e2e/runner/benchmark.ts <sample-id> \
 > e2e/.runtime/<sample-id>-01.log 2>&1
 ```
 

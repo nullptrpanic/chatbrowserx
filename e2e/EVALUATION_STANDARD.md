@@ -10,8 +10,8 @@ owns environment reconstruction and commands. SAMPLE_SPEC.md owns data formats.
 - An attempt starts one fresh WorkSession and ends with one immutable report.
 - A batch is one command's ordered attempts for one product revision and one timestamp directory.
 - A batch summary is a replaceable aggregate derived from its immutable attempt reports.
-- When created, `results/` stores ordinary runs and `benchmark/` stores formal comparable batches;
-  do not retain empty placeholder directories.
+- `benchmark/` stores every evaluation batch, including a one-attempt smoke run; do not retain
+  an empty placeholder directory.
 
 Freeze `sample.json` before the first attempt. Increment `contractVersion` when task, input,
 side-effect, or acceptance semantics change. Never loosen a check after observing a result.

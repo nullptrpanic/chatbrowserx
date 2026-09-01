@@ -10,7 +10,7 @@ const sample = evaluationSampleDefinition();
 async function createSampleRoot(value: unknown = sample): Promise<string> {
   const root = await mkdtemp(join(tmpdir(), 'chatbrowserx-sample-loader-'));
   const directory = join(root, 'e2e', 'samples', sample.id);
-  await mkdir(join(directory, 'results'), { recursive: true });
+  await mkdir(join(directory, 'benchmark'), { recursive: true });
   await writeFile(join(directory, 'sample.json'), JSON.stringify(value), 'utf8');
   return root;
 }
@@ -107,6 +107,18 @@ describe('self-contained E2E samples', () => {
     expect(loaded.scenario).toMatchObject({
       requiredToolResultIncludes: ['TAIL_DIAGNOSTIC'],
     });
+  });
+
+  it('materializes the actual total traversal limit', async () => {
+    const value = structuredClone(sample) as unknown as {
+      evaluation: { policy: Record<string, unknown> };
+    };
+    value.evaluation.policy.maxTraversalSegments = 12;
+    const root = await createSampleRoot(value);
+
+    const loaded = await loadEvaluationSample(root, sample.id);
+
+    expect(loaded.scenario).toMatchObject({ maxTraversalSegments: 12 });
   });
 
   it('materializes named mutation readback requirements', async () => {

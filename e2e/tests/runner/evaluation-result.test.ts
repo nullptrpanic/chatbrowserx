@@ -7,13 +7,14 @@ import {
   createEvaluationResult,
   evaluationResultFilename,
   parseEvaluationResult,
+  writeDiagnosticEvaluationResult,
   writeEvaluationResult,
 } from '../../runner/evaluation-result';
 import type { LiveRunReport } from '../../runner/live-types';
 import { liveRunReport, liveScenario } from './fixtures';
 
 const scenario = liveScenario();
-const batch = createEvaluationBatch('results', '2026-08-27T12:30:00.000Z', 5);
+const batch = createEvaluationBatch('2026-08-27T12:30:00.000Z', 5);
 
 function report(overrides: Partial<LiveRunReport> = {}): LiveRunReport {
   const base = liveRunReport();
@@ -28,6 +29,31 @@ function report(overrides: Partial<LiveRunReport> = {}): LiveRunReport {
 }
 
 describe('evaluation result', () => {
+  it('writes provider diagnostics outside the comparable benchmark collection', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'chatbrowserx-e2e-diagnostic-'));
+    const path = await writeDiagnosticEvaluationResult(root, scenario, batch, report());
+    expect(path).toBe(
+      join(
+        root,
+        'e2e',
+        '.runtime',
+        'provider-diagnose',
+        'example-read',
+        '20260827T123000.000Z.json',
+      ),
+    );
+    await expect(readFile(path, 'utf8')).resolves.toContain('"runId": "live_abc-123"');
+  });
+
+  it('creates a benchmark batch without a collection argument', () => {
+    expect(createEvaluationBatch('2026-08-27T12:30:00.000Z', 1)).toEqual({
+      collection: 'benchmark',
+      id: '20260827T123000.000Z',
+      startedAt: '2026-08-27T12:30:00.000Z',
+      requestedRuns: 1,
+    });
+  });
+
   it('records one self-contained batch attempt with comparison facts and diagnostic evidence', () => {
     const result = createEvaluationResult(scenario, batch, 2, report());
 
@@ -36,7 +62,7 @@ describe('evaluation result', () => {
         schemaVersion: 4,
         sampleId: 'example-read',
         batch: {
-          collection: 'results',
+          collection: 'benchmark',
           id: '20260827T123000.000Z',
           startedAt: '2026-08-27T12:30:00.000Z',
           requestedRuns: 5,
@@ -105,6 +131,23 @@ describe('evaluation result', () => {
     expect(() => parseEvaluationResult(result, scenario.name, batch.id, '02.json')).toThrow(
       'extraMetric is not supported',
     );
+  });
+
+  it('rejects the removed ordinary-results collection', () => {
+    const benchmark = createEvaluationBatch('2026-08-27T12:31:00.000Z', 1);
+    const result = createEvaluationResult(scenario, benchmark, 1, report());
+
+    expect(() =>
+      parseEvaluationResult(
+        {
+          ...result,
+          batch: { ...result.batch, collection: 'results' },
+        },
+        scenario.name,
+        benchmark.id,
+        '01.json',
+      ),
+    ).toThrow('batch.collection');
   });
 
   it('rejects a v4 failure that omits a required field', () => {
@@ -184,7 +227,7 @@ describe('evaluation result', () => {
     const path = await writeEvaluationResult(root, scenario, batch, 2, report());
 
     expect(path).toBe(
-      join(root, 'e2e', 'samples', 'example-read', 'results', '20260827T123000.000Z', '02.json'),
+      join(root, 'e2e', 'samples', 'example-read', 'benchmark', '20260827T123000.000Z', '02.json'),
     );
     const stored = JSON.parse(await readFile(path, 'utf8')) as {
       success: boolean;
@@ -233,14 +276,14 @@ describe('evaluation result', () => {
       'e2e',
       'samples',
       'example-read',
-      'results',
+      'benchmark',
       '20260827T123000.000Z',
       'report.json',
     );
     expect(JSON.parse(await readFile(summaryPath, 'utf8'))).toEqual({
       schemaVersion: 1,
       sampleId: 'example-read',
-      collection: 'results',
+      collection: 'benchmark',
       batchId: '20260827T123000.000Z',
       requestedRuns: 5,
       completedRuns: 2,
@@ -263,9 +306,9 @@ describe('evaluation result', () => {
     );
   });
 
-  it('uses the same report layout in the parallel benchmark collection', async () => {
+  it('writes the final requested attempt in the benchmark collection', async () => {
     const root = await mkdtemp(join(tmpdir(), 'chatbrowserx-e2e-benchmark-'));
-    const benchmark = createEvaluationBatch('benchmark', '2026-08-27T12:31:00.000Z', 5);
+    const benchmark = createEvaluationBatch('2026-08-27T12:31:00.000Z', 5);
     for (let attempt = 1; attempt < 5; attempt += 1) {
       await writeEvaluationResult(
         root,

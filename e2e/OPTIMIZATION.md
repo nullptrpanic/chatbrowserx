@@ -89,7 +89,7 @@ for a new baseline run when a later candidate is compared.
 | 2D    | Stabilize common browser schemas and validate dynamic refs in the executor                                                                       | Fewer schema changes and potentially better cache reuse                           | Medium          | Medium         | queued   |
 | 2E    | Prioritize editable targets in the bounded interactive ref budget and disclose deferred image delivery after capture                             | Keeps dense-page editors actionable without broadening the page snapshot          | Very small      | Low            | admitted |
 | 2F    | Classify fragment links as `same-page` from native DOM link semantics                                                                            | Gives generic navigation policy reliable table-of-contents evidence               | Small           | Low            | admitted |
-| 3A    | Discover optional Sandbox Skills through `skill_search` instead of injecting the complete catalog, while keeping browser tools visible           | Lower prompt cost and prevent unrelated Skills from displacing browser execution  | Medium          | Low to medium  | admitted |
+| 3A    | Load installed Sandbox Skills through a hidden `skill_loader` system-prompt contributor only when Sandbox is reachable                           | Removes catalog/search coupling and avoids exposing unusable Sandbox capabilities | Small           | Low            | admitted |
 | 3B    | Native deferred discovery for optional, non-browser tool families                                                                                | Lower large-tool-set prompt cost without hiding browser core tools                | Medium to large | Medium         | queued   |
 | 3C    | Read-only programmatic orchestration for many independent network or history reads                                                               | Fewer model round trips on proven fan-out workloads                               | Large           | Medium to high | queued   |
 | 3D    | Cross-conversation FTS retrieval with search-then-read IDs, excluding automatic memory                                                           | Reuse prior task evidence without replaying full conversations                    | Medium to large | Medium         | queued   |
@@ -114,7 +114,7 @@ The following are excluded unless a future reproducible defect changes the decis
 
 For each candidate, update only its row and append one concise entry containing the date, product
 revisions, sample counts, success rates, relevant mean/P95 deltas, and the admit/reject reason. Raw
-attempt facts remain in each ignored sample's `results/` or `benchmark/` directory; do not
+attempt facts remain in each ignored sample's `benchmark/` directory; do not
 duplicate them here.
 
 - 2026-08-29 — Phase 0 admitted against unchanged product

@@ -10,7 +10,7 @@ for (const sample of catalog.samples) {
     (left, right) => right.passed - left.passed || right.attempts - left.attempts,
   )[0];
   process.stdout.write(
-    `${sample.id}: results=${String(sample.results.passed)}/${String(sample.results.attempts)} benchmark=${String(sample.benchmark.passed)}/${String(sample.benchmark.attempts)} currentBenchmark=${String(sample.benchmark.currentContractPassed)}/${String(sample.benchmark.currentContractAttempts)} bestRevision=${String(bestCurrentBatch?.passed ?? 0)}/${String(bestCurrentBatch?.attempts ?? 0)} required=${String(sample.requiredRuns)}\n`,
+    `${sample.id}: benchmark=${String(sample.benchmark.passed)}/${String(sample.benchmark.attempts)} currentBenchmark=${String(sample.benchmark.currentContractPassed)}/${String(sample.benchmark.currentContractAttempts)} bestRevision=${String(bestCurrentBatch?.passed ?? 0)}/${String(bestCurrentBatch?.attempts ?? 0)} required=${String(sample.requiredRuns)}\n`,
   );
 }
 process.stdout.write(`Validated ${String(catalog.samples.length)} E2E samples.\n`);

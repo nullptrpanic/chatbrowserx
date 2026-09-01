@@ -49,13 +49,13 @@ test('keeps the complete E2E subsystem below the root e2e directory', () => {
     'e2e:benchmark:compare',
     'e2e:live:setup',
     'e2e:live:verify',
-    'e2e:live:run',
     'e2e:live:benchmark',
     'e2e:live:provider-diagnose',
     'e2e:live:seed-product',
   ]) {
     expect(pkg.scripts[name]).toContain('e2e/runner/');
   }
+  expect(pkg.scripts).not.toHaveProperty('e2e:live:run');
   expect(pkg.scripts['test:e2e']).toContain('e2e/playwright.config.ts');
 
   const ignore = readFileSync(resolve(root, '.gitignore'), 'utf8');

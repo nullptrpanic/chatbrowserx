@@ -8,11 +8,7 @@ immutable report per attempt; it does not describe a particular sample.
 ```text
 e2e/samples/<sample-id>/
 ├── sample.json
-├── results/                         # Created by the first ordinary run
-│   └── <UTC-batch-timestamp>/
-│       ├── 01.json
-│       └── report.json
-└── benchmark/                       # Created by the first formal batch
+└── benchmark/                       # Created by the first evaluation run
     └── <UTC-batch-timestamp>/
         ├── 01.json
         ├── ...
@@ -24,10 +20,9 @@ per-sample README or code-owned scenario registry.
 
 A sample can be created, generated, or delivered through any controlled channel outside Git.
 Transfer `sample.json` for a new history, or the complete sample directory to preserve history.
-`results/` and `benchmark/` are created by their first runs and must not be kept as empty
-placeholders. A normal live run writes one report below `results/`; one benchmark command writes
-all of its ordered attempts below one timestamped `benchmark/` directory. Never overwrite an
-attempt report with different bytes. After creation or import, run
+`benchmark/` is created by the first run and must not be kept as an empty placeholder. One command
+writes all of its ordered attempts below one timestamped `benchmark/` directory; omitting its run
+count produces one attempt. Never overwrite an attempt report with different bytes. After creation or import, run
 `npm run e2e:catalog:validate`, then follow `RUNBOOK.md`.
 
 ## Sample Schema Version 4
@@ -125,6 +120,7 @@ acceptance checks, and product safety rules.
 | expectedToolCounts                   | integer map            | no       | Exact count for every named tool.                                  |
 | requiredVerifiedTools                | non-empty string array | no       | Every result from each named tool must be verified and successful. |
 | maxScrollSegmentsPerCall             | positive integer       | no       | Traversal segments allowed before model reassessment.              |
+| maxTraversalSegments                 | positive integer       | no       | Maximum observed traversal segments across all scroll calls.       |
 | stopScrollingAfterActiveElementNames | string array           | no       | Reject later scrolling after a named section becomes active.       |
 | requireVerticalBoundaryCoverage      | boolean                | no       | Require ordered top-before-bottom evidence.                        |
 | maxAttachmentCount                   | non-negative integer   | no       | Maximum durable image references in tool results.                  |
@@ -203,7 +199,7 @@ All fields below are required. failure is null for a pass and an object for a fa
 | ------------------------------------------------- | --------------------------------------------------------------------------------------------------- |
 | schemaVersion                                     | Exactly 4.                                                                                          |
 | sampleId / runId                                  | Sample identity and unique attempt identity.                                                        |
-| batch.collection                                  | `results` for ordinary runs or `benchmark` for formal batches.                                      |
+| batch.collection                                  | Always `benchmark`.                                                                                 |
 | batch.id / startedAt                              | Batch directory name and its ISO UTC creation time.                                                 |
 | batch.requestedRuns / attempt                     | Declared batch size and this report's one-based attempt number.                                     |
 | productRevision                                   | Product revision or explicit isolated-build label.                                                  |
@@ -247,7 +243,6 @@ All fields below are required. failure is null for a pass and an object for a fa
 The directory identifies the batch and filenames identify attempt order:
 
 ```text
-results/20260827T123346.514Z/01.json
 benchmark/20260827T130000.000Z/01.json
 benchmark/20260827T130000.000Z/02.json
 ```

@@ -1,4 +1,3 @@
-import { stat } from 'node:fs/promises';
 import { join } from 'node:path';
 import type { LiveScenario } from './live-types';
 import { loadEvaluationResults } from './evaluation-result-loader';
@@ -9,7 +8,6 @@ export type { EvaluationSampleDefinition } from './sample-loader';
 export interface EvaluationSampleSummary extends EvaluationSampleDefinition {
   readonly directory: string;
   readonly scenario: LiveScenario;
-  readonly results: EvaluationCollectionSummary;
   readonly benchmark: EvaluationCollectionSummary;
 }
 
@@ -31,7 +29,7 @@ export interface EvaluationCatalog {
   readonly samples: readonly EvaluationSampleSummary[];
 }
 
-async function validateResults(
+async function summarizeBenchmark(
   directory: string,
   sampleId: string,
   currentContractVersion: number,
@@ -69,26 +67,6 @@ async function validateResults(
   };
 }
 
-const EMPTY_COLLECTION: EvaluationCollectionSummary = {
-  attempts: 0,
-  passed: 0,
-  currentContractAttempts: 0,
-  currentContractPassed: 0,
-  revisionBatches: [],
-};
-
-async function validateOptionalBenchmark(
-  directory: string,
-  sampleId: string,
-  currentContractVersion: number,
-): Promise<EvaluationCollectionSummary> {
-  const exists = await stat(directory)
-    .then((entry) => entry.isDirectory())
-    .catch(() => false);
-  if (!exists) return EMPTY_COLLECTION;
-  return validateResults(directory, sampleId, currentContractVersion);
-}
-
 /** Validates the complete local sample catalog without a code-owned scenario registry. */
 export async function validateEvaluationCatalog(
   repositoryRoot: string,
@@ -96,19 +74,15 @@ export async function validateEvaluationCatalog(
   const loaded = await listEvaluationSamples(repositoryRoot);
   const samples = await Promise.all(
     loaded.map(async ({ directory, definition, scenario }) => {
-      const [results, benchmark] = await Promise.all([
-        validateResults(join(directory, 'results'), definition.id, definition.contractVersion),
-        validateOptionalBenchmark(
-          join(directory, 'benchmark'),
-          definition.id,
-          definition.contractVersion,
-        ),
-      ]);
+      const benchmark = await summarizeBenchmark(
+        join(directory, 'benchmark'),
+        definition.id,
+        definition.contractVersion,
+      );
       return {
         ...definition,
         directory,
         scenario,
-        results,
         benchmark,
       };
     }),

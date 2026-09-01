@@ -1,6 +1,6 @@
 import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { createEvaluationBatch, writeEvaluationResult } from './evaluation-result';
+import { createEvaluationBatch, writeDiagnosticEvaluationResult } from './evaluation-result';
 import { withExistingLiveSession } from './live-session';
 import { ResponsesRequestReplayProbe, type ProviderReplayResult } from './provider-replay';
 import { resolveLiveProductTarget, resolveProductRevision } from './product-revision';
@@ -29,7 +29,7 @@ async function main(): Promise<void> {
     workspaceRevision,
   });
   const dependencies = createLiveRunDependencies(productTarget.productRevision);
-  const batch = createEvaluationBatch('results', new Date().toISOString(), 1);
+  const batch = createEvaluationBatch(new Date().toISOString(), 1);
   let report: LiveRunReport;
   let replay: ProviderReplayResult | null = null;
   let replayError: string | null = null;
@@ -67,7 +67,7 @@ async function main(): Promise<void> {
     report = createLiveHarnessFailureReport(scenario, error, dependencies);
   }
 
-  const reportPath = await writeEvaluationResult(repositoryRoot, scenario, batch, 1, report);
+  const reportPath = await writeDiagnosticEvaluationResult(repositoryRoot, scenario, batch, report);
   const original = report.providerTrace.requests.at(-1) ?? null;
   process.stdout.write(`Evaluation report: ${reportPath}\n`);
   process.stdout.write(
