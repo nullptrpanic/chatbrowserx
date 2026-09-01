@@ -503,6 +503,12 @@ function refWithAction(value: unknown, action: string): string | null {
   return typeof entry.ref === 'string' && actions.includes(action) ? entry.ref : null;
 }
 
+function semanticUpsertEntry(value: unknown): Readonly<Record<string, unknown>> | null {
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) return null;
+  const item = value as Readonly<Record<string, unknown>>;
+  return childRecord(item, 'e') ?? item;
+}
+
 function scrollableRefFromEntry(value: unknown): string | null {
   return refWithAction(value, 'scroll');
 }
@@ -518,8 +524,7 @@ function scrollableRefs(data: Readonly<Record<string, unknown>> | null): readonl
   }
   if (Array.isArray(data.upsert)) {
     for (const item of data.upsert) {
-      if (typeof item !== 'object' || item === null || Array.isArray(item)) continue;
-      const ref = scrollableRefFromEntry((item as Readonly<Record<string, unknown>>).e);
+      const ref = scrollableRefFromEntry(semanticUpsertEntry(item));
       if (ref) refs.add(ref);
     }
   }
@@ -568,9 +573,15 @@ function applySemanticRefState(
     for (const item of record.upsert) {
       if (typeof item !== 'object' || item === null || Array.isArray(item)) continue;
       const value = item as Readonly<Record<string, unknown>>;
-      const identity = typeof value.k === 'string' ? value.k : '';
+      const entry = semanticUpsertEntry(value);
+      const identity =
+        typeof value.k === 'string'
+          ? value.k
+          : typeof entry?.ref === 'string'
+            ? `ref:${entry.ref}`
+            : '';
       if (identity.startsWith('ref:')) refs.delete(identity.slice(4));
-      const ref = refFromEntry(value.e);
+      const ref = refFromEntry(entry);
       if (ref) refs.add(ref);
     }
   }

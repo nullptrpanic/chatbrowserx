@@ -135,7 +135,7 @@ describe('compactBrowserModelOutput', () => {
           snapshot: 'snapshot_2',
           base: 'snapshot_1',
           remove: ['ref:stale-action'],
-          upsert: [{ k: 'node:new-paragraph', e: { d: 4, r: 'statictext', n: 'New text' } }],
+          upsert: [{ d: 4, r: 'statictext', n: 'New text' }],
           coverage: { targets: ['ref_document'], primaryTarget: 'ref_document' },
         },
       },
@@ -171,6 +171,52 @@ describe('compactBrowserModelOutput', () => {
     expect(compact.observation).toEqual({ targetPresent: true, targetObscured: false });
     expect(compact.data.observations[0]).not.toHaveProperty('remove');
     expect(compactBrowserModelOutput(full).length).toBeLessThan(full.length);
+  });
+
+  it('removes delta transport identities without losing ordered semantic entries', () => {
+    const passive = { d: 4, r: 'statictext', n: 'Policy summary' };
+    const actionable = {
+      d: 2,
+      r: 'region',
+      n: 'Document',
+      s: ['expanded'],
+      a: ['scroll'],
+      f: 'frame_main',
+      ref: 'ref_document',
+    };
+    const full = JSON.stringify({
+      ok: true,
+      tabId: 7,
+      url: 'https://example.com/document',
+      data: {
+        action: 'scroll',
+        mode: 'traverse',
+        observations: [
+          {
+            mode: 'interactive',
+            snapshot: 'snapshot_2',
+            base: 'snapshot_1',
+            upsert: [
+              { k: 'node:paragraph', e: passive },
+              { k: 'ref:ref_document', e: actionable },
+            ],
+          },
+        ],
+      },
+      observation: null,
+    });
+
+    const compact = JSON.parse(compactBrowserModelOutput(full)) as {
+      readonly data: {
+        readonly observations: readonly {
+          readonly upsert: readonly Readonly<Record<string, unknown>>[];
+        }[];
+      };
+    };
+
+    expect(compact.data.observations[0]?.upsert).toEqual([passive, actionable]);
+    expect(compactBrowserModelOutput(full)).not.toContain('node:paragraph');
+    expect(compactBrowserModelOutput(full)).not.toContain('ref:ref_document');
   });
 
   it('deduplicates unchanged identities while retaining changed and first actionable entries', () => {
@@ -219,16 +265,16 @@ describe('compactBrowserModelOutput', () => {
     const compact = JSON.parse(compactBrowserModelOutput(full)) as {
       readonly data: {
         readonly observations: readonly {
-          readonly upsert: readonly { readonly k: string; readonly e: { readonly n: string } }[];
+          readonly upsert: readonly { readonly n: string }[];
         }[];
       };
     };
 
-    expect(compact.data.observations[0]?.upsert.map(({ e }) => e.n)).toEqual([
+    expect(compact.data.observations[0]?.upsert.map(({ n }) => n)).toEqual([
       'Repeated paragraph',
       'Document',
     ]);
-    expect(compact.data.observations[1]?.upsert.map(({ e }) => e.n)).toEqual(['Changed paragraph']);
+    expect(compact.data.observations[1]?.upsert.map(({ n }) => n)).toEqual(['Changed paragraph']);
   });
 
   it('preserves ordered state changes while dropping repeated transport state', () => {
@@ -285,13 +331,13 @@ describe('compactBrowserModelOutput', () => {
     const compact = JSON.parse(compactBrowserModelOutput(full)) as {
       readonly data: {
         readonly observations: readonly {
-          readonly upsert: readonly { readonly k: string; readonly e: { readonly n: string } }[];
+          readonly upsert: readonly { readonly n: string }[];
           readonly coverage?: Readonly<Record<string, unknown>>;
         }[];
       };
     };
 
-    expect(compact.data.observations.map(({ upsert }) => upsert.map(({ e }) => e.n))).toEqual([
+    expect(compact.data.observations.map(({ upsert }) => upsert.map(({ n }) => n))).toEqual([
       ['Document', 'Loading'],
       ['Ready', 'Repeated title'],
       ['Loading', 'Repeated title'],

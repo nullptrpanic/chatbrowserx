@@ -33,14 +33,14 @@ function compactScrollObservation(
   }
 
   if (Array.isArray(observation.upsert)) {
-    compact.upsert = observation.upsert.filter((value) => {
+    compact.upsert = observation.upsert.flatMap((value) => {
       const item = record(value);
       const entry = record(item?.e);
-      if (item === null || entry === null || typeof item.k !== 'string') return true;
+      if (item === null || entry === null || typeof item.k !== 'string') return [value];
       const signature = JSON.stringify(entry);
       const changed = currentEntries.get(item.k) !== signature;
       currentEntries.set(item.k, signature);
-      return changed;
+      return changed ? [entry] : [];
     });
   }
   if (!keepCoverage) delete compact.coverage;
@@ -64,8 +64,8 @@ function compactScrollData(data: Record<string, unknown>): Record<string, unknow
 }
 
 /**
- * Removes only browser-envelope fields whose absence is protocol-equivalent to their value.
- * Any unrecognized shape remains byte-for-byte unchanged so audit evidence cannot be lost.
+ * Projects only protocol-defined redundant transport fields out of the model-visible receipt.
+ * Any unrecognized shape remains byte-for-byte unchanged so its semantics are never guessed.
  */
 export function compactBrowserModelOutput(fullOutput: string): string {
   let parsed: unknown;
