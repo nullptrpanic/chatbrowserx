@@ -621,6 +621,10 @@ export function evaluateLiveRun(scenario: LiveScenario, input: LiveRunInput): Li
       request.response.captureError === 'response_body_pending' ||
       request.response.captureError === 'response_body_unavailable';
     const capturedFailure = request.response.failed && request.response.captureError === null;
+    const capturedHttpFailure =
+      request.response.status !== null &&
+      (request.response.status < 200 || request.response.status >= 300) &&
+      !request.response.completed;
     const capturedTransportFailure =
       request.response.status === null &&
       request.response.bodyBytes === 0 &&
@@ -629,10 +633,16 @@ export function evaluateLiveRun(scenario: LiveScenario, input: LiveRunInput): Li
       !request.response.failed &&
       request.response.captureError === null;
     return (
-      (request.response.status === 200 || capturedFailure || capturedTransportFailure) &&
+      (request.response.status === 200 ||
+        capturedFailure ||
+        capturedHttpFailure ||
+        capturedTransportFailure) &&
       !request.response.completed &&
       !request.response.bodyTooLarge &&
-      (captureWasUnavailable || capturedFailure || capturedTransportFailure) &&
+      (captureWasUnavailable ||
+        capturedFailure ||
+        capturedHttpFailure ||
+        capturedTransportFailure) &&
       next.bodyValid &&
       next.orphanFunctionOutputCount === 0 &&
       next.unpairedFunctionCallCount === 0 &&

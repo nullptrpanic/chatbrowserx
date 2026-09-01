@@ -1132,6 +1132,43 @@ describe('live E2E acceptance policy', () => {
     );
     expect(recoveredHttpRetry.passed).toBe(true);
 
+    const recoveredHttpRetryWithoutBody = evaluateLiveRun(scenario, {
+      ...completedInput(),
+      providerRetryReasons: ['transient_model_retry:upstream_failure'],
+      providerTrace: {
+        requestCount: 2,
+        requests: [
+          {
+            ...request,
+            response: {
+              ...request.response,
+              status: 503,
+              bodyBytes: 0,
+              completed: false,
+              failed: false,
+              eventTypes: [],
+              encryptedReasoningOutputCount: 0,
+              captureError: 'response_body_pending',
+            },
+          },
+          {
+            ...request,
+            sequence: 2,
+            response: { ...request.response, encryptedReasoningOutputCount: 0 },
+          },
+        ],
+      },
+    });
+    expect(recoveredHttpRetryWithoutBody.checks).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          name: 'provider-response-evidence',
+          passed: true,
+        }),
+      ]),
+    );
+    expect(recoveredHttpRetryWithoutBody.passed).toBe(true);
+
     const broken = evaluateLiveRun(scenario, {
       ...input,
       providerTrace: {
