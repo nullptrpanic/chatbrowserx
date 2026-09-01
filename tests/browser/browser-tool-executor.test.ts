@@ -964,7 +964,13 @@ describe('BrowserToolExecutor', () => {
     ['browser_click', { ref: 'ref_action', button: 'left', count: 1 }],
     [
       'browser_scroll',
-      { target: 'ref_action', deltaX: 0, deltaY: 600, maxSegments: 1, stopText: '' },
+      {
+        target: 'ref_action',
+        deltaX: 0,
+        deltaY: 600,
+        maxSegments: 1,
+        stopText: '',
+      },
     ],
   ])('returns a fresh semantic observation in the same result after %s', async (name, input) => {
     const observer = {
@@ -1236,7 +1242,12 @@ describe('BrowserToolExecutor', () => {
               mode: 'interactive',
               snapshot: 'snapshot_2',
               base: 'snapshot_1',
-              upsert: [{ k: 'node:older', e: { d: 2, r: 'statictext', n: 'Older message' } }],
+              upsert: [
+                {
+                  k: 'node:older',
+                  e: { d: 2, r: 'statictext', n: 'Older message' },
+                },
+              ],
               coverage: { contentKey: 'older' },
             },
             observation: null,
@@ -1274,7 +1285,11 @@ describe('BrowserToolExecutor', () => {
         order.push('settle');
       }),
     };
-    const executor = new BrowserToolExecutor({ tabs: tabPort(), observer, actions });
+    const executor = new BrowserToolExecutor({
+      tabs: tabPort(),
+      observer,
+      actions,
+    });
     const signal = new AbortController().signal;
     const context = { currentTabId: 7 };
 
@@ -1634,7 +1649,11 @@ describe('BrowserToolExecutor', () => {
           };
         }),
       };
-      const executor = new BrowserToolExecutor({ tabs: tabPort(), observer, actions });
+      const executor = new BrowserToolExecutor({
+        tabs: tabPort(),
+        observer,
+        actions,
+      });
       const signal = new AbortController().signal;
       const context = { currentTabId: 7 };
 
@@ -1839,7 +1858,11 @@ describe('BrowserToolExecutor', () => {
         throw new Error('page remained dynamic');
       }),
     };
-    const executor = new BrowserToolExecutor({ tabs: tabPort(), observer, actions });
+    const executor = new BrowserToolExecutor({
+      tabs: tabPort(),
+      observer,
+      actions,
+    });
     const signal = new AbortController().signal;
     const context = { currentTabId: 7 };
 
@@ -1883,7 +1906,14 @@ describe('BrowserToolExecutor', () => {
               ? {
                   mode: 'interactive',
                   snapshot: 'snapshot_0',
-                  elements: [{ r: 'list', n: 'History', a: ['scroll'], ref: 'ref_history' }],
+                  elements: [
+                    {
+                      r: 'list',
+                      n: 'History',
+                      a: ['scroll'],
+                      ref: 'ref_history',
+                    },
+                  ],
                 }
               : {
                   mode: 'interactive',
@@ -1979,7 +2009,14 @@ describe('BrowserToolExecutor', () => {
           data: {
             mode: 'interactive',
             snapshot: 'snapshot_before',
-            elements: [{ r: 'region', n: 'Document', a: ['scroll'], ref: 'ref_document' }],
+            elements: [
+              {
+                r: 'region',
+                n: 'Document',
+                a: ['scroll'],
+                ref: 'ref_document',
+              },
+            ],
           },
           observation: null,
           attachmentIds: [],
@@ -1994,7 +2031,10 @@ describe('BrowserToolExecutor', () => {
             base: 'snapshot_before',
             remove: passiveTombstones,
             upsert: [{ k: 'node:new', e: { d: 4, r: 'statictext', n: 'New text' } }],
-            coverage: { targets: ['ref_document'], primaryTarget: 'ref_document' },
+            coverage: {
+              targets: ['ref_document'],
+              primaryTarget: 'ref_document',
+            },
           },
           observation: null,
           attachmentIds: [],
@@ -2021,7 +2061,11 @@ describe('BrowserToolExecutor', () => {
         observation: null,
       })),
     };
-    const executor = new BrowserToolExecutor({ tabs: tabPort(), observer, actions });
+    const executor = new BrowserToolExecutor({
+      tabs: tabPort(),
+      observer,
+      actions,
+    });
     const signal = new AbortController().signal;
     const context = { currentTabId: 7 };
 
@@ -2039,7 +2083,10 @@ describe('BrowserToolExecutor', () => {
     );
 
     expect(result.output.length).toBeGreaterThan(100 * 1_024);
-    expect(JSON.parse(result.output)).toMatchObject({ ok: true, data: { action: 'scroll' } });
+    expect(JSON.parse(result.output)).toMatchObject({
+      ok: true,
+      data: { action: 'scroll' },
+    });
     expect(result.modelOutput?.length).toBeLessThanOrEqual(100 * 1_024);
     expect(JSON.parse(result.modelOutput ?? '{}')).toMatchObject({
       ok: true,
@@ -2255,7 +2302,12 @@ describe('BrowserToolExecutor', () => {
               contentKey: keys[sequence],
             },
             elements: [
-              { r: 'list', n: `Card ${String(sequence)}`, a: ['scroll'], ref: 'ref_carousel' },
+              {
+                r: 'list',
+                n: `Card ${String(sequence)}`,
+                a: ['scroll'],
+                ref: 'ref_carousel',
+              },
             ],
           },
           observation: null,
@@ -2282,7 +2334,11 @@ describe('BrowserToolExecutor', () => {
         observation: null,
       })),
     };
-    const executor = new BrowserToolExecutor({ tabs: tabPort(), observer, actions });
+    const executor = new BrowserToolExecutor({
+      tabs: tabPort(),
+      observer,
+      actions,
+    });
     const signal = new AbortController().signal;
     const context = { currentTabId: 7 };
 
@@ -2356,7 +2412,11 @@ describe('BrowserToolExecutor', () => {
         observation: null,
       })),
     };
-    const executor = new BrowserToolExecutor({ tabs: tabPort(), observer, actions });
+    const executor = new BrowserToolExecutor({
+      tabs: tabPort(),
+      observer,
+      actions,
+    });
     const signal = new AbortController().signal;
     const context = { currentTabId: 7 };
 
@@ -2610,7 +2670,11 @@ describe('BrowserToolExecutor', () => {
         settled = true;
       }),
     };
-    const executor = new BrowserToolExecutor({ tabs: tabPort(), observer, actions });
+    const executor = new BrowserToolExecutor({
+      tabs: tabPort(),
+      observer,
+      actions,
+    });
     const signal = new AbortController().signal;
     const context = { currentTabId: 7 };
 
@@ -2662,7 +2726,12 @@ describe('BrowserToolExecutor', () => {
             mode: 'interactive',
             snapshot: 'snapshot_typed',
             base: 'snapshot_before',
-            upsert: [{ k: 'ref:ref_search', e: { r: 'searchbox', n: 'query', ref: 'ref_search' } }],
+            upsert: [
+              {
+                k: 'ref:ref_search',
+                e: { r: 'searchbox', n: 'query', ref: 'ref_search' },
+              },
+            ],
           },
           observation: null,
           attachmentIds: [],
@@ -2698,7 +2767,11 @@ describe('BrowserToolExecutor', () => {
       })),
       settle: vi.fn(async () => undefined),
     };
-    const executor = new BrowserToolExecutor({ tabs: tabPort(), observer, actions });
+    const executor = new BrowserToolExecutor({
+      tabs: tabPort(),
+      observer,
+      actions,
+    });
     const signal = new AbortController().signal;
     const context = { currentTabId: 7 };
 
@@ -3264,7 +3337,7 @@ describe('BrowserToolExecutor', () => {
     });
   });
 
-  it('dispatches the four bounded network operations and rejects an incomplete get batch', async () => {
+  it('dispatches start, stop, list, and get over one frozen network capture', async () => {
     const requestSummary = {
       requestId: 'request_1',
       url: 'https://api.test/',
@@ -3290,10 +3363,12 @@ describe('BrowserToolExecutor', () => {
         message: 'Capture started. Earlier traffic is unavailable.',
       })),
       list: vi.fn(async () => ({
+        message: 'Frozen requests listed. browser_network_get is available now.',
         requests: [requestSummary],
         mode: 'endpoint_sample' as const,
         matchedRequestCount: 1,
         resultCount: 1,
+        returnedCount: 1,
         hasMore: false,
         nextCursor: null,
         coverage: {
@@ -3340,6 +3415,7 @@ describe('BrowserToolExecutor', () => {
         },
       ]),
       stop: vi.fn(async () => ({
+        message: 'Capture frozen. browser_network_list is available now.',
         stopped: true as const,
         alreadyStopped: false,
         startedAt: 900,
@@ -3357,6 +3433,7 @@ describe('BrowserToolExecutor', () => {
     const signal = new AbortController().signal;
 
     const started = await executor.execute(call('browser_network_start', { tabId: 7 }), signal);
+    const stopped = await executor.execute(call('browser_network_stop', { tabId: 7 }), signal);
     const listed = await executor.execute(
       call('browser_network_list', {
         tabId: 7,
@@ -3386,7 +3463,6 @@ describe('BrowserToolExecutor', () => {
       }),
       signal,
     );
-    const stopped = await executor.execute(call('browser_network_stop', { tabId: 7 }), signal);
 
     expect(network.start).toHaveBeenCalledWith(7, signal);
     expect(network.list).toHaveBeenCalledWith(7, '/api/', 25, 'endpoint_sample', '');
@@ -3438,6 +3514,7 @@ describe('BrowserToolExecutor', () => {
       list: vi.fn(),
       get: vi.fn(),
       stop: vi.fn(async () => ({
+        message: 'Capture frozen. browser_network_list is available now.',
         stopped: true as const,
         alreadyStopped: false,
         startedAt: 900,
@@ -3507,6 +3584,41 @@ describe('BrowserToolExecutor', () => {
       ok: false,
       code: 'NETWORK_CAPTURE_LOST',
       message: 'Network capture was lost. Start capture again.',
+      retryable: true,
+      needsInspect: false,
+    });
+    expect(output.output).not.toContain('private capture state');
+  });
+
+  it('tells the model to stop an active capture before reading requests', async () => {
+    const executor = new BrowserToolExecutor({
+      tabs: tabPort(),
+      network: {
+        start: vi.fn(),
+        list: vi.fn(async () => {
+          throw new NetworkCaptureError('NETWORK_CAPTURE_ACTIVE', 'private capture state', true);
+        }),
+        get: vi.fn(),
+        stop: vi.fn(),
+      },
+    });
+
+    const output = await executor.execute(
+      call('browser_network_list', {
+        tabId: 7,
+        urlPattern: '',
+        limit: 25,
+        mode: 'recent',
+        cursor: '',
+      }),
+      new AbortController().signal,
+    );
+
+    expect(JSON.parse(output.output)).toEqual({
+      ok: false,
+      code: 'NETWORK_CAPTURE_ACTIVE',
+      message:
+        'Network capture is still active. Complete the workflow and stop capture before reading requests.',
       retryable: true,
       needsInspect: false,
     });
@@ -3712,7 +3824,11 @@ describe('BrowserToolExecutor', () => {
               })
             : vi.fn(async () => failedAction),
       };
-      const executor = new BrowserToolExecutor({ tabs: tabPort(), observer, actions });
+      const executor = new BrowserToolExecutor({
+        tabs: tabPort(),
+        observer,
+        actions,
+      });
       const signal = new AbortController().signal;
       const context = { currentTabId: 7 };
 
@@ -3784,9 +3900,16 @@ describe('BrowserToolExecutor', () => {
         });
       }),
     };
-    const executor = new BrowserToolExecutor({ tabs: tabPort(), observer, actions });
+    const executor = new BrowserToolExecutor({
+      tabs: tabPort(),
+      observer,
+      actions,
+    });
     const signal = new AbortController().signal;
-    const context = { currentTabId: 7, availableAssetIds: ['attachment_capture'] };
+    const context = {
+      currentTabId: 7,
+      availableAssetIds: ['attachment_capture'],
+    };
 
     await executor.execute(call('browser_inspect', { mode: 'interactive' }), signal, context);
     const output = await executor.execute(

@@ -14,6 +14,8 @@ const MAX_GET_REQUESTS = 5;
 const MAX_BODY_BYTES = 64 * 1024;
 const MAX_GET_RESULTS_CHARACTERS = 80 * 1024;
 const MAX_JSON_SANITIZE_CHARACTERS = 512 * 1024;
+const MAX_LIST_REQUEST_BODY_PREVIEW_BYTES = 2 * 1024;
+const MAX_LIST_REQUEST_BODY_PREVIEWS_PER_PAGE_BYTES = 2 * 1024;
 const MAX_HEADER_COUNT = 12;
 const MAX_HEADER_NAME = 100;
 const MAX_HEADER_VALUE = 256;
@@ -24,12 +26,21 @@ const NETWORK_ENABLE_PARAMETERS = {
   maxPostDataSize: 0,
 } as const;
 const CAPTURE_STARTED_MESSAGE =
-  'Capture started. Earlier traffic is unavailable, and any prior frozen snapshot was replaced. On the next model turn, re-read the available tools: browser_network_list, browser_network_get, and browser_network_stop are now available. Keep capture active until the requested user-visible workflow is complete; network_idle alone does not prove asynchronous business completion. For initial page traffic, reload after starting. After completion, wait for final network quiet, list every recent cursor page, and read needed bodies. If stop happens first, the frozen snapshot remains readable until the next start.';
+  'Capture started. Earlier traffic is unavailable, and any prior frozen snapshot was replaced. browser_network_stop is available now. Complete and verify the requested user-visible workflow; network_idle alone does not prove asynchronous business completion. Reload now if initial page traffic is required. After business completion and final network quiet, call browser_network_stop to freeze the capture. browser_network_list and browser_network_get are intentionally unavailable until the capture is frozen; do not report them missing.';
+const CAPTURE_STOPPED_MESSAGE =
+  'Capture frozen. browser_network_list is available now; call it with an empty cursor. browser_network_get is intentionally unavailable until the first successful list; do not report it missing.';
+const CAPTURE_UNAVAILABLE_MESSAGE =
+  'No active or frozen capture was available. Call browser_network_start to create a new capture.';
+const REQUESTS_LISTED_MESSAGE =
+  'Frozen requests listed. browser_network_get is available now for request IDs returned by this list.';
 const SENSITIVE_NAME =
   /(?:^|[-_])(?:authorization|proxy[-_]?authorization|cookie|set[-_]?cookie|token|secret|password|passwd|api[-_]?key|credential|session)(?:$|[-_])/i;
 
 export type NetworkCaptureErrorCode =
-  'NETWORK_CAPTURE_LOST' | 'NETWORK_LIST_CURSOR_INVALID' | 'NETWORK_REQUEST_NOT_FOUND';
+  | 'NETWORK_CAPTURE_LOST'
+  | 'NETWORK_CAPTURE_ACTIVE'
+  | 'NETWORK_LIST_CURSOR_INVALID'
+  | 'NETWORK_REQUEST_NOT_FOUND';
 
 export class NetworkCaptureError extends Error {
   readonly code: NetworkCaptureErrorCode;
@@ -64,16 +75,25 @@ export interface NetworkCaptureCoverage {
 }
 
 export interface NetworkRequestPage {
+  readonly message: string;
   readonly requests: readonly NetworkRequestSummary[];
   readonly mode: NetworkListMode;
   readonly matchedRequestCount: number;
   readonly resultCount: number;
+  readonly returnedCount: number;
   readonly hasMore: boolean;
   readonly nextCursor: string | null;
   readonly coverage: NetworkCaptureCoverage;
 }
 
+export interface NetworkRequestBodyPreview {
+  readonly encoding: 'utf8';
+  readonly text: string;
+  readonly byteLength: number;
+}
+
 export interface NetworkCaptureStopped {
+  readonly message: string;
   readonly stopped: true;
   readonly alreadyStopped: boolean;
   readonly startedAt: number | null;
@@ -100,6 +120,7 @@ export interface NetworkRequestSummary {
   readonly failed: boolean;
   readonly redirected: boolean;
   readonly fromCache: boolean;
+  readonly requestBodyPreview?: NetworkRequestBodyPreview | undefined;
   /** Present only for endpoint_sample list results. */
   readonly occurrenceCount?: number | undefined;
 }
@@ -113,7 +134,7 @@ export interface NetworkBody {
   readonly reason?: 'no_body' | 'binary' | 'unavailable' | 'invalid_json' | 'too_large' | undefined;
 }
 
-export interface NetworkRequestDetails extends NetworkRequestSummary {
+export interface NetworkRequestDetails extends Omit<NetworkRequestSummary, 'requestBodyPreview'> {
   readonly requestHeaders: Readonly<Record<string, string>>;
   readonly responseHeaders: Readonly<Record<string, string>>;
   readonly protocol: string | null;
@@ -185,6 +206,7 @@ interface CapturedRequest {
   readonly requestHeaders: Readonly<Record<string, string>>;
   readonly requestMimeType: string | null;
   readonly hasPostData: boolean;
+  readonly requestBodyPreview: NetworkRequestBodyPreview | null;
   responseHeaders: Readonly<Record<string, string>>;
 }
 
@@ -364,6 +386,23 @@ function sanitizeBodyText(
   return truncateUtf8(sanitized, MAX_BODY_BYTES);
 }
 
+function requestBodyPreview(
+  request: Readonly<Record<string, unknown>>,
+  mimeType: string | null,
+): NetworkRequestBodyPreview | null {
+  if (!isJsonMimeType(mimeType) && !isFormMimeType(mimeType)) return null;
+  const postData = request.postData;
+  if (typeof postData !== 'string') return null;
+  if (new TextEncoder().encode(postData).length > MAX_LIST_REQUEST_BODY_PREVIEW_BYTES) return null;
+  const sanitized = sanitizeBodyText(postData, mimeType);
+  if ('reason' in sanitized || sanitized.truncated) return null;
+  return {
+    encoding: 'utf8',
+    text: sanitized.text,
+    byteLength: new TextEncoder().encode(sanitized.text).length,
+  };
+}
+
 function endpointSignature(record: CapturedRequest): string {
   try {
     const url = new URL(record.url);
@@ -389,7 +428,33 @@ function summary(record: CapturedRequest): NetworkRequestSummary {
     failed: record.failed,
     redirected: record.redirected,
     fromCache: record.fromCache,
+    ...(record.requestBodyPreview === null
+      ? {}
+      : { requestBodyPreview: record.requestBodyPreview }),
   };
+}
+
+function withoutRequestBodyPreview(
+  request: NetworkRequestSummary,
+): Omit<NetworkRequestSummary, 'requestBodyPreview'> {
+  const { requestBodyPreview: omitted, ...summaryWithoutPreview } = request;
+  void omitted;
+  return summaryWithoutPreview;
+}
+
+function boundedListPreviews(
+  requests: readonly NetworkRequestSummary[],
+): readonly NetworkRequestSummary[] {
+  let includedBytes = 0;
+  return requests.map((request) => {
+    const preview = request.requestBodyPreview;
+    if (preview === undefined) return request;
+    if (includedBytes + preview.byteLength > MAX_LIST_REQUEST_BODY_PREVIEWS_PER_PAGE_BYTES) {
+      return withoutRequestBodyPreview(request);
+    }
+    includedBytes += preview.byteLength;
+    return request;
+  });
 }
 
 function bodyWithCharacterLimit(body: NetworkBody, maximum: number): NetworkBody {
@@ -507,7 +572,7 @@ export class NetworkCaptureRegistry implements NetworkCapturePort {
     mode: NetworkListMode,
     cursor: string,
   ): Promise<NetworkRequestPage> {
-    const state = this.#requiredState(tabId);
+    const state = this.#requiredFrozenState(tabId);
     const pattern = urlPattern.slice(0, 500).toLowerCase();
     const boundedLimit = Math.max(1, Math.min(MAX_LIST_RESULTS, Math.floor(limit)));
     if (cursor.length > 0) {
@@ -554,7 +619,7 @@ export class NetworkCaptureRegistry implements NetworkCapturePort {
     tabId: number,
     requests: readonly NetworkGetRequest[],
   ): Promise<readonly NetworkGetResult[]> {
-    const state = this.#requiredState(tabId);
+    const state = this.#requiredFrozenState(tabId);
     const seen = new Set<string>();
     const results: NetworkGetResult[] = [];
     for (const input of requests.slice(0, MAX_GET_REQUESTS)) {
@@ -580,7 +645,7 @@ export class NetworkCaptureRegistry implements NetworkCapturePort {
         ok: true,
         requestId: input.requestId,
         request: {
-          ...summary(record),
+          ...withoutRequestBodyPreview(summary(record)),
           requestHeaders: record.requestHeaders,
           responseHeaders: record.responseHeaders,
           protocol: record.protocol,
@@ -598,6 +663,7 @@ export class NetworkCaptureRegistry implements NetworkCapturePort {
     const stoppedAt = this.#dependencies.clock.now();
     if (!state) {
       return {
+        message: CAPTURE_UNAVAILABLE_MESSAGE,
         stopped: true,
         alreadyStopped: true,
         startedAt: null,
@@ -613,6 +679,7 @@ export class NetworkCaptureRegistry implements NetworkCapturePort {
     const alreadyStopped = state.stoppedAt !== null;
     state.stoppedAt ??= stoppedAt;
     return {
+      message: CAPTURE_STOPPED_MESSAGE,
       stopped: true,
       alreadyStopped,
       startedAt: state.startedAt,
@@ -661,6 +728,18 @@ export class NetworkCaptureRegistry implements NetworkCapturePort {
     return state;
   }
 
+  #requiredFrozenState(tabId: number): CaptureState {
+    const state = this.#requiredState(tabId);
+    if (state.stoppedAt === null) {
+      throw new NetworkCaptureError(
+        'NETWORK_CAPTURE_ACTIVE',
+        'Network capture is still active. Complete the workflow and stop capture before reading requests.',
+        true,
+      );
+    }
+    return state;
+  }
+
   #coverage(state: CaptureState, snapshotAt: number): NetworkCaptureCoverage {
     return {
       startedAt: state.startedAt,
@@ -676,6 +755,7 @@ export class NetworkCaptureRegistry implements NetworkCapturePort {
 
   #page(state: CaptureState, snapshot: NetworkListCursor, limit: number): NetworkRequestPage {
     const end = Math.min(snapshot.results.length, snapshot.offset + limit);
+    const requests = boundedListPreviews(snapshot.results.slice(snapshot.offset, end));
     const hasMore = end < snapshot.results.length;
     let nextCursor: string | null = null;
     if (hasMore) {
@@ -688,10 +768,12 @@ export class NetworkCaptureRegistry implements NetworkCapturePort {
       }
     }
     return {
-      requests: snapshot.results.slice(snapshot.offset, end),
+      message: REQUESTS_LISTED_MESSAGE,
+      requests,
       mode: snapshot.mode,
       matchedRequestCount: snapshot.matchedRequestCount,
       resultCount: snapshot.results.length,
+      returnedCount: requests.length,
       hasMore,
       nextCursor,
       coverage: snapshot.coverage,
@@ -791,6 +873,7 @@ export class NetworkCaptureRegistry implements NetworkCapturePort {
       state.droppedCount += 1;
       return null;
     }
+    const requestMimeType = mimeTypeFromHeaders(request.headers);
     const record: CapturedRequest = {
       opaqueId,
       cdpRequestId,
@@ -811,8 +894,9 @@ export class NetworkCaptureRegistry implements NetworkCapturePort {
       redirected: false,
       fromCache: false,
       requestHeaders: sanitizeHeaders(request.headers),
-      requestMimeType: mimeTypeFromHeaders(request.headers),
+      requestMimeType,
       hasPostData: request.hasPostData === true,
+      requestBodyPreview: requestBodyPreview(request, requestMimeType),
       responseHeaders: {},
     };
     state.records.push(record);

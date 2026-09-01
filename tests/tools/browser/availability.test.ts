@@ -41,7 +41,13 @@ function pair(
 function checkpoint(
   items: readonly TestContinuationItem[] = [],
   toolResults: readonly MaterializedToolResult[] = [],
+  runIds: {
+    readonly checkpoint?: string;
+    readonly generatedResults?: string;
+  } = {},
 ): BrowserToolState {
+  const checkpointRunId = runIds.checkpoint ?? 'run_1';
+  const generatedResultRunId = runIds.generatedResults ?? checkpointRunId;
   const calls = new Map(
     items.flatMap((item) => (item.type === 'function_call' ? [[item.callId, item] as const] : [])),
   );
@@ -53,7 +59,7 @@ function checkpoint(
     generatedResults.push({
       id: item.resultId,
       taskId: 'task_1',
-      runId: 'run_1',
+      runId: generatedResultRunId,
       callId: item.callId,
       toolName: call.name,
       argumentsJson: call.argumentsJson,
@@ -71,7 +77,7 @@ function checkpoint(
   const checkpoint: Checkpoint = {
     id: 'checkpoint_1',
     taskId: 'task_1',
-    runId: 'run_1',
+    runId: checkpointRunId,
     continuationItems,
     pendingToolCall: null,
     browserToolCallsInAttempt: 0,
@@ -452,24 +458,184 @@ describe('browserToolDefinitionsForCheckpoint', () => {
     );
   });
 
-  it('keeps network readers available for a frozen capture after stop', () => {
+  it('exposes network tools in start, stop, list, then get order', () => {
     const started = pair(
       'start',
       'browser_network_start',
       {},
-      { ok: true, data: { started: true } },
+      { ok: true, tabId: 7, data: { generation: 3, alreadyActive: false } },
     );
-    expect(names(checkpoint(started))).toEqual(
-      expect.arrayContaining([
-        'browser_network_list',
-        'browser_network_get',
-        'browser_network_stop',
-      ]),
+    const capturing = names(checkpoint(started));
+    expect(capturing).toContain('browser_network_stop');
+    expect(capturing).not.toEqual(
+      expect.arrayContaining(['browser_network_list', 'browser_network_get']),
     );
 
-    const stopped = pair('stop', 'browser_network_stop', {}, { ok: true, data: { stopped: true } });
-    expect(names(checkpoint([...started, ...stopped]))).toEqual(
-      expect.arrayContaining(['browser_network_list', 'browser_network_get']),
+    const stopped = pair(
+      'stop',
+      'browser_network_stop',
+      { tabId: 7 },
+      { ok: true, tabId: 7, data: { stopped: true, startedAt: 1, totalCaptured: 2 } },
+    );
+    const frozen = names(checkpoint([...started, ...stopped]));
+    expect(frozen).toEqual(
+      expect.arrayContaining([
+        'browser_network_start',
+        'browser_network_stop',
+        'browser_network_list',
+      ]),
+    );
+    expect(frozen).not.toContain('browser_network_get');
+
+    const listed = pair(
+      'list',
+      'browser_network_list',
+      { tabId: 7, urlPattern: '', limit: 10, mode: 'recent', cursor: '' },
+      {
+        ok: true,
+        tabId: 7,
+        data: {
+          requests: [{ requestId: 'networkRequest_1' }],
+          returnedCount: 1,
+          hasMore: false,
+        },
+      },
+    );
+    const readable = names(checkpoint([...started, ...stopped, ...listed]));
+    expect(readable).toEqual(
+      expect.arrayContaining([
+        'browser_network_start',
+        'browser_network_stop',
+        'browser_network_list',
+        'browser_network_get',
+      ]),
+    );
+  });
+
+  it('binds stop and frozen readers to the tab that started capture', () => {
+    const started = pair(
+      'start-tab',
+      'browser_network_start',
+      { tabId: 0 },
+      {
+        ok: true,
+        tabId: 19,
+        data: { generation: 4, alreadyActive: false },
+      },
+    );
+    const stop = browserToolDefinitionsForCheckpoint(checkpoint(started)).find(
+      ({ name }) => name === 'browser_network_stop',
+    );
+    expect(stop?.parameters).toMatchObject({ properties: { tabId: { enum: [19] } } });
+
+    const stopped = pair(
+      'stop-tab',
+      'browser_network_stop',
+      { tabId: 19 },
+      {
+        ok: true,
+        tabId: 19,
+        data: { stopped: true, startedAt: 1, totalCaptured: 1 },
+      },
+    );
+    const list = browserToolDefinitionsForCheckpoint(checkpoint([...started, ...stopped])).find(
+      ({ name }) => name === 'browser_network_list',
+    );
+    expect(list?.parameters).toMatchObject({ properties: { tabId: { enum: [19] } } });
+  });
+
+  it('resets network availability when a paused task starts a new run', () => {
+    const previousRunStarted = pair(
+      'previous-start',
+      'browser_network_start',
+      {},
+      { ok: true, tabId: 7, data: { generation: 3, alreadyActive: false } },
+    );
+
+    const resumed = names(
+      checkpoint(previousRunStarted, [], {
+        checkpoint: 'run_2',
+        generatedResults: 'run_1',
+      }),
+    );
+
+    expect(resumed).toContain('browser_network_start');
+    expect(resumed).not.toEqual(
+      expect.arrayContaining([
+        'browser_network_stop',
+        'browser_network_list',
+        'browser_network_get',
+      ]),
+    );
+  });
+
+  it('retains previously used network definitions when replaying their results in a new run', () => {
+    const previousRun = [
+      ...pair(
+        'old-start',
+        'browser_network_start',
+        {},
+        {
+          ok: true,
+          tabId: 7,
+          data: { generation: 3, alreadyActive: false },
+        },
+      ),
+      ...pair(
+        'old-stop',
+        'browser_network_stop',
+        { tabId: 7 },
+        {
+          ok: true,
+          tabId: 7,
+          data: { stopped: true, startedAt: 1, totalCaptured: 1 },
+        },
+      ),
+      ...pair(
+        'old-list',
+        'browser_network_list',
+        { tabId: 7, urlPattern: '', limit: 10, mode: 'recent', cursor: '' },
+        {
+          ok: true,
+          tabId: 7,
+          data: {
+            requests: [{ requestId: 'networkRequest_1' }],
+            returnedCount: 1,
+            hasMore: false,
+          },
+        },
+      ),
+      ...pair(
+        'old-get',
+        'browser_network_get',
+        {
+          tabId: 7,
+          requests: [
+            {
+              requestId: 'networkRequest_1',
+              includeRequestBody: false,
+              includeResponseBody: false,
+            },
+          ],
+        },
+        { ok: true, tabId: 7, data: { results: [] } },
+      ),
+    ];
+
+    const replayed = names(
+      checkpoint(previousRun, [], {
+        checkpoint: 'run_2',
+        generatedResults: 'run_1',
+      }),
+    );
+
+    expect(replayed).toEqual(
+      expect.arrayContaining([
+        'browser_network_start',
+        'browser_network_stop',
+        'browser_network_list',
+        'browser_network_get',
+      ]),
     );
   });
 

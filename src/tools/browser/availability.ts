@@ -57,12 +57,20 @@ const VISUAL_INVALIDATING_TOOLS = new Set<BrowserToolName>([
 interface CapabilityState {
   semanticSnapshotCurrent: boolean;
   visualSnapshotCurrent: boolean;
-  networkReadable: boolean;
+  network: NetworkCapabilityState;
   inspectSatisfiedByLatestScroll: boolean;
   selectableRefs: Set<string>;
   scrollableRefs: Set<string>;
   readonly usedTools: Set<BrowserToolName>;
 }
+
+type NetworkCapabilityState =
+  | { readonly phase: 'idle' }
+  | {
+      readonly phase: 'capturing' | 'frozen' | 'listed';
+      readonly tabId: number;
+      readonly generation: number | null;
+    };
 
 type MaterializedFunctionOutput = Extract<
   MaterializedContinuationItem,
@@ -72,6 +80,7 @@ type MaterializedFunctionOutput = Extract<
 interface BrowserToolHistory {
   readonly items: readonly MaterializedContinuationItem[];
   readonly outputRecords: Map<MaterializedFunctionOutput, Readonly<Record<string, unknown>> | null>;
+  readonly currentRunResultIds: ReadonlySet<string>;
 }
 
 export interface BrowserScrollContinuation {
@@ -98,7 +107,7 @@ const MAX_EXPOSED_ASSET_IDS = 8;
 const MAX_BOUND_SCROLL_REFS = 32;
 
 export interface BrowserToolState {
-  readonly checkpoint: Pick<Checkpoint, 'continuationItems'>;
+  readonly checkpoint: Pick<Checkpoint, 'continuationItems' | 'runId'>;
   readonly toolResults: readonly MaterializedToolResult[];
 }
 
@@ -157,6 +166,36 @@ function bindScrollableTargets(
   };
 }
 
+function bindNetworkTab(
+  definition: ModelToolDefinition,
+  network: NetworkCapabilityState,
+): ModelToolDefinition {
+  if (
+    network.phase === 'idle' ||
+    !['browser_network_stop', 'browser_network_list', 'browser_network_get'].includes(
+      definition.name,
+    )
+  ) {
+    return definition;
+  }
+  const properties = definition.parameters.properties as Readonly<Record<string, unknown>>;
+  const tabId = properties.tabId as Readonly<Record<string, unknown>>;
+  return {
+    ...definition,
+    parameters: {
+      ...definition.parameters,
+      properties: {
+        ...properties,
+        tabId: {
+          ...tabId,
+          enum: [network.tabId],
+          description: 'Use the exact tab that owns this network capture.',
+        },
+      },
+    },
+  };
+}
+
 function jsonRecord(value: string): Readonly<Record<string, unknown>> | null {
   try {
     const parsed: unknown = JSON.parse(value);
@@ -176,6 +215,11 @@ function browserToolHistory(state: BrowserToolState): BrowserToolHistory {
       toolResults: state.toolResults,
     }),
     outputRecords: new Map(),
+    currentRunResultIds: new Set(
+      state.toolResults
+        .filter((result) => result.runId === state.checkpoint.runId)
+        .map((result) => result.id),
+    ),
   };
 }
 
@@ -536,6 +580,7 @@ function applySuccessfulBrowserResult(
   name: BrowserToolName,
   result: Readonly<Record<string, unknown>>,
   state: CapabilityState,
+  currentRun: boolean,
 ): void {
   const data =
     typeof result.data === 'object' && result.data !== null && !Array.isArray(result.data)
@@ -569,7 +614,7 @@ function applySuccessfulBrowserResult(
     state.selectableRefs.clear();
     state.scrollableRefs.clear();
   }
-  if (name === 'browser_network_start') state.networkReadable = true;
+  if (currentRun) applySuccessfulNetworkResult(name, result, data, state);
   const embeddedObservations = embeddedInteractiveObservations(data);
   state.inspectSatisfiedByLatestScroll =
     name === 'browser_scroll' &&
@@ -587,6 +632,54 @@ function applySuccessfulBrowserResult(
       state.scrollableRefs.clear();
       for (const target of coverageTargets) state.scrollableRefs.add(target);
     }
+  }
+}
+
+function safeTabId(value: unknown): number | null {
+  return typeof value === 'number' && Number.isSafeInteger(value) && value >= 0 ? value : null;
+}
+
+function safeGeneration(value: unknown): number | null {
+  return typeof value === 'number' && Number.isSafeInteger(value) && value >= 0 ? value : null;
+}
+
+function applySuccessfulNetworkResult(
+  name: BrowserToolName,
+  result: Readonly<Record<string, unknown>>,
+  data: Readonly<Record<string, unknown>> | null,
+  state: CapabilityState,
+): void {
+  const tabId = safeTabId(result.tabId);
+  if (name === 'browser_network_start') {
+    if (tabId === null) return;
+    state.network = {
+      phase: 'capturing',
+      tabId,
+      generation: safeGeneration(data?.generation),
+    };
+    return;
+  }
+  if (state.network.phase === 'idle' || tabId !== state.network.tabId) return;
+  if (name === 'browser_network_stop' && state.network.phase === 'capturing') {
+    state.network =
+      data?.startedAt === null
+        ? { phase: 'idle' }
+        : {
+            phase: 'frozen',
+            tabId: state.network.tabId,
+            generation: state.network.generation,
+          };
+    return;
+  }
+  if (
+    name === 'browser_network_list' &&
+    (state.network.phase === 'frozen' || state.network.phase === 'listed')
+  ) {
+    state.network = {
+      phase: 'listed',
+      tabId: state.network.tabId,
+      generation: state.network.generation,
+    };
   }
 }
 
@@ -610,7 +703,7 @@ function availableBrowserToolDefinitions(
   const state: CapabilityState = {
     semanticSnapshotCurrent: false,
     visualSnapshotCurrent: false,
-    networkReadable: false,
+    network: { phase: 'idle' },
     inspectSatisfiedByLatestScroll: false,
     selectableRefs: new Set(),
     scrollableRefs: new Set(),
@@ -624,7 +717,7 @@ function availableBrowserToolDefinitions(
     if (item.type === 'compaction') {
       state.semanticSnapshotCurrent = false;
       state.visualSnapshotCurrent = false;
-      state.networkReadable = false;
+      state.network = { phase: 'idle' };
       state.inspectSatisfiedByLatestScroll = false;
       state.selectableRefs.clear();
       state.scrollableRefs.clear();
@@ -643,7 +736,7 @@ function availableBrowserToolDefinitions(
     if (successfulCommit(call, item, history)) {
       state.semanticSnapshotCurrent = false;
       state.visualSnapshotCurrent = false;
-      state.networkReadable = false;
+      state.network = { phase: 'idle' };
       state.inspectSatisfiedByLatestScroll = false;
       state.selectableRefs.clear();
       state.scrollableRefs.clear();
@@ -655,7 +748,12 @@ function availableBrowserToolDefinitions(
     state.usedTools.add(name);
     const output = successfulOutputRecord(history, item);
     if (output) {
-      applySuccessfulBrowserResult(name, output, state);
+      applySuccessfulBrowserResult(
+        name,
+        output,
+        state,
+        history.currentRunResultIds.has(item.resultId),
+      );
       continue;
     }
     state.inspectSatisfiedByLatestScroll = false;
@@ -689,10 +787,13 @@ function availableBrowserToolDefinitions(
     enabled.add('browser_click_point');
     enabled.add('browser_drag_point');
   }
-  if (state.networkReadable) {
+  if (state.network.phase === 'capturing') {
+    enabled.add('browser_network_stop');
+  } else if (state.network.phase === 'frozen') {
+    enabled.add('browser_network_list');
+  } else if (state.network.phase === 'listed') {
     enabled.add('browser_network_list');
     enabled.add('browser_network_get');
-    enabled.add('browser_network_stop');
   }
   if (state.selectableRefs.size >= 2) enabled.add('browser_set_checked_many');
 
@@ -700,7 +801,10 @@ function availableBrowserToolDefinitions(
   if (assetIds.length > 0) enabled.add('browser_paste_image');
   return BROWSER_TOOL_DEFINITIONS.filter(({ name }) => enabled.has(name as BrowserToolName)).map(
     (definition) =>
-      bindScrollableTargets(bindAvailableAssets(definition, assetIds), state.scrollableRefs),
+      bindNetworkTab(
+        bindScrollableTargets(bindAvailableAssets(definition, assetIds), state.scrollableRefs),
+        state.network,
+      ),
   );
 }
 

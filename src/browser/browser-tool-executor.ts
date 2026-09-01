@@ -231,6 +231,13 @@ function failureFor(error: unknown): BrowserToolFailure {
         true,
         false,
       );
+    case 'NETWORK_CAPTURE_ACTIVE':
+      return failure(
+        'NETWORK_CAPTURE_ACTIVE',
+        'Network capture is still active. Complete the workflow and stop capture before reading requests.',
+        true,
+        false,
+      );
     case 'NETWORK_LIST_CURSOR_INVALID':
       return failure(
         'NETWORK_LIST_CURSOR_INVALID',

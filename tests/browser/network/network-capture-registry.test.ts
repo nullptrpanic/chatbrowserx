@@ -14,7 +14,10 @@ function transport() {
   const send = vi.fn(async (_session: DebuggerSession, method: string) => {
     if (method === 'Network.getRequestPostData') {
       return {
-        postData: JSON.stringify({ password: 'secret', value: 'request-visible' }),
+        postData: JSON.stringify({
+          password: 'secret',
+          value: 'request-visible',
+        }),
         base64Encoded: false,
       };
     }
@@ -147,6 +150,48 @@ function finish(debuggerTransport: ReturnType<typeof transport>, requestId: stri
 }
 
 describe('NetworkCaptureRegistry', () => {
+  it('does not advertise frozen readers when no capture is available to stop', async () => {
+    const capture = registry(transport());
+
+    const stopped = await capture.stop(7);
+
+    expect(stopped).toMatchObject({
+      stopped: true,
+      alreadyStopped: true,
+      startedAt: null,
+    });
+    expect(stopped.message).not.toContain('available now');
+  });
+
+  it('requires an active capture to be frozen before requests can be read', async () => {
+    const debuggerTransport = transport();
+    const capture = registry(debuggerTransport);
+    await capture.start(7, new AbortController().signal);
+    request(debuggerTransport, 'cdp_1', 'https://api.test/one');
+
+    await expect(capture.list(7, '', 10, 'recent', '')).rejects.toMatchObject({
+      code: 'NETWORK_CAPTURE_ACTIVE',
+      retryable: true,
+    });
+    await expect(
+      capture.get(7, [
+        {
+          requestId: 'networkRequest_1',
+          includeRequestBody: false,
+          includeResponseBody: false,
+        },
+      ]),
+    ).rejects.toMatchObject({
+      code: 'NETWORK_CAPTURE_ACTIVE',
+      retryable: true,
+    });
+
+    await capture.stop(7);
+    await expect(capture.list(7, '', 10, 'recent', '')).resolves.toMatchObject({
+      returnedCount: 1,
+    });
+  });
+
   it('starts future-only capture idempotently on root, current, and future child sessions', async () => {
     const debuggerTransport = transport();
     const capture = registry(debuggerTransport);
@@ -154,11 +199,16 @@ describe('NetworkCaptureRegistry', () => {
     const first = await capture.start(7, new AbortController().signal);
     const second = await capture.start(7, new AbortController().signal);
 
-    expect(first).toMatchObject({ tabId: 7, alreadyActive: false, generation: 3 });
+    expect(first).toMatchObject({
+      tabId: 7,
+      alreadyActive: false,
+      generation: 3,
+    });
     expect(first.message).toContain('Earlier traffic is unavailable');
-    expect(first.message).toContain('browser_network_list');
-    expect(first.message).toContain('browser_network_get');
-    expect(first.message).toContain('browser_network_stop');
+    expect(first.message).toContain('browser_network_stop is available now');
+    expect(first.message).toContain(
+      'browser_network_list and browser_network_get are intentionally unavailable',
+    );
     expect(second).toMatchObject({ alreadyActive: true });
     expect(debuggerTransport.send).toHaveBeenCalledWith({ tabId: 7 }, 'Network.enable', {
       maxTotalBufferSize: 10_485_760,
@@ -176,7 +226,11 @@ describe('NetworkCaptureRegistry', () => {
 
     debuggerTransport.event({ tabId: 7 }, 'Target.attachedToTarget', {
       sessionId: 'session_future',
-      targetInfo: { targetId: 'frame_future', type: 'iframe', url: 'https://future.test/' },
+      targetInfo: {
+        targetId: 'frame_future',
+        type: 'iframe',
+        url: 'https://future.test/',
+      },
     });
     await vi.waitFor(() =>
       expect(debuggerTransport.send).toHaveBeenCalledWith(
@@ -204,12 +258,21 @@ describe('NetworkCaptureRegistry', () => {
     });
     response(debuggerTransport, 'cdp_1');
     request(debuggerTransport, 'cdp_2', 'data:text/plain,private');
+    await capture.stop(7);
 
     const { requests: entries } = await capture.list(7, 'api.test', 10, 'recent', '');
 
     expect(entries).toHaveLength(2);
-    expect(entries[0]).toMatchObject({ status: 200, completed: true, redirected: false });
-    expect(entries[1]).toMatchObject({ status: 302, completed: true, redirected: true });
+    expect(entries[0]).toMatchObject({
+      status: 200,
+      completed: true,
+      redirected: false,
+    });
+    expect(entries[1]).toMatchObject({
+      status: 302,
+      completed: true,
+      redirected: true,
+    });
     expect(entries[0]?.requestId).not.toBe('cdp_1');
     expect(entries[0]?.url).toContain('access_token=%5Bredacted%5D');
     expect(JSON.stringify(entries)).not.toContain('secret');
@@ -223,6 +286,7 @@ describe('NetworkCaptureRegistry', () => {
     for (let index = 0; index < 502; index += 1) {
       request(debuggerTransport, `cdp_${String(index)}`, `https://api.test/${String(index)}`);
     }
+    await capture.stop(7);
 
     const { requests: entries } = await capture.list(7, '', 100, 'recent', '');
 
@@ -239,6 +303,7 @@ describe('NetworkCaptureRegistry', () => {
     request(debuggerTransport, 'cdp_2', 'https://api.test/items?sort=desc&page=2');
     request(debuggerTransport, 'cdp_3', 'https://api.test/items?page=3', {}, { method: 'POST' });
     request(debuggerTransport, 'cdp_4', 'https://api.test/items?page=4&filter=open');
+    await capture.stop(7);
 
     const { requests: entries } = await capture.list(7, '', 10, 'endpoint_sample', '');
 
@@ -254,7 +319,7 @@ describe('NetworkCaptureRegistry', () => {
     });
   });
 
-  it('paginates one stable recent snapshot while newer requests continue arriving', async () => {
+  it('paginates one stable frozen snapshot while later request events arrive', async () => {
     const debuggerTransport = transport();
     const capture = registry(debuggerTransport);
     await capture.start(7, new AbortController().signal);
@@ -264,6 +329,7 @@ describe('NetworkCaptureRegistry', () => {
     finish(debuggerTransport, 'cdp_2');
     request(debuggerTransport, 'cdp_3', 'https://api.test/three');
     finish(debuggerTransport, 'cdp_3');
+    await capture.stop(7);
 
     const first = await capture.list(7, '', 2, 'recent', '');
     expect(first).toMatchObject({
@@ -307,6 +373,7 @@ describe('NetworkCaptureRegistry', () => {
     await capture.start(7, new AbortController().signal);
     request(debuggerTransport, 'cdp_1', 'https://api.test/one');
     request(debuggerTransport, 'cdp_2', 'https://api.test/two');
+    await capture.stop(7);
     const first = await capture.list(7, 'api.test', 1, 'recent', '');
     if (!first.nextCursor) throw new Error('Expected a second network-list page.');
 
@@ -325,10 +392,14 @@ describe('NetworkCaptureRegistry', () => {
     for (let index = 0; index < 502; index += 1) {
       request(debuggerTransport, `cdp_${String(index)}`, `https://api.test/${String(index)}`);
     }
+    const stopped = await capture.stop(7);
 
     const page = await capture.list(7, '', 100, 'recent', '');
 
-    expect(started).toMatchObject({ startedAt: expect.any(Number), capacity: 500 });
+    expect(started).toMatchObject({
+      startedAt: expect.any(Number),
+      capacity: 500,
+    });
     expect(page).toMatchObject({
       hasMore: true,
       matchedRequestCount: 500,
@@ -343,7 +414,6 @@ describe('NetworkCaptureRegistry', () => {
     });
     expect(page.requests).toHaveLength(100);
 
-    const stopped = await capture.stop(7);
     expect(stopped).toMatchObject({
       stopped: true,
       alreadyStopped: false,
@@ -371,6 +441,7 @@ describe('NetworkCaptureRegistry', () => {
     await capture.start(7, new AbortController().signal);
 
     request(debuggerTransport, 'cdp_1', 'https://api.test/one');
+    await capture.stop(7);
     const page = await capture.list(7, '', 100, 'recent', '');
 
     expect(page).toMatchObject({
@@ -392,6 +463,7 @@ describe('NetworkCaptureRegistry', () => {
     await capture.start(7, new AbortController().signal);
     request(debuggerTransport, 'cdp_1', 'https://api.test/one');
     request(debuggerTransport, 'cdp_2', 'https://api.test/two');
+    await capture.stop(7);
     const { requests: entries } = await capture.list(7, '', 10, 'recent', '');
     const newest = entries[0];
     const oldest = entries[1];
@@ -467,6 +539,7 @@ describe('NetworkCaptureRegistry', () => {
       },
     );
     response(debuggerTransport, 'cdp_body');
+    await capture.stop(7);
     const { requests: entries } = await capture.list(7, '', 10, 'recent', '');
     const [summary] = entries;
     if (!summary) throw new Error('Expected captured request.');
@@ -548,10 +621,14 @@ describe('NetworkCaptureRegistry', () => {
     await capture.start(7, new AbortController().signal);
     request(debuggerTransport, 'cdp_binary', 'https://api.test/image');
     response(debuggerTransport, 'cdp_binary');
+    await capture.stop(7);
     const { requests: entries } = await capture.list(7, '', 10, 'recent', '');
     const [summary] = entries;
     if (!summary) throw new Error('Expected captured request.');
-    debuggerTransport.send.mockResolvedValueOnce({ body: 'private-binary', base64Encoded: true });
+    debuggerTransport.send.mockResolvedValueOnce({
+      body: 'private-binary',
+      base64Encoded: true,
+    });
 
     await expect(
       capture.get(7, [
@@ -564,7 +641,9 @@ describe('NetworkCaptureRegistry', () => {
     ).resolves.toMatchObject({
       0: {
         ok: true,
-        request: { responseBody: { included: true, available: false, reason: 'binary' } },
+        request: {
+          responseBody: { included: true, available: false, reason: 'binary' },
+        },
       },
     });
     debuggerTransport.send.mockRejectedValueOnce(new Error('private CDP failure'));
@@ -579,7 +658,13 @@ describe('NetworkCaptureRegistry', () => {
     ).resolves.toMatchObject({
       0: {
         ok: true,
-        request: { responseBody: { included: true, available: false, reason: 'unavailable' } },
+        request: {
+          responseBody: {
+            included: true,
+            available: false,
+            reason: 'unavailable',
+          },
+        },
       },
     });
   });
@@ -599,6 +684,7 @@ describe('NetworkCaptureRegistry', () => {
         headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
       },
     );
+    await capture.stop(7);
     const { requests: entries } = await capture.list(7, '', 10, 'recent', '');
     const [summary] = entries;
     if (!summary) throw new Error('Expected captured request.');
@@ -683,6 +769,7 @@ describe('NetworkCaptureRegistry', () => {
         encodedDataLength: 100_000,
       });
     }
+    await capture.stop(7);
     const { requests: entries } = await capture.list(7, '', 5, 'recent', '');
 
     const results = await capture.get(
@@ -740,6 +827,7 @@ describe('NetworkCaptureRegistry', () => {
       droppedCount: 0,
       bufferLossless: true,
     });
+    expect(stopped.message).toContain('browser_network_list is available now');
     expect(debuggerTransport.send).not.toHaveBeenCalledWith({ tabId: 7 }, 'Network.disable');
 
     request(debuggerTransport, 'cdp_2', 'https://api.test/after-stop');
@@ -762,8 +850,14 @@ describe('NetworkCaptureRegistry', () => {
       expect.objectContaining({
         ok: true,
         request: expect.objectContaining({
-          requestBody: expect.objectContaining({ included: true, available: true }),
-          responseBody: expect.objectContaining({ included: true, available: true }),
+          requestBody: expect.objectContaining({
+            included: true,
+            available: true,
+          }),
+          responseBody: expect.objectContaining({
+            included: true,
+            available: true,
+          }),
         }),
       }),
     ]);
@@ -775,11 +869,103 @@ describe('NetworkCaptureRegistry', () => {
     });
   });
 
+  it('reports page counts and includes only bounded sanitized request body previews', async () => {
+    const debuggerTransport = transport();
+    const capture = registry(debuggerTransport);
+    await capture.start(7, new AbortController().signal);
+    request(
+      debuggerTransport,
+      'cdp_small_body',
+      'https://api.test/small',
+      {},
+      {
+        method: 'POST',
+        hasPostData: true,
+        postData: JSON.stringify({ password: 'secret', value: 'visible' }),
+        headers: { 'Content-Type': 'application/json' },
+      },
+    );
+    finish(debuggerTransport, 'cdp_small_body');
+    request(
+      debuggerTransport,
+      'cdp_large_body',
+      'https://api.test/large',
+      {},
+      {
+        method: 'POST',
+        hasPostData: true,
+        postData: JSON.stringify({ value: 'x'.repeat(3_000) }),
+        headers: { 'Content-Type': 'application/json' },
+      },
+    );
+    finish(debuggerTransport, 'cdp_large_body');
+    await capture.stop(7);
+
+    const page = await capture.list(7, '', 10, 'recent', '');
+
+    expect(page).toMatchObject({
+      matchedRequestCount: 2,
+      resultCount: 2,
+      returnedCount: 2,
+      hasMore: false,
+    });
+    expect(page.message).toContain('browser_network_get is available now');
+    expect(page.requests[0]).not.toHaveProperty('requestBodyPreview');
+    expect(page.requests[1]).toMatchObject({
+      requestBodyPreview: {
+        encoding: 'utf8',
+        text: '{"password":"[redacted]","value":"visible"}',
+        byteLength: 43,
+      },
+    });
+    expect(JSON.stringify(page)).not.toContain('secret');
+    expect(debuggerTransport.send).not.toHaveBeenCalledWith(
+      expect.anything(),
+      'Network.getRequestPostData',
+      expect.anything(),
+    );
+  });
+
+  it('bounds the aggregate request body previews returned by one list page', async () => {
+    const debuggerTransport = transport();
+    const capture = registry(debuggerTransport);
+    await capture.start(7, new AbortController().signal);
+    for (let index = 0; index < 5; index += 1) {
+      const requestId = `cdp_preview_${String(index)}`;
+      request(
+        debuggerTransport,
+        requestId,
+        `https://api.test/preview/${String(index)}`,
+        {},
+        {
+          method: 'POST',
+          hasPostData: true,
+          postData: JSON.stringify({ value: 'x'.repeat(1_900) }),
+          headers: { 'Content-Type': 'application/json' },
+        },
+      );
+      finish(debuggerTransport, requestId);
+    }
+    await capture.stop(7);
+
+    const page = await capture.list(7, '', 10, 'recent', '');
+    const previews = page.requests.flatMap(({ requestBodyPreview }) =>
+      requestBodyPreview === undefined ? [] : [requestBodyPreview],
+    );
+
+    expect(page.returnedCount).toBe(5);
+    expect(previews).toHaveLength(1);
+    expect(previews.reduce((total, preview) => total + preview.byteLength, 0)).toBeLessThanOrEqual(
+      2 * 1024,
+    );
+  });
+
   it('invalidates a frozen capture only when a new capture starts or the debugger detaches', async () => {
     const debuggerTransport = transport();
     const capture = registry(debuggerTransport);
     await capture.start(7, new AbortController().signal);
     request(debuggerTransport, 'cdp_1', 'https://api.test/one');
+    await capture.stop(7);
     const { requests: entries } = await capture.list(7, '', 10, 'recent', '');
     const [summary] = entries;
     if (!summary) throw new Error('Expected captured request.');
@@ -791,8 +977,9 @@ describe('NetworkCaptureRegistry', () => {
       },
     ]);
 
-    await capture.stop(7);
-    await expect(capture.list(7, '', 10, 'recent', '')).resolves.toMatchObject({ resultCount: 1 });
+    await expect(capture.list(7, '', 10, 'recent', '')).resolves.toMatchObject({
+      resultCount: 1,
+    });
     await expect(
       capture.get(7, [
         {
@@ -804,6 +991,7 @@ describe('NetworkCaptureRegistry', () => {
     ).resolves.toEqual([expect.objectContaining({ ok: true, requestId: summary.requestId })]);
 
     await capture.start(7, new AbortController().signal);
+    await capture.stop(7);
     await expect(
       capture.get(7, [
         {
@@ -819,7 +1007,9 @@ describe('NetworkCaptureRegistry', () => {
         code: 'NETWORK_REQUEST_NOT_FOUND',
       }),
     ]);
-    await expect(capture.list(7, '', 10, 'recent', '')).resolves.toMatchObject({ resultCount: 0 });
+    await expect(capture.list(7, '', 10, 'recent', '')).resolves.toMatchObject({
+      resultCount: 0,
+    });
 
     debuggerTransport.detach({ tabId: 7 });
     await expect(capture.list(7, '', 10, 'recent', '')).rejects.toMatchObject({

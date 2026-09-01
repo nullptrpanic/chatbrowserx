@@ -457,13 +457,13 @@ export const BROWSER_TOOL_SPECS = [
   taskBrowserToolSpec(
     'browser_network_start',
     browserNetworkStartSchema,
-    'Start future-traffic capture, replacing any frozen snapshot. Call first for network evidence. After success, the next model turn exposes browser_network_list, browser_network_get, and browser_network_stop. Re-read tools. Do not report them missing from this turn. Keep capture active through the workflow; network_idle is not business completion. Reload after starting for initial traffic.',
+    'Start future-traffic capture, replacing any frozen snapshot. Call first for network evidence. Complete and verify the user-visible workflow, wait for final network quiet, then freeze it with browser_network_stop. Request readers are introduced only after stop. Reload after starting when initial page traffic is required.',
     {},
   ),
   taskBrowserToolSpec(
     'browser_network_list',
     browserNetworkListSchema,
-    'Snapshot and page through captured request metadata, including a frozen capture after stop. Use recent with cursor="" and follow nextCursor until hasMore=false for complete retained metadata; use endpoint_sample only for a compact newest-per-endpoint sample. Coverage reports buffer loss and in-flight requests. Verify asynchronous business completion before the final snapshot, then inspect relevant IDs with browser_network_get.',
+    'Page through one frozen capture after browser_network_stop. Counts distinguish captured, retained, matched, total result, and current-page requests; follow nextCursor until hasMore=false. Small sanitized structured request bodies may be included as bounded previews. Use recent for complete retained metadata or endpoint_sample for a compact newest-per-endpoint sample. After the first successful list, inspect selected IDs with browser_network_get.',
     {
       urlPattern: { type: 'string', maxLength: 500 },
       limit: { type: 'integer', minimum: 1, maximum: 100 },
@@ -474,7 +474,7 @@ export const BROWSER_TOOL_SPECS = [
   taskBrowserToolSpec(
     'browser_network_get',
     browserNetworkGetSchema,
-    'Read sanitized details for 1 to 5 captured request IDs. Request and response bodies are separate and fetched only when their per-ID flags are true. Duplicate IDs use the first item. If any ID is absent from the current capture snapshot, the whole call fails; list again with cursor="" and copy requestId values exactly before retrying.',
+    'After browser_network_list, read sanitized details for 1 to 5 listed request IDs. Request and response bodies are separate and fetched only when their per-ID flags are true. Duplicate IDs use the first item. If any ID is absent from the frozen capture, list again with cursor="" and copy requestId values exactly before retrying.',
     {
       requests: {
         type: 'array',
@@ -496,7 +496,7 @@ export const BROWSER_TOOL_SPECS = [
   taskBrowserToolSpec(
     'browser_network_stop',
     browserNetworkStopSchema,
-    'Stop accepting new captured events at any time and freeze the current data. Captured request IDs and bodies remain readable with browser_network_list and browser_network_get until the next browser_network_start or debugger loss. Stop never waits for business completion.',
+    'After verifying business completion and final network quiet, stop accepting events and freeze the capture. The next model turn introduces browser_network_list. Frozen request IDs and bodies remain readable until the next browser_network_start, task-run release, or debugger loss. Stop itself never waits for business completion.',
     {},
   ),
 ] as const;

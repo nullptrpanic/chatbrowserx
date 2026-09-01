@@ -236,17 +236,19 @@ describe('BROWSER_TOOL_DEFINITIONS', () => {
     expect(definition?.description).toContain('next browser_network_start');
   });
 
-  it('describes the deferred network-reader lifecycle on capture start', () => {
-    const definition = BROWSER_TOOL_DEFINITIONS.find(
-      ({ name }) => name === 'browser_network_start',
-    );
+  it('describes the staged stop, list, then get lifecycle', () => {
+    const start = BROWSER_TOOL_DEFINITIONS.find(({ name }) => name === 'browser_network_start');
+    const stop = BROWSER_TOOL_DEFINITIONS.find(({ name }) => name === 'browser_network_stop');
+    const list = BROWSER_TOOL_DEFINITIONS.find(({ name }) => name === 'browser_network_list');
 
-    expect(definition?.description).toContain('next model turn');
-    expect(definition?.description).toContain('browser_network_list');
-    expect(definition?.description).toContain('browser_network_get');
-    expect(definition?.description).toContain('browser_network_stop');
-    expect(definition?.description).toContain('Do not report');
-    expect(definition?.description.length).toBeLessThanOrEqual(400);
+    expect(start?.description).toContain('browser_network_stop');
+    expect(start?.description).toContain('introduced only after stop');
+    expect(stop?.description).toContain('introduces browser_network_list');
+    expect(list?.description).toContain('After the first successful list');
+    expect(list?.description).toContain('browser_network_get');
+    expect(start?.description.length).toBeLessThanOrEqual(400);
+    expect(stop?.description.length).toBeLessThanOrEqual(400);
+    expect(list?.description.length).toBeLessThanOrEqual(500);
   });
 
   it('advertises bounded and explicit deep native interactive modes', () => {
