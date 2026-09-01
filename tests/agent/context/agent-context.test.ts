@@ -362,23 +362,27 @@ describe('buildAgentContext', () => {
     expect(context.systemPrompt).toBe('你是一个浏览器助手');
   });
 
-  it('keeps task-page metadata out of provider user input', async () => {
-    const active = message({
-      id: 'current_with_page',
-      taskId: TASK.id,
-      role: 'user',
-      text: 'Analyze this page.',
-      sourcePage: {
-        title: 'Messenger - Feishu',
-        url: 'https://bytedance.larkoffice.com/next/messenger',
-        favIconUrl: null,
-      },
-    });
+  it('includes the submitted source tab instead of the later task target in page metadata', async () => {
+    const active = {
+      ...message({
+        id: 'current_with_page',
+        taskId: TASK.id,
+        role: 'user',
+        text: 'Analyze this page.',
+        sourcePage: {
+          title: 'Messenger - Feishu',
+          url: 'https://bytedance.larkoffice.com/next/messenger',
+          favIconUrl: null,
+        },
+      }),
+      sourceTabId: 23,
+    };
     const context = await buildAgentContext(
       {
         task: TASK,
         checkpoint: {
           ...CHECKPOINT,
+          browserTargetTabId: 41,
           continuationItems: [{ type: 'message_ref', messageId: active.id }],
         },
         toolResults: [],
@@ -393,7 +397,13 @@ describe('buildAgentContext', () => {
       {
         type: 'message',
         role: 'user',
-        content: [{ type: 'input_text', text: 'Analyze this page.' }],
+        content: [
+          { type: 'input_text', text: 'Analyze this page.' },
+          {
+            type: 'input_text',
+            text: 'Task page metadata (untrusted): {"tabId":23,"title":"Messenger - Feishu","url":"https://bytedance.larkoffice.com/next/messenger"}',
+          },
+        ],
       },
     ]);
   });

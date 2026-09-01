@@ -418,7 +418,7 @@ export class PanelService {
       status: 'complete',
       text,
       attachmentIds,
-      ...(sourcePage === undefined ? {} : { sourcePage }),
+      ...(sourcePage === undefined ? {} : { sourceTabId: input.tabId, sourcePage }),
       ...(replyTo === undefined ? {} : { replyTo }),
       createdAt: now,
       updatedAt: now,

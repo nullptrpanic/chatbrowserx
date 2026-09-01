@@ -27,6 +27,7 @@ export interface MessageRecord {
   readonly status: MessageStatus;
   readonly text: string;
   readonly attachmentIds: readonly AttachmentId[];
+  readonly sourceTabId?: number | undefined;
   readonly sourcePage?: MessageSourcePage | undefined;
   readonly replyTo?: MessageReplyReference | undefined;
   readonly createdAt: number;

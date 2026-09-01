@@ -214,6 +214,7 @@ async function resolveFunctionOutputImages(
 function modelMessage(
   message: MessageRecord,
   images: readonly string[] = [],
+  includeTaskPageMetadata = false,
   reply: ReplyProjection | undefined = undefined,
 ): ModelInputItem | undefined {
   const content: ModelMessageContent[] = [];
@@ -241,6 +242,26 @@ function modelMessage(
       type: message.role === 'assistant' ? 'output_text' : 'input_text',
       text,
     });
+  }
+  if (
+    includeTaskPageMetadata &&
+    message.role === 'user' &&
+    message.sourcePage !== undefined &&
+    Number.isSafeInteger(message.sourceTabId) &&
+    (message.sourceTabId ?? -1) >= 0
+  ) {
+    const title = message.sourcePage.title.slice(0, 500);
+    const url = message.sourcePage.url.slice(0, 2_048);
+    if (title.length > 0 || url.length > 0) {
+      content.push({
+        type: 'input_text',
+        text: `Task page metadata (untrusted): ${JSON.stringify({
+          tabId: message.sourceTabId,
+          title,
+          url,
+        })}`,
+      });
+    }
   }
   if (message.role === 'user') {
     content.push(
@@ -474,6 +495,7 @@ export async function buildAgentContext(
       const modelItem = modelMessage(
         message,
         images.get(message.id),
+        true,
         replyProjections.get(message.id),
       );
       if (modelItem) activeInput.push(modelItem);

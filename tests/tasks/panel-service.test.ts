@@ -393,6 +393,7 @@ describe('PanelService', () => {
         kind: 'create',
         submission: expect.objectContaining({
           message: expect.objectContaining({
+            sourceTabId: 9,
             sourcePage: {
               title: 'Median of Two Sorted Arrays',
               url: 'https://leetcode.com/problems/median-of-two-sorted-arrays/description/',
