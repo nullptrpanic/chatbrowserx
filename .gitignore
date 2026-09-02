@@ -7,7 +7,9 @@ artifacts/
 playwright-report/
 test-results/
 blob-report/
-/e2e/samples/
+/e2e/samples/*
+!/e2e/samples/example/
+!/e2e/samples/example/**
 /e2e/.runtime/
 .DS_Store
 *.log

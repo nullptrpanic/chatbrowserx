@@ -92,7 +92,7 @@ const policySchema = z
     finalTextIncludesAny: z.array(nonEmptyStrings).min(1).optional(),
     requireFreshProviderContext: z.boolean().optional(),
     finalTextExcludes: z.array(nonEmptyString).optional(),
-    minFinalTextLength: nonNegativeInteger,
+    minFinalTextLength: nonNegativeInteger.optional(),
     minimumMarkdownTableRows: positiveInteger.optional(),
   })
   .strict();
@@ -215,7 +215,9 @@ export function materializeLiveScenario(sample: EvaluationSampleDefinition): Liv
     forbidScreenshotInspect: policy.forbidScreenshotInspect,
     forbidSubmittedType: policy.forbidSubmittedType,
     finalTextIncludes: policy.finalTextIncludes,
-    minFinalTextLength: policy.minFinalTextLength,
+    ...(policy.minFinalTextLength === undefined
+      ? {}
+      : { minFinalTextLength: policy.minFinalTextLength }),
     ...(policy.expectedSubmittedTypeCount === undefined
       ? {}
       : { expectedSubmittedTypeCount: policy.expectedSubmittedTypeCount }),

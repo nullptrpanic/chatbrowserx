@@ -25,7 +25,7 @@ describe('live execution metrics', () => {
         tool(
           'browser_scroll',
           { target: 'viewport', maxSegments: 2, deltaY: 800 },
-          { ok: true, data: { observations: [{ index: 0 }, { index: 1 }] } },
+          { ok: true, data: { segments: 1, observations: [{ index: 0 }, { index: 1 }] } },
         ),
         tool(
           'browser_inspect',
@@ -89,7 +89,7 @@ describe('live execution metrics', () => {
         browser_type: 1,
       },
       fullInteractiveObservations: 1,
-      traversalSegments: 2,
+      traversalSegments: 1,
       screenshotFallbacks: 1,
       screenshotFallbackReasons: { semantic_coverage: 1 },
       staleRefs: 1,

@@ -1,5 +1,6 @@
 import type { LiveExecutionMetrics, LiveProviderTrace, LiveToolResult } from './live-types';
 import { jsonRecord } from './json-contract';
+import { readTraversalSegments } from './live-scroll-metrics';
 
 interface LiveExecutionMetricInput {
   readonly modelTurns: number;
@@ -98,8 +99,8 @@ export function deriveLiveExecutionMetrics(input: LiveExecutionMetricInput): Liv
     if (result.toolName === 'browser_inspect' && argumentsValue?.mode === 'interactive') {
       fullInteractiveObservations += 1;
     }
-    if (result.toolName === 'browser_scroll' && Array.isArray(data?.observations)) {
-      traversalSegments += data.observations.length;
+    if (result.toolName === 'browser_scroll') {
+      traversalSegments += readTraversalSegments(data) ?? 0;
     }
     if (result.toolName === 'browser_inspect' && argumentsValue?.mode === 'screenshot') {
       screenshotFallbacks += 1;

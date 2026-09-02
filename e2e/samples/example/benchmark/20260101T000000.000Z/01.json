@@ -1,0 +1,125 @@
+{
+  "schemaVersion": 4,
+  "sampleId": "example",
+  "batch": {
+    "collection": "benchmark",
+    "id": "20260101T000000.000Z",
+    "startedAt": "2026-01-01T00:00:00.000Z",
+    "requestedRuns": 1,
+    "attempt": 1
+  },
+  "runId": "example_attempt_001",
+  "productRevision": "example-only-not-a-measurement",
+  "scenarioContractVersion": 1,
+  "startedAt": "2026-01-01T00:00:01.000Z",
+  "endedAt": "2026-01-01T00:00:03.500Z",
+  "elapsedMs": 2500,
+  "terminalStatus": "completed",
+  "success": true,
+  "input": {
+    "text": "Read the visible page and report its main heading. Do not change the page."
+  },
+  "output": {
+    "text": "The main heading is Example Domain."
+  },
+  "tokenUsage": {
+    "inputTokens": 1000,
+    "outputTokens": 200,
+    "totalTokens": 1200,
+    "cachedInputTokens": 400,
+    "cacheWriteInputTokens": 0,
+    "reasoningOutputTokens": 80
+  },
+  "execution": {
+    "modelElapsedMs": 1800,
+    "firstEventMs": 250,
+    "firstTextMs": 1500,
+    "modelRounds": 2,
+    "providerRetries": 0,
+    "providerRetryCounts": {},
+    "toolCalls": 1,
+    "toolCounts": {
+      "browser_inspect": 1
+    },
+    "fullInteractiveObservations": 1,
+    "providerRequests": 2,
+    "compactionRequests": 0,
+    "traversalSegments": 0,
+    "screenshotFallbacks": 0,
+    "screenshotFallbackReasons": {},
+    "staleRefs": 0,
+    "stateMismatches": 0,
+    "repeatedFingerprints": 0,
+    "verifiedMutations": 0,
+    "ambiguousMutations": 0,
+    "noProgressBlocks": 0,
+    "auditOutputCharacters": 38,
+    "modelOutputCharacters": 38,
+    "modelOutputReductionCharacters": 0,
+    "toolDefinitionCharactersTotal": 6000,
+    "toolDefinitionCharactersMax": 3000,
+    "toolDefinitionSchemaChanges": 0,
+    "toolDefinitionSchemaVariants": 1,
+    "enabledToolsets": ["browser"],
+    "skillCatalogDisclosureCount": 0,
+    "exactReads": 0,
+    "auditOutputCharactersByTool": {
+      "browser_inspect": 38
+    },
+    "modelOutputCharactersByTool": {
+      "browser_inspect": 38
+    }
+  },
+  "acceptance": {
+    "passed": true,
+    "checks": [
+      {
+        "name": "terminal-status",
+        "passed": true,
+        "detail": "Terminal status: completed."
+      },
+      {
+        "name": "required-tools",
+        "passed": true,
+        "detail": "Observed browser_inspect."
+      },
+      {
+        "name": "final-text-includes",
+        "passed": true,
+        "detail": "Final output includes Example Domain."
+      }
+    ]
+  },
+  "failure": null,
+  "evidence": {
+    "taskId": "example_task_001",
+    "conversationId": "example_conversation_001",
+    "toolResults": [
+      {
+        "toolName": "browser_inspect",
+        "argumentsJson": "{\"tabId\":1,\"mode\":\"interactive\"}",
+        "output": "{\"ok\":true,\"heading\":\"Example Domain\"}",
+        "attachmentIds": [],
+        "auditOutputCharacters": 38,
+        "modelOutputCharacters": 38
+      }
+    ],
+    "providerTrace": {
+      "requestCount": 2,
+      "requests": [
+        {
+          "sequence": 1,
+          "status": 200,
+          "functionCalls": ["browser_inspect"]
+        },
+        {
+          "sequence": 2,
+          "status": 200,
+          "functionCalls": []
+        }
+      ],
+      "compactionRequestCount": 0,
+      "compactionRequests": []
+    }
+  }
+}

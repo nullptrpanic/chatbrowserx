@@ -4,6 +4,7 @@ import type {
   LiveRunInput,
   LiveScenario,
 } from './live-types';
+import { readTraversalSegments } from './live-scroll-metrics';
 
 const SECRET_KEY = /authorization|cookie|password|secret|access[\s_-]?token|api[\s_-]?key/i;
 const BEARER_TOKEN = /Bearer\s+[A-Za-z0-9._~+/=-]+/gi;
@@ -417,9 +418,7 @@ export function evaluateLiveRun(scenario: LiveScenario, input: LiveRunInput): Li
         );
   const measuredScrollSegments = scrollCalls.map(({ output }) => {
     const data = output?.data;
-    if (typeof data !== 'object' || data === null || Array.isArray(data)) return null;
-    const observations = (data as Readonly<Record<string, unknown>>).observations;
-    return Array.isArray(observations) ? observations.length : null;
+    return readTraversalSegments(data);
   });
   const traversalSegments = measuredScrollSegments.reduce<number>(
     (total, count) => total + (count ?? 0),
@@ -851,8 +850,11 @@ export function evaluateLiveRun(scenario: LiveScenario, input: LiveRunInput): Li
     ),
     check(
       'final-text-length',
-      input.finalText.trim().length >= scenario.minFinalTextLength,
-      `${String(input.finalText.trim().length)} characters; minimum ${String(scenario.minFinalTextLength)}.`,
+      scenario.minFinalTextLength === undefined ||
+        input.finalText.trim().length >= scenario.minFinalTextLength,
+      scenario.minFinalTextLength === undefined
+        ? 'No minimum final-text length declared.'
+        : `${String(input.finalText.trim().length)} characters; minimum ${String(scenario.minFinalTextLength)}.`,
     ),
     check(
       'markdown-table-rows',

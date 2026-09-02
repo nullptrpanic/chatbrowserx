@@ -52,6 +52,22 @@ describe('live E2E acceptance policy', () => {
     expect(result.checks.every((check) => check.passed)).toBe(true);
   });
 
+  it('accepts concise output when the contract relies on explicit semantic evidence', () => {
+    const { minFinalTextLength: minimum, ...semanticScenario } = scenario;
+    expect(minimum).toBe(20);
+    const result = evaluateLiveRun(semanticScenario, {
+      ...completedInput(),
+      finalText: 'Example chat',
+    });
+
+    expect(result.passed).toBe(true);
+    expect(result.checks).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ name: 'final-text-length', passed: true }),
+      ]),
+    );
+  });
+
   it('rejects a section traversal that can run through many segments before reassessment', () => {
     const boundedScenario: LiveScenario = {
       ...scenario,
@@ -122,7 +138,7 @@ describe('live E2E acceptance policy', () => {
           {
             output: JSON.stringify({
               ok: true,
-              data: { observations: [{ segment: 1 }, { segment: 2 }] },
+              data: { segments: 1, observations: [{ segment: 0 }, { segment: 1 }] },
             }),
           },
         ),
@@ -139,7 +155,7 @@ describe('live E2E acceptance policy', () => {
           {
             output: JSON.stringify({
               ok: true,
-              data: { observations: [{ segment: 3 }, { segment: 4 }] },
+              data: { segments: 1, observations: [{ segment: 0 }, { segment: 1 }] },
             }),
           },
         ),
@@ -148,11 +164,11 @@ describe('live E2E acceptance policy', () => {
     const boundedScenario: LiveScenario = {
       ...scenario,
       requiredTools: ['browser_inspect', 'browser_scroll'],
-      maxTraversalSegments: 4,
+      maxTraversalSegments: 2,
     };
 
     const accepted = evaluateLiveRun(boundedScenario, input);
-    const rejected = evaluateLiveRun({ ...boundedScenario, maxTraversalSegments: 3 }, input);
+    const rejected = evaluateLiveRun({ ...boundedScenario, maxTraversalSegments: 1 }, input);
 
     expect(accepted.checks).toEqual(
       expect.arrayContaining([

@@ -64,7 +64,8 @@ export interface LiveScenario {
   readonly requireFreshProviderContext?: boolean;
   /** Any occurrence indicates the model reported an unresolved blocker instead of success. */
   readonly finalTextExcludes?: readonly string[];
-  readonly minFinalTextLength: number;
+  /** Optional coarse output-size guard; prefer explicit semantic checks when sufficient. */
+  readonly minFinalTextLength?: number;
   readonly minimumMarkdownTableRows?: number;
   readonly allowRemoteMutation: boolean;
 }

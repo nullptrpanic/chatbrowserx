@@ -59,6 +59,18 @@ describe('self-contained E2E samples', () => {
     });
   });
 
+  it('allows a sample to rely on explicit semantic checks without a text-length proxy', async () => {
+    const value = structuredClone(sample) as unknown as {
+      evaluation: { policy: { minFinalTextLength?: number } };
+    };
+    delete value.evaluation.policy.minFinalTextLength;
+    const root = await createSampleRoot(value);
+
+    const loaded = await loadEvaluationSample(root, sample.id);
+
+    expect(loaded.scenario).not.toHaveProperty('minFinalTextLength');
+  });
+
   it('rejects a sample without a target URL', async () => {
     const value = structuredClone(sample) as unknown as {
       target: { url?: string };

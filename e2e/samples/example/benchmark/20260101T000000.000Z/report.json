@@ -1,0 +1,16 @@
+{
+  "schemaVersion": 1,
+  "sampleId": "example",
+  "collection": "benchmark",
+  "batchId": "20260101T000000.000Z",
+  "requestedRuns": 1,
+  "completedRuns": 1,
+  "successfulRuns": 1,
+  "failedRuns": 0,
+  "totalProviderRequests": 2,
+  "totalProviderRequestElapsedMs": 1800,
+  "averageTotalTokens": 1200,
+  "averageElapsedMs": 2500,
+  "averageToolCalls": 1,
+  "averageProviderRequestElapsedMs": 900
+}

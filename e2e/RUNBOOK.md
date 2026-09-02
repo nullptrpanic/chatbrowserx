@@ -15,35 +15,39 @@ e2e/
 ├── tests/
 │   ├── runner/                # Deterministic framework tests
 │   └── browser/               # Playwright product tests
-├── samples/                   # Ignored; transported outside Git
-│   └── <sample-id>/
+├── samples/
+│   ├── example/               # Tracked synthetic format and reconstruction fixture
+│   │   ├── sample.json
+│   │   └── benchmark/<UTC-batch-timestamp>/{01.json,report.json}
+│   └── <sample-id>/            # Ignored; transported outside Git
 │       ├── sample.json
-│       └── benchmark/               # Created by the first evaluation run
-│           └── <UTC-batch-timestamp>/
-│               ├── 01.json ...
-│               └── report.json
+│       └── benchmark/          # Created by the first evaluation run
+│           └── <UTC-batch-timestamp>/{01.json,...,report.json}
 └── .runtime/                  # Ignored machine-local state
     ├── profile/
     └── playwright/
 ```
 
-The repository tracks the method, not samples or runtime state. Never force-add `e2e/samples` or
-`e2e/.runtime`. See `SAMPLE_SPEC.md` for their transport and formats.
+The repository tracks the method and one public synthetic example, not real samples or runtime
+state. Never force-add another `e2e/samples` directory or anything in `e2e/.runtime`. See
+`SAMPLE_SPEC.md` for transport, formats, and direct links to the tracked example files.
 
 ## Requirements
 
 - Node.js 24 or 26 in the range declared by package.json; Node.js 25 is unsupported.
 - Dependencies installed from package-lock.json with npm ci.
 - Chrome available to Playwright.
-- One complete `e2e/samples/<sample-id>/sample.json`.
+- One complete `e2e/samples/<sample-id>/sample.json`; the tracked `example` sample is sufficient for
+  validating a fresh checkout, while a real evaluation needs its target-specific sample.
 - Legitimate access to the Codex Provider and any account required by the target sample.
 
 ## Rebuild on a New Machine
 
 1. Check out the repository and install the locked dependency tree.
 2. Run the environment doctor.
-3. Receive or create the sample directory through a controlled non-Git channel.
-4. Validate the complete local catalog.
+3. Validate the tracked synthetic example, then receive or create any target-specific sample through
+   a controlled non-Git channel.
+4. Validate the complete local catalog again after importing target-specific samples.
 5. Create a fresh dedicated Profile and complete interactive authentication.
 6. Verify the Profile and target independently.
 7. Run the declared traffic and retain its result.
@@ -51,8 +55,9 @@ The repository tracks the method, not samples or runtime state. Never force-add 
 ```bash
 npm ci
 npm run e2e:env:doctor
+npm run e2e:catalog:validate
 
-# Receive or create:
+# For a real evaluation, receive or create:
 # e2e/samples/<sample-id>/sample.json
 # Result directories are created only when their first report is written.
 
@@ -61,6 +66,10 @@ npm run e2e:live:setup -- <sample-id>
 npm run e2e:live:verify -- <sample-id>
 npm run e2e:live:benchmark -- <sample-id>
 ```
+
+Use the tracked [`samples/example/sample.json`](samples/example/sample.json) as the structural
+reference when creating a sample on another machine. Create a new directory with a matching new
+`id`; do not copy the example's synthetic `benchmark/` history into a real sample.
 
 The doctor checks the toolchain and starts the built extension in a disposable Profile. Setup opens
 `e2e/.runtime/profile` for supported UI authentication and the sample's setup instructions. The
@@ -98,6 +107,10 @@ ID; no second raw-report copy is written. After every attempt, the runner atomic
 batch's `report.json` with aggregate counts and averages derived from all completed attempt files.
 It contains no per-attempt detail. Provider diagnostics are stored separately below
 `e2e/.runtime/provider-diagnose/` and never enter comparable benchmark history.
+
+The tracked synthetic batch under [`samples/example/benchmark/`](samples/example/benchmark/) shows
+the resulting attempt and summary layout. Its numbers are illustrative and are not product
+measurements or a comparison baseline.
 
 ## Concurrent Correctness Runs
 

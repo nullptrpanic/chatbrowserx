@@ -22,8 +22,12 @@ A sample can be created, generated, or delivered through any controlled channel 
 Transfer `sample.json` for a new history, or the complete sample directory to preserve history.
 `benchmark/` is created by the first run and must not be kept as an empty placeholder. One command
 writes all of its ordered attempts below one timestamped `benchmark/` directory; omitting its run
-count produces one attempt. Never overwrite an attempt report with different bytes. After creation or import, run
-`npm run e2e:catalog:validate`, then follow `RUNBOOK.md`.
+count produces one attempt. Never overwrite an attempt report with different bytes. After creation
+or import, run `npm run e2e:catalog:validate`, then follow `RUNBOOK.md`.
+
+Real samples remain outside Git. The repository tracks only the public synthetic
+[`samples/example/`](samples/example/) fixture so a fresh checkout always contains one complete,
+valid sample, attempt, and batch-summary reference.
 
 ## Sample Schema Version 4
 
@@ -110,29 +114,29 @@ acceptance checks, and product safety rules.
 
 ### evaluation.policy
 
-| Field                                | Type                   | Required | Meaning                                                            |
-| ------------------------------------ | ---------------------- | -------- | ------------------------------------------------------------------ |
-| forbidScreenshotInspect              | boolean                | yes      | Fail screenshot-based inspection when true.                        |
-| forbidSubmittedType                  | boolean                | yes      | Fail submitted typing operations when true.                        |
-| finalTextIncludes                    | non-empty string array | yes      | Every normalized literal must occur in final output.               |
-| minFinalTextLength                   | non-negative integer   | yes      | Minimum final-output character count.                              |
-| expectedSubmittedTypeCount           | non-negative integer   | no       | Exact submitted typing count.                                      |
-| expectedToolCounts                   | integer map            | no       | Exact count for every named tool.                                  |
-| requiredVerifiedTools                | non-empty string array | no       | Every result from each named tool must be verified and successful. |
-| maxScrollSegmentsPerCall             | positive integer       | no       | Traversal segments allowed before model reassessment.              |
-| maxTraversalSegments                 | positive integer       | no       | Maximum observed traversal segments across all scroll calls.       |
-| stopScrollingAfterActiveElementNames | string array           | no       | Reject later scrolling after a named section becomes active.       |
-| requireVerticalBoundaryCoverage      | boolean                | no       | Require ordered top-before-bottom evidence.                        |
-| maxAttachmentCount                   | non-negative integer   | no       | Maximum durable image references in tool results.                  |
-| requiredTypedTextIncludes            | string array           | no       | Literals required in captured typing arguments.                    |
-| allowedKeypresses                    | non-empty string array | no       | Exact navigation key sequences allowed for `browser_keypress`.     |
-| requiredToolResultIncludes           | string array           | no       | Literals required in at least one complete durable tool result.    |
-| requiredToolOutputIncludes           | string array           | no       | Literals required as post-submit static page text.                 |
-| requiredMutationReadbacks            | object array           | no       | Structural values required after each named commit button.         |
-| finalTextIncludesAny                 | array of string arrays | no       | Require one alternative from every inner group.                    |
-| requireFreshProviderContext          | boolean                | no       | Require only the active request in the first Provider context.     |
-| finalTextExcludes                    | string array           | no       | Any normalized matching literal fails output.                      |
-| minimumMarkdownTableRows             | positive integer       | no       | Minimum Markdown data-row count.                                   |
+| Field                                | Type                   | Required | Meaning                                                               |
+| ------------------------------------ | ---------------------- | -------- | --------------------------------------------------------------------- |
+| forbidScreenshotInspect              | boolean                | yes      | Fail screenshot-based inspection when true.                           |
+| forbidSubmittedType                  | boolean                | yes      | Fail submitted typing operations when true.                           |
+| finalTextIncludes                    | non-empty string array | yes      | Every normalized literal must occur in final output.                  |
+| minFinalTextLength                   | non-negative integer   | no       | Optional coarse minimum when explicit output checks are insufficient. |
+| expectedSubmittedTypeCount           | non-negative integer   | no       | Exact submitted typing count.                                         |
+| expectedToolCounts                   | integer map            | no       | Exact count for every named tool.                                     |
+| requiredVerifiedTools                | non-empty string array | no       | Every result from each named tool must be verified and successful.    |
+| maxScrollSegmentsPerCall             | positive integer       | no       | Traversal segments allowed before model reassessment.                 |
+| maxTraversalSegments                 | positive integer       | no       | Maximum browser-reported `data.segments` across all scroll calls.     |
+| stopScrollingAfterActiveElementNames | string array           | no       | Reject later scrolling after a named section becomes active.          |
+| requireVerticalBoundaryCoverage      | boolean                | no       | Require ordered top-before-bottom evidence.                           |
+| maxAttachmentCount                   | non-negative integer   | no       | Maximum durable image references in tool results.                     |
+| requiredTypedTextIncludes            | string array           | no       | Literals required in captured typing arguments.                       |
+| allowedKeypresses                    | non-empty string array | no       | Exact navigation key sequences allowed for `browser_keypress`.        |
+| requiredToolResultIncludes           | string array           | no       | Literals required in at least one complete durable tool result.       |
+| requiredToolOutputIncludes           | string array           | no       | Literals required as post-submit static page text.                    |
+| requiredMutationReadbacks            | object array           | no       | Structural values required after each named commit button.            |
+| finalTextIncludesAny                 | array of string arrays | no       | Require one alternative from every inner group.                       |
+| requireFreshProviderContext          | boolean                | no       | Require only the active request in the first Provider context.        |
+| finalTextExcludes                    | string array           | no       | Any normalized matching literal fails output.                         |
+| minimumMarkdownTableRows             | positive integer       | no       | Minimum Markdown data-row count.                                      |
 
 Each `requiredMutationReadbacks` item contains an exact accessible button `actionName` and a
 non-empty `includes` array. Draft/editor values and evidence observed before the named action do
@@ -141,55 +145,10 @@ submit-like action; named non-text evidence such as a content image is allowed.
 
 ## Complete Sample
 
-```json
-{
-  "schemaVersion": 4,
-  "id": "example-read",
-  "contractVersion": 1,
-  "description": "Reads one example page without changing remote data.",
-  "requiredRuns": 3,
-  "resources": {
-    "exclusive": []
-  },
-  "target": {
-    "url": "https://example.com/",
-    "expectedOrigin": "https://example.com",
-    "readinessTimeoutMs": 30000
-  },
-  "environment": {
-    "targetSetupMode": "interactive",
-    "targetSetupInstructions": [
-      "Sign in with an evaluation account that can read the example workspace."
-    ],
-    "readinessChecks": [
-      { "kind": "url_excludes", "value": "/login" },
-      { "kind": "page_text_includes", "value": "Example Domain" }
-    ]
-  },
-  "input": {
-    "text": "Read the visible page and report its heading. Do not modify the page."
-  },
-  "execution": {
-    "taskTimeoutMs": 120000,
-    "maxToolCalls": 10,
-    "requiredTools": ["browser_inspect"],
-    "forbiddenTools": ["browser_type", "browser_click_point"]
-  },
-  "sideEffects": {
-    "mode": "read_only"
-  },
-  "evaluation": {
-    "method": "deterministic",
-    "policy": {
-      "forbidScreenshotInspect": true,
-      "forbidSubmittedType": true,
-      "finalTextIncludes": ["Example Domain"],
-      "finalTextExcludes": ["unable to verify"],
-      "minFinalTextLength": 20
-    }
-  }
-}
-```
+The tracked [`samples/example/sample.json`](samples/example/sample.json) is the complete sample
+example for this schema. It uses a public target, needs no target authentication, and contains no
+private or task-specific data. Copy its structure, not its identity or benchmark history, when
+creating another sample.
 
 ## Evaluation Attempt Report Schema Version 4
 
@@ -219,7 +178,7 @@ All fields below are required. failure is null for a pass and an object for a fa
 | execution.toolCalls / toolCounts                  | Total Tool Calls and counts by tool name.                                                           |
 | execution.fullInteractiveObservations             | Full interactive browser observations.                                                              |
 | execution.providerRequests / compactionRequests   | Actual Provider-call count, including retries, and unsupported compact calls for this attempt.      |
-| execution.traversalSegments / screenshotFallbacks | Structured traversal and screenshot fallback counts.                                                |
+| execution.traversalSegments / screenshotFallbacks | Browser-reported traversal segments and screenshot fallback counts.                                 |
 | execution.screenshotFallbackReasons               | Screenshot fallback counts grouped by reason.                                                       |
 | execution.staleRefs / stateMismatches             | Stale semantic references and post-action mismatches.                                               |
 | execution.repeatedFingerprints / noProgressBlocks | Repeated actions and no-progress blocks.                                                            |
@@ -254,6 +213,11 @@ it cannot contain a gap. Each attempt report is the complete portable comparison
 record, so no second raw-report file or `sourceReport` pointer exists. Flat files and older schemas
 are rejected; the harness has one current layout and one current attempt-report contract.
 
+The tracked
+[`samples/example/benchmark/20260101T000000.000Z/01.json`](samples/example/benchmark/20260101T000000.000Z/01.json)
+is a complete attempt-report example. Its IDs, revision, timings, Token counts, and evidence are
+synthetic format fixtures, not product measurements.
+
 ## Batch Summary Schema Version 1
 
 Every batch directory also contains one derived `report.json`. It is atomically replaced after each
@@ -277,3 +241,7 @@ All averages include successful and failed attempts. When there are no Provider 
 summary contains no run IDs, input, output, evidence, or tool detail. Attempt files remain the
 immutable factual source; catalog validation rejects a missing summary or one that cannot be
 recomputed exactly from those attempts.
+
+The tracked
+[`samples/example/benchmark/20260101T000000.000Z/report.json`](samples/example/benchmark/20260101T000000.000Z/report.json)
+is the batch-summary example and is exactly derivable from the adjacent `01.json`.

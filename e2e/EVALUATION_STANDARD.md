@@ -13,6 +13,12 @@ owns environment reconstruction and commands. SAMPLE_SPEC.md owns data formats.
 - `benchmark/` stores every evaluation batch, including a one-attempt smoke run; do not retain
   an empty placeholder directory.
 
+The tracked public fixture links these units together in one place: its
+[`sample.json`](samples/example/sample.json) defines the contract,
+[`01.json`](samples/example/benchmark/20260101T000000.000Z/01.json) is one immutable attempt, and
+[`report.json`](samples/example/benchmark/20260101T000000.000Z/report.json) is the derived batch
+summary. The values are synthetic and must not be used as a product baseline.
+
 Freeze `sample.json` before the first attempt. Increment `contractVersion` when task, input,
 side-effect, or acceptance semantics change. Never loosen a check after observing a result.
 

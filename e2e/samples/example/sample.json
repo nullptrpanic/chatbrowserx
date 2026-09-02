@@ -1,0 +1,47 @@
+{
+  "schemaVersion": 4,
+  "id": "example",
+  "contractVersion": 1,
+  "description": "Reads the public Example Domain page without changing it.",
+  "requiredRuns": 1,
+  "resources": {
+    "exclusive": []
+  },
+  "target": {
+    "url": "https://example.com/",
+    "expectedOrigin": "https://example.com",
+    "readinessTimeoutMs": 30000
+  },
+  "environment": {
+    "targetSetupMode": "none",
+    "targetSetupInstructions": [],
+    "readinessChecks": [
+      {
+        "kind": "page_text_includes",
+        "value": "Example Domain"
+      }
+    ]
+  },
+  "input": {
+    "text": "Read the visible page and report its main heading. Do not change the page."
+  },
+  "execution": {
+    "taskTimeoutMs": 120000,
+    "maxToolCalls": 10,
+    "requiredTools": ["browser_inspect"],
+    "forbiddenTools": ["browser_type", "browser_click_point"]
+  },
+  "sideEffects": {
+    "mode": "read_only"
+  },
+  "evaluation": {
+    "method": "deterministic",
+    "policy": {
+      "forbidScreenshotInspect": true,
+      "forbidSubmittedType": true,
+      "finalTextIncludes": ["Example Domain"],
+      "finalTextExcludes": ["unable to verify"],
+      "minFinalTextLength": 20
+    }
+  }
+}

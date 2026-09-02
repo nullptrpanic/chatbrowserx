@@ -18,8 +18,9 @@ These rules apply to every file and operation under `e2e/`.
   scripts, hidden prompts, or code-owned scenario registries.
 - Use `e2e/samples/<sample-id>/benchmark/` as the sole evaluation collection, including for a
   one-attempt smoke run.
-- Keep `e2e/samples` and `e2e/.runtime` ignored and move them only through a controlled non-Git
-  channel.
+- Keep real `e2e/samples` and all of `e2e/.runtime` ignored and move them only through a controlled
+  non-Git channel. The public, synthetic `e2e/samples/example/` contract fixture is the only tracked
+  sample exception.
 - Never change product code merely to make E2E pass or improve metrics. A product change requires a
   preserved, reproducible product defect under `EVALUATION_STANDARD.md`; rerun the frozen sample to
   close that defect.
