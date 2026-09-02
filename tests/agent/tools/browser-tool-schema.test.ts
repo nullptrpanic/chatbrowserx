@@ -162,6 +162,22 @@ describe('BROWSER_TOOL_DEFINITIONS', () => {
     }
   });
 
+  it('aligns task-current-tab guidance with the required tabId schema', () => {
+    const listTabs = BROWSER_TOOL_DEFINITIONS.find(({ name }) => name === 'browser_list_tabs');
+    const inspect = BROWSER_TOOL_DEFINITIONS.find(({ name }) => name === 'browser_inspect');
+    const parameters = inspect?.parameters as {
+      readonly properties: Readonly<Record<string, { readonly description?: string }>>;
+      readonly required: readonly string[];
+    };
+
+    expect(listTabs?.description).toBe(
+      'List browser tabs with IDs, titles, URLs, and active state.',
+    );
+    expect(parameters.required).toContain('tabId');
+    expect(parameters.properties.tabId?.description).toContain('Required');
+    expect(parameters.properties.tabId?.description).toContain('metadata is absent');
+  });
+
   it('omits function-schema keywords rejected by the model API', () => {
     const serialized = JSON.stringify(BROWSER_TOOL_DEFINITIONS);
     for (const keyword of ['oneOf', 'anyOf', 'allOf', 'uniqueItems']) {

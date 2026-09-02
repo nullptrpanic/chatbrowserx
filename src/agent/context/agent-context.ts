@@ -26,6 +26,8 @@ import {
 const APPROVED_IMAGE_TYPES = new Set(['image/gif', 'image/jpeg', 'image/png', 'image/webp']);
 export const RUNTIME_SUPPLEMENT_PREFIX =
   'Additional information supplied while the task was running:';
+const TASK_BROWSER_BINDING_CONTEXT =
+  'Task browser binding (trusted runtime context): this task has a current tab binding. For task-page tools, use tabId 0.';
 
 export interface AgentContextInput {
   readonly task: Task;
@@ -148,6 +150,12 @@ interface ReplyProjection {
   readonly target: MessageRecord;
 }
 
+interface ModelMessageOptions {
+  readonly includeTaskPageContext?: boolean;
+  readonly reply?: ReplyProjection;
+  readonly taskCurrentTabBound?: boolean;
+}
+
 /** Loads and revalidates one deduplicated persisted image batch. */
 async function loadImageBatch(
   attachmentIds: readonly string[],
@@ -228,9 +236,9 @@ async function resolveFunctionOutputImages(
 function modelMessage(
   message: MessageRecord,
   images: readonly string[] = [],
-  includeTaskPageMetadata = false,
-  reply: ReplyProjection | undefined = undefined,
+  options: ModelMessageOptions = {},
 ): ModelInputItem | undefined {
+  const { includeTaskPageContext = false, reply, taskCurrentTabBound = false } = options;
   const content: ModelMessageContent[] = [];
   if (reply !== undefined) {
     const completeTargetText =
@@ -261,7 +269,15 @@ function modelMessage(
     });
   }
   if (
-    includeTaskPageMetadata &&
+    includeTaskPageContext &&
+    taskCurrentTabBound &&
+    message.kind === 'conversation' &&
+    message.role === 'user'
+  ) {
+    content.push({ type: 'input_text', text: TASK_BROWSER_BINDING_CONTEXT });
+  }
+  if (
+    includeTaskPageContext &&
     message.role === 'user' &&
     message.sourcePage !== undefined &&
     Number.isSafeInteger(message.sourceTabId) &&
@@ -273,7 +289,7 @@ function modelMessage(
       content.push({
         type: 'input_text',
         text: `Task page metadata (untrusted): ${JSON.stringify({
-          tabId: message.sourceTabId,
+          sourceTabId: message.sourceTabId,
           title,
           url,
         })}`,
@@ -499,6 +515,16 @@ export async function buildAgentContext(
   );
   await resolveMessageImages(history, dependencies.attachments, imageBudget, images);
 
+  const taskPageContextMessageId =
+    activeMessages.find(
+      (message) =>
+        message.kind === 'conversation' &&
+        message.role === 'user' &&
+        message.sourcePage !== undefined,
+    )?.id ??
+    activeMessages.find((message) => message.kind === 'conversation' && message.role === 'user')
+      ?.id;
+
   const historyInput: ModelInputItem[] = [];
   for (const message of history) {
     const item = modelMessage(message, images.get(message.id));
@@ -509,12 +535,12 @@ export async function buildAgentContext(
     if (item.type === 'message_ref') {
       const message = messagesById.get(item.messageId);
       if (message === undefined) throw new Error('Task message reference is invalid.');
-      const modelItem = modelMessage(
-        message,
-        images.get(message.id),
-        true,
-        replyProjections.get(message.id),
-      );
+      const reply = replyProjections.get(message.id);
+      const modelItem = modelMessage(message, images.get(message.id), {
+        includeTaskPageContext: message.id === taskPageContextMessageId,
+        ...(reply === undefined ? {} : { reply }),
+        taskCurrentTabBound: context.checkpoint.browserTargetTabId !== null,
+      });
       if (modelItem) activeInput.push(modelItem);
     } else if (item.type === 'function_call') {
       for (const outputItem of item.modelOutputItems ?? []) {

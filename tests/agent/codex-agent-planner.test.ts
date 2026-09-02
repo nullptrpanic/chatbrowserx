@@ -63,6 +63,9 @@ const CHECKPOINT: Checkpoint = {
   createdAt: 200,
 };
 
+const TASK_BROWSER_BINDING_TEXT =
+  'Task browser binding (trusted runtime context): this task has a current tab binding. For task-page tools, use tabId 0.';
+
 const PLAN_INPUT: AgentPlanInput = {
   task: TASK,
   events: [
@@ -506,7 +509,10 @@ describe('CodexAgentPlanner', () => {
         {
           type: 'message',
           role: 'user',
-          content: [{ type: 'input_text', text: 'Continue checkout' }],
+          content: [
+            { type: 'input_text', text: 'Continue checkout' },
+            { type: 'input_text', text: TASK_BROWSER_BINDING_TEXT },
+          ],
         },
       ],
     });
@@ -878,7 +884,10 @@ describe('CodexAgentPlanner', () => {
         {
           type: 'message',
           role: 'user',
-          content: [{ type: 'input_text', text: 'Continue checkout' }],
+          content: [
+            { type: 'input_text', text: 'Continue checkout' },
+            { type: 'input_text', text: TASK_BROWSER_BINDING_TEXT },
+          ],
         },
         {
           type: 'function_call',
@@ -1913,7 +1922,10 @@ describe('CodexAgentPlanner', () => {
       {
         type: 'message',
         role: 'user',
-        content: [{ type: 'input_text', text: 'Continue checkout' }],
+        content: [
+          { type: 'input_text', text: 'Continue checkout' },
+          { type: 'input_text', text: TASK_BROWSER_BINDING_TEXT },
+        ],
       },
       expect.objectContaining({
         type: 'function_call',

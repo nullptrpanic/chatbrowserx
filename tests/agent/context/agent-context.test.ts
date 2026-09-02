@@ -41,6 +41,9 @@ const CHECKPOINT: Checkpoint = {
   createdAt: 200,
 };
 
+const TASK_BROWSER_BINDING_TEXT =
+  'Task browser binding (trusted runtime context): this task has a current tab binding. For task-page tools, use tabId 0.';
+
 const COMPLETED_TOOL_RESULTS: readonly MaterializedToolResult[] = [
   {
     id: 'evidence_1',
@@ -366,6 +369,82 @@ describe('buildAgentContext', () => {
     expect(context.systemPrompt).toBe('你是一个浏览器助手');
   });
 
+  it('tells the model to use the task-bound current tab when page metadata is absent', async () => {
+    const context = await buildAgentContext(
+      {
+        task: TASK,
+        checkpoint: {
+          ...CHECKPOINT,
+          browserTargetTabId: 23,
+          continuationItems: [{ type: 'message_ref', messageId: 'current' }],
+        },
+        toolResults: [],
+        customSystemPrompt: '你是一个浏览器助手',
+        historyMessageLimit: 50,
+      },
+      contextDependencies(
+        [
+          message({
+            id: 'current',
+            taskId: TASK.id,
+            role: 'user',
+            text: 'Analyze this page.',
+          }),
+        ],
+        { get: vi.fn(async () => undefined) },
+      ),
+    );
+
+    expect(context.activeInput).toEqual([
+      {
+        type: 'message',
+        role: 'user',
+        content: [
+          { type: 'input_text', text: 'Analyze this page.' },
+          {
+            type: 'input_text',
+            text: TASK_BROWSER_BINDING_TEXT,
+          },
+        ],
+      },
+    ]);
+  });
+
+  it('does not claim a task current tab binding after it becomes unavailable', async () => {
+    const context = await buildAgentContext(
+      {
+        task: TASK,
+        checkpoint: {
+          ...CHECKPOINT,
+          browserTargetTabId: null,
+          continuationItems: [{ type: 'message_ref', messageId: 'current' }],
+        },
+        toolResults: [],
+        customSystemPrompt: '你是一个浏览器助手',
+        historyMessageLimit: 50,
+      },
+      contextDependencies(
+        [
+          message({
+            id: 'current',
+            taskId: TASK.id,
+            role: 'user',
+            text: 'Analyze this page.',
+          }),
+        ],
+        { get: vi.fn(async () => undefined) },
+      ),
+    );
+
+    expect(context.activeInput).toEqual([
+      {
+        type: 'message',
+        role: 'user',
+        content: [{ type: 'input_text', text: 'Analyze this page.' }],
+      },
+    ]);
+  });
+
   it('includes the submitted source tab instead of the later task target in page metadata', async () => {
     const active = {
       ...message({
@@ -405,7 +484,11 @@ describe('buildAgentContext', () => {
           { type: 'input_text', text: 'Analyze this page.' },
           {
             type: 'input_text',
-            text: 'Task page metadata (untrusted): {"tabId":23,"title":"Messenger - Feishu","url":"https://bytedance.larkoffice.com/next/messenger"}',
+            text: TASK_BROWSER_BINDING_TEXT,
+          },
+          {
+            type: 'input_text',
+            text: 'Task page metadata (untrusted): {"sourceTabId":23,"title":"Messenger - Feishu","url":"https://bytedance.larkoffice.com/next/messenger"}',
           },
         ],
       },
@@ -643,7 +726,10 @@ describe('buildAgentContext', () => {
       {
         type: 'message',
         role: 'user',
-        content: [{ type: 'input_text', text: 'Inspect the page.' }],
+        content: [
+          { type: 'input_text', text: 'Inspect the page.' },
+          { type: 'input_text', text: TASK_BROWSER_BINDING_TEXT },
+        ],
       },
       {
         type: 'reasoning',
@@ -969,6 +1055,7 @@ describe('buildAgentContext', () => {
         role: 'user',
         content: [
           { type: 'input_text', text: 'Use this screenshot.' },
+          { type: 'input_text', text: TASK_BROWSER_BINDING_TEXT },
           {
             type: 'input_image',
             imageUrl: 'data:image/png;base64,AAEC',
@@ -1026,7 +1113,10 @@ describe('buildAgentContext', () => {
       {
         type: 'message',
         role: 'user',
-        content: [{ type: 'input_text', text: 'Hello model.' }],
+        content: [
+          { type: 'input_text', text: 'Hello model.' },
+          { type: 'input_text', text: TASK_BROWSER_BINDING_TEXT },
+        ],
       },
     ]);
     expect(attachmentGet).not.toHaveBeenCalled();
@@ -1405,7 +1495,10 @@ describe('buildAgentContext', () => {
       {
         type: 'message',
         role: 'user',
-        content: [{ type: 'input_text', text: 'Initial request' }],
+        content: [
+          { type: 'input_text', text: 'Initial request' },
+          { type: 'input_text', text: TASK_BROWSER_BINDING_TEXT },
+        ],
       },
       {
         type: 'function_call',
@@ -1497,7 +1590,10 @@ describe('buildAgentContext', () => {
       {
         type: 'message',
         role: 'user',
-        content: [{ type: 'input_text', text: 'Continue current work' }],
+        content: [
+          { type: 'input_text', text: 'Continue current work' },
+          { type: 'input_text', text: TASK_BROWSER_BINDING_TEXT },
+        ],
       },
       {
         type: 'compaction',

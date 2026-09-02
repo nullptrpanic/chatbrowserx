@@ -210,7 +210,8 @@ const TAB_ID_PROPERTY = {
 } as const;
 const TASK_TAB_ID_PROPERTY = {
   ...TAB_ID_PROPERTY,
-  description: 'Use 0 for the task current tab; a nonzero ID targets that background tab.',
+  description:
+    'Required. Use 0 for the task-bound current tab, even when task page metadata is absent. Use a nonzero ID only to target a specific background tab.',
 } as const;
 const URL_PROPERTY = {
   type: 'string',
@@ -246,7 +247,7 @@ export const BROWSER_TOOL_SPECS = [
   browserToolSpec(
     'browser_list_tabs',
     browserListTabsSchema,
-    'List browser tabs with IDs, titles, URLs, and active state. Use this for tab discovery or tab management, not as a prerequisite for reading the task current page; task-page tools use tabId 0 or omit tabId.',
+    'List browser tabs with IDs, titles, URLs, and active state.',
     {},
   ),
   browserToolSpec(
