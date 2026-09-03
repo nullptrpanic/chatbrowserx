@@ -79,7 +79,7 @@ export async function createAgent(host: AgentHost): Promise<Agent> {
   const recovery = new RecoveryScanner({
     repository: host.tasks,
     clock: host.clock,
-    startTask: async (taskId) => coordinator.schedule(taskId),
+    startTask: async (taskId, runId) => coordinator.schedule(taskId, runId),
   });
   return new AgentFacade({
     submissions: commands,

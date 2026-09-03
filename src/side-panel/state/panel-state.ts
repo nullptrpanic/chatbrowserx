@@ -84,6 +84,28 @@ const taskSupplementSchema = z
 const panelTaskSchema = z
   .object({
     id: idSchema,
+    latestRunId: idSchema.nullable(),
+    runs: z
+      .array(
+        z
+          .object({
+            id: idSchema,
+            attempt: z.number().int().positive(),
+            status: taskStatusSchema,
+            startedAt: timestampSchema,
+            endedAt: timestampSchema.nullable(),
+            lastError: z
+              .object({
+                code: z.string().max(128),
+                retryable: z.boolean(),
+                userMessage: z.string().max(2_000),
+              })
+              .strict()
+              .nullable(),
+          })
+          .strict(),
+      )
+      .max(500),
     detailLevel: z.enum(['summary', 'full']),
     status: taskStatusSchema,
     goal: z.string().max(20_000),
@@ -143,6 +165,7 @@ export const panelSnapshotSchema: z.ZodType<PanelSnapshot> = z
           .object({
             id: idSchema,
             taskId: idSchema,
+            runId: idSchema.optional(),
             role: z.enum(['user', 'assistant', 'system']),
             status: z.enum(['complete', 'streaming', 'interrupted', 'error']),
             text: z.string().max(1_000_000),

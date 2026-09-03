@@ -5,7 +5,7 @@ import type { TaskSnapshot } from '../../src/tasks/task-command-service';
 
 /** Builds the narrow lifecycle collaborators owned by the public Agent boundary. */
 function buildFixture() {
-  const snapshot = { task: { id: 'task_1' } } as TaskSnapshot;
+  const snapshot = { task: { id: 'task_1' }, run: { id: 'run_1' } } as TaskSnapshot;
   const order: string[] = [];
   const submissions = {
     createSubmission: vi.fn(async () => {
@@ -23,8 +23,9 @@ function buildFixture() {
     clearContext: vi.fn(async () => snapshot),
   };
   const coordinator = {
-    schedule: vi.fn((taskId: string) => {
+    schedule: vi.fn((taskId: string, runId: string) => {
       void taskId;
+      void runId;
       order.push('schedule');
     }),
     pause: vi.fn(async () => snapshot),
@@ -51,7 +52,7 @@ describe('AgentFacade', () => {
 
     expect(fixture.order).toEqual(['persist.create', 'schedule']);
     expect(fixture.coordinator.schedule).toHaveBeenCalledOnce();
-    expect(fixture.coordinator.schedule).toHaveBeenCalledWith('task_1');
+    expect(fixture.coordinator.schedule).toHaveBeenCalledWith('task_1', 'run_1');
   });
 
   it('uses the same start boundary for a cancelled-task continuation', async () => {

@@ -14,6 +14,7 @@ import type { Clock } from '../../shared/time';
 import type { MessageRecord } from '../../tasks/message-types';
 import { orderTaskMessagesByEvent } from '../../tasks/task-message-order';
 import type { ModelOutputContinuationItem } from '../../tasks/continuation-types';
+import { prepareModelInput } from './model-input-preparation-error';
 import { buildAgentContext } from '../context/agent-context';
 import type { AgentEvent, AgentModelTurn, AgentPlanInput, AgentPlanner } from '../execution-types';
 import { StreamPersistenceBuffer } from '../stream-persistence-buffer';
@@ -120,33 +121,42 @@ export class ModelTurnPlanner implements AgentPlanner {
       checkpoint: input.checkpoint,
       toolResults: input.toolResults,
     };
-    const settingsPromise = this.#dependencies.settings.get();
-    const conversationViewPromise = loadConversationView(
-      input.task.conversationId,
-      this.#dependencies,
+    const settingsPromise = prepareModelInput('settings', this.#dependencies.settings.get());
+    const conversationViewPromise = prepareModelInput(
+      'conversation_history',
+      loadConversationView(input.task.conversationId, this.#dependencies),
     );
     const [settings, conversationView] = await Promise.all([
       settingsPromise,
       conversationViewPromise,
     ]);
-    const contractPromise = this.#dependencies.tools.contract(
-      { ...toolContext, conversationTasks: conversationView.tasks },
-      signal,
+    const contractPromise = prepareModelInput(
+      'tool_contract',
+      this.#dependencies.tools.contract(
+        { ...toolContext, conversationTasks: conversationView.tasks },
+        signal,
+      ),
     );
-    const contextPromise = buildAgentContext(
-      {
-        task: input.task,
-        checkpoint: input.checkpoint,
-        toolResults: input.toolResults,
-        customSystemPrompt: settings.systemPrompt,
-        historyMessageLimit: settings.historyMessageLimit,
-      },
-      {
-        conversationView,
-        attachments: this.#dependencies.attachments,
-      },
+    const contextPromise = prepareModelInput(
+      'agent_context',
+      buildAgentContext(
+        {
+          task: input.task,
+          checkpoint: input.checkpoint,
+          toolResults: input.toolResults,
+          customSystemPrompt: settings.systemPrompt,
+          historyMessageLimit: settings.historyMessageLimit,
+        },
+        {
+          conversationView,
+          attachments: this.#dependencies.attachments,
+        },
+      ),
     );
-    const reusableMessagePromise = this.#prepareReusableMessage(input, conversationView);
+    const reusableMessagePromise = prepareModelInput(
+      'assistant_message',
+      this.#prepareReusableMessage(input, conversationView),
+    );
     const [registeredContract, context, reusableMessage] = await Promise.all([
       contractPromise,
       contextPromise,
@@ -368,11 +378,19 @@ export class ModelTurnPlanner implements AgentPlanner {
       input.task.id,
       'conversation',
     ).filter((message) => message.kind === 'conversation' && message.role === 'assistant');
+    const currentRunMessageIds = new Set(
+      input.events.flatMap((event) =>
+        event.runId === input.checkpoint.runId && event.type === 'message.recorded'
+          ? [event.messageId]
+          : [],
+      ),
+    );
     const reusableReplies = taskReplies.filter(
       (message) =>
-        message.status === 'streaming' ||
-        message.status === 'interrupted' ||
-        (message.status === 'complete' && !checkpointMessageIds.has(message.id)),
+        currentRunMessageIds.has(message.id) &&
+        (message.status === 'streaming' ||
+          message.status === 'interrupted' ||
+          (message.status === 'complete' && !checkpointMessageIds.has(message.id))),
     );
     const reusable = reusableReplies.at(-1);
     await Promise.all(

@@ -4,6 +4,7 @@ import type { Translator } from '../../shared/i18n/i18n';
 import type {
   PanelToolResult,
   PanelTask,
+  PanelTaskRun,
   PanelTaskSupplement,
 } from '../../shared/protocol/panel-types';
 import type { AttachmentDraftClient } from '../chat/use-image-draft';
@@ -157,6 +158,28 @@ export function TaskProgressCard({
         onRetry={onRetry}
         onCancel={onCancel}
       />
+    </section>
+  );
+}
+
+/** Keeps an earlier execution attempt's terminal state attached to its own answer. */
+export function TaskRunStatusCard({
+  run,
+  t,
+}: {
+  readonly run: PanelTaskRun;
+  readonly t: Translator;
+}) {
+  return (
+    <section className="task-card is-embedded" aria-label={taskStatusLabel(run.status, t)}>
+      <div className="task-summary-toggle task-run-summary">
+        <TaskStatusLabel status={run.status} t={t} />
+      </div>
+      {run.lastError === null ? null : (
+        <p className="task-error" role="alert">
+          {run.lastError.userMessage}
+        </p>
+      )}
     </section>
   );
 }

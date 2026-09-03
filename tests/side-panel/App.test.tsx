@@ -49,6 +49,8 @@ describe('App background connection', () => {
     const base = buildSnapshot();
     const task = {
       id: 'task_reply_target',
+      latestRunId: null,
+      runs: [],
       detailLevel: 'summary' as const,
       status: 'completed' as const,
       goal: 'Original question',
@@ -554,6 +556,8 @@ describe('App background connection', () => {
     const base = buildSnapshot();
     const task = {
       id: 'task_running',
+      latestRunId: null,
+      runs: [],
       detailLevel: 'full' as const,
       status: 'planning' as const,
       goal: 'Inspect the current layout',
@@ -640,6 +644,8 @@ describe('App background connection', () => {
       },
       task: {
         id: 'task_1',
+        latestRunId: null,
+        runs: [],
         detailLevel: 'full',
         status: 'paused',
         goal: 'Existing task',
@@ -720,6 +726,8 @@ describe('App background connection', () => {
       },
       task: {
         id: 'task_1',
+        latestRunId: null,
+        runs: [],
         detailLevel: 'full',
         status: 'failed',
         goal: 'Failed task',

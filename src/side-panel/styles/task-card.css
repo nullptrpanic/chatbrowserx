@@ -33,6 +33,14 @@
   background: var(--cbx-hover);
 }
 
+.task-run-summary {
+  cursor: default;
+}
+
+.task-run-summary:hover {
+  background: transparent;
+}
+
 .task-summary-meta {
   min-width: 0;
   flex: 1;

@@ -64,7 +64,7 @@ const CHECKPOINT: Checkpoint = {
 };
 
 const TASK_BROWSER_BINDING_TEXT =
-  'Task browser binding (trusted runtime context): this task has a current tab binding. For task-page tools, use tabId 0.';
+  'Task page context:\nTrusted runtime binding: this task has a current tab binding. For task-page tools, use tabId 0.';
 
 const PLAN_INPUT: AgentPlanInput = {
   task: TASK,
@@ -395,6 +395,32 @@ const FIRST_TURN_BROWSER_TOOL_NAMES = [
 const CONFIGURED_TAVILY = { isConfigured: async () => true } as const;
 
 describe('CodexAgentPlanner', () => {
+  it('labels conversation-history failures before they cross the executor boundary', async () => {
+    const model = provider(async function* () {
+      yield { type: 'response.started', responseId: 'unused' };
+    });
+    const storage = repositories();
+    storage.listMessages.mockImplementationOnce(() => {
+      throw new Error('private IndexedDB detail');
+    });
+    const planner = new CodexAgentPlanner({
+      provider: model.instance,
+      tavilyAvailability: CONFIGURED_TAVILY,
+      settings: settings(),
+      conversations: storage.conversations,
+      tasks: storage.tasks,
+      attachments: storage.attachments,
+      ids: { create: (prefix) => `${prefix}_input_failure` },
+      clock: { now: () => 500 },
+    });
+
+    await expect(collect(planner)).rejects.toMatchObject({
+      name: 'ModelInputPreparationError',
+      stage: 'conversation_history',
+    });
+    expect(model.requests).toHaveLength(0);
+  });
+
   it('prepares the tool contract and message context concurrently', async () => {
     const model = provider(async function* () {
       yield { type: 'response.started', responseId: 'resp_parallel_prepare' };
@@ -1736,6 +1762,120 @@ describe('CodexAgentPlanner', () => {
         id: 'message_abandoned',
         status: 'complete',
         text: 'Recovered',
+      }),
+    ]);
+  });
+
+  it('keeps a failed run reply immutable when a later run produces a new answer', async () => {
+    const model = provider(async function* () {
+      yield { type: 'response.started', responseId: 'resp_continued_run' };
+      yield { type: 'text.delta', delta: 'Answer from the continued run.' };
+      yield {
+        type: 'response.completed',
+        responseId: 'resp_continued_run',
+        usage: null,
+      };
+    });
+    const failedReply: MessageRecord = {
+      id: 'message_failed_run',
+      kind: 'conversation',
+      conversationId: TASK.conversationId,
+      taskId: TASK.id,
+      role: 'assistant',
+      status: 'interrupted',
+      text: 'Partial answer from the failed run.',
+      attachmentIds: [],
+      createdAt: 300,
+      updatedAt: 300,
+    };
+    const correction: MessageRecord = {
+      id: 'message_correction',
+      kind: 'conversation',
+      conversationId: TASK.conversationId,
+      taskId: TASK.id,
+      role: 'user',
+      status: 'complete',
+      text: 'Use only browser tools.',
+      attachmentIds: [],
+      createdAt: 400,
+      updatedAt: 400,
+    };
+    const storage = repositories([failedReply, correction]);
+    const planner = new CodexAgentPlanner({
+      provider: model.instance,
+      tavilyAvailability: CONFIGURED_TAVILY,
+      settings: settings(),
+      conversations: storage.conversations,
+      tasks: storage.tasks,
+      attachments: storage.attachments,
+      ids: { create: (prefix) => `${prefix}_continued_run` },
+      clock: { now: () => 500 },
+    });
+    const input: AgentPlanInput = {
+      task: { ...TASK, latestRunId: 'run_2', lastEventSequence: 3 },
+      checkpoint: {
+        ...CHECKPOINT,
+        id: 'checkpoint_2',
+        runId: 'run_2',
+        continuationItems: [
+          { type: 'message_ref', messageId: USER_MESSAGE.id },
+          { type: 'message_ref', messageId: correction.id },
+        ],
+      },
+      events: [
+        PLAN_INPUT.events[0] as TaskEvent,
+        {
+          id: 'event_failed_reply',
+          taskId: TASK.id,
+          runId: 'run_1',
+          sequence: 2,
+          at: 300,
+          type: 'message.recorded',
+          messageId: failedReply.id,
+        },
+        {
+          id: 'event_correction',
+          taskId: TASK.id,
+          runId: 'run_2',
+          sequence: 3,
+          at: 400,
+          type: 'message.recorded',
+          messageId: correction.id,
+        },
+      ],
+      toolResults: [],
+    };
+
+    await collect(planner, new AbortController().signal, input);
+
+    expect(model.requests[0]?.input).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          type: 'message',
+          role: 'user',
+          content: expect.arrayContaining([
+            expect.objectContaining({ type: 'input_text', text: USER_MESSAGE.text }),
+          ]),
+        }),
+        {
+          type: 'message',
+          role: 'user',
+          content: [
+            { type: 'input_text', text: correction.text },
+            { type: 'input_text', text: TASK_BROWSER_BINDING_TEXT },
+          ],
+        },
+      ]),
+    );
+    expect(JSON.stringify(model.requests[0]?.input)).not.toContain(failedReply.text);
+    expect(storage.appendTaskMessage).toHaveBeenCalledOnce();
+    expect(storage.messages.find(({ id }) => id === failedReply.id)).toEqual(failedReply);
+    expect(storage.messages.filter(({ role }) => role === 'assistant')).toEqual([
+      failedReply,
+      expect.objectContaining({
+        id: 'message_continued_run',
+        status: 'complete',
+        text: 'Answer from the continued run.',
       }),
     ]);
   });

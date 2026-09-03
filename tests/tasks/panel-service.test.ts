@@ -305,6 +305,47 @@ describe('PanelService', () => {
     expect(fixture.dependencies.tasks.readTaskArchive).not.toHaveBeenCalled();
   });
 
+  it('projects message ownership and every persisted run lifecycle', async () => {
+    const fixture = buildFixture();
+    useArchive(fixture, {
+      events: [
+        {
+          id: 'event_message_1',
+          taskId: fixture.task.id,
+          runId: fixture.run.id,
+          sequence: 1,
+          type: 'message.recorded',
+          messageId: 'message_1',
+          at: 1_010,
+        },
+      ],
+      task: { ...fixture.task, lastEventSequence: 1 },
+    });
+    const service = new PanelService(fixture.dependencies);
+
+    const snapshot = await service.getSnapshot(7, fixture.conversation.id);
+
+    expect(snapshot.messages).toEqual([
+      expect.objectContaining({ id: 'message_1', runId: fixture.run.id }),
+    ]);
+    expect(snapshot.tasks).toEqual([
+      expect.objectContaining({
+        id: fixture.task.id,
+        latestRunId: fixture.run.id,
+        runs: [
+          {
+            id: fixture.run.id,
+            attempt: 1,
+            status: 'completed',
+            startedAt: 1_010,
+            endedAt: 1_190,
+            lastError: null,
+          },
+        ],
+      }),
+    ]);
+  });
+
   it('shares history across tabs while keeping the current page context separate', async () => {
     const fixture = buildFixture();
     const otherConversation = {
@@ -509,7 +550,7 @@ describe('PanelService', () => {
     expect(fixture.dependencies.agent.start).toHaveBeenCalledOnce();
   });
 
-  it('continues the latest failed logical task only for an explicit continuation request', async () => {
+  it('continues the latest failed logical task for any next user message', async () => {
     const fixture = buildFixture();
     const failedTask = { ...fixture.task, status: 'failed' as const };
     fixture.dependencies.tasks.listByConversation.mockResolvedValue([failedTask]);
@@ -518,7 +559,7 @@ describe('PanelService', () => {
     await service.submit({
       tabId: 9,
       conversationId: fixture.conversation.id,
-      text: '继续',
+      text: '不要用外部 CLI，改用浏览器工具。',
       attachmentIds: [],
     });
 
@@ -530,7 +571,7 @@ describe('PanelService', () => {
     );
   });
 
-  it('starts a new logical task for an unrelated request after a failure', async () => {
+  it('does not infer a new logical task from wording after a failure', async () => {
     const fixture = buildFixture();
     const failedTask = { ...fixture.task, status: 'failed' as const };
     fixture.dependencies.tasks.listByConversation.mockResolvedValue([failedTask]);
@@ -545,10 +586,11 @@ describe('PanelService', () => {
 
     expect(fixture.dependencies.agent.start).toHaveBeenCalledWith(
       expect.objectContaining({
-        kind: 'create',
-        submission: expect.objectContaining({ goal: '打开另一个页面查看天气' }),
+        kind: 'continue',
+        submission: expect.objectContaining({ sourceTaskId: failedTask.id }),
       }),
     );
+    expect(fixture.dependencies.agent.start).toHaveBeenCalledOnce();
   });
 
   it('creates a fresh logical task after the cancelled task context was cleared', async () => {

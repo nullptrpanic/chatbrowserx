@@ -34,7 +34,7 @@ describe('RecoveryScanner', () => {
     await scanner.requestRecoveryScan();
 
     expect(startTask).toHaveBeenCalledTimes(1);
-    expect(startTask).toHaveBeenCalledWith(planning.id);
+    expect(startTask).toHaveBeenCalledWith(planning.id, planning.latestRunId);
   });
 
   it('coalesces concurrent scans so one task cannot be scheduled twice', async () => {
@@ -80,6 +80,6 @@ describe('RecoveryScanner', () => {
 
     expect(repository.listRecoverable).toHaveBeenCalledWith(2_000);
     expect(startTask).toHaveBeenCalledTimes(1);
-    expect(startTask).toHaveBeenCalledWith(queued.id);
+    expect(startTask).toHaveBeenCalledWith(queued.id, queued.latestRunId);
   });
 });

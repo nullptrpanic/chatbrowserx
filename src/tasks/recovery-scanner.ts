@@ -1,12 +1,12 @@
 import type { TaskRepository } from '../persistence/task-repository';
-import type { TaskId } from '../shared/ids';
+import type { TaskId, TaskRunId } from '../shared/ids';
 import type { Clock } from '../shared/time';
 import type { TaskStatus } from './task-types';
 
 export interface RecoveryScannerDependencies {
   readonly repository: Pick<TaskRepository, 'listRecoverable'>;
   readonly clock: Clock;
-  readonly startTask: (taskId: TaskId) => Promise<void>;
+  readonly startTask: (taskId: TaskId, runId: TaskRunId) => Promise<void>;
 }
 
 const automaticTaskStatuses = new Set<TaskStatus>(['queued', 'planning']);
@@ -51,9 +51,14 @@ export class RecoveryScanner {
     const tasks = await this.#dependencies.repository.listRecoverable(
       this.#dependencies.clock.now(),
     );
-    const taskIds = new Set(
-      tasks.filter((task) => automaticTaskStatuses.has(task.status)).map((task) => task.id),
+    const runsByTaskId = new Map<TaskId, TaskRunId>();
+    for (const task of tasks) {
+      if (automaticTaskStatuses.has(task.status) && task.latestRunId !== null) {
+        runsByTaskId.set(task.id, task.latestRunId);
+      }
+    }
+    await Promise.all(
+      [...runsByTaskId].map(([taskId, runId]) => this.#dependencies.startTask(taskId, runId)),
     );
-    await Promise.all([...taskIds].map((taskId) => this.#dependencies.startTask(taskId)));
   }
 }

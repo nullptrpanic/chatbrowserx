@@ -115,6 +115,8 @@ function buildPanel() {
     getSnapshot: vi.fn(async () => snapshot),
     getTaskDetails: vi.fn(async (): Promise<PanelTask> => ({
       id: 'task_1',
+      latestRunId: null,
+      runs: [],
       detailLevel: 'full',
       status: 'completed',
       goal: 'Complete the page',

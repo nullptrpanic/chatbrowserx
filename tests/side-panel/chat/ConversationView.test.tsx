@@ -14,6 +14,8 @@ const attachments = {
 function completedTask(id: string, goal: string, updatedAt: number): PanelTask {
   return {
     id,
+    latestRunId: null,
+    runs: [],
     detailLevel: 'full',
     status: 'completed',
     goal,
@@ -46,6 +48,210 @@ function completedTask(id: string, goal: string, updatedAt: number): PanelTask {
 }
 
 describe('ConversationView answer execution details', () => {
+  it('keeps an earlier failed run answer with its own terminal status and error', () => {
+    const task = {
+      ...completedTask('task_multi_run', 'Continue the page task', 1_500),
+      latestRunId: 'run_2',
+      runs: [
+        {
+          id: 'run_1',
+          attempt: 1,
+          status: 'failed',
+          startedAt: 1_000,
+          endedAt: 1_200,
+          lastError: {
+            code: 'InvalidProviderResponse',
+            retryable: false,
+            userMessage: 'The provider returned an invalid response (stage: sse_protocol).',
+          },
+        },
+        {
+          id: 'run_2',
+          attempt: 2,
+          status: 'completed',
+          startedAt: 1_300,
+          endedAt: 1_500,
+          lastError: null,
+        },
+      ],
+    } as PanelTask;
+    const messages = [
+      {
+        id: 'assistant_run_1',
+        taskId: task.id,
+        runId: 'run_1',
+        role: 'assistant' as const,
+        status: 'interrupted' as const,
+        text: 'Partial answer from the failed run.',
+        attachmentIds: [],
+        createdAt: 1_200,
+        updatedAt: 1_200,
+      },
+      {
+        id: 'assistant_run_2',
+        taskId: task.id,
+        runId: 'run_2',
+        role: 'assistant' as const,
+        status: 'complete' as const,
+        text: 'Final answer from the continued run.',
+        attachmentIds: [],
+        createdAt: 1_500,
+        updatedAt: 1_500,
+      },
+    ] as readonly PanelMessage[];
+
+    render(
+      <ConversationView
+        messages={messages}
+        tasks={[task]}
+        task={task}
+        attachments={attachments}
+        t={t}
+        onSuggestion={vi.fn()}
+        onPause={vi.fn()}
+        onResume={vi.fn()}
+        onRetry={vi.fn()}
+        onCancel={vi.fn()}
+      />,
+    );
+
+    const previousAnswer = screen
+      .getByText('Partial answer from the failed run.')
+      .closest('article');
+    const currentAnswer = screen
+      .getByText('Final answer from the continued run.')
+      .closest('article');
+    expect(previousAnswer).not.toBeNull();
+    expect(currentAnswer).not.toBeNull();
+    expect((previousAnswer as HTMLElement).querySelector('.task-card')).not.toBeNull();
+    expect(
+      within(previousAnswer as HTMLElement).getByText(
+        'The provider returned an invalid response (stage: sse_protocol).',
+      ),
+    ).toBeVisible();
+    expect(within(previousAnswer as HTMLElement).getByText('任务失败')).toBeVisible();
+    expect((currentAnswer as HTMLElement).querySelector('.task-card')).not.toBeNull();
+  });
+
+  it('derives a cancelled answer card from the persisted run before rendering the next question', () => {
+    const task = {
+      ...completedTask('task_cancel_then_continue', 'Continue the page task', 1_500),
+      latestRunId: 'run_2',
+      status: 'planning',
+      updatedAt: 1_500,
+      runs: [
+        {
+          id: 'run_1',
+          attempt: 1,
+          status: 'cancelled',
+          startedAt: 1_000,
+          endedAt: 1_200,
+          lastError: null,
+        },
+        {
+          id: 'run_2',
+          attempt: 2,
+          status: 'planning',
+          startedAt: 1_400,
+          endedAt: null,
+          lastError: null,
+        },
+      ],
+    } as PanelTask;
+    const messages = [
+      {
+        id: 'user_run_1',
+        taskId: task.id,
+        runId: 'run_1',
+        role: 'user' as const,
+        status: 'complete' as const,
+        text: '问题1',
+        attachmentIds: [],
+        createdAt: 1_000,
+        updatedAt: 1_000,
+      },
+      {
+        id: 'user_run_2',
+        taskId: task.id,
+        runId: 'run_2',
+        role: 'user' as const,
+        status: 'complete' as const,
+        text: '问题2',
+        attachmentIds: [],
+        createdAt: 1_400,
+        updatedAt: 1_400,
+      },
+    ] as readonly PanelMessage[];
+
+    render(
+      <ConversationView
+        messages={messages}
+        tasks={[task]}
+        task={task}
+        attachments={attachments}
+        t={t}
+        onSuggestion={vi.fn()}
+        onPause={vi.fn()}
+        onResume={vi.fn()}
+        onRetry={vi.fn()}
+        onCancel={vi.fn()}
+      />,
+    );
+
+    const articles = screen.getAllByRole('article');
+    expect(articles).toHaveLength(3);
+    expect(articles[0]).toHaveTextContent('问题1');
+    expect(articles[1]).toHaveTextContent('任务已取消，未生成回复。');
+    expect(articles[1]).toHaveTextContent('任务已取消');
+    expect(articles[2]).toHaveTextContent('问题2');
+    expect(screen.getAllByText('正在生成回复').length).toBeGreaterThan(0);
+  });
+
+  it('shows current task progress separately until the latest run has an assistant answer', () => {
+    const task = {
+      ...completedTask('task_waiting_for_answer', 'Continue the page task', 1_500),
+      latestRunId: 'run_2',
+      status: 'failed',
+      lastError: {
+        code: 'TaskInputError',
+        retryable: false,
+        userMessage: 'Task input could not be prepared.',
+      },
+    } as PanelTask;
+    const previousAnswer = {
+      id: 'assistant_previous_run',
+      taskId: task.id,
+      runId: 'run_1',
+      role: 'assistant' as const,
+      status: 'interrupted' as const,
+      text: 'Earlier partial answer.',
+      attachmentIds: [],
+      createdAt: 1_200,
+      updatedAt: 1_200,
+    } as PanelMessage;
+
+    const { container } = render(
+      <ConversationView
+        messages={[previousAnswer]}
+        tasks={[task]}
+        task={task}
+        attachments={attachments}
+        t={t}
+        onSuggestion={vi.fn()}
+        onPause={vi.fn()}
+        onResume={vi.fn()}
+        onRetry={vi.fn()}
+        onCancel={vi.fn()}
+      />,
+    );
+
+    const previousArticle = screen.getByText('Earlier partial answer.').closest('article');
+    expect(previousArticle).not.toBeNull();
+    expect((previousArticle as HTMLElement).querySelector('.task-card')).toBeNull();
+    expect(container.querySelectorAll('.task-card')).toHaveLength(1);
+    expect(screen.getByRole('button', { name: '重试' })).toBeVisible();
+  });
+
   it('forwards Reply from the visible assistant answer', async () => {
     const user = userEvent.setup();
     const onReply = vi.fn();
@@ -701,9 +907,24 @@ describe('ConversationView answer execution details', () => {
     ).not.toBeInTheDocument();
   });
 
-  it('attaches a failed task to its retained empty assistant reply', () => {
+  it('reconstructs a failed answer card from persisted run state after reload', () => {
     const task: PanelTask = {
       id: 'task_failed',
+      latestRunId: 'run_failed',
+      runs: [
+        {
+          id: 'run_failed',
+          attempt: 1,
+          status: 'failed',
+          startedAt: 1_000,
+          endedAt: 1_300,
+          lastError: {
+            code: 'TaskInputError',
+            retryable: false,
+            userMessage: 'Task input could not be prepared.',
+          },
+        },
+      ],
       detailLevel: 'full',
       status: 'failed',
       goal: 'Failed request',
@@ -731,22 +952,9 @@ describe('ConversationView answer execution details', () => {
       toolResults: [],
       supplements: [],
     };
-    const messages: PanelMessage[] = [
-      {
-        id: 'assistant_failed',
-        taskId: task.id,
-        role: 'assistant',
-        status: 'error',
-        text: '',
-        attachmentIds: [],
-        createdAt: 1_300,
-        updatedAt: 1_300,
-      },
-    ];
-
     render(
       <ConversationView
-        messages={messages}
+        messages={[]}
         tasks={[task]}
         task={task}
         attachments={attachments}
@@ -768,9 +976,20 @@ describe('ConversationView answer execution details', () => {
     expect(screen.getAllByText('Task input could not be prepared.')).toHaveLength(1);
   });
 
-  it('renders a retained empty cancelled reply as a message bubble', () => {
+  it('reconstructs a cancelled answer card from persisted run state after reload', () => {
     const task: PanelTask = {
       id: 'task_cancelled',
+      latestRunId: 'run_cancelled',
+      runs: [
+        {
+          id: 'run_cancelled',
+          attempt: 1,
+          status: 'cancelled',
+          startedAt: 1_000,
+          endedAt: 1_300,
+          lastError: null,
+        },
+      ],
       detailLevel: 'full',
       status: 'cancelled',
       goal: 'Cancelled request',
@@ -794,22 +1013,9 @@ describe('ConversationView answer execution details', () => {
       toolResults: [],
       supplements: [],
     };
-    const messages: PanelMessage[] = [
-      {
-        id: 'assistant_cancelled',
-        taskId: task.id,
-        role: 'assistant',
-        status: 'interrupted',
-        text: '',
-        attachmentIds: [],
-        createdAt: 1_300,
-        updatedAt: 1_300,
-      },
-    ];
-
     render(
       <ConversationView
-        messages={messages}
+        messages={[]}
         tasks={[task]}
         task={task}
         attachments={attachments}

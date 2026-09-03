@@ -56,7 +56,7 @@ export const en = {
   cancelReply: 'Cancel reply',
   replyImageCount: '{count} image(s)',
   streaming: 'Generating',
-  interrupted: 'This response was interrupted; choose Continue to request it again',
+  interrupted: 'This response was interrupted; your next submission will continue this task.',
   failedResponse: 'The task failed before a reply was generated.',
   cancelledResponse: 'The task was cancelled before a reply was generated.',
   taskDetails: 'Show execution details',

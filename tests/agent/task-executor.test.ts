@@ -56,7 +56,7 @@ function sources() {
 }
 
 /** Creates only valid message-backed submissions after the production empty-task path was removed. */
-type ExecutorConversationStore = Pick<ConversationRepository, 'listMessages'> & {
+type ExecutorConversationStore = Pick<ConversationRepository, 'listMessages' | 'updateMessage'> & {
   readonly appendMessage?: (message: MessageRecord) => Promise<void>;
 };
 
@@ -310,6 +310,47 @@ async function runBrowserProgressScenario(
 }
 
 describe('TaskExecutor', () => {
+  it('does not execute when a detached wake-up targets an older run', async () => {
+    const database = await openChatBrowserDatabase(createTestDatabaseName('stale-run-wakeup'));
+    const repository = new IndexedDbTaskRepository(database);
+    const dependencies = sources();
+    const commands = new TaskCommandService(
+      repository,
+      dependencies.clock,
+      dependencies.ids,
+      dependencies.conversations,
+    );
+    const created = await commands.create({
+      conversationId: 'conversation_1',
+      tabId: 7,
+      goal: 'Do not execute a stale wake-up',
+    });
+    const plan = vi.fn(() =>
+      (async function* () {
+        yield* [];
+      })(),
+    );
+    const executor = new TaskExecutor({
+      repository,
+      conversations: dependencies.conversations,
+      planner: { plan },
+      tavily: tavilyPort(),
+      browser: browserPort(),
+      clock: dependencies.clock,
+      ids: dependencies.ids,
+    });
+
+    const result = await executor.run(
+      created.task.id,
+      new AbortController().signal,
+      'superseded_run',
+    );
+
+    expect(result).toMatchObject({ task: { status: 'queued' }, run: { id: created.run.id } });
+    expect(plan).not.toHaveBeenCalled();
+    database.close();
+  });
+
   it('executes an exact task selector through the unified history reader', async () => {
     const database = await openChatBrowserDatabase(createTestDatabaseName('exact-history-read'));
     const repository = new IndexedDbTaskRepository(database);
@@ -3388,16 +3429,10 @@ describe('TaskExecutor', () => {
       retryable: false,
     });
     expect(
-      await new IndexedDbConversationRepository(database).listMessages('conversation_1'),
-    ).toContainEqual(
-      expect.objectContaining({
-        conversationId: 'conversation_1',
-        taskId: created.task.id,
-        role: 'assistant',
-        status: 'error',
-        text: '',
-      }),
-    );
+      (await new IndexedDbConversationRepository(database).listMessages('conversation_1')).filter(
+        ({ role }) => role === 'assistant',
+      ),
+    ).toEqual([]);
     expect(tavily.search).toHaveBeenCalledOnce();
     database.close();
   });
@@ -3665,7 +3700,10 @@ describe('TaskExecutor', () => {
         plan: () =>
           (async function* () {
             yield* [];
-            throw new Error('private attachment detail');
+            throw Object.assign(new Error('private attachment detail'), {
+              name: 'ModelInputPreparationError',
+              stage: 'agent_context',
+            });
           })(),
       },
       tavily: tavilyPort(),
@@ -3681,20 +3719,18 @@ describe('TaskExecutor', () => {
       run: {
         error: {
           code: 'TaskInputError',
-          userMessage: 'Task input could not be prepared.',
+          userMessage: 'Task input could not be prepared (stage: agent_context).',
+          evidenceRef: 'input_preparation:agent_context',
         },
       },
     });
+    const failed = await repository.readTaskArchive(created.task.id);
+    expect(JSON.stringify(failed)).not.toContain('private attachment detail');
     expect(
-      await new IndexedDbConversationRepository(database).listMessages('conversation_1'),
-    ).toContainEqual(
-      expect.objectContaining({
-        taskId: created.task.id,
-        role: 'assistant',
-        status: 'error',
-        text: '',
-      }),
-    );
+      (await new IndexedDbConversationRepository(database).listMessages('conversation_1')).filter(
+        ({ role }) => role === 'assistant',
+      ),
+    ).toEqual([]);
     database.close();
   });
 

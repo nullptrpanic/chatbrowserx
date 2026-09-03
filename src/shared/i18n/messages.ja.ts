@@ -58,7 +58,7 @@ export const ja = {
   cancelReply: '返信をキャンセル',
   replyImageCount: '画像 {count} 枚',
   streaming: '生成中',
-  interrupted: '出力が中断されました。「続行」で再度リクエストできます',
+  interrupted: '出力が中断されました。次の送信は現在のタスクで続行されます。',
   failedResponse: 'タスクが失敗し、応答は生成されませんでした。',
   cancelledResponse: 'タスクがキャンセルされ、応答は生成されませんでした。',
   taskDetails: '実行詳細を表示',

@@ -34,27 +34,6 @@ const MAX_PANEL_SUPPLEMENTS = 100;
 const MAX_SOURCE_FAVICON_URL = 8_192;
 const terminalTaskStatuses = new Set<Task['status']>(['completed', 'failed', 'cancelled']);
 const previewImageTypes = new Set<string>(IMAGE_POLICY.acceptedMimeTypes);
-const explicitContinuationRequests = new Set([
-  'continue',
-  'continue please',
-  'go on',
-  'resume',
-  '继续',
-  '继续吧',
-  '继续执行',
-  '继续完成',
-  '接着做',
-]);
-
-function isExplicitContinuationRequest(text: string): boolean {
-  return explicitContinuationRequests.has(
-    text
-      .trim()
-      .toLowerCase()
-      .replace(/[。.!！]+$/u, '')
-      .trim(),
-  );
-}
 
 export interface PanelServiceDependencies {
   readonly conversations: Pick<
@@ -326,6 +305,17 @@ export class PanelService {
       visibleTasks.map(({ id }) => id),
     );
     const timelineByTaskId = new Map(timelines.map((timeline) => [timeline.task.id, timeline]));
+    const messageRunById = new Map<string, string>();
+    for (const timeline of timelines) {
+      for (const event of timeline.events) {
+        if (event.type !== 'message.recorded') continue;
+        const existing = messageRunById.get(event.messageId);
+        if (existing !== undefined && existing !== event.runId) {
+          throw new Error('Conversation message has conflicting TaskEvent associations.');
+        }
+        messageRunById.set(event.messageId, event.runId);
+      }
+    }
     const panelTasks = visibleTasks.flatMap((task) => {
       const timeline = timelineByTaskId.get(task.id);
       return timeline === undefined ? [] : [this.#projectTask(timeline, [], 'summary')];
@@ -351,6 +341,7 @@ export class PanelService {
         return {
           id: message.id,
           taskId: message.taskId,
+          ...(messageRunById.has(message.id) ? { runId: messageRunById.get(message.id) } : {}),
           role: message.role,
           status: message.status,
           text: message.text,
@@ -447,8 +438,7 @@ export class PanelService {
     const goal = taskGoal(text);
     if (
       latestTask !== undefined &&
-      (latestTask.status === 'cancelled' ||
-        (latestTask.status === 'failed' && isExplicitContinuationRequest(text)))
+      (latestTask.status === 'cancelled' || latestTask.status === 'failed')
     ) {
       const contextWasCleared = (await this.#dependencies.tasks.listEvents(latestTask.id)).some(
         (event) => event.type === 'context.cleared',
@@ -676,6 +666,22 @@ export class PanelService {
     const lastError = runs.at(-1)?.error ?? null;
     return {
       id: task.id,
+      latestRunId: task.latestRunId,
+      runs: runs.slice(-MAX_PANEL_MESSAGES).map((run) => ({
+        id: run.id,
+        attempt: run.attempt,
+        status: run.status,
+        startedAt: run.startedAt,
+        endedAt: run.endedAt,
+        lastError:
+          run.error === null
+            ? null
+            : {
+                code: run.error.code,
+                retryable: run.error.retryable,
+                userMessage: run.error.userMessage,
+              },
+      })),
       detailLevel,
       status: task.status,
       goal: task.goal,

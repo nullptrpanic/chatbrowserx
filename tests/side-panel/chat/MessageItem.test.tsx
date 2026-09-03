@@ -46,6 +46,28 @@ function requireBlob(value: ClipboardItemData | undefined): Blob {
 }
 
 describe('MessageItem', () => {
+  it('explains that the next submission continues an interrupted task', () => {
+    render(
+      <MessageItem
+        message={{
+          id: 'assistant_interrupted',
+          taskId: 'task_interrupted',
+          role: 'assistant',
+          status: 'interrupted',
+          text: '已保留的部分回复',
+          attachmentIds: [],
+          createdAt: 1_000,
+          updatedAt: 1_000,
+        }}
+        attachments={attachments}
+        t={t}
+      />,
+    );
+
+    expect(screen.getByText('本次输出已中断；下一次提交将在当前任务中继续。')).toBeVisible();
+    expect(screen.queryByText(/点击继续/)).not.toBeInTheDocument();
+  });
+
   it('offers Reply beside Copy for a completed assistant answer', async () => {
     const user = userEvent.setup();
     const onReply = vi.fn();
@@ -418,6 +440,8 @@ describe('MessageItem', () => {
         t={t}
         task={{
           id: 'task_error',
+          latestRunId: null,
+          runs: [],
           detailLevel: 'full',
           status: 'failed',
           goal: 'Failed request',
@@ -506,6 +530,8 @@ describe('MessageItem', () => {
     };
     const task = {
       id: 'task_cancelled',
+      latestRunId: null,
+      runs: [],
       detailLevel: 'full' as const,
       status: 'cancelled' as const,
       goal: 'Cancelled task',

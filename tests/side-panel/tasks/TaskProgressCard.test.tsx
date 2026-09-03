@@ -13,6 +13,8 @@ const attachments = {
 function runningTask(completedToolCallCount: number): PanelTask {
   return {
     id: 'task_running',
+    latestRunId: null,
+    runs: [],
     detailLevel: 'full',
     status: 'planning',
     goal: 'Inspect the page',

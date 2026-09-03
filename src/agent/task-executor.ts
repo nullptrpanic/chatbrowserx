@@ -5,20 +5,20 @@ import {
   providerErrorFromCode,
   type ProviderError,
 } from './model/model-provider-error';
-import type { IdGenerator, TaskId } from '../shared/ids';
+import type { IdGenerator, TaskId, TaskRunId } from '../shared/ids';
 import type { Clock } from '../shared/time';
 import type { Checkpoint } from '../tasks/checkpoint-types';
 import type { ContinuationItem, PendingToolCall } from '../tasks/continuation-types';
 import type { TaskSnapshot } from '../tasks/task-command-service';
 import type { TaskError } from '../tasks/task-errors';
 import { TaskLeaseManager } from '../tasks/task-lease';
-import { retainTaskReply } from '../tasks/task-reply-retention';
 import { transitionTask, type TaskTransitionType } from '../tasks/task-transition';
 import type { Task, TaskEvent, TaskModelTurnMetrics, TaskRun } from '../tasks/task-types';
 import type { MaterializedToolResult, ToolResult } from '../tasks/tool-result-types';
 import { selectPendingTaskSupplements } from '../tasks/task-supplements';
 import type { AgentEvent, AgentModelTurn, AgentPlanner } from './execution-types';
 import type { ToolExecutionPolicy, ToolRuntimePort, ValidatedToolCall } from '../tools/types';
+import { isModelInputPreparationError } from './model/model-input-preparation-error';
 
 export type TaskExecutorErrorCode =
   | 'TASK_NOT_FOUND'
@@ -108,13 +108,21 @@ function invalidPlannerResultError(): TaskError {
   };
 }
 
-function taskInputError(): TaskError {
+function modelInputPreparationStage(error: unknown): string | null {
+  return isModelInputPreparationError(error) ? error.stage : null;
+}
+
+function taskInputError(error: unknown): TaskError {
+  const stage = modelInputPreparationStage(error);
   return {
     code: 'TaskInputError',
     retryable: false,
     recoveryAction: 'review_task_input',
-    userMessage: 'Task input could not be prepared.',
-    evidenceRef: null,
+    userMessage:
+      stage === null
+        ? 'Task input could not be prepared.'
+        : `Task input could not be prepared (stage: ${stage}).`,
+    evidenceRef: stage === null ? null : `input_preparation:${stage}`,
   };
 }
 
@@ -227,7 +235,7 @@ export class TaskExecutor {
     this.#leases = new TaskLeaseManager(dependencies.repository);
   }
 
-  async run(taskId: TaskId, signal: AbortSignal): Promise<TaskSnapshot> {
+  async run(taskId: TaskId, signal: AbortSignal, expectedRunId?: TaskRunId): Promise<TaskSnapshot> {
     throwIfAborted(signal);
     const ownerId = this.#createId('runner');
     const acquired = await this.#leases.acquire(taskId, ownerId, this.#dependencies.clock.now());
@@ -235,6 +243,7 @@ export class TaskExecutor {
 
     try {
       let snapshot = await this.#loadSnapshot(taskId);
+      if (expectedRunId !== undefined && snapshot.run.id !== expectedRunId) return snapshot;
       if (!runnableStatuses.has(snapshot.task.status)) return snapshot;
       if (snapshot.task.status !== 'planning') {
         snapshot = await this.#saveBoundary(snapshot, ownerId, signal, {
@@ -892,10 +901,15 @@ export class TaskExecutor {
       });
     }
     if (!isProviderError(error)) {
+      const inputError = taskInputError(error);
+      const inputStage = modelInputPreparationStage(error);
       return this.#saveBoundary(snapshot, ownerId, signal, {
         type: 'task.failed',
-        reason: source === 'model' ? 'task_input_preparation_failed' : `${source}_execution_failed`,
-        error: taskInputError(),
+        reason:
+          source === 'model'
+            ? `task_input_preparation_failed${inputStage === null ? '' : `:${inputStage}`}`
+            : `${source}_execution_failed`,
+        error: inputError,
       });
     }
     if (error.code === 'ABORTED') throw error;
@@ -1142,16 +1156,6 @@ export class TaskExecutor {
         : {}),
       ...(canonicalResults.length === 0 ? {} : { toolResults: canonicalResults }),
     });
-    if (input.type === 'task.failed') {
-      await retainTaskReply(task, 'error', this.#dependencies);
-      return this.#refreshCurrentAttempt({
-        task,
-        run,
-        checkpoint,
-        events: [...current.events, ...events],
-        toolResults: nextToolResults,
-      });
-    }
     return {
       task,
       run,

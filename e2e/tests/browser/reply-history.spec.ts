@@ -33,6 +33,30 @@ function finalTextResponse(responseId: string, text: string): string {
   ]);
 }
 
+function invalidResponse(responseId: string, partialText = ''): string {
+  return sse([
+    {
+      event: 'response.created',
+      data: { type: 'response.created', response: { id: responseId } },
+    },
+    ...(partialText.length === 0
+      ? []
+      : [
+          {
+            event: 'response.output_text.delta',
+            data: { type: 'response.output_text.delta', delta: partialText },
+          },
+        ]),
+    {
+      event: 'response.completed',
+      data: {
+        type: 'response.completed',
+        response: { id: `${responseId}_mismatched` },
+      },
+    },
+  ]);
+}
+
 function toolResponse(
   responseId: string,
   itemId: string,
@@ -141,6 +165,29 @@ async function waitForTask(
       { timeout: 30_000 },
     )
     .toBe('completed');
+}
+
+async function waitForTaskStatus(
+  page: Parameters<typeof sendExtensionMessage>[0],
+  taskId: string,
+  status: 'completed' | 'failed' | 'cancelled',
+): Promise<void> {
+  await expect
+    .poll(
+      async () => {
+        const snapshot = await sendExtensionMessage<{
+          readonly task: { readonly status: string };
+        }>(page, {
+          version: 1,
+          requestId: `reply_e2e_task_${taskId}_${String(Date.now())}`,
+          type: 'task.getSnapshot',
+          payload: { taskId },
+        });
+        return snapshot.task.status;
+      },
+      { timeout: 30_000 },
+    )
+    .toBe(status);
 }
 
 extensionTest(
@@ -320,5 +367,241 @@ extensionTest(
       taskId: targetTaskId,
       excerpt: targetAnswer,
     });
+  },
+);
+
+extensionTest(
+  'keeps a failed run answer in order when the next question continues the task',
+  async ({ extensionSession }) => {
+    extensionTest.setTimeout(120_000);
+    const fixturePage = await extensionSession.context.newPage();
+    await fixturePage.goto('https://example.com/failed-run-history');
+    const tabs = await extensionSession.sidePanelPage.evaluate(
+      async (url) => chrome.tabs.query({ url }),
+      fixturePage.url(),
+    );
+    const tabId = tabs[0]?.id;
+    if (typeof tabId !== 'number') throw new Error('Failed-run fixture tab ID unavailable.');
+
+    const firstQuestion = 'Question 1 should retain its failed answer card.';
+    const partialAnswer = 'Partial answer from the failed run.';
+    const secondQuestion = 'Question 2 should continue after the failed run.';
+    const finalAnswer = 'Final answer from the second run.';
+    let providerTurn = 0;
+    let secondRunRequest: unknown;
+    await extensionSession.context.route(
+      'https://chatgpt.com/backend-api/codex/responses',
+      async (route) => {
+        providerTurn += 1;
+        const body = route.request().postDataJSON() as unknown;
+        const responseBody =
+          providerTurn <= 4
+            ? invalidResponse(
+                `resp_failed_run_${String(providerTurn)}`,
+                providerTurn === 1 ? partialAnswer : '',
+              )
+            : finalTextResponse('resp_failed_run_recovered', finalAnswer);
+        if (providerTurn === 5) secondRunRequest = body;
+        await route.fulfill({
+          status: 200,
+          headers: { 'Content-Type': 'text/event-stream' },
+          body: responseBody,
+        });
+      },
+    );
+
+    await sendExtensionMessage(extensionSession.sidePanelPage, {
+      version: 1,
+      requestId: 'failed_run_e2e_settings',
+      type: 'settings.save',
+      payload: {
+        reasoningEffort: 'low',
+        systemPrompt: 'Answer the user directly.',
+        language: 'en',
+        historyMessageLimit: 50,
+        codexAccessToken: syntheticAccessToken(),
+      },
+    });
+
+    const first = await sendExtensionMessage<{
+      readonly task: { readonly id: string; readonly conversationId: string };
+    }>(extensionSession.sidePanelPage, {
+      version: 1,
+      requestId: 'failed_run_e2e_submit_1',
+      type: 'chat.submit',
+      payload: { tabId, text: firstQuestion, attachmentIds: [] },
+    });
+    await waitForTaskStatus(extensionSession.sidePanelPage, first.task.id, 'failed');
+
+    const second = await sendExtensionMessage<{
+      readonly task: { readonly id: string };
+    }>(extensionSession.sidePanelPage, {
+      version: 1,
+      requestId: 'failed_run_e2e_submit_2',
+      type: 'chat.submit',
+      payload: {
+        tabId,
+        conversationId: first.task.conversationId,
+        text: secondQuestion,
+        attachmentIds: [],
+      },
+    });
+    expect(second.task.id).toBe(first.task.id);
+    await waitForTask(extensionSession.sidePanelPage, second.task.id);
+
+    const snapshot = await sendExtensionMessage<PanelSnapshot>(extensionSession.sidePanelPage, {
+      version: 1,
+      requestId: 'failed_run_e2e_snapshot',
+      type: 'panel.getSnapshot',
+      payload: { tabId, conversationId: first.task.conversationId },
+    });
+    expect(snapshot.task?.runs.map(({ status }) => status)).toEqual(['failed', 'completed']);
+    expect(snapshot.messages.map(({ role, status, text }) => ({ role, status, text }))).toEqual([
+      { role: 'user', status: 'complete', text: firstQuestion },
+      { role: 'assistant', status: 'interrupted', text: partialAnswer },
+      { role: 'user', status: 'complete', text: secondQuestion },
+      { role: 'assistant', status: 'complete', text: finalAnswer },
+    ]);
+    expect(inputTexts(secondRunRequest).join('\n')).not.toContain(partialAnswer);
+    expect(providerTurn).toBe(5);
+
+    await extensionSession.sidePanelPage.reload();
+    const articles = extensionSession.sidePanelPage.locator('article.message-item');
+    await expect(articles).toHaveCount(4);
+    await expect(articles.nth(0)).toContainText(firstQuestion);
+    await expect(articles.nth(1)).toContainText(partialAnswer);
+    await expect(articles.nth(1)).toContainText('Task failed');
+    await expect(articles.nth(1)).toContainText(
+      'The provider returned an invalid response (stage: sse_protocol).',
+    );
+    await expect(articles.nth(2)).toContainText(secondQuestion);
+    await expect(articles.nth(3)).toContainText(finalAnswer);
+    await expect(articles.nth(3)).toContainText('Task completed');
+  },
+);
+
+extensionTest(
+  'keeps an empty cancelled run card in order when the next question continues the task',
+  async ({ extensionSession }) => {
+    extensionTest.setTimeout(120_000);
+    const fixturePage = await extensionSession.context.newPage();
+    await fixturePage.goto('https://example.com/cancelled-run-history');
+    const tabs = await extensionSession.sidePanelPage.evaluate(
+      async (url) => chrome.tabs.query({ url }),
+      fixturePage.url(),
+    );
+    const tabId = tabs[0]?.id;
+    if (typeof tabId !== 'number') throw new Error('Cancelled-run fixture tab ID unavailable.');
+
+    const firstQuestion = 'Question 1 will be cancelled without an answer.';
+    const secondQuestion = 'Question 2 should continue after cancellation.';
+    const finalAnswer = 'Final answer after the cancelled run.';
+    let providerTurn = 0;
+    await extensionSession.context.route(
+      'https://chatgpt.com/backend-api/codex/responses',
+      async (route) => {
+        providerTurn += 1;
+        const responseBody =
+          providerTurn === 1
+            ? toolResponse(
+                'resp_cancelled_run_wait',
+                'item_cancelled_run_wait',
+                'call_cancelled_run_wait',
+                'browser_wait',
+                { tabId, condition: 'delay', timeoutMs: 10_000 },
+              )
+            : finalTextResponse('resp_cancelled_run_recovered', finalAnswer);
+        await route.fulfill({
+          status: 200,
+          headers: { 'Content-Type': 'text/event-stream' },
+          body: responseBody,
+        });
+      },
+    );
+
+    await sendExtensionMessage(extensionSession.sidePanelPage, {
+      version: 1,
+      requestId: 'cancelled_run_e2e_settings',
+      type: 'settings.save',
+      payload: {
+        reasoningEffort: 'low',
+        systemPrompt: 'Answer the user directly.',
+        language: 'en',
+        historyMessageLimit: 50,
+        codexAccessToken: syntheticAccessToken(),
+      },
+    });
+
+    const first = await sendExtensionMessage<{
+      readonly task: { readonly id: string; readonly conversationId: string };
+    }>(extensionSession.sidePanelPage, {
+      version: 1,
+      requestId: 'cancelled_run_e2e_submit_1',
+      type: 'chat.submit',
+      payload: { tabId, text: firstQuestion, attachmentIds: [] },
+    });
+    await expect
+      .poll(async () => {
+        const running = await sendExtensionMessage<{
+          readonly events: readonly { readonly type: string; readonly name?: string }[];
+        }>(extensionSession.sidePanelPage, {
+          version: 1,
+          requestId: `cancelled_run_e2e_running_${String(Date.now())}`,
+          type: 'task.getSnapshot',
+          payload: { taskId: first.task.id },
+        });
+        return running.events.some(
+          (event) => event.type === 'tool.call' && event.name === 'browser_wait',
+        );
+      })
+      .toBe(true);
+    await sendExtensionMessage(extensionSession.sidePanelPage, {
+      version: 1,
+      requestId: 'cancelled_run_e2e_cancel',
+      type: 'task.cancel',
+      payload: { taskId: first.task.id },
+    });
+    await waitForTaskStatus(extensionSession.sidePanelPage, first.task.id, 'cancelled');
+
+    const second = await sendExtensionMessage<{
+      readonly task: { readonly id: string };
+    }>(extensionSession.sidePanelPage, {
+      version: 1,
+      requestId: 'cancelled_run_e2e_submit_2',
+      type: 'chat.submit',
+      payload: {
+        tabId,
+        conversationId: first.task.conversationId,
+        text: secondQuestion,
+        attachmentIds: [],
+      },
+    });
+    expect(second.task.id).toBe(first.task.id);
+    await waitForTask(extensionSession.sidePanelPage, second.task.id);
+
+    const snapshot = await sendExtensionMessage<PanelSnapshot>(extensionSession.sidePanelPage, {
+      version: 1,
+      requestId: 'cancelled_run_e2e_snapshot',
+      type: 'panel.getSnapshot',
+      payload: { tabId, conversationId: first.task.conversationId },
+    });
+    expect(snapshot.task?.runs.map(({ status }) => status)).toEqual(['cancelled', 'completed']);
+    expect(snapshot.messages.map(({ role, text }) => ({ role, text }))).toEqual([
+      { role: 'user', text: firstQuestion },
+      { role: 'user', text: secondQuestion },
+      { role: 'assistant', text: finalAnswer },
+    ]);
+
+    await extensionSession.sidePanelPage.reload();
+    const articles = extensionSession.sidePanelPage.locator('article.message-item');
+    await expect(articles).toHaveCount(4);
+    await expect(articles.nth(0)).toContainText(firstQuestion);
+    await expect(articles.nth(1)).toContainText(
+      'The task was cancelled before a reply was generated.',
+    );
+    await expect(articles.nth(1)).toContainText('Task cancelled');
+    await expect(articles.nth(2)).toContainText(secondQuestion);
+    await expect(articles.nth(3)).toContainText(finalAnswer);
+    await expect(articles.nth(3)).toContainText('Task completed');
   },
 );

@@ -36,6 +36,8 @@ export interface PanelMessageReplyReference {
 export interface PanelMessage {
   readonly id: string;
   readonly taskId: string;
+  /** Owning execution attempt, projected from the permanent message event. */
+  readonly runId?: string | undefined;
   readonly role: 'user' | 'assistant' | 'system';
   readonly status: 'complete' | 'streaming' | 'interrupted' | 'error';
   readonly text: string;
@@ -87,8 +89,28 @@ export interface PanelTaskSupplement {
   readonly detailIndex: number;
 }
 
+export interface PanelTaskError {
+  readonly code: string;
+  readonly retryable: boolean;
+  readonly userMessage: string;
+}
+
+/** Permanent lifecycle state for one execution attempt of a logical task. */
+export interface PanelTaskRun {
+  readonly id: string;
+  readonly attempt: number;
+  readonly status: PanelTaskStatus;
+  readonly startedAt: number;
+  readonly endedAt: number | null;
+  readonly lastError: PanelTaskError | null;
+}
+
 export interface PanelTask {
   readonly id: string;
+  /** Latest execution attempt; used to attach live state to only that attempt's answer. */
+  readonly latestRunId: string | null;
+  /** Every attempt is retained so earlier failed or cancelled answers keep their own status. */
+  readonly runs: readonly PanelTaskRun[];
   /** Summary projections are lightweight; full projections are loaded only after expansion. */
   readonly detailLevel: 'summary' | 'full';
   readonly status: PanelTaskStatus;
@@ -103,11 +125,7 @@ export interface PanelTask {
   readonly detailItemCount: number;
   /** True after the cancelled task continuation was explicitly discarded. */
   readonly contextCleared: boolean;
-  readonly lastError: {
-    readonly code: string;
-    readonly retryable: boolean;
-    readonly userMessage: string;
-  } | null;
+  readonly lastError: PanelTaskError | null;
   readonly events: readonly PanelTaskEvent[];
   readonly toolResults: readonly PanelToolResult[];
   readonly supplements: readonly PanelTaskSupplement[];

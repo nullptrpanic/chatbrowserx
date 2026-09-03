@@ -53,7 +53,7 @@ export class AgentFacade implements Agent {
       input.kind === 'create'
         ? await this.#dependencies.submissions.createSubmission(input.submission)
         : await this.#dependencies.submissions.continueSubmission(input.submission);
-    this.#dependencies.coordinator.schedule(snapshot.task.id);
+    this.#dependencies.coordinator.schedule(snapshot.task.id, snapshot.run.id);
     return snapshot;
   }
 

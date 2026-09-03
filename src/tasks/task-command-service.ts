@@ -11,8 +11,6 @@ import type { Conversation } from './conversation-types';
 import type { ContinuationItem, PendingToolCall } from './continuation-types';
 import type { MessageRecord, TaskMessageDraft } from './message-types';
 import { createTaskRecords, createTaskRun, type CreateTaskInput } from './task-factory';
-import { retainTaskReply } from './task-reply-retention';
-import { orderTaskMessagesByEvent } from './task-message-order';
 import { transitionTask, type TaskTransitionType } from './task-transition';
 import type { Task, TaskEvent, TaskRun } from './task-types';
 import type { MaterializedToolResult } from './tool-result-types';
@@ -107,13 +105,13 @@ export class TaskCommandService implements TaskCommandPort, TaskSubmissionPort {
   readonly #repository: TaskRepository;
   readonly #clock: Clock;
   readonly #ids: IdGenerator;
-  readonly #conversations: Pick<ConversationRepository, 'listMessages'>;
+  readonly #conversations: Pick<ConversationRepository, 'listMessages' | 'updateMessage'>;
 
   constructor(
     repository: TaskRepository,
     clock: Clock,
     ids: IdGenerator,
-    conversations: Pick<ConversationRepository, 'listMessages'>,
+    conversations: Pick<ConversationRepository, 'listMessages' | 'updateMessage'>,
   ) {
     this.#repository = repository;
     this.#clock = clock;
@@ -262,6 +260,7 @@ export class TaskCommandService implements TaskCommandPort, TaskSubmissionPort {
     const sourceCheckpoint = this.#requiredCheckpoint(source);
     const userMessageId = this.#readMessageId(input.userMessageId);
     const messages = await this.#conversations.listMessages(source.task.conversationId);
+    await this.#interruptRunReplies(source, messages);
     let continuationItems = [...sourceCheckpoint.continuationItems];
     const pendingSupplements = selectPendingTaskSupplements(
       messages,
@@ -418,6 +417,7 @@ export class TaskCommandService implements TaskCommandPort, TaskSubmissionPort {
   }
 
   async #startRun(snapshot: TaskSnapshot, reason: string): Promise<TaskSnapshot> {
+    await this.#interruptRunReplies(snapshot);
     const previousCheckpoint = this.#requiredCheckpoint(snapshot);
     const run = createTaskRun(snapshot.task, snapshot.run.attempt + 1, {
       clock: this.#clock,
@@ -469,44 +469,43 @@ export class TaskCommandService implements TaskCommandPort, TaskSubmissionPort {
   async cancel(taskId: TaskId): Promise<TaskSnapshot> {
     const snapshot = await this.getSnapshot(taskId);
     if (['completed', 'failed'].includes(snapshot.task.status)) return snapshot;
-    let cancelled = snapshot;
-    if (snapshot.task.status !== 'cancelled') {
-      const checkpoint = this.#requiredCheckpoint(snapshot);
-      const messages = await this.#conversations.listMessages(snapshot.task.conversationId);
-      const reply = orderTaskMessagesByEvent(
-        messages,
-        snapshot.events,
-        snapshot.task.id,
-        'conversation',
-      ).findLast(
-        (message) =>
-          message.kind === 'conversation' &&
-          message.role === 'assistant' &&
-          (message.status === 'complete' || message.status === 'interrupted') &&
-          message.text.length > 0,
-      );
-      const continuationItems =
-        reply === undefined ||
-        checkpoint.continuationItems.some(
-          (item) => item.type === 'message_ref' && item.messageId === reply.id,
+    if (snapshot.task.status === 'cancelled') return snapshot;
+    const cancelled = await this.#saveStatusTransition(snapshot, 'task.cancelled', 'user_cancel');
+    await this.#interruptRunReplies(cancelled);
+    return cancelled;
+  }
+
+  /** Marks only this attempt's unfinished draft as non-historical conversation output. */
+  async #interruptRunReplies(
+    snapshot: TaskSnapshot,
+    suppliedMessages?: readonly MessageRecord[],
+  ): Promise<void> {
+    const runMessageIds = new Set(
+      snapshot.events.flatMap((event) =>
+        event.runId === snapshot.run.id && event.type === 'message.recorded'
+          ? [event.messageId]
+          : [],
+      ),
+    );
+    const messages =
+      suppliedMessages ?? (await this.#conversations.listMessages(snapshot.task.conversationId));
+    await Promise.all(
+      messages
+        .filter(
+          (message) =>
+            runMessageIds.has(message.id) &&
+            message.kind === 'conversation' &&
+            message.role === 'assistant' &&
+            (message.status === 'streaming' || message.status === 'complete'),
         )
-          ? checkpoint.continuationItems
-          : insertBeforePendingToolCall(checkpoint.continuationItems, checkpoint.pendingToolCall, [
-              { type: 'message_ref', messageId: reply.id },
-            ]);
-      cancelled = await this.#saveStatusTransition(
-        snapshot,
-        'task.cancelled',
-        'user_cancel',
-        continuationItems,
-      );
-    }
-    await retainTaskReply(cancelled.task, 'interrupted', {
-      conversations: this.#conversations,
-      repository: this.#repository,
-      ids: this.#ids,
-    });
-    return this.getSnapshot(cancelled.task.id);
+        .map((message) =>
+          this.#conversations.updateMessage({
+            ...message,
+            status: 'interrupted',
+            updatedAt: Math.max(message.updatedAt, snapshot.task.updatedAt),
+          }),
+        ),
+    );
   }
 
   async clearContext(taskId: TaskId): Promise<TaskSnapshot> {

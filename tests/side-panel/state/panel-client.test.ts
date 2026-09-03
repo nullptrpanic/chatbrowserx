@@ -14,6 +14,8 @@ import { parsePanelSettings, parsePanelSnapshot } from '../../../src/side-panel/
 function snapshot(sequence = 1): PanelSnapshot {
   const task = {
     id: 'task_1',
+    latestRunId: null,
+    runs: [],
     detailLevel: 'summary' as const,
     status: 'planning' as const,
     goal: 'Task',

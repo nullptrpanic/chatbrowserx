@@ -53,7 +53,7 @@ export const zhCN = {
   cancelReply: '取消回复',
   replyImageCount: '{count} 张图片',
   streaming: '正在生成',
-  interrupted: '本次输出已中断，可点击继续重新请求',
+  interrupted: '本次输出已中断；下一次提交将在当前任务中继续。',
   failedResponse: '任务执行失败，未生成回复。',
   cancelledResponse: '任务已取消，未生成回复。',
   taskDetails: '查看执行详情',

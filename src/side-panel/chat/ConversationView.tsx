@@ -5,6 +5,7 @@ import type {
   PanelMessage,
   PanelMessageSourcePage,
   PanelTask,
+  PanelTaskRun,
 } from '../../shared/protocol/panel-types';
 import type { AttachmentDraftClient } from './use-image-draft';
 import { MessageItem } from './MessageItem';
@@ -50,10 +51,39 @@ export function ConversationView({
   const [following, setFollowing] = useState(true);
   const contentVersion = conversationContentVersion(messages, tasks, task);
   const tasksById = new Map(tasks.map((item) => [item.id, item]));
+  const displayMessages = messagesWithTerminalRunReplies(messages, tasks);
+  const runsById = new Map(
+    tasks.flatMap((item) => item.runs.map((run) => [taskRunKey(item.id, run.id), run] as const)),
+  );
+  const answerHostByRun = new Map<string, string>();
+  for (const message of displayMessages) {
+    const run =
+      message.runId === undefined
+        ? null
+        : (runsById.get(taskRunKey(message.taskId, message.runId)) ?? null);
+    if (canHostTaskDetails(message, tasksById.get(message.taskId) ?? null, run)) {
+      answerHostByRun.set(messageRunKey(message), message.id);
+    }
+  }
+  const visibleAssistantMessageIds = new Set(answerHostByRun.values());
   const taskHostMessageIds = new Map<string, string>();
-  for (const message of messages) {
+  for (const message of displayMessages) {
     const messageTask = tasksById.get(message.taskId) ?? null;
-    if (canHostTaskDetails(message, messageTask)) {
+    const belongsToLatestRun =
+      messageTask === null ||
+      messageTask.latestRunId === null ||
+      message.runId === messageTask.latestRunId;
+    if (
+      belongsToLatestRun &&
+      visibleAssistantMessageIds.has(message.id) &&
+      canHostTaskDetails(
+        message,
+        messageTask,
+        message.runId === undefined
+          ? null
+          : (runsById.get(taskRunKey(message.taskId, message.runId)) ?? null),
+      )
+    ) {
       taskHostMessageIds.set(message.taskId, message.id);
     }
   }
@@ -64,7 +94,7 @@ export function ConversationView({
     if (following && element !== null) element.scrollTop = element.scrollHeight;
   }, [contentVersion, following]);
 
-  const empty = messages.length === 0 && task === null;
+  const empty = displayMessages.length === 0 && task === null;
   return (
     <div
       className="conversation-scroller"
@@ -95,22 +125,24 @@ export function ConversationView({
         </section>
       ) : (
         <div className="message-list">
-          {messages.map((message) => {
-            if (
-              message.role === 'assistant' &&
-              taskHostMessageIds.get(message.taskId) !== message.id
-            ) {
+          {displayMessages.map((message) => {
+            if (message.role === 'assistant' && !visibleAssistantMessageIds.has(message.id)) {
               return null;
             }
             const messageTask =
               taskHostMessageIds.get(message.taskId) === message.id
                 ? (tasksById.get(message.taskId) ?? null)
                 : null;
+            const messageRun =
+              message.runId === undefined
+                ? null
+                : (runsById.get(taskRunKey(message.taskId, message.runId)) ?? null);
             return (
               <MessageItem
                 key={message.id}
                 message={message}
                 task={messageTask}
+                run={messageRun}
                 taskInteractive={messageTask?.id === task?.id}
                 attachments={attachments}
                 t={t}
@@ -158,6 +190,73 @@ export function ConversationView({
   );
 }
 
+/** Groups legacy messages by Task and new messages by their permanent execution attempt. */
+function messageRunKey(message: PanelMessage): string {
+  return taskRunKey(message.taskId, message.runId ?? 'legacy');
+}
+
+function taskRunKey(taskId: string, runId: string): string {
+  return `${taskId}\u0000${runId}`;
+}
+
+/** Derives an empty answer from terminal Run facts when no assistant text was persisted. */
+function messagesWithTerminalRunReplies(
+  messages: readonly PanelMessage[],
+  tasks: readonly PanelTask[],
+): readonly PanelMessage[] {
+  const assistantRuns = new Set(
+    messages.flatMap((message) =>
+      message.role === 'assistant' && message.runId !== undefined
+        ? [taskRunKey(message.taskId, message.runId)]
+        : [],
+    ),
+  );
+  const taskPosition = new Map(tasks.map((task, index) => [task.id, index]));
+  const runPosition = new Map(
+    tasks.flatMap((task) =>
+      task.runs.map((run) => [taskRunKey(task.id, run.id), run.attempt] as const),
+    ),
+  );
+  const derived = tasks.flatMap((task) =>
+    task.runs.flatMap((run): PanelMessage[] => {
+      if (
+        (run.status !== 'failed' && run.status !== 'cancelled') ||
+        assistantRuns.has(taskRunKey(task.id, run.id))
+      ) {
+        return [];
+      }
+      const at = run.endedAt ?? run.startedAt;
+      return [
+        {
+          id: `terminal-reply:${run.id}`,
+          taskId: task.id,
+          runId: run.id,
+          role: 'assistant',
+          status: run.status === 'failed' ? 'error' : 'interrupted',
+          text: '',
+          attachmentIds: [],
+          createdAt: at,
+          updatedAt: at,
+        },
+      ];
+    }),
+  );
+  if (derived.length === 0) return messages;
+
+  return [...messages, ...derived].sort((left, right) => {
+    const timeOrder = left.createdAt - right.createdAt;
+    if (timeOrder !== 0) return timeOrder;
+    const taskOrder =
+      (taskPosition.get(left.taskId) ?? Number.MAX_SAFE_INTEGER) -
+      (taskPosition.get(right.taskId) ?? Number.MAX_SAFE_INTEGER);
+    if (taskOrder !== 0) return taskOrder;
+    return (
+      (runPosition.get(messageRunKey(left)) ?? Number.MAX_SAFE_INTEGER) -
+      (runPosition.get(messageRunKey(right)) ?? Number.MAX_SAFE_INTEGER)
+    );
+  });
+}
+
 /** Tracks only visible content changes so identity-only polling cannot disturb scrolling. */
 function conversationContentVersion(
   messages: readonly PanelMessage[],
@@ -182,6 +281,7 @@ function conversationContentVersion(
         item.id,
         item.sequence,
         item.status,
+        item.runs.map((run) => `${run.id}:${run.status}`).join(','),
         item.detailLevel,
         item.toolResults.length,
         item.supplements.length,
@@ -196,14 +296,21 @@ function conversationContentVersion(
 }
 
 /** Prevents an invisible interrupted placeholder from swallowing its task's fallback card. */
-function canHostTaskDetails(message: PanelMessage, task: PanelTask | null): boolean {
+function canHostTaskDetails(
+  message: PanelMessage,
+  task: PanelTask | null,
+  run: PanelTaskRun | null,
+): boolean {
   return (
     message.role === 'assistant' &&
     !(
       message.status === 'interrupted' &&
       message.text.length === 0 &&
       message.attachmentIds.length === 0 &&
-      task?.status !== 'cancelled'
+      task?.status !== 'cancelled' &&
+      run?.status !== 'cancelled' &&
+      task?.status !== 'failed' &&
+      run?.status !== 'failed'
     )
   );
 }

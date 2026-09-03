@@ -263,29 +263,70 @@ describe('TaskCommandService', () => {
     fixture.database.close();
   });
 
-  it('retains a durable assistant bubble and returns its latest event after cancellation', async () => {
+  it('records cancellation without persisting a synthetic assistant message', async () => {
     const fixture = await setup('command-cancel-retention');
     const created = await createSubmission(fixture);
     const cancelled = await fixture.commands.cancel(created.task.id);
 
     expect(cancelled).toMatchObject({
-      task: { status: 'cancelled', lastEventSequence: 4 },
+      task: { status: 'cancelled', lastEventSequence: 3 },
       run: { status: 'cancelled' },
       events: [
         { sequence: 1, type: 'message.recorded' },
         { sequence: 2, type: 'status.changed' },
         { sequence: 3, type: 'status.changed', taskStatus: 'cancelled' },
-        { sequence: 4, type: 'message.recorded' },
       ],
     });
-    expect(await fixture.conversations.listMessages(created.task.conversationId)).toContainEqual(
-      expect.objectContaining({
+    expect(await fixture.conversations.listMessages(created.task.conversationId)).toEqual([
+      expect.objectContaining({ id: 'message_user', role: 'user' }),
+    ]);
+    fixture.database.close();
+  });
+
+  it('does not promote a cancelled partial reply into the next run checkpoint', async () => {
+    const fixture = await setup('command-cancel-partial-checkpoint');
+    const created = await createSubmission(fixture);
+    const partialAt = fixture.clock.now();
+    await fixture.repository.appendTaskMessage({
+      eventId: fixture.ids.create('event'),
+      at: partialAt,
+      message: {
+        id: 'message_partial',
+        kind: 'conversation',
+        conversationId: created.task.conversationId,
         taskId: created.task.id,
         role: 'assistant',
+        status: 'complete',
+        text: 'Incomplete draft',
+        attachmentIds: [],
+        createdAt: partialAt,
+        updatedAt: partialAt,
+      },
+    });
+
+    const cancelled = await fixture.commands.cancel(created.task.id);
+    const nextMessage = userMessage(created.task.conversationId, 'message_after_partial');
+    const continued = await fixture.commands.continueSubmission({
+      sourceTaskId: created.task.id,
+      tabId: 7,
+      conversation: conversation(created.task.conversationId),
+      message: nextMessage,
+    });
+
+    expect(cancelled.checkpoint?.continuationItems).toEqual([
+      { type: 'message_ref', messageId: 'message_user' },
+    ]);
+    expect(await fixture.conversations.listMessages(created.task.conversationId)).toContainEqual(
+      expect.objectContaining({
+        id: 'message_partial',
         status: 'interrupted',
-        text: '',
+        text: 'Incomplete draft',
       }),
     );
+    expect(continued.checkpoint?.continuationItems).toEqual([
+      { type: 'message_ref', messageId: 'message_user' },
+      { type: 'message_ref', messageId: nextMessage.id },
+    ]);
     fixture.database.close();
   });
 

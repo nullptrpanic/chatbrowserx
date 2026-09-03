@@ -5,8 +5,9 @@ import type {
   PanelMessage,
   PanelMessageSourcePage,
   PanelTask,
+  PanelTaskRun,
 } from '../../shared/protocol/panel-types';
-import { TaskProgressCard } from '../tasks/TaskProgressCard';
+import { TaskProgressCard, TaskRunStatusCard } from '../tasks/TaskProgressCard';
 import type { AttachmentDraftClient } from './use-image-draft';
 import { copyMessageToClipboard } from './copy-message';
 import { MessageImages } from './MessageImages';
@@ -17,6 +18,7 @@ export interface MessageItemProps {
   readonly attachments: AttachmentDraftClient;
   readonly t: Translator;
   readonly task?: PanelTask | null;
+  readonly run?: PanelTaskRun | null;
   readonly taskInteractive?: boolean;
   readonly onOpenImagePreview?: ((attachmentId: string) => Promise<boolean>) | undefined;
   readonly onOpenSourcePage?: ((source: PanelMessageSourcePage) => Promise<void>) | undefined;
@@ -35,6 +37,7 @@ export function MessageItem({
   attachments,
   t,
   task = null,
+  run = null,
   taskInteractive = false,
   onOpenImagePreview,
   onOpenSourcePage,
@@ -51,14 +54,17 @@ export function MessageItem({
   const [confirmingContextClear, setConfirmingContextClear] = useState(false);
   const [clearingContext, setClearingContext] = useState(false);
   const sourcePage = message.role === 'user' ? message.sourcePage : undefined;
+  const cancelledRun = task?.status === 'cancelled' || run?.status === 'cancelled';
+  const failedRun = task?.status === 'failed' || run?.status === 'failed';
+  const terminalRun =
+    run !== null &&
+    (run.status === 'failed' || run.status === 'cancelled' || run.status === 'completed');
   const displayedText =
     message.text.length > 0
       ? message.text
-      : message.role === 'assistant' && message.status === 'error'
+      : message.role === 'assistant' && (message.status === 'error' || failedRun)
         ? t('failedResponse')
-        : message.role === 'assistant' &&
-            message.status === 'interrupted' &&
-            task?.status === 'cancelled'
+        : message.role === 'assistant' && message.status === 'interrupted' && cancelledRun
           ? t('cancelledResponse')
           : '';
   const canClearTaskContext =
@@ -73,7 +79,8 @@ export function MessageItem({
     message.status === 'interrupted' &&
     message.text.length === 0 &&
     message.attachmentIds.length === 0 &&
-    task?.status !== 'cancelled'
+    !cancelledRun &&
+    !failedRun
   ) {
     return null;
   }
@@ -146,7 +153,7 @@ export function MessageItem({
             {t('streaming')}
           </span>
         ) : null}
-        {message.status === 'interrupted' && task?.status !== 'cancelled' ? (
+        {message.status === 'interrupted' && !cancelledRun && !terminalRun ? (
           <p className="interrupted-label">{t('interrupted')}</p>
         ) : null}
         {displayedText.length > 0 ||
@@ -217,7 +224,7 @@ export function MessageItem({
             </div>
           </div>
         ) : null}
-        {task === null ? null : (
+        {task !== null ? (
           <TaskProgressCard
             task={task}
             attachments={attachments}
@@ -231,6 +238,8 @@ export function MessageItem({
             onRetry={onRetry}
             onCancel={onCancel}
           />
+        ) : run === null || message.role !== 'assistant' ? null : (
+          <TaskRunStatusCard run={run} t={t} />
         )}
       </div>
     </article>

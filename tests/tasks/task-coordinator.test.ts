@@ -12,7 +12,7 @@ function buildFixture() {
         signal.addEventListener('abort', () => resolve(), { once: true });
       }),
   );
-  const snapshot = { task: { id: 'task_1' } } as TaskSnapshot;
+  const snapshot = { task: { id: 'task_1' }, run: { id: 'run_1' } } as TaskSnapshot;
   const commands = {
     pause: vi.fn(async () => snapshot),
     resume: vi.fn(async () => snapshot),
@@ -126,7 +126,9 @@ describe('TaskCoordinator', () => {
     const fixture = buildFixture();
 
     await expect(fixture.coordinator.retry('task_1')).resolves.toEqual(fixture.snapshot);
-    await vi.waitFor(() => expect(fixture.run).toHaveBeenCalledWith('task_1', expect.anything()));
+    await vi.waitFor(() =>
+      expect(fixture.run).toHaveBeenCalledWith('task_1', expect.anything(), 'run_1'),
+    );
     expect(fixture.commands.retry).toHaveBeenCalledWith('task_1');
     fixture.resolve();
   });
@@ -146,9 +148,56 @@ describe('TaskCoordinator', () => {
       onExecutionError,
     });
 
-    coordinator.schedule('task_1');
+    coordinator.schedule('task_1', 'run_1');
 
     await vi.waitFor(() => expect(onExecutionError).toHaveBeenCalledWith('task_1', error));
+  });
+
+  it('deduplicates repeated wake-ups for the same persisted run', async () => {
+    const fixture = buildFixture();
+
+    fixture.coordinator.schedule('task_1', 'run_1');
+    fixture.coordinator.schedule('task_1', 'run_1');
+
+    await vi.waitFor(() => expect(fixture.run).toHaveBeenCalledTimes(1));
+    expect(fixture.run).toHaveBeenCalledWith('task_1', expect.any(AbortSignal), 'run_1');
+    fixture.resolve();
+    await fixture.coordinator.dispose();
+    expect(fixture.run).toHaveBeenCalledTimes(1);
+  });
+
+  it('waits for the current run before starting a newly persisted run of the same task', async () => {
+    const finishes = new Map<string, () => void>();
+    const run = vi.fn(
+      (taskId: string) =>
+        new Promise<void>((resolve) => {
+          finishes.set(taskId, resolve);
+        }),
+    );
+    const onExecutionError = vi.fn();
+    const commands = {
+      pause: vi.fn(),
+      resume: vi.fn(),
+      retry: vi.fn(),
+      cancel: vi.fn(),
+    };
+    const coordinator = new TaskCoordinator({
+      executor: { run },
+      commands,
+      onExecutionError,
+    });
+    coordinator.schedule('task_1', 'run_1');
+    await vi.waitFor(() => expect(run).toHaveBeenCalledTimes(1));
+    coordinator.schedule('task_1', 'run_2');
+    expect(run).toHaveBeenCalledTimes(1);
+
+    finishes.get('task_1')?.();
+    await vi.waitFor(() => expect(run).toHaveBeenCalledTimes(2));
+    expect(run.mock.calls[1]).toEqual(['task_1', expect.any(AbortSignal), 'run_2']);
+    expect(onExecutionError).not.toHaveBeenCalled();
+
+    finishes.get('task_1')?.();
+    await coordinator.dispose();
   });
 
   it('aborts and joins active execution when disposed', async () => {

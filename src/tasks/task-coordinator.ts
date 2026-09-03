@@ -1,8 +1,8 @@
-import type { TaskId } from '../shared/ids';
+import type { TaskId, TaskRunId } from '../shared/ids';
 import { TaskCommandError, type TaskSnapshot } from './task-command-service';
 
 export interface CoordinatedTaskExecutor {
-  run(taskId: TaskId, signal: AbortSignal): Promise<unknown>;
+  run(taskId: TaskId, signal: AbortSignal, expectedRunId?: TaskRunId): Promise<unknown>;
 }
 
 export interface CoordinatedTaskCommands {
@@ -22,11 +22,14 @@ export interface TaskCoordinatorDependencies {
 interface ActiveTask {
   readonly controller: AbortController;
   readonly completion: Promise<void>;
+  readonly runId?: TaskRunId | undefined;
 }
 
 export class TaskCoordinator {
   readonly #dependencies: TaskCoordinatorDependencies;
   readonly #active = new Map<TaskId, ActiveTask>();
+  readonly #scheduled = new Set<string>();
+  #scheduleTail: Promise<void> = Promise.resolve();
   #disposed = false;
 
   /** Creates a per-task scheduler that owns abort signals but no durable task state. */
@@ -35,7 +38,7 @@ export class TaskCoordinator {
   }
 
   /** Starts one task once and returns the same completion while it remains active. */
-  start(taskId: TaskId): Promise<void> {
+  start(taskId: TaskId, runId?: TaskRunId): Promise<void> {
     if (this.#disposed) {
       return Promise.reject(new TaskCommandError('TASK_STATE_INVALID', '任务执行器已关闭'));
     }
@@ -46,13 +49,17 @@ export class TaskCoordinator {
     }
 
     const controller = new AbortController();
-    const execution = this.#dependencies.executor.run(taskId, controller.signal);
+    const execution = this.#dependencies.executor.run(taskId, controller.signal, runId);
     const completion = execution
       .then(() => undefined)
       .finally(() => {
         if (this.#active.get(taskId)?.completion === completion) this.#active.delete(taskId);
       });
-    this.#active.set(taskId, { controller, completion });
+    this.#active.set(taskId, {
+      controller,
+      completion,
+      ...(runId === undefined ? {} : { runId }),
+    });
     return completion;
   }
 
@@ -68,7 +75,7 @@ export class TaskCoordinator {
     this.#assertAvailable(taskId);
     await this.#stop(taskId);
     const snapshot = await this.#dependencies.commands.resume(taskId);
-    this.schedule(taskId);
+    this.schedule(taskId, snapshot.run.id);
     return snapshot;
   }
 
@@ -78,7 +85,7 @@ export class TaskCoordinator {
     this.#assertAvailable(taskId);
     await this.#stop(taskId);
     const snapshot = await this.#dependencies.commands.retry(taskId);
-    this.schedule(taskId);
+    this.schedule(taskId, snapshot.run.id);
     return snapshot;
   }
 
@@ -89,10 +96,17 @@ export class TaskCoordinator {
   }
 
   /** Starts one detached run and reports terminal scheduler failure through a safe boundary. */
-  schedule(taskId: TaskId): void {
-    void this.start(taskId).catch((error: unknown) => {
-      this.#dependencies.onExecutionError?.(taskId, error);
-    });
+  schedule(taskId: TaskId, runId: TaskRunId): void {
+    const scheduleKey = `${taskId}\u0000${runId}`;
+    if (this.#scheduled.has(scheduleKey)) return;
+    this.#scheduled.add(scheduleKey);
+    const scheduled = this.#scheduleTail.then(() => this.#runScheduled(taskId, runId));
+    this.#scheduleTail = scheduled.catch(() => undefined);
+    void scheduled
+      .catch((error: unknown) => {
+        this.#dependencies.onExecutionError?.(taskId, error);
+      })
+      .finally(() => this.#scheduled.delete(scheduleKey));
   }
 
   /** Prevents new work, aborts every active runner, and waits for all executions to settle. */
@@ -127,6 +141,23 @@ export class TaskCoordinator {
       ]);
     } finally {
       if (timer !== undefined) globalThis.clearTimeout(timer);
+    }
+  }
+
+  /** Serializes detached starts so a just-finished runner cannot strand a persisted task. */
+  async #runScheduled(taskId: TaskId, runId: TaskRunId): Promise<void> {
+    while (!this.#disposed) {
+      const activeTask = this.#active.values().next().value as ActiveTask | undefined;
+      if (activeTask !== undefined) {
+        if (activeTask.runId === runId) {
+          await activeTask.completion;
+          return;
+        }
+        await activeTask.completion.catch(() => undefined);
+        continue;
+      }
+      await this.start(taskId, runId);
+      return;
     }
   }
 
