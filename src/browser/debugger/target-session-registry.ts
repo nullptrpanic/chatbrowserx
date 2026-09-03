@@ -262,6 +262,9 @@ export class TargetSessionRegistry {
   async #configureSession(session: DebuggerSession): Promise<void> {
     await this.#transport.send(session, 'Target.setAutoAttach', AUTO_ATTACH_PARAMETERS);
     for (const method of ENABLED_DOMAINS) await this.#transport.send(session, method);
+    await this.#transport
+      .send(session, 'Emulation.setFocusEmulationEnabled', { enabled: true })
+      .catch(() => undefined);
   }
 
   async #handleEvent(

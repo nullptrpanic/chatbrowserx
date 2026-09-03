@@ -69,6 +69,11 @@ describe('TargetSessionRegistry', () => {
     for (const method of ['Page.enable', 'DOM.enable', 'Accessibility.enable', 'Runtime.enable']) {
       expect(debuggerTransport.send).toHaveBeenCalledWith({ tabId: 7 }, method);
     }
+    expect(debuggerTransport.send).toHaveBeenCalledWith(
+      { tabId: 7 },
+      'Emulation.setFocusEmulationEnabled',
+      { enabled: true },
+    );
   });
 
   it('registers and recursively configures nested OOPIF sessions', async () => {
@@ -94,6 +99,13 @@ describe('TargetSessionRegistry', () => {
         { tabId: 7, sessionId: 'session_nested' },
         'Target.setAutoAttach',
         AUTO_ATTACH,
+      ),
+    );
+    await vi.waitFor(() =>
+      expect(debuggerTransport.send).toHaveBeenCalledWith(
+        { tabId: 7, sessionId: 'session_nested' },
+        'Emulation.setFocusEmulationEnabled',
+        { enabled: true },
       ),
     );
     const snapshot = await registry.ensure(7, new AbortController().signal);
@@ -145,6 +157,29 @@ describe('TargetSessionRegistry', () => {
     const snapshot = await ensuring;
     expect(childConfigured).toBe(true);
     expect(snapshot.children.has('target_child')).toBe(true);
+  });
+
+  it('keeps the session usable when focus emulation is unsupported', async () => {
+    const debuggerTransport = transport();
+    vi.mocked(debuggerTransport.send).mockImplementation(async (_session, method) => {
+      if (method === 'Emulation.setFocusEmulationEnabled') {
+        throw new Error('Method not found');
+      }
+      return {};
+    });
+    const registry = new TargetSessionRegistry(debuggerTransport);
+
+    await expect(registry.ensure(7, new AbortController().signal)).resolves.toMatchObject({
+      tabId: 7,
+      root: { tabId: 7 },
+    });
+    expect(debuggerTransport.send).toHaveBeenCalledWith(
+      { tabId: 7 },
+      'Emulation.setFocusEmulationEnabled',
+      { enabled: true },
+    );
+    expect(debuggerTransport.attach).toHaveBeenCalledOnce();
+    expect(debuggerTransport.detach).not.toHaveBeenCalled();
   });
 
   it('invalidates child and root state without affecting another tab', async () => {
