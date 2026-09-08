@@ -98,7 +98,7 @@ describe('PanelClient', () => {
           };
         },
       },
-      { getActiveTab: vi.fn(async () => ({ id: 7 })) },
+      { getActiveTab: vi.fn(async () => snapshot().tab) },
       { pollIntervalMs: 60_000 },
     );
     await client.connect();
@@ -135,7 +135,7 @@ describe('PanelClient', () => {
     }));
     const client = new PanelClient(
       { send },
-      { getActiveTab: vi.fn(async () => ({ id: 7 })) },
+      { getActiveTab: vi.fn(async () => snapshot().tab) },
       { pollIntervalMs: 250 },
     );
     await client.connect();
@@ -152,6 +152,64 @@ describe('PanelClient', () => {
       send.mock.calls.filter(([message]) => message.type === 'sandbox.getConsole'),
     ).toHaveLength(2);
     client.dispose();
+  });
+
+  it.each([
+    { name: 'same-tab navigation', change: { url: 'https://example.com/next' } },
+    { name: 'a title-only update', change: { title: 'Updated document' } },
+    { name: 'an active-tab switch', change: { id: 9 } },
+    {
+      name: 'metadata exceeding the snapshot limits',
+      change: {
+        title: 'T'.repeat(501),
+        url: `https://example.com/${'x'.repeat(4_096)}`,
+      },
+      visible: {
+        title: 'T'.repeat(500),
+        url: `https://example.com/${'x'.repeat(4_076)}`,
+      },
+    },
+  ])('refreshes once on polling after $name without a task version change', async (testCase) => {
+    vi.useFakeTimers();
+    let current = snapshot();
+    let browserTab = current.tab;
+    vi.stubGlobal('chrome', { tabs: { query: vi.fn(async () => [browserTab]) } });
+    const send = vi.fn<RuntimePort['send']>(async (message) => ({
+      version: 1,
+      requestId: message.requestId,
+      ok: true,
+      data:
+        message.type === 'panel.getSnapshot'
+          ? current
+          : message.type === 'panel.getStateVersion'
+            ? { stateVersion: 1 }
+            : {},
+    }));
+    const client = new PanelClient({ send }, createChromePanelEnvironment());
+    try {
+      await client.connect();
+      browserTab = { ...browserTab, ...testCase.change };
+      const visible = testCase.visible ?? testCase.change;
+      current = { ...current, tab: { ...current.tab, ...visible } };
+
+      await vi.advanceTimersByTimeAsync(5_000);
+
+      expect(client.getSnapshot().snapshot).toMatchObject({
+        stateVersion: 1,
+        tab: visible,
+        conversation: { id: 'conversation_1' },
+        task: { id: 'task_1', tabId: 7 },
+      });
+      await vi.advanceTimersByTimeAsync(10_000);
+      expect(
+        send.mock.calls.filter(([message]) => message.type === 'panel.getSnapshot'),
+      ).toHaveLength(2);
+      expect(
+        send.mock.calls.filter(([message]) => message.type === 'panel.getStateVersion'),
+      ).toHaveLength(2);
+    } finally {
+      client.dispose();
+    }
   });
 
   it('renders the panel before a non-blocking Sandbox console probe completes', async () => {
@@ -173,7 +231,7 @@ describe('PanelClient', () => {
     const openSandboxConsole = vi.fn(async () => undefined);
     const client = new PanelClient(
       { send },
-      { getActiveTab: vi.fn(async () => ({ id: 7 })), openSandboxConsole },
+      { getActiveTab: vi.fn(async () => snapshot().tab), openSandboxConsole },
       { pollIntervalMs: 60_000 },
     );
 
@@ -222,7 +280,7 @@ describe('PanelClient', () => {
     );
     const client = new PanelClient(
       { send },
-      { getActiveTab: vi.fn(async () => ({ id: 7 })) },
+      { getActiveTab: vi.fn(async () => snapshot().tab) },
       { pollIntervalMs: 60_000 },
     );
 
@@ -247,7 +305,7 @@ describe('PanelClient', () => {
     }));
     const client = new PanelClient(
       { send },
-      { getActiveTab: vi.fn(async () => ({ id: 7 })) },
+      { getActiveTab: vi.fn(async () => snapshot().tab) },
       { pollIntervalMs: 60_000 },
     );
     await client.connect();
@@ -414,7 +472,7 @@ describe('PanelClient', () => {
     const client = new PanelClient(
       { send },
       {
-        getActiveTab: vi.fn(async () => ({ id: 7 })),
+        getActiveTab: vi.fn(async () => snapshot().tab),
       },
       { pollIntervalMs: 60_000 },
     );
@@ -442,7 +500,7 @@ describe('PanelClient', () => {
     const client = new PanelClient(
       runtime,
       {
-        getActiveTab: vi.fn(async () => ({ id: 7 })),
+        getActiveTab: vi.fn(async () => snapshot().tab),
       },
       { pollIntervalMs: 60_000 },
     );
@@ -500,7 +558,7 @@ describe('PanelClient', () => {
     }));
     const client = new PanelClient(
       { send },
-      { getActiveTab: vi.fn(async () => ({ id: 7 })) },
+      { getActiveTab: vi.fn(async () => snapshot().tab) },
       { pollIntervalMs: 60_000 },
     );
     await client.connect();
@@ -565,7 +623,7 @@ describe('PanelClient', () => {
     }));
     const client = new PanelClient(
       { send },
-      { getActiveTab: vi.fn(async () => ({ id: 7 })) },
+      { getActiveTab: vi.fn(async () => snapshot().tab) },
       { pollIntervalMs: 60_000 },
     );
     await client.connect();
@@ -667,7 +725,7 @@ describe('PanelClient', () => {
     });
     const client = new PanelClient(
       { send },
-      { getActiveTab: vi.fn(async () => ({ id: 7 })) },
+      { getActiveTab: vi.fn(async () => snapshot().tab) },
       { pollIntervalMs: 60_000 },
     );
     await client.connect();
@@ -718,7 +776,7 @@ describe('PanelClient', () => {
     });
     const client = new PanelClient(
       { send },
-      { getActiveTab: vi.fn(async () => ({ id: 7 })) },
+      { getActiveTab: vi.fn(async () => snapshot().tab) },
       { pollIntervalMs: 60_000 },
     );
     await client.connect();
@@ -760,7 +818,7 @@ describe('PanelClient', () => {
     });
     const client = new PanelClient(
       { send },
-      { getActiveTab: vi.fn(async () => ({ id: 7 })) },
+      { getActiveTab: vi.fn(async () => snapshot().tab) },
       { pollIntervalMs: 60_000 },
     );
     await client.connect();
@@ -807,7 +865,7 @@ describe('PanelClient', () => {
     });
     const client = new PanelClient(
       { send },
-      { getActiveTab: vi.fn(async () => ({ id: activeTabId })) },
+      { getActiveTab: vi.fn(async () => ({ ...snapshot().tab, id: activeTabId })) },
       { pollIntervalMs: 60_000 },
     );
     await client.connect();
@@ -837,7 +895,7 @@ describe('PanelClient', () => {
     });
     const client = new PanelClient(
       { send },
-      { getActiveTab: vi.fn(async () => ({ id: 7 })) },
+      { getActiveTab: vi.fn(async () => snapshot().tab) },
       { pollIntervalMs: 60_000 },
     );
     await client.connect();
@@ -873,7 +931,7 @@ describe('PanelClient', () => {
     }));
     const client = new PanelClient(
       { send },
-      { getActiveTab: vi.fn(async () => ({ id: 7 })) },
+      { getActiveTab: vi.fn(async () => snapshot().tab) },
       { pollIntervalMs: 60_000 },
     );
     await client.connect();
@@ -912,7 +970,7 @@ describe('PanelClient', () => {
     });
     const client = new PanelClient(
       { send },
-      { getActiveTab: vi.fn(async () => ({ id: activeTabId })) },
+      { getActiveTab: vi.fn(async () => ({ ...snapshot().tab, id: activeTabId })) },
       { pollIntervalMs: 60_000 },
     );
     await client.connect();
@@ -962,7 +1020,7 @@ describe('PanelClient', () => {
     });
     const client = new PanelClient(
       { send },
-      { getActiveTab: vi.fn(async () => ({ id: 7 })) },
+      { getActiveTab: vi.fn(async () => snapshot().tab) },
       { pollIntervalMs: 60_000 },
     );
     await client.connect();
@@ -992,7 +1050,7 @@ describe('PanelClient', () => {
     };
     const client = new PanelClient(
       runtime,
-      { getActiveTab: vi.fn(async () => ({ id: 7 })) },
+      { getActiveTab: vi.fn(async () => snapshot().tab) },
       { pollIntervalMs: 60_000 },
     );
     await client.connect();
@@ -1039,7 +1097,7 @@ describe('PanelClient', () => {
     const client = new PanelClient(
       runtime,
       {
-        getActiveTab: vi.fn(async () => ({ id: 7 })),
+        getActiveTab: vi.fn(async () => snapshot().tab),
       },
       { pollIntervalMs: 60_000 },
     );
@@ -1078,7 +1136,7 @@ describe('PanelClient', () => {
     const client = new PanelClient(
       { send },
       {
-        getActiveTab: vi.fn(async () => ({ id: 7 })),
+        getActiveTab: vi.fn(async () => snapshot().tab),
       },
       { pollIntervalMs: 60_000 },
     );
@@ -1131,7 +1189,7 @@ describe('PanelClient', () => {
       return true;
     });
     const environmentWithLegacyRequest = {
-      getActiveTab: vi.fn(async () => ({ id: 7 })),
+      getActiveTab: vi.fn(async () => snapshot().tab),
       requestOriginPermission,
     };
     const client = new PanelClient({ send }, environmentWithLegacyRequest, {
@@ -1172,7 +1230,7 @@ describe('PanelClient', () => {
     }));
     const client = new PanelClient(
       { send },
-      { getActiveTab: vi.fn(async () => ({ id: 7 })) },
+      { getActiveTab: vi.fn(async () => snapshot().tab) },
       { pollIntervalMs: 60_000 },
     );
     await client.connect();
@@ -1193,7 +1251,7 @@ describe('PanelClient', () => {
     }));
     const client = new PanelClient(
       { send },
-      { getActiveTab: vi.fn(async () => ({ id: 7 })) },
+      { getActiveTab: vi.fn(async () => snapshot().tab) },
       { pollIntervalMs: 60_000 },
     );
     await client.connect();

@@ -37,7 +37,7 @@ function buildSnapshot(): PanelSnapshot {
 }
 
 const environment = {
-  getActiveTab: vi.fn(async () => ({ id: 7 })),
+  getActiveTab: vi.fn(async () => buildSnapshot().tab),
 };
 const attachments = {
   addFiles: vi.fn(async () => []),
@@ -515,7 +515,7 @@ describe('App background connection', () => {
     const events: string[] = [];
     const snapshot = buildSnapshot();
     const guardedEnvironment = {
-      getActiveTab: vi.fn(async () => ({ id: 7 })),
+      getActiveTab: vi.fn(async () => buildSnapshot().tab),
       requestOriginPermission: vi.fn(async () => {
         events.push('permission.granted');
         return true;

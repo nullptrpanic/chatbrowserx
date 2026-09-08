@@ -27,7 +27,7 @@ export interface PanelClientState {
 }
 
 export interface PanelEnvironment {
-  getActiveTab(): Promise<{ readonly id: number } | null>;
+  getActiveTab(): Promise<Pick<PanelSnapshot['tab'], 'id' | 'title' | 'url'> | null>;
   openSourcePage?(source: PanelMessageSourcePage): Promise<void>;
   openSandboxConsole?(url: string): Promise<void>;
 }
@@ -102,7 +102,13 @@ export function createChromePanelEnvironment(): PanelEnvironment {
         active: true,
         currentWindow: true,
       });
-      return tab?.id === undefined ? null : { id: tab.id };
+      return tab?.id === undefined
+        ? null
+        : {
+            id: tab.id,
+            title: (tab.title ?? '').slice(0, 500),
+            url: (tab.url ?? '').slice(0, 4_096),
+          };
     },
     async openSourcePage(source) {
       await chrome.tabs.create({ url: source.url, active: true });
@@ -644,10 +650,16 @@ export class PanelClient {
     for (const listener of [...this.#listeners]) listener();
   }
 
-  /** Performs a cheap recovery check and reloads only for a changed tab or durable version. */
+  /** Reloads only when the active page identity or durable state version changes. */
   async #recoverIfChanged(): Promise<void> {
     const activeTab = await this.#environment.getActiveTab();
-    if (activeTab === null || activeTab.id !== this.#tabId || this.#state.snapshot === null) {
+    const tab = this.#state.snapshot?.tab;
+    if (
+      activeTab === null ||
+      activeTab.id !== tab?.id ||
+      activeTab.title !== tab.title ||
+      activeTab.url !== tab.url
+    ) {
       await this.refresh();
       return;
     }
