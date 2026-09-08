@@ -15,7 +15,7 @@ import { TaskLeaseManager } from '../tasks/task-lease';
 import { transitionTask, type TaskTransitionType } from '../tasks/task-transition';
 import type { Task, TaskEvent, TaskModelTurnMetrics, TaskRun } from '../tasks/task-types';
 import type { MaterializedToolResult, ToolResult } from '../tasks/tool-result-types';
-import { selectPendingTaskSupplements } from '../tasks/task-supplements';
+import { pendingTaskSupplementIds, selectPendingTaskSupplements } from '../tasks/task-supplements';
 import type { AgentEvent, AgentModelTurn, AgentPlanner } from './execution-types';
 import type { ToolExecutionPolicy, ToolRuntimePort, ValidatedToolCall } from '../tools/types';
 import { isModelInputPreparationError } from './model/model-input-preparation-error';
@@ -39,7 +39,7 @@ export class TaskExecutorError extends Error {
 
 export interface TaskExecutorDependencies {
   readonly repository: TaskRepository;
-  readonly conversations: Pick<ConversationRepository, 'listMessages' | 'updateMessage'>;
+  readonly conversations: Pick<ConversationRepository, 'listTaskMessages' | 'updateMessage'>;
   readonly planner: AgentPlanner;
   readonly tools: ToolRuntimePort;
   readonly clock: Clock;
@@ -799,9 +799,8 @@ export class TaskExecutor {
   ): Promise<ActiveTaskSnapshot> {
     snapshot = await this.#refreshCurrentAttempt(snapshot);
     if (!runnableStatuses.has(snapshot.task.status)) return snapshot;
-    const messages = await this.#dependencies.conversations.listMessages(
-      snapshot.task.conversationId,
-    );
+    if (pendingTaskSupplementIds(snapshot.events, snapshot.task.id).size === 0) return snapshot;
+    const messages = await this.#dependencies.conversations.listTaskMessages(snapshot.task.id);
     const supplements = selectPendingTaskSupplements(messages, snapshot.events, snapshot.task.id);
     if (supplements.length === 0) return snapshot;
 
@@ -821,7 +820,7 @@ export class TaskExecutor {
 
   /** Returns a just-completed reply to the reusable interrupted state without changing its text. */
   async #interruptReply(task: Task, messageId: string): Promise<void> {
-    const messages = await this.#dependencies.conversations.listMessages(task.conversationId);
+    const messages = await this.#dependencies.conversations.listTaskMessages(task.id);
     const message = messages.find(
       (candidate) =>
         candidate.id === messageId &&

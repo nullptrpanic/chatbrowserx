@@ -43,6 +43,9 @@ function sources() {
     ids: { create: (prefix: string) => `${prefix}_${String(++id)}` },
     conversations: {
       listMessages: vi.fn(async () => [...messages]),
+      listTaskMessages: vi.fn(async (taskId: string) =>
+        messages.filter((message) => message.taskId === taskId),
+      ),
       appendMessage: vi.fn(async (message: MessageRecord) => {
         messages.push(message);
       }),
@@ -440,6 +443,7 @@ describe('TaskExecutor', () => {
       goal: 'Complete without rereading the full event stream',
     });
     const fullSnapshotReads = vi.spyOn(repository, 'readActiveRuntimeSnapshot');
+    dependencies.conversations.listMessages.mockClear();
     const executor = new TaskExecutor({
       repository,
       conversations: dependencies.conversations,
@@ -463,6 +467,8 @@ describe('TaskExecutor', () => {
       executor.run(created.task.id, new AbortController().signal),
     ).resolves.toMatchObject({ task: { status: 'completed' } });
     expect(fullSnapshotReads).toHaveBeenCalledOnce();
+    expect(dependencies.conversations.listMessages).not.toHaveBeenCalled();
+    expect(dependencies.conversations.listTaskMessages).not.toHaveBeenCalled();
     database.close();
   });
 
@@ -1774,7 +1780,13 @@ describe('TaskExecutor', () => {
       planner,
       tavily: tavilyPort(),
       browser: browserPort(),
-      sandbox: { execute, recover: vi.fn() },
+      sandbox: {
+        execute,
+        recover: vi.fn(),
+        async configurationKey() {
+          return this;
+        },
+      },
       clock: dependencies.clock,
       ids: dependencies.ids,
     });
@@ -1855,7 +1867,13 @@ describe('TaskExecutor', () => {
       planner,
       tavily: tavilyPort(),
       browser: browserPort(),
-      sandbox: { execute, recover },
+      sandbox: {
+        execute,
+        recover,
+        async configurationKey() {
+          return this;
+        },
+      },
       clock: dependencies.clock,
       ids: dependencies.ids,
     });
@@ -1944,7 +1962,13 @@ describe('TaskExecutor', () => {
       },
       tavily: tavilyPort(),
       browser: browserPort(),
-      sandbox: { execute, recover },
+      sandbox: {
+        execute,
+        recover,
+        async configurationKey() {
+          return this;
+        },
+      },
       clock: dependencies.clock,
       ids: dependencies.ids,
     });
@@ -2007,7 +2031,13 @@ describe('TaskExecutor', () => {
       },
       tavily: tavilyPort(),
       browser: browserPort(),
-      sandbox: { execute, recover },
+      sandbox: {
+        execute,
+        recover,
+        async configurationKey() {
+          return this;
+        },
+      },
       clock: dependencies.clock,
       ids: dependencies.ids,
     });
@@ -2059,6 +2089,9 @@ describe('TaskExecutor', () => {
       tavily: tavilyPort(),
       browser: browserPort(),
       sandbox: {
+        async configurationKey() {
+          return this;
+        },
         execute: vi.fn(async () => {
           throw new SandboxClientError('AUTH', 'definitely_not_dispatched');
         }),
@@ -2125,6 +2158,9 @@ describe('TaskExecutor', () => {
       tavily: tavilyPort(),
       browser: browserPort(),
       sandbox: {
+        async configurationKey() {
+          return this;
+        },
         execute: vi.fn(async () => {
           throw new SandboxClientError('UNAVAILABLE', 'definitely_not_dispatched');
         }),
@@ -2191,7 +2227,13 @@ describe('TaskExecutor', () => {
       },
       tavily: tavilyPort(),
       browser: browserPort(),
-      sandbox: { execute, recover: vi.fn() },
+      sandbox: {
+        execute,
+        recover: vi.fn(),
+        async configurationKey() {
+          return this;
+        },
+      },
       clock: dependencies.clock,
       ids: dependencies.ids,
     });
@@ -2249,7 +2291,13 @@ describe('TaskExecutor', () => {
       },
       tavily: tavilyPort(),
       browser: browserPort(),
-      sandbox: { execute, recover: vi.fn() },
+      sandbox: {
+        execute,
+        recover: vi.fn(),
+        async configurationKey() {
+          return this;
+        },
+      },
       clock: dependencies.clock,
       ids: dependencies.ids,
     });
@@ -3128,6 +3176,7 @@ describe('TaskExecutor', () => {
     const database = await openChatBrowserDatabase(createTestDatabaseName('tool-supplement'));
     const repository = new IndexedDbTaskRepository(database);
     const conversations = new IndexedDbConversationRepository(database);
+    const taskMessageReads = vi.spyOn(conversations, 'listTaskMessages');
     const dependencies = sources();
     const conversation = {
       id: 'conversation_1',
@@ -3250,6 +3299,7 @@ describe('TaskExecutor', () => {
         .map((event) => (event.type === 'supplement.applied' ? event.messageId : '')),
     ).toEqual(['supplement_during_tool', 'supplement_during_tool_2']);
     expect(plan).toHaveBeenCalledTimes(2);
+    expect(taskMessageReads).toHaveBeenCalledExactlyOnceWith(created.task.id);
     database.close();
   });
 
@@ -3724,7 +3774,7 @@ describe('TaskExecutor', () => {
         },
       },
     });
-    const failed = await repository.readTaskArchive(created.task.id);
+    const failed = await repository.readTaskDetailWindow(created.task.id, 100);
     expect(JSON.stringify(failed)).not.toContain('private attachment detail');
     expect(
       (await new IndexedDbConversationRepository(database).listMessages('conversation_1')).filter(

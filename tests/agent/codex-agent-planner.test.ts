@@ -215,6 +215,9 @@ function sandboxWithSkills(
   ].join('\0');
   return {
     execute: vi.fn(async () => JSON.stringify({ code: 0, stdout, stderr: '', truncated: false })),
+    async configurationKey() {
+      return this;
+    },
     recover: async () => ({ status: 'not_found' }),
   };
 }
@@ -434,6 +437,9 @@ describe('CodexAgentPlanner', () => {
       resolveDiscovery = resolve;
     });
     const sandbox: SandboxExecutionPort = {
+      async configurationKey() {
+        return this;
+      },
       execute: vi.fn(() => discovery),
       recover: async () => ({ status: 'not_found' }),
     };
@@ -809,9 +815,7 @@ describe('CodexAgentPlanner', () => {
       {
         type: 'tool.call',
         call: {
-          family: 'sandbox',
           operation: 'exec',
-          replay: 'mutation',
           name: 'sandbox_exec',
         },
       },
@@ -1034,9 +1038,7 @@ describe('CodexAgentPlanner', () => {
       {
         type: 'tool.call',
         call: {
-          family: 'browser',
           operation: 'list_tabs',
-          replay: 'safe',
           callId: 'call_browser',
           name: 'browser_list_tabs',
           argumentsJson: '{}',
@@ -1151,6 +1153,107 @@ describe('CodexAgentPlanner', () => {
       messageId: 'message_1',
     });
   });
+
+  it.each(['interrupted', 'complete'] as const)(
+    'preserves checkpointed %s text across subsequent commentary and final turns',
+    async (status) => {
+      const firstReply: MessageRecord = {
+        ...USER_MESSAGE,
+        id: 'first_reply',
+        role: 'assistant',
+        status,
+        text: 'First tool explanation.',
+        createdAt: 300,
+      };
+      const storage = repositories([firstReply]);
+      let turn = 0;
+      const model = provider(async function* () {
+        turn += 1;
+        yield { type: 'response.started', responseId: `response_${turn}` };
+        yield {
+          type: 'text.delta',
+          delta: turn === 1 ? 'Second tool explanation.' : 'Final answer.',
+        };
+        if (turn === 1) {
+          yield { type: 'tool.started', callId: 'second_call', name: 'browser_list_tabs' };
+          yield {
+            type: 'tool.completed',
+            callId: 'second_call',
+            name: 'browser_list_tabs',
+            argumentsJson: '{}',
+          };
+        }
+        yield { type: 'response.completed', responseId: `response_${turn}`, usage: null };
+      });
+      let nextId = 0;
+      const planner = new CodexAgentPlanner({
+        provider: model.instance,
+        tavilyAvailability: CONFIGURED_TAVILY,
+        settings: settings(),
+        conversations: storage.conversations,
+        tasks: storage.tasks,
+        attachments: storage.attachments,
+        ids: { create: (prefix) => `${prefix}_${++nextId}` },
+        clock: { now: () => 500 + turn },
+      });
+      let input = planInputFor(storage.messages);
+      const result = completedResult({
+        resultId: 'first_result',
+        callId: 'first_call',
+        toolName: 'browser_list_tabs',
+        argumentsJson: '{}',
+        output: '{"tabs":[]}',
+      });
+      input = {
+        ...input,
+        toolResults: [result],
+        checkpoint: {
+          ...CHECKPOINT,
+          continuationItems: [
+            ...CHECKPOINT.continuationItems,
+            {
+              type: 'function_call',
+              callId: 'first_call',
+              name: 'browser_list_tabs',
+              argumentsJson: '{}',
+              modelOutputItems: [{ type: 'assistant_message_ref', messageId: firstReply.id }],
+            },
+            { type: 'function_call_output_ref', callId: 'first_call', resultId: result.id },
+          ],
+        },
+      };
+      const outcome = (await collect(planner, undefined, input)).at(-1);
+      expect(storage.messages.find(({ id }) => id === firstReply.id)).toEqual(firstReply);
+      if (outcome?.type !== 'tool.call') throw new Error('Expected the second tool call.');
+      const secondResult = { ...result, id: 'second_result', callId: 'second_call' };
+      input = {
+        ...planInputFor(storage.messages),
+        toolResults: [result, secondResult],
+        checkpoint: {
+          ...input.checkpoint,
+          continuationItems: [
+            ...input.checkpoint.continuationItems,
+            {
+              type: 'function_call',
+              callId: outcome.call.callId,
+              name: outcome.call.name,
+              argumentsJson: outcome.call.argumentsJson,
+              modelOutputItems: outcome.modelOutputItems ?? [],
+            },
+            { type: 'function_call_output_ref', callId: 'second_call', resultId: secondResult.id },
+          ],
+        },
+      };
+      await expect(collect(planner, undefined, input)).resolves.toMatchObject([
+        { type: 'task.completed' },
+      ]);
+      expect(
+        storage.messages.filter(({ role }) => role === 'assistant').map(({ text }) => text),
+      ).toEqual(['First tool explanation.', 'Second tool explanation.', 'Final answer.']);
+      expect(JSON.stringify(model.requests[1]?.input)).toContain('First tool explanation.');
+      expect(JSON.stringify(model.requests[1]?.input)).toContain('Second tool explanation.');
+    },
+  );
 
   it.each([
     ['tavily_search', SEARCH_ARGUMENTS],

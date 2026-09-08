@@ -2,7 +2,7 @@ import type { ConversationRepository } from '../persistence/conversation-reposit
 import type { TaskRepository } from '../persistence/task-repository';
 import type { ConversationId, TaskId } from '../shared/ids';
 import type { MessageRecord } from './message-types';
-import { isHistoricalTask, orderedHistoricalTasks } from './task-history-order';
+import { orderedTaskEvents, isHistoricalTask, orderedHistoricalTasks } from './task-history-order';
 import type { Task, TaskEvent, TaskStatus } from './task-types';
 import type { ToolResult } from './tool-result-types';
 
@@ -411,19 +411,6 @@ function visibleHistoryEvent(event: TaskEvent): boolean {
   );
 }
 
-function orderedTaskEvents(task: Task, events: readonly TaskEvent[]): readonly TaskEvent[] {
-  const ordered = [...events].sort(
-    (left, right) => left.sequence - right.sequence || left.id.localeCompare(right.id),
-  );
-  if (
-    ordered.length !== task.lastEventSequence ||
-    ordered.some((event, index) => event.taskId !== task.id || event.sequence !== index + 1)
-  ) {
-    throw new Error('Task history event records are inconsistent.');
-  }
-  return ordered;
-}
-
 function historyItems(
   events: readonly TaskEvent[],
   messageById: ReadonlyMap<string, MessageRecord>,
@@ -642,7 +629,11 @@ export class TaskHistoryReader implements TaskHistoryReaderPort {
       this.#tasks.listEvents(selected.id),
       this.#conversations.listTaskMessages(selected.id),
     ]);
-    const events = orderedTaskEvents(selected, storedEvents);
+    const events = orderedTaskEvents(
+      selected,
+      storedEvents,
+      'Task history event records are inconsistent.',
+    );
     const messageById = validatedTaskMessages(selected, events, messages);
     const visibleEvents = events.filter(visibleHistoryEvent);
     const start =
@@ -738,7 +729,11 @@ export class TaskHistoryReader implements TaskHistoryReaderPort {
       this.#tasks.listEvents(selected.id),
       this.#conversations.listTaskMessages(selected.id),
     ]);
-    const events = orderedTaskEvents(selected, storedEvents);
+    const events = orderedTaskEvents(
+      selected,
+      storedEvents,
+      'Task history event records are inconsistent.',
+    );
     const event = events.find(({ sequence }) => sequence === payload.sequence);
     if (event === undefined) return detailNotFound();
 

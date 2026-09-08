@@ -1,5 +1,6 @@
 import type { IDBPDatabase } from 'idb';
 import type { ConversationId, TaskId, TaskRunId, ToolResultId } from '../shared/ids';
+import { orderedTaskEvents } from '../tasks/task-history-order';
 import type { Checkpoint } from '../tasks/checkpoint-types';
 import type { Conversation } from '../tasks/conversation-types';
 import type { MessageRecord } from '../tasks/message-types';
@@ -58,14 +59,6 @@ export interface ActiveTaskRuntimeDelta {
   readonly events: readonly TaskEvent[];
 }
 
-/** Permanent task history that remains readable after its runtime checkpoint is deleted. */
-export interface PersistedTaskArchive {
-  readonly task: Task;
-  readonly runs: readonly TaskRun[];
-  readonly events: readonly TaskEvent[];
-  readonly toolResults: readonly MaterializedToolResult[];
-}
-
 /** Permanent task ordering facts without any potentially large tool-result payloads. */
 export interface PersistedTaskTimeline {
   readonly task: Task;
@@ -110,8 +103,6 @@ export interface TaskRepository {
     taskId: TaskId,
     afterSequence: number,
   ): Promise<ActiveTaskRuntimeDelta | undefined>;
-  readTaskArchive(taskId: TaskId): Promise<PersistedTaskArchive | undefined>;
-  readTaskArchives(taskIds: readonly TaskId[]): Promise<PersistedTaskArchive[]>;
   readTaskTimelines(taskIds: readonly TaskId[]): Promise<PersistedTaskTimeline[]>;
   readTaskDetailWindow(
     taskId: TaskId,
@@ -198,19 +189,6 @@ function orderedRuns(runs: readonly TaskRun[]): TaskRun[] {
   return [...runs].sort(
     (left, right) => left.attempt - right.attempt || left.id.localeCompare(right.id),
   );
-}
-
-function orderedTaskEvents(task: Task, events: readonly TaskEvent[]): TaskEvent[] {
-  const ordered = [...events].sort(
-    (left, right) => left.sequence - right.sequence || left.id.localeCompare(right.id),
-  );
-  if (
-    ordered.length !== task.lastEventSequence ||
-    ordered.some((event, index) => event.taskId !== task.id || event.sequence !== index + 1)
-  ) {
-    throw new Error('Task event records are inconsistent.');
-  }
-  return ordered;
 }
 
 function orderedTaskEventDelta(
@@ -755,75 +733,6 @@ export class IndexedDbTaskRepository implements TaskRepository {
     const events = orderedTaskEventDelta(task, afterSequence, storedEvents);
     await transaction.done;
     return { task, run, checkpoint, events };
-  }
-
-  /** Batch-loads permanent task detail without consulting runtime checkpoints. */
-  async readTaskArchive(taskId: TaskId): Promise<PersistedTaskArchive | undefined> {
-    const transaction = this.#database.transaction(
-      ['tasks', 'task-runs', 'task-events', 'tool-results'],
-      'readonly',
-    );
-    const task = await transaction.objectStore('tasks').get(taskId);
-    if (task === undefined) {
-      await transaction.done;
-      return undefined;
-    }
-    const [storedRuns, storedEvents, results] = await Promise.all([
-      transaction.objectStore('task-runs').index('by-task-attempt').getAll(taskRunRange(taskId)),
-      transaction
-        .objectStore('task-events')
-        .index('by-task-sequence')
-        .getAll(taskSequenceRange(taskId)),
-      transaction.objectStore('tool-results').index('by-task').getAll(taskId),
-    ]);
-    const runs = validatedRuns(task, storedRuns);
-    const events = orderedTaskEvents(task, storedEvents);
-    validateEventRuns(events, runs);
-    await transaction.done;
-    return {
-      task,
-      runs,
-      events,
-      toolResults: materializedResults(events, results),
-    };
-  }
-
-  /** Batch-loads several permanent task archives in one IndexedDB transaction. */
-  async readTaskArchives(taskIds: readonly TaskId[]): Promise<PersistedTaskArchive[]> {
-    const uniqueTaskIds = [...new Set(taskIds)];
-    if (uniqueTaskIds.length === 0) return [];
-    const transaction = this.#database.transaction(
-      ['tasks', 'task-runs', 'task-events', 'tool-results'],
-      'readonly',
-    );
-    const archives = await Promise.all(
-      uniqueTaskIds.map(async (taskId): Promise<PersistedTaskArchive | undefined> => {
-        const task = await transaction.objectStore('tasks').get(taskId);
-        if (task === undefined) return undefined;
-        const [storedRuns, storedEvents, results] = await Promise.all([
-          transaction
-            .objectStore('task-runs')
-            .index('by-task-attempt')
-            .getAll(taskRunRange(taskId)),
-          transaction
-            .objectStore('task-events')
-            .index('by-task-sequence')
-            .getAll(taskSequenceRange(taskId)),
-          transaction.objectStore('tool-results').index('by-task').getAll(taskId),
-        ]);
-        const runs = validatedRuns(task, storedRuns);
-        const events = orderedTaskEvents(task, storedEvents);
-        validateEventRuns(events, runs);
-        return {
-          task,
-          runs,
-          events,
-          toolResults: materializedResults(events, results),
-        };
-      }),
-    );
-    await transaction.done;
-    return archives.flatMap((archive) => (archive === undefined ? [] : [archive]));
   }
 
   /** Batch-loads task timelines without reading any tool-result output bodies. */

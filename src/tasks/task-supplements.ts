@@ -3,12 +3,11 @@ import type { MessageRecord } from './message-types';
 import type { TaskEvent } from './task-types';
 import { orderTaskMessagesByEvent } from './task-message-order';
 
-/** Selects queued but not-yet-applied supplements in permanent TaskEvent order. */
-export function selectPendingTaskSupplements(
-  messages: readonly MessageRecord[],
+/** Checks the permanent queue before loading message bodies. */
+export function pendingTaskSupplementIds(
   events: readonly TaskEvent[],
   taskId: TaskId,
-): readonly MessageRecord[] {
+): ReadonlySet<string> {
   const queuedSequenceById = new Map<string, number>();
   const applied = new Set<string>();
   for (const event of [...events].sort((left, right) => left.sequence - right.sequence)) {
@@ -32,9 +31,19 @@ export function selectPendingTaskSupplements(
       applied.add(event.messageId);
     }
   }
+  return new Set([...queuedSequenceById.keys()].filter((id) => !applied.has(id)));
+}
+
+/** Selects queued but not-yet-applied supplements in permanent TaskEvent order. */
+export function selectPendingTaskSupplements(
+  messages: readonly MessageRecord[],
+  events: readonly TaskEvent[],
+  taskId: TaskId,
+): readonly MessageRecord[] {
+  const pending = pendingTaskSupplementIds(events, taskId);
   try {
-    return orderTaskMessagesByEvent(messages, events, taskId, 'supplement').filter(
-      (message) => !applied.has(message.id),
+    return orderTaskMessagesByEvent(messages, events, taskId, 'supplement').filter((message) =>
+      pending.has(message.id),
     );
   } catch {
     throw new Error('Task supplement event association is invalid.');

@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from 'vitest';
-import type { PersistedTaskArchive } from '../../src/persistence/task-repository';
+import type { PersistedTaskDetailWindow } from '../../src/persistence/task-repository';
 import { PanelService } from '../../src/tasks/panel-service';
 import type { Checkpoint } from '../../src/tasks/checkpoint-types';
 import type { MessageRecord } from '../../src/tasks/message-types';
@@ -62,7 +62,7 @@ function buildFixture() {
       error: null,
     },
   ];
-  const archive: PersistedTaskArchive = {
+  const archive: PersistedTaskDetailWindow = {
     task,
     runs: [run],
     events,
@@ -109,10 +109,6 @@ function buildFixture() {
         void taskId;
         return events;
       }),
-      readTaskArchive: vi.fn(async (taskId: string) => (taskId === task.id ? archive : undefined)),
-      readTaskArchives: vi.fn(async (taskIds: readonly string[]) =>
-        taskIds.includes(task.id) ? [archive] : [],
-      ),
       readTaskTimelines: vi.fn(async (taskIds: readonly string[]) =>
         taskIds.includes(task.id)
           ? [{ task: archive.task, runs: archive.runs, events: archive.events }]
@@ -204,20 +200,14 @@ type PanelFixture = ReturnType<typeof buildFixture>;
 /** Replaces the permanent task archive returned to both summary and detail projections. */
 function useArchive(
   fixture: PanelFixture,
-  overrides: Partial<PersistedTaskArchive>,
-): PersistedTaskArchive {
-  const archive: PersistedTaskArchive = {
+  overrides: Partial<PersistedTaskDetailWindow>,
+): PersistedTaskDetailWindow {
+  const archive: PersistedTaskDetailWindow = {
     task: overrides.task ?? fixture.task,
     runs: overrides.runs ?? [fixture.run],
     events: overrides.events ?? fixture.events,
     toolResults: overrides.toolResults ?? [],
   };
-  fixture.dependencies.tasks.readTaskArchive.mockImplementation(async (taskId) =>
-    taskId === archive.task.id ? archive : undefined,
-  );
-  fixture.dependencies.tasks.readTaskArchives.mockImplementation(async (taskIds) =>
-    taskIds.includes(archive.task.id) ? [archive] : [],
-  );
   fixture.dependencies.tasks.readTaskTimelines.mockImplementation(async (taskIds) =>
     taskIds.includes(archive.task.id)
       ? [{ task: archive.task, runs: archive.runs, events: archive.events }]
@@ -301,8 +291,6 @@ describe('PanelService', () => {
       fixture.task.id,
       100,
     );
-    expect(fixture.dependencies.tasks.readTaskArchives).not.toHaveBeenCalled();
-    expect(fixture.dependencies.tasks.readTaskArchive).not.toHaveBeenCalled();
   });
 
   it('projects message ownership and every persisted run lifecycle', async () => {
@@ -1052,7 +1040,7 @@ describe('PanelService', () => {
         error: null,
       },
     ];
-    const secondArchive: PersistedTaskArchive = {
+    const secondArchive: PersistedTaskDetailWindow = {
       task: secondTask,
       runs: [secondRun],
       events: secondEvents,
@@ -1098,16 +1086,6 @@ describe('PanelService', () => {
     ]);
     fixture.dependencies.tasks.listAll.mockResolvedValue([fixture.task, secondTask]);
     fixture.dependencies.tasks.listByConversation.mockResolvedValue([fixture.task, secondTask]);
-    fixture.dependencies.tasks.readTaskArchives.mockImplementation(async (taskIds) =>
-      [fixture.archive, secondArchive].filter(({ task }) => taskIds.includes(task.id)),
-    );
-    fixture.dependencies.tasks.readTaskArchive.mockImplementation(async (taskId) =>
-      taskId === secondTask.id
-        ? secondArchive
-        : taskId === fixture.task.id
-          ? fixture.archive
-          : undefined,
-    );
     fixture.dependencies.tasks.readTaskTimelines.mockImplementation(async (taskIds) =>
       [fixture.archive, secondArchive]
         .filter(({ task }) => taskIds.includes(task.id))

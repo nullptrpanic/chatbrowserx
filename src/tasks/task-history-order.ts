@@ -1,5 +1,5 @@
 import type { ConversationId, TaskId } from '../shared/ids';
-import type { Task } from './task-types';
+import type { Task, TaskEvent } from './task-types';
 
 export interface HistoricalTaskContext {
   readonly conversationId: ConversationId;
@@ -28,4 +28,22 @@ export function orderedHistoricalTasks(
         right.createdAt - left.createdAt ||
         right.id.localeCompare(left.id),
     );
+}
+
+/** Orders a complete task event log and rejects missing, duplicate, or foreign sequences. */
+export function orderedTaskEvents(
+  task: Task,
+  events: readonly TaskEvent[],
+  errorMessage = 'Task event records are inconsistent.',
+): TaskEvent[] {
+  const ordered = [...events].sort(
+    (left, right) => left.sequence - right.sequence || left.id.localeCompare(right.id),
+  );
+  if (
+    ordered.length !== task.lastEventSequence ||
+    ordered.some((event, index) => event.taskId !== task.id || event.sequence !== index + 1)
+  ) {
+    throw new Error(errorMessage);
+  }
+  return ordered;
 }

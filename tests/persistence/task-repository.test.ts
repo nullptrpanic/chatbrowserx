@@ -710,7 +710,7 @@ describe('IndexedDbTaskRepository', () => {
       toolResults: [result],
     });
 
-    expect((await repository.readTaskArchive(stored.id))?.toolResults).toMatchObject([
+    expect((await repository.readTaskDetailWindow(stored.id, 100))?.toolResults).toMatchObject([
       {
         id: result.id,
         runId: nextRun.id,
@@ -925,7 +925,7 @@ describe('IndexedDbTaskRepository', () => {
       createdAt: 120,
     });
 
-    await expect(repository.readTaskArchive(stored.id)).rejects.toThrow(
+    await expect(repository.readActiveRuntimeSnapshot(stored.id)).rejects.toThrow(
       'Task tool-result records are inconsistent.',
     );
     database.close();
@@ -939,7 +939,7 @@ describe('IndexedDbTaskRepository', () => {
     await completeTask(repository, fixture, stored);
 
     expect((await repository.readActiveRuntimeSnapshot(stored.id))?.checkpoint).toBeUndefined();
-    expect(await repository.readTaskArchive(stored.id)).toMatchObject({
+    expect(await repository.readTaskDetailWindow(stored.id, 100)).toMatchObject({
       task: { id: stored.id, status: 'completed', lastEventSequence: 3 },
       runs: [{ id: fixture.run.id, status: 'completed', checkpointId: null }],
       events: [{ sequence: 1 }, { sequence: 2 }, { sequence: 3 }],
@@ -1021,7 +1021,7 @@ describe('IndexedDbTaskRepository', () => {
       deleteCheckpoint: true,
     });
 
-    expect((await repository.readTaskArchive(stored.id))?.events).toEqual(
+    expect((await repository.readTaskDetailWindow(stored.id, 100))?.events).toEqual(
       expect.arrayContaining([
         expect.objectContaining({
           type: 'supplement.applied',

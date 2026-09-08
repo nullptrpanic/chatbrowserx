@@ -388,9 +388,10 @@ export class ModelTurnPlanner implements AgentPlanner {
     const reusableReplies = taskReplies.filter(
       (message) =>
         currentRunMessageIds.has(message.id) &&
+        !checkpointMessageIds.has(message.id) &&
         (message.status === 'streaming' ||
           message.status === 'interrupted' ||
-          (message.status === 'complete' && !checkpointMessageIds.has(message.id))),
+          message.status === 'complete'),
     );
     const reusable = reusableReplies.at(-1);
     await Promise.all(

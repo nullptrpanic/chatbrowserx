@@ -484,7 +484,7 @@ describe('TaskCommandService', () => {
       checkpoint: null,
     });
     expect(cleared.events.at(-1)).toMatchObject({ type: 'context.cleared' });
-    expect(await fixture.repository.readTaskArchive(created.task.id)).toMatchObject({
+    expect(await fixture.repository.readTaskDetailWindow(created.task.id, 100)).toMatchObject({
       task: { id: created.task.id },
       events: expect.arrayContaining([
         expect.objectContaining({ type: 'message.recorded' }),
