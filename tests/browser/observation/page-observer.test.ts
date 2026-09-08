@@ -1,7 +1,8 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import type {
-  DebuggerSession,
-  DebuggerTransport,
+import {
+  ChromeDebuggerTransport,
+  type DebuggerSession,
+  type DebuggerTransport,
 } from '../../../src/browser/debugger/debugger-transport';
 import type { BrowserSessionSnapshot } from '../../../src/browser/debugger/target-session-registry';
 import { ElementRefStore } from '../../../src/browser/observation/element-ref-store';
@@ -43,6 +44,29 @@ const CONTENT: PageObservationContentPort = {
   })),
   setOverlaysHidden: vi.fn(async () => undefined),
 };
+
+it('aborts an interactive inspection while native snapshot calls are stalled', async () => {
+  const sendCommand = vi.fn(() => new Promise(() => undefined));
+  const transport = new ChromeDebuggerTransport({
+    attach: async () => undefined,
+    detach: async () => undefined,
+    sendCommand,
+    onEvent: { addListener: () => undefined, removeListener: () => undefined },
+    onDetach: { addListener: () => undefined, removeListener: () => undefined },
+  });
+  const observer = new PageObserver({
+    sessions: sessions({ tabId: 7, generation: 1, root: { tabId: 7 }, children: new Map() }),
+    transport,
+    content: CONTENT,
+    refs: new ElementRefStore({ create: () => 'ref-test' }),
+  });
+  const controller = new AbortController();
+  const pending = observer.inspect(7, 'interactive', controller.signal);
+  const outcome = expect(pending).rejects.toMatchObject({ name: 'AbortError' });
+  await vi.waitFor(() => expect(sendCommand).toHaveBeenCalled());
+  controller.abort();
+  await outcome;
+});
 
 function buttonDomSnapshot(
   frameId = 'frame-main',
@@ -97,12 +121,17 @@ function buttonDomSnapshot(
   };
 }
 
-function virtualDocumentDomSnapshot() {
+function virtualDocumentDomSnapshot(
+  frameId = 'frame-main',
+  backendNodeId = 11,
+  url = 'https://top.test/',
+  scrollHeight = 6_000,
+) {
   const strings = [
-    'https://top.test/',
+    url,
     'Virtual document',
     '',
-    'frame-main',
+    frameId,
     '#document',
     'DIV',
     'aria-label',
@@ -129,7 +158,7 @@ function virtualDocumentDomSnapshot() {
           nodeType: [9, 1],
           nodeName: [4, 5],
           nodeValue: [2, 2],
-          backendNodeId: [1, 11],
+          backendNodeId: [1, backendNodeId],
           attributes: [[], [6, 7]],
           isClickable: { index: [] },
         },
@@ -139,13 +168,29 @@ function virtualDocumentDomSnapshot() {
           bounds: [[100, 80, 800, 600]],
           text: [2],
           stackingContexts: { index: [] },
-          scrollRects: [[100, 80, 800, 6_000]],
+          scrollRects: [[100, 80, 800, scrollHeight]],
           clientRects: [[100, 80, 800, 600]],
         },
         textBoxes: { layoutIndex: [], bounds: [], start: [], length: [] },
       },
     ],
   };
+}
+
+function frameOwnerDomSnapshot() {
+  const snapshot = multipleScrollContainersDomSnapshot([
+    { label: 'Outer pages', bounds: [0, 0, 1_000, 700], scrollHeight: 5_000 },
+    { label: 'Embedded document', bounds: [100, 100, 800, 500], scrollHeight: 500 },
+  ]);
+  const document_ = snapshot.documents[0];
+  if (!document_) throw new Error('Fixture document is missing.');
+  const { nodes } = document_;
+  nodes.parentIndex[2] = 1;
+  nodes.nodeName[1] = snapshot.strings.push('MAIN') - 1;
+  nodes.nodeName[2] = snapshot.strings.push('IFRAME') - 1;
+  nodes.backendNodeId[2] = 30;
+  nodes.attributes[2] = [];
+  return snapshot;
 }
 
 function multipleScrollContainersDomSnapshot(
@@ -275,6 +320,35 @@ function nestedScrollContainersDomSnapshot() {
   };
 }
 
+function nestedDistinctScrollContainersDomSnapshot(innerScrollHeight = 15_000) {
+  const snapshot = nestedScrollContainersDomSnapshot();
+  const document = snapshot.documents[0];
+  if (!document) throw new Error('Nested scroll fixture has no document.');
+  return {
+    ...snapshot,
+    documents: [
+      {
+        ...document,
+        layout: {
+          ...document.layout,
+          bounds: [
+            [0, 0, 1_000, 700],
+            [100, 100, 800, 500],
+          ],
+          scrollRects: [
+            [0, 0, 1_000, 5_000],
+            [100, 100, 800, innerScrollHeight],
+          ],
+          clientRects: [
+            [0, 0, 1_000, 700],
+            [100, 100, 800, 500],
+          ],
+        },
+      },
+    ],
+  };
+}
+
 function mainFrameTree(
   loaderId = 'loader-main',
   frameId = 'frame-main',
@@ -359,19 +433,28 @@ describe('PageObserver', () => {
     const result = await observer.inspect(7, 'interactive', new AbortController().signal);
 
     expect(sessionPort.ensure).toHaveBeenCalledOnce();
-    expect(transport.send).toHaveBeenCalledWith({ tabId: 7 }, 'DOMSnapshot.captureSnapshot', {
-      computedStyles: [
-        'cursor',
-        'display',
-        'visibility',
-        'pointer-events',
-        'overflow-x',
-        'overflow-y',
-      ],
-      includeDOMRects: true,
-      includePaintOrder: true,
-    });
-    expect(transport.send).not.toHaveBeenCalledWith({ tabId: 7 }, 'Page.getNavigationHistory');
+    expect(transport.send).toHaveBeenCalledWith(
+      { tabId: 7 },
+      'DOMSnapshot.captureSnapshot',
+      {
+        computedStyles: [
+          'cursor',
+          'display',
+          'visibility',
+          'pointer-events',
+          'overflow-x',
+          'overflow-y',
+        ],
+        includeDOMRects: true,
+        includePaintOrder: true,
+      },
+      expect.any(AbortSignal),
+    );
+    expect(
+      vi
+        .mocked(transport.send)
+        .mock.calls.some(([, method]) => method === 'Page.getNavigationHistory'),
+    ).toBe(false);
     expect(result).toMatchObject({
       url: 'https://frame.test/current',
       debuggerSession: 'ephemeral',
@@ -461,7 +544,12 @@ describe('PageObserver', () => {
 
     const result = await observer.inspect(7, 'interactive', new AbortController().signal);
 
-    expect(transport.send).toHaveBeenCalledWith({ tabId: 7 }, 'Page.getNavigationHistory');
+    expect(transport.send).toHaveBeenCalledWith(
+      { tabId: 7 },
+      'Page.getNavigationHistory',
+      undefined,
+      expect.any(AbortSignal),
+    );
     expect(result.url).toBeNull();
     expect(result.data).toMatchObject({
       mode: 'interactive',
@@ -615,6 +703,7 @@ describe('PageObserver', () => {
 
     expect(coverage.targets).toEqual(['ref_document', 'ref_auxiliary', 'ref_sidebar']);
     expect(coverage.primaryTarget).toBe('ref_document');
+    expect(result.scrollHierarchy?.root).toBe('ref_document');
   });
 
   it('does not guess a primary scroll target for similarly sized split panes', async () => {
@@ -678,7 +767,69 @@ describe('PageObserver', () => {
 
     expect(coverage.targets).toEqual(['ref_left', 'ref_right']);
     expect(coverage).not.toHaveProperty('primaryTarget');
+    expect(result.scrollHierarchy?.root).toBeUndefined();
   });
+
+  it.each([
+    { innerHeight: 15_000, primary: 'ref_inner', layoutAvailable: true },
+    { innerHeight: 8_000, primary: undefined, layoutAvailable: true },
+    { innerHeight: 2_000, primary: 'ref_outer', layoutAvailable: true },
+    { innerHeight: 15_000, primary: 'ref_inner', layoutAvailable: false },
+  ])(
+    'retains nested ownership independently of recommendation ($primary) and layout availability ($layoutAvailable)',
+    async ({ innerHeight, primary, layoutAvailable }) => {
+      const snapshot: BrowserSessionSnapshot = {
+        tabId: 7,
+        generation: 1,
+        root: { tabId: 7 },
+        children: new Map(),
+      };
+      const transport = debuggerTransport((_session, method) => {
+        if (method === 'Accessibility.getFullAXTree') {
+          return {
+            nodes: [
+              {
+                nodeId: 'root',
+                backendDOMNodeId: 1,
+                ignored: false,
+                role: { value: 'RootWebArea' },
+                name: { value: 'Nested document' },
+              },
+            ],
+          };
+        }
+        if (method === 'DOMSnapshot.captureSnapshot') {
+          return nestedDistinctScrollContainersDomSnapshot(innerHeight);
+        }
+        if (method === 'Page.getFrameTree') return mainFrameTree();
+        if (method === 'Page.getLayoutMetrics') {
+          if (!layoutAvailable) throw new Error('Layout metrics are unavailable.');
+          return {
+            visualViewport: { pageX: 0, pageY: 0, clientWidth: 1_200, clientHeight: 800 },
+            contentSize: { x: 0, y: 0, width: 1_200, height: 800 },
+          };
+        }
+        if (method === 'Page.getNavigationHistory') return { currentIndex: 0, entries: [] };
+        return {};
+      });
+      const refs = ['ref_outer', 'ref_inner'];
+      const observer = new PageObserver({
+        sessions: sessions(snapshot),
+        transport,
+        content: CONTENT,
+        refs: new ElementRefStore({ create: () => refs.shift() ?? 'unexpected_ref' }),
+      });
+
+      const result = await observer.inspect(7, 'interactive', new AbortController().signal);
+
+      expect((result.data.coverage as Record<string, unknown>).primaryTarget).toBe(primary);
+      expect(result.scrollHierarchy).toEqual({
+        ...(layoutAvailable ? { root: 'ref_outer' } : {}),
+        parentByTarget: new Map([['ref_inner', 'ref_outer']]),
+      });
+      expect(JSON.stringify(result.data)).not.toContain('scrollHierarchy');
+    },
+  );
 
   it('canonicalizes near-identical nested scroll surfaces to the deeper semantic target', async () => {
     const snapshot: BrowserSessionSnapshot = {
@@ -2281,10 +2432,93 @@ describe('PageObserver', () => {
       { tabId: 7 },
       'Page.captureScreenshot',
       expect.anything(),
+      expect.any(AbortSignal),
     );
     expect(persistScreenshot).toHaveBeenCalledOnce();
     expect(close).toHaveBeenCalledOnce();
   });
+
+  it.each([
+    { ownerKnown: true, layoutAvailable: true },
+    { ownerKnown: false, layoutAvailable: true },
+    { ownerKnown: true, layoutAvailable: false },
+  ])(
+    'resolves OOPIF ownership with a known owner ($ownerKnown), and certifies its root only with layout ($layoutAvailable)',
+    async ({ ownerKnown, layoutAvailable }) => {
+      const child = {
+        targetId: 'frame_child',
+        type: 'iframe',
+        url: 'https://child.test/',
+        parentSessionId: null,
+        session: { tabId: 7, sessionId: 'session_child' },
+      } as const;
+      const snapshot: BrowserSessionSnapshot = {
+        tabId: 7,
+        generation: 2,
+        root: { tabId: 7 },
+        children: new Map([[child.targetId, child]]),
+      };
+      const transport = debuggerTransport((session, method, params) => {
+        if (method === 'Accessibility.getFullAXTree') {
+          return {
+            nodes: [
+              {
+                nodeId: 'root',
+                backendDOMNodeId: 1,
+                ignored: false,
+                role: { value: 'RootWebArea' },
+                name: { value: session.sessionId ? 'Child document' : 'Outer document' },
+              },
+            ],
+          };
+        }
+        if (method === 'DOMSnapshot.captureSnapshot') {
+          return session.sessionId
+            ? virtualDocumentDomSnapshot('frame-child-document', 21, 'https://child.test/', 15_000)
+            : frameOwnerDomSnapshot();
+        }
+        if (method === 'Page.getFrameTree') {
+          return session.sessionId
+            ? mainFrameTree('loader-child', 'frame-child-document', 'https://child.test/')
+            : mainFrameTree();
+        }
+        if (method === 'Page.getLayoutMetrics') {
+          if (!layoutAvailable) throw new Error('Layout metrics are unavailable.');
+          return {
+            visualViewport: { pageX: 0, pageY: 0, clientWidth: 1_200, clientHeight: 800 },
+            contentSize: { x: 0, y: 0, width: 1_200, height: 800 },
+          };
+        }
+        if (method === 'DOM.getFrameOwner') {
+          expect(session).toEqual({ tabId: 7 });
+          expect(params).toEqual({ frameId: 'frame-child-document' });
+          if (!ownerKnown) throw new Error('Frame owner is no longer available.');
+          return { backendNodeId: 30 };
+        }
+        if (method === 'Page.getNavigationHistory') return { currentIndex: 0, entries: [] };
+        return {};
+      });
+      const ids = ['ref_outer', 'ref_child'];
+      const observer = new PageObserver({
+        sessions: sessions(snapshot),
+        transport,
+        content: CONTENT,
+        refs: new ElementRefStore({ create: () => ids.shift() ?? 'unexpected_ref' }),
+      });
+
+      const result = await observer.inspect(7, 'interactive', new AbortController().signal);
+
+      expect(result.scrollHierarchy).toEqual(
+        ownerKnown
+          ? {
+              ...(layoutAvailable ? { root: 'ref_outer' } : {}),
+              parentByTarget: new Map([['ref_child', 'ref_outer']]),
+            }
+          : undefined,
+      );
+      expect(JSON.stringify(result.data)).not.toContain('scrollHierarchy');
+    },
+  );
 
   it('includes OOPIF semantics while keeping a stable frame target and loader in the ref', async () => {
     const child = {

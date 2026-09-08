@@ -3,7 +3,12 @@ import type { ParsedBrowserToolCall } from '../../tools/browser/contract';
 import { IMAGE_POLICY } from '../../attachments/attachment-policy';
 import type { AttachmentRepository } from '../../persistence/attachment-repository';
 import type { PageCommand } from '../../shared/protocol/message-types';
-import type { DebuggerSession, DebuggerTransport } from '../debugger/debugger-transport';
+import { bytesToBase64 } from '../../shared/base64';
+import {
+  withDebuggerSignal,
+  type DebuggerSession,
+  type DebuggerTransport,
+} from '../debugger/debugger-transport';
 import type {
   BrowserSessionSnapshot,
   TargetSessionRegistry,
@@ -43,9 +48,8 @@ const SELECT_FUNCTION = `function(value) {
   return { ok: true, value: this.value };
 }`;
 
-const SCROLL_ELEMENT_FUNCTION = `function(deltaX, deltaY) {
-  const __chatbrowserxScrollTarget = true;
-  void __chatbrowserxScrollTarget;
+// Inlined into both page-side functions so target selection and progress measurements agree.
+const SCROLL_TARGET_SETUP = `
   const element = this;
   const window_ = element?.ownerDocument?.defaultView;
   if (!window_?.Element || !(element instanceof window_.Element)) return { found: false };
@@ -77,7 +81,12 @@ const SCROLL_ELEMENT_FUNCTION = `function(deltaX, deltaY) {
   };
   let target = element;
   while (target && !scrollable(target)) target = target.parentElement;
-  if (!target) return { found: false };
+  if (!target) return { found: false };`;
+
+const SCROLL_ELEMENT_FUNCTION = `function(deltaX, deltaY) {
+  const __chatbrowserxScrollTarget = true;
+  void __chatbrowserxScrollTarget;
+  ${SCROLL_TARGET_SETUP}
   const before = state(target);
   target.scrollLeft = before.x + deltaX;
   target.scrollTop = before.y + deltaY;
@@ -100,37 +109,8 @@ const SCROLL_ELEMENT_FUNCTION = `function(deltaX, deltaY) {
 const READ_SCROLL_STATE_FUNCTION = `function() {
   const __chatbrowserxScrollState = true;
   void __chatbrowserxScrollState;
-  const element = this;
-  const window_ = element?.ownerDocument?.defaultView;
-  if (!window_?.Element || !(element instanceof window_.Element)) return { found: false };
-  const scrollable = (candidate) => {
-    const style = window_.getComputedStyle(candidate);
-    const overflow = (value) => value === 'auto' || value === 'scroll' || value === 'overlay' || value === 'hidden';
-    return (
-      (overflow(style.overflowX) && candidate.scrollWidth > candidate.clientWidth + 1) ||
-      (overflow(style.overflowY) && candidate.scrollHeight > candidate.clientHeight + 1)
-    );
-  };
-  let target = element;
-  while (target && !scrollable(target)) target = target.parentElement;
-  if (!target) return { found: false };
-  const text = target.textContent || '';
-  const sample = text.length <= 4096 ? text : text.slice(0, 2048) + text.slice(-2048);
-  let hash = 0x811c9dc5;
-  for (let index = 0; index < sample.length; index += 1) {
-    hash ^= sample.charCodeAt(index);
-    hash = Math.imul(hash, 0x01000193);
-  }
-  return {
-    found: true,
-    x: target.scrollLeft,
-    y: target.scrollTop,
-    maxX: Math.max(0, target.scrollWidth - target.clientWidth),
-    maxY: Math.max(0, target.scrollHeight - target.clientHeight),
-    clientWidth: target.clientWidth,
-    clientHeight: target.clientHeight,
-    contentKey: [target.childElementCount, target.scrollWidth, target.scrollHeight, hash >>> 0].join(':'),
-  };
+  ${SCROLL_TARGET_SETUP}
+  return { found: true, ...state(target) };
 }`;
 
 const CLICK_ELEMENT_FUNCTION = `function() {
@@ -1066,8 +1046,17 @@ export interface BrowserScrollTargetSize {
   readonly height: number;
 }
 
+export interface BrowserActionExecutionContext {
+  readonly containingTarget?: string;
+  readonly revealTarget?: boolean;
+}
+
 export interface BrowserActionPort {
-  execute(call: ParsedBrowserToolCall, signal: AbortSignal): Promise<BrowserActionResult>;
+  execute(
+    call: ParsedBrowserToolCall,
+    signal: AbortSignal,
+    context?: BrowserActionExecutionContext,
+  ): Promise<BrowserActionResult>;
   measureScrollTarget?(
     tabId: number,
     target: string,
@@ -1149,15 +1138,6 @@ function throwIfAborted(signal: AbortSignal): void {
   if (signal.aborted) throw new DOMException('Browser action was aborted.', 'AbortError');
 }
 
-function encodeBase64(bytes: Uint8Array): string {
-  let binary = '';
-  const chunkSize = 32 * 1_024;
-  for (let offset = 0; offset < bytes.length; offset += chunkSize) {
-    binary += String.fromCharCode(...bytes.subarray(offset, offset + chunkSize));
-  }
-  return btoa(binary);
-}
-
 function quadRect(quad: readonly number[] | undefined): ViewportRect | undefined {
   if (!quad || quad.length < 8 || quad.some((coordinate) => !Number.isFinite(coordinate))) {
     return undefined;
@@ -1237,27 +1217,6 @@ interface SetCheckedExecutionResult {
 
 function input<T>(call: ParsedBrowserToolCall): T {
   return call.arguments as T;
-}
-
-function trustedInputPoint(
-  pageResult: Awaited<ReturnType<BrowserPageActionPort['performAction']>> | null,
-): Point | null {
-  if (
-    pageResult?.action !== 'type' ||
-    pageResult.applied ||
-    pageResult.reason !== 'trusted_input_required' ||
-    typeof pageResult.target !== 'object' ||
-    pageResult.target === null
-  ) {
-    return null;
-  }
-  const target = pageResult.target as Readonly<Record<string, unknown>>;
-  return typeof target.x === 'number' &&
-    Number.isFinite(target.x) &&
-    typeof target.y === 'number' &&
-    Number.isFinite(target.y)
-    ? { x: target.x, y: target.y }
-    : null;
 }
 
 function axValue(value: Protocol.Accessibility.AXValue | undefined): string | null {
@@ -1461,19 +1420,40 @@ function hasImagePasteEvidence(before: ImagePasteState, after: ImagePasteState):
 /** Executes already-checkpointed browser actions through semantic refs or validated viewport points. */
 export class BrowserActionExecutor implements BrowserActionPort {
   readonly #dependencies: BrowserActionExecutorDependencies;
-  #primaryModifier: Promise<number> | undefined;
+  #primaryModifier: { value?: Promise<number> } = {};
 
   constructor(dependencies: BrowserActionExecutorDependencies) {
     this.#dependencies = dependencies;
   }
 
-  async settle(tabId: number, signal: AbortSignal, timeoutMs: number): Promise<void> {
+  #scoped(signal: AbortSignal): BrowserActionExecutor {
+    const scoped = new BrowserActionExecutor({
+      ...this.#dependencies,
+      transport: withDebuggerSignal(this.#dependencies.transport, signal),
+    });
+    scoped.#primaryModifier = this.#primaryModifier;
+    return scoped;
+  }
+
+  settle(tabId: number, signal: AbortSignal, timeoutMs: number): Promise<void> {
+    return this.#scoped(signal).#settle(tabId, signal, timeoutMs);
+  }
+
+  async #settle(tabId: number, signal: AbortSignal, timeoutMs: number): Promise<void> {
     throwIfAborted(signal);
     const snapshot = await this.#dependencies.sessions.ensure(tabId, signal);
     await this.#wait(snapshot, 'dom_stable', timeoutMs, signal);
   }
 
-  async measureScrollTarget(
+  measureScrollTarget(
+    tabId: number,
+    target: string,
+    signal: AbortSignal,
+  ): Promise<BrowserScrollTargetSize | undefined> {
+    return this.#scoped(signal).#measureScrollTarget(tabId, target, signal);
+  }
+
+  async #measureScrollTarget(
     tabId: number,
     target: string,
     signal: AbortSignal,
@@ -1486,7 +1466,7 @@ export class BrowserActionExecutor implements BrowserActionPort {
         ? { width: viewport.width, height: viewport.height }
         : undefined;
     }
-    const prepared = await this.#prepareElementTarget(snapshot, target, tabId);
+    const prepared = await this.#resolveElementTarget(snapshot, target, tabId);
     const state = await this.#readElementScrollState(prepared);
     return state?.clientWidth !== undefined &&
       state.clientWidth > 0 &&
@@ -1496,36 +1476,31 @@ export class BrowserActionExecutor implements BrowserActionPort {
       : undefined;
   }
 
-  async execute(call: ParsedBrowserToolCall, signal: AbortSignal): Promise<BrowserActionResult> {
+  execute(
+    call: ParsedBrowserToolCall,
+    signal: AbortSignal,
+    context: BrowserActionExecutionContext = {},
+  ): Promise<BrowserActionResult> {
+    return this.#scoped(signal).#execute(call, signal, context);
+  }
+
+  async #execute(
+    call: ParsedBrowserToolCall,
+    signal: AbortSignal,
+    context: BrowserActionExecutionContext = {},
+  ): Promise<BrowserActionResult> {
     throwIfAborted(signal);
     const tabId = (call.arguments as { readonly tabId: number }).tabId;
-    const pageResult = await this.#performPageAction(call, tabId);
+    const pageResult =
+      context.revealTarget === false ? null : await this.#performPageAction(call, tabId);
     if (pageResult?.applied) {
-      const { url, ...rawData } = pageResult;
-      const observedValue = typeof pageResult.value === 'string' ? pageResult.value : '';
-      const data =
-        pageResult.action === 'type'
-          ? {
-              action: 'type',
-              applied: true,
-              dispatched: pageResult.dispatched,
-              strategy: 'dom',
-              verified: true,
-              replaced: input<{ readonly replace: boolean }>(call).replace,
-              submitted: pageResult.submitted,
-              valueLength: observedValue.length,
-              verification: inputVerification(
-                observedValue,
-                input<{ readonly text: string }>(call).text,
-              ),
-            }
-          : rawData;
+      const { url, ...data } = pageResult;
       return {
         tabId,
         url,
         data,
         observation: {
-          targetPresent: call.operation === 'scroll' ? null : true,
+          targetPresent: null,
         },
       };
     }
@@ -1582,7 +1557,7 @@ export class BrowserActionExecutor implements BrowserActionPort {
         await this.#showPointer(tabId, target.point, target.point, 'click');
         const bytes = new Uint8Array(await attachment.blob.arrayBuffer());
         throwIfAborted(signal);
-        const base64 = encodeBase64(bytes);
+        const base64 = bytesToBase64(bytes);
         const extension =
           mimeType === 'image/jpeg'
             ? 'jpg'
@@ -1593,112 +1568,110 @@ export class BrowserActionExecutor implements BrowserActionPort {
                 : 'png';
         const fileName =
           attachment.fileName?.trim().slice(0, 200) || `chatbrowserx-screenshot.${extension}`;
-        const resolved = await this.#dependencies.transport.send<Protocol.DOM.ResolveNodeResponse>(
+        data = await this.#withElementObject(
           target.session,
-          'DOM.resolveNode',
-          { backendNodeId: target.reference.backendNodeId },
-        );
-        const objectId = resolved.object.objectId;
-        if (!objectId) {
-          throw new BrowserActionError('UNSUPPORTED_ACTION', 'The paste target is unavailable.');
-        }
-        try {
-          const response =
-            await this.#dependencies.transport.send<Protocol.Runtime.CallFunctionOnResponse>(
-              target.session,
-              'Runtime.callFunctionOn',
-              {
-                objectId,
-                functionDeclaration: PASTE_IMAGE_FUNCTION,
-                arguments: [{ value: base64 }, { value: mimeType }, { value: fileName }],
-                awaitPromise: true,
-                returnByValue: true,
-                silent: true,
-                userGesture: true,
-              },
-            );
-          const pasted = response.result.value as
-            | {
-                readonly dispatched?: unknown;
-                readonly strategy?: unknown;
-                readonly fileCount?: unknown;
-                readonly handled?: unknown;
-                readonly verified?: unknown;
-                readonly mutations?: unknown;
-                readonly addedElements?: unknown;
-                readonly localChanged?: unknown;
-                readonly previewCount?: unknown;
-              }
-            | undefined;
-          if (
-            response.exceptionDetails !== undefined ||
-            pasted?.dispatched !== true ||
-            pasted.fileCount !== 1 ||
-            (pasted.strategy !== 'clipboard_event' && pasted.strategy !== 'file_input')
-          ) {
-            throw new BrowserActionError(
-              'UNSUPPORTED_ACTION',
-              'The target did not accept the pasted image.',
-            );
-          }
-          if (pasted.verified === true) {
-            data = {
-              action: 'paste_image',
-              dispatched: true,
-              strategy: pasted.strategy,
-              fileCount: 1,
-              handled: pasted.handled === true,
-              verified: true,
-              mutations:
-                typeof pasted.mutations === 'number' && Number.isSafeInteger(pasted.mutations)
-                  ? pasted.mutations
-                  : 0,
-              previewCount:
-                typeof pasted.previewCount === 'number' && Number.isSafeInteger(pasted.previewCount)
-                  ? pasted.previewCount
-                  : 0,
-            };
-          } else {
-            const fileChooserPaste =
-              pasted.strategy === 'clipboard_event'
-                ? await this.#pasteImageThroughFileChooser(
-                    target,
-                    objectId,
-                    base64,
-                    mimeType,
-                    fileName,
-                    signal,
-                  )
-                : { attempted: false as const };
-            if (fileChooserPaste.data) {
-              data = { action: 'paste_image', ...fileChooserPaste.data };
-            } else if (fileChooserPaste.attempted) {
+          target.reference.backendNodeId,
+          async (objectId) => {
+            if (!objectId) {
               throw new BrowserActionError(
-                'ATTACHMENT_VERIFICATION_FAILED',
-                'The editor handled the image paste, but no attachment preview change was measured.',
+                'UNSUPPORTED_ACTION',
+                'The paste target is unavailable.',
               );
+            }
+            const response =
+              await this.#dependencies.transport.send<Protocol.Runtime.CallFunctionOnResponse>(
+                target.session,
+                'Runtime.callFunctionOn',
+                {
+                  objectId,
+                  functionDeclaration: PASTE_IMAGE_FUNCTION,
+                  arguments: [{ value: base64 }, { value: mimeType }, { value: fileName }],
+                  awaitPromise: true,
+                  returnByValue: true,
+                  silent: true,
+                  userGesture: true,
+                },
+              );
+            const pasted = response.result.value as
+              | {
+                  readonly dispatched?: unknown;
+                  readonly strategy?: unknown;
+                  readonly fileCount?: unknown;
+                  readonly handled?: unknown;
+                  readonly verified?: unknown;
+                  readonly mutations?: unknown;
+                  readonly addedElements?: unknown;
+                  readonly localChanged?: unknown;
+                  readonly previewCount?: unknown;
+                }
+              | undefined;
+            if (
+              response.exceptionDetails !== undefined ||
+              pasted?.dispatched !== true ||
+              pasted.fileCount !== 1 ||
+              (pasted.strategy !== 'clipboard_event' && pasted.strategy !== 'file_input')
+            ) {
+              throw new BrowserActionError(
+                'UNSUPPORTED_ACTION',
+                'The target did not accept the pasted image.',
+              );
+            }
+            if (pasted.verified === true) {
+              return {
+                action: 'paste_image',
+                dispatched: true,
+                strategy: pasted.strategy,
+                fileCount: 1,
+                handled: pasted.handled === true,
+                verified: true,
+                mutations:
+                  typeof pasted.mutations === 'number' && Number.isSafeInteger(pasted.mutations)
+                    ? pasted.mutations
+                    : 0,
+                previewCount:
+                  typeof pasted.previewCount === 'number' &&
+                  Number.isSafeInteger(pasted.previewCount)
+                    ? pasted.previewCount
+                    : 0,
+              };
             } else {
-              const nativePaste = await this.#pasteImageFromSystemClipboard(
-                target,
-                objectId,
-                base64,
-                mimeType,
-                signal,
-              );
-              if (!nativePaste) {
+              const fileChooserPaste =
+                pasted.strategy === 'clipboard_event'
+                  ? await this.#pasteImageThroughFileChooser(
+                      target,
+                      objectId,
+                      base64,
+                      mimeType,
+                      fileName,
+                      signal,
+                    )
+                  : { attempted: false as const };
+              if (fileChooserPaste.data) {
+                return { action: 'paste_image', ...fileChooserPaste.data };
+              } else if (fileChooserPaste.attempted) {
                 throw new BrowserActionError(
                   'ATTACHMENT_VERIFICATION_FAILED',
                   'The editor handled the image paste, but no attachment preview change was measured.',
                 );
+              } else {
+                const nativePaste = await this.#pasteImageFromSystemClipboard(
+                  target,
+                  objectId,
+                  base64,
+                  mimeType,
+                  signal,
+                );
+                if (!nativePaste) {
+                  throw new BrowserActionError(
+                    'ATTACHMENT_VERIFICATION_FAILED',
+                    'The editor handled the image paste, but no attachment preview change was measured.',
+                  );
+                }
+                return { action: 'paste_image', ...nativePaste };
               }
-              data = { action: 'paste_image', ...nativePaste };
             }
-          }
-        } finally {
-          await this.#dependencies.transport
-            .send(target.session, 'Runtime.releaseObject', { objectId })
-            .catch(() => undefined);
-        }
+          },
+        );
         targetPresent = true;
         break;
       }
@@ -1882,24 +1855,15 @@ export class BrowserActionExecutor implements BrowserActionPort {
           replace: boolean;
           submit: boolean;
         }>(call);
-        const fallbackPoint = trustedInputPoint(pageResult);
-        const target = fallbackPoint
-          ? null
-          : await this.#prepareElementTarget(snapshot, value.ref, tabId);
-        const targetSession = target?.session ?? snapshot.root;
-        const editorInfo = target ? await this.#editorTargetInfo(target) : null;
-        const trustedInput = fallbackPoint !== null || editorInfo?.editor === true;
-        let verifiedValue = '';
-        if (fallbackPoint) {
-          await this.#validatePoint(snapshot.root, fallbackPoint);
-          await this.#showPointer(tabId, fallbackPoint, fallbackPoint, 'click');
-          await this.#click(snapshot.root, fallbackPoint, 'left', 1);
-        } else if (target) {
-          await this.#showPointer(tabId, target.point, target.point, 'click');
-          await this.#dependencies.transport.send(target.session, 'DOM.focus', {
-            backendNodeId: target.reference.backendNodeId,
-          });
-        }
+        const target = await this.#prepareElementTarget(snapshot, value.ref, tabId);
+        const targetSession = target.session;
+        const editorInfo = await this.#editorTargetInfo(target);
+        const trustedInput = editorInfo.editor;
+        let verifiedValue: string;
+        await this.#showPointer(tabId, target.point, target.point, 'click');
+        await this.#dependencies.transport.send(targetSession, 'DOM.focus', {
+          backendNodeId: target.reference.backendNodeId,
+        });
         if (value.replace) {
           await this.#selectAll(targetSession);
           if (value.text.length === 0) {
@@ -1912,12 +1876,12 @@ export class BrowserActionExecutor implements BrowserActionPort {
           }
         }
         if (value.text.length > 0) {
-          if (fallbackPoint || editorInfo?.custom === true) {
+          if (editorInfo.custom) {
             await this.#insertFocusedText(
               targetSession,
               value.text,
               value.replace,
-              editorInfo?.custom ?? true,
+              editorInfo.custom,
               target,
             );
           } else {
@@ -1927,21 +1891,16 @@ export class BrowserActionExecutor implements BrowserActionPort {
           }
         }
         if (trustedInput) {
-          const before = fallbackPoint
-            ? typeof pageResult?.value === 'string'
-              ? pageResult.value
-              : ''
-            : (editorInfo?.value ?? '');
           verifiedValue = await this.#verifyTrustedInput(
             targetSession,
             value.text,
             value.replace,
-            before.replace(/\r\n?/g, '\n'),
+            editorInfo.value.replace(/\r\n?/g, '\n'),
             signal,
             target,
           );
-        } else if (target) {
-          const before = editorInfo?.value.replace(/\r\n?/g, '\n') ?? '';
+        } else {
+          const before = editorInfo.value.replace(/\r\n?/g, '\n');
           const observed = await this.#editorTargetInfo(target);
           verifiedValue = normalizeInputValue(observed.value);
           if (!verifiesInput(verifiedValue, value.text, value.replace, before)) {
@@ -1953,7 +1912,7 @@ export class BrowserActionExecutor implements BrowserActionPort {
           }
         }
         if (value.submit) {
-          if (trustedInput && target && value.text.length > 0) {
+          if (trustedInput && value.text.length > 0) {
             await this.#settleSubmissionEditor(target, value.text, signal);
           }
           await this.#dispatchKey(targetSession, {
@@ -1962,7 +1921,7 @@ export class BrowserActionExecutor implements BrowserActionPort {
             code: 'Enter',
             modifiers: 0,
           });
-          await this.#verifySubmittedInput(targetSession, value.text, signal, target);
+          await this.#verifySubmittedInput(target, value.text, signal);
         }
         data = {
           action: 'type',
@@ -1996,14 +1955,36 @@ export class BrowserActionExecutor implements BrowserActionPort {
         const prepared =
           value.target === 'viewport'
             ? null
-            : await this.#prepareElementTarget(snapshot, value.target, tabId);
+            : await this.#prepareElementTarget(
+                snapshot,
+                value.target,
+                tabId,
+                true,
+                context.revealTarget !== false,
+              );
         const point = prepared?.point ?? {
           x: viewport.width / 2,
           y: viewport.height / 2,
         };
         if (prepared) {
           await this.#showPointer(tabId, point, point, 'move');
-          const elementScroll = await this.#scrollElement(prepared, value.deltaX, value.deltaY);
+          const nativeScroll = context.containingTarget !== undefined;
+          let elementScroll: ElementScrollResult | undefined;
+          if (nativeScroll) {
+            // A nested document may delegate scrolling to its owner. Direct DOM writes can
+            // appear to move it while bypassing that coordination; measure, then use a wheel.
+            const before = await this.#readElementScrollState(prepared);
+            if (before) {
+              elementScroll = {
+                ...before,
+                beforeX: before.x,
+                beforeY: before.y,
+                ...(before.contentKey === undefined ? {} : { beforeContentKey: before.contentKey }),
+              };
+            }
+          } else {
+            elementScroll = await this.#scrollElement(prepared, value.deltaX, value.deltaY);
+          }
           if (elementScroll) {
             let current: ElementScrollState = elementScroll;
             let strategy = 'element';
@@ -2022,11 +2003,43 @@ export class BrowserActionExecutor implements BrowserActionPort {
             );
             const initialProgress =
               initialDeltaX !== 0 || initialDeltaY !== 0 || initialContentChanged;
-            if (atRequestedBoundary || !initialProgress) {
-              strategy =
-                atRequestedBoundary && initialProgress
+            let ownerMovement:
+              | {
+                  readonly target: string;
+                  readonly actualDeltaX: number;
+                  readonly actualDeltaY: number;
+                }
+              | undefined;
+            if (nativeScroll || atRequestedBoundary || !initialProgress) {
+              strategy = nativeScroll
+                ? 'element_wheel'
+                : atRequestedBoundary && initialProgress
                   ? 'element_boundary_wheel'
                   : 'element_wheel_fallback';
+              let readOwner:
+                (() => Promise<Pick<ElementScrollState, 'x' | 'y'> | undefined>) | undefined;
+              if (context.containingTarget !== undefined) {
+                try {
+                  if (context.containingTarget === 'viewport') {
+                    readOwner = async () => {
+                      const { pageX: x, pageY: y } = await this.#viewport(snapshot.root);
+                      return { x, y };
+                    };
+                  } else {
+                    const parent = await this.#resolveElementTarget(
+                      snapshot,
+                      context.containingTarget,
+                      tabId,
+                    );
+                    readOwner = () => this.#readElementScrollState(parent);
+                  }
+                } catch (error) {
+                  if (signal.aborted || (error instanceof Error && error.name === 'AbortError')) {
+                    throw error;
+                  }
+                }
+              }
+              const ownerBefore = await readOwner?.().catch(() => undefined);
               await this.#dependencies.transport.send(
                 prepared.session,
                 'Input.dispatchMouseEvent',
@@ -2039,8 +2052,26 @@ export class BrowserActionExecutor implements BrowserActionPort {
                 },
               );
               const immediate = current;
+              let ownerAfter = ownerBefore;
               current =
-                (await this.#waitForElementScrollChange(prepared, immediate, signal)) ?? current;
+                (await this.#waitForElementScrollChange(prepared, immediate, signal, async () => {
+                  ownerAfter = await readOwner?.().catch(() => undefined);
+                  return (
+                    ownerBefore !== undefined &&
+                    ownerAfter !== undefined &&
+                    (ownerAfter.x !== ownerBefore.x || ownerAfter.y !== ownerBefore.y)
+                  );
+                })) ?? current;
+              const ownerDeltaX = ownerAfter && ownerBefore ? ownerAfter.x - ownerBefore.x : 0;
+              const ownerDeltaY = ownerAfter && ownerBefore ? ownerAfter.y - ownerBefore.y : 0;
+              ownerMovement =
+                context.containingTarget !== undefined && (ownerDeltaX !== 0 || ownerDeltaY !== 0)
+                  ? {
+                      target: context.containingTarget,
+                      actualDeltaX: ownerDeltaX,
+                      actualDeltaY: ownerDeltaY,
+                    }
+                  : undefined;
               remainingDeltaX = this.#consumeRequestedScrollDelta(
                 remainingDeltaX,
                 current.x - immediate.x,
@@ -2049,6 +2080,8 @@ export class BrowserActionExecutor implements BrowserActionPort {
                 remainingDeltaY,
                 current.y - immediate.y,
               );
+              remainingDeltaX = this.#consumeRequestedScrollDelta(remainingDeltaX, ownerDeltaX);
+              remainingDeltaY = this.#consumeRequestedScrollDelta(remainingDeltaY, ownerDeltaY);
             }
             const contentChanged =
               elementScroll.beforeContentKey !== undefined &&
@@ -2064,7 +2097,8 @@ export class BrowserActionExecutor implements BrowserActionPort {
             );
             const loadedMore =
               atRequestedBoundary && (contentChanged || extentChanged || !stillAtBoundary);
-            const boundaryVerified = atRequestedBoundary && !initialProgress && !loadedMore;
+            const boundaryVerified =
+              atRequestedBoundary && !initialProgress && !loadedMore && ownerMovement === undefined;
             const needsBoundaryProbe = atRequestedBoundary && initialProgress && !loadedMore;
             const actualDeltaX = value.deltaX - remainingDeltaX;
             const actualDeltaY = value.deltaY - remainingDeltaY;
@@ -2075,7 +2109,12 @@ export class BrowserActionExecutor implements BrowserActionPort {
               strategy,
               deltaX: value.deltaX,
               deltaY: value.deltaY,
-              moved: actualDeltaX !== 0 || actualDeltaY !== 0 || contentChanged || extentChanged,
+              moved:
+                actualDeltaX !== 0 ||
+                actualDeltaY !== 0 ||
+                contentChanged ||
+                extentChanged ||
+                ownerMovement !== undefined,
               actualDeltaX,
               actualDeltaY,
               remainingDeltaX,
@@ -2087,6 +2126,7 @@ export class BrowserActionExecutor implements BrowserActionPort {
               loadedMore,
               boundaryVerified,
               needsBoundaryProbe,
+              ...(ownerMovement === undefined ? {} : { ownerMovement }),
               position: {
                 x: current.x,
                 y: current.y,
@@ -2178,46 +2218,43 @@ export class BrowserActionExecutor implements BrowserActionPort {
       case 'select': {
         const value = input<{ tabId: number; ref: string; value: string }>(call);
         const target = await this.#prepareElementTarget(snapshot, value.ref, tabId);
-        const resolved = await this.#dependencies.transport.send<Protocol.DOM.ResolveNodeResponse>(
+        await this.#withElementObject(
           target.session,
-          'DOM.resolveNode',
-          { backendNodeId: target.reference.backendNodeId },
+          target.reference.backendNodeId,
+          async (objectId) => {
+            if (!objectId) {
+              throw new BrowserActionError(
+                'UNSUPPORTED_ACTION',
+                'The select target is unavailable.',
+              );
+            }
+            const response =
+              await this.#dependencies.transport.send<Protocol.Runtime.CallFunctionOnResponse>(
+                target.session,
+                'Runtime.callFunctionOn',
+                {
+                  objectId,
+                  functionDeclaration: SELECT_FUNCTION,
+                  arguments: [{ value: value.value }],
+                  awaitPromise: false,
+                  returnByValue: true,
+                  userGesture: true,
+                },
+              );
+            const result = response.result.value as
+              { readonly ok?: unknown; readonly value?: unknown } | undefined;
+            if (
+              response.exceptionDetails !== undefined ||
+              result?.ok !== true ||
+              result.value !== value.value
+            ) {
+              throw new BrowserActionError(
+                'ACTION_STATE_MISMATCH',
+                'The select element did not retain the requested value.',
+              );
+            }
+          },
         );
-        if (!resolved.object.objectId) {
-          throw new BrowserActionError('UNSUPPORTED_ACTION', 'The select target is unavailable.');
-        }
-        const objectId = resolved.object.objectId;
-        try {
-          const response =
-            await this.#dependencies.transport.send<Protocol.Runtime.CallFunctionOnResponse>(
-              target.session,
-              'Runtime.callFunctionOn',
-              {
-                objectId,
-                functionDeclaration: SELECT_FUNCTION,
-                arguments: [{ value: value.value }],
-                awaitPromise: false,
-                returnByValue: true,
-                userGesture: true,
-              },
-            );
-          const result = response.result.value as
-            { readonly ok?: unknown; readonly value?: unknown } | undefined;
-          if (
-            response.exceptionDetails !== undefined ||
-            result?.ok !== true ||
-            result.value !== value.value
-          ) {
-            throw new BrowserActionError(
-              'ACTION_STATE_MISMATCH',
-              'The select element did not retain the requested value.',
-            );
-          }
-        } finally {
-          await this.#dependencies.transport
-            .send(target.session, 'Runtime.releaseObject', { objectId })
-            .catch(() => undefined);
-        }
         data = { action: 'select', dispatched: true, verified: true };
         targetPresent = true;
         break;
@@ -2334,6 +2371,28 @@ export class BrowserActionExecutor implements BrowserActionPort {
       : undefined;
   }
 
+  async #withElementObject<T>(
+    session: DebuggerSession,
+    backendNodeId: number,
+    use: (objectId: string | undefined) => Promise<T>,
+  ): Promise<T> {
+    const resolved = await this.#dependencies.transport.send<Protocol.DOM.ResolveNodeResponse>(
+      session,
+      'DOM.resolveNode',
+      { backendNodeId },
+    );
+    const objectId = resolved.object.objectId;
+    try {
+      return await use(objectId);
+    } finally {
+      if (objectId) {
+        await this.#dependencies.transport
+          .send(session, 'Runtime.releaseObject', { objectId })
+          .catch(() => undefined);
+      }
+    }
+  }
+
   async #pasteImageThroughFileChooser(
     target: PreparedElementTarget,
     objectId: string,
@@ -2371,7 +2430,7 @@ export class BrowserActionExecutor implements BrowserActionPort {
     }
     const point = { x: trigger.x, y: trigger.y };
     await this.#validatePoint(target.session, point);
-    let interceptEnabled = false;
+    let interceptAttempted = false;
     let clicked = false;
     let chooser:
       | {
@@ -2380,12 +2439,12 @@ export class BrowserActionExecutor implements BrowserActionPort {
         }
       | undefined;
     try {
+      interceptAttempted = true;
       await this.#dependencies.transport.send(
         target.session,
         'Page.setInterceptFileChooserDialog',
         { enabled: true },
       );
-      interceptEnabled = true;
       chooser = this.#waitForFileChooser(target.session, signal, 2_000);
       await this.#showPointer(target.reference.tabId, point, point, 'click');
       await this.#click(target.session, point, 'left', 1);
@@ -2393,85 +2452,77 @@ export class BrowserActionExecutor implements BrowserActionPort {
       throwIfAborted(signal);
       const backendNodeId = await chooser.promise;
       if (backendNodeId === null) return { attempted: true };
-      const resolved = await this.#dependencies.transport.send<Protocol.DOM.ResolveNodeResponse>(
+      return await this.#withElementObject(
         target.session,
-        'DOM.resolveNode',
-        { backendNodeId },
-      );
-      const fileInputObjectId = resolved.object.objectId;
-      if (typeof fileInputObjectId !== 'string' || fileInputObjectId.length === 0) {
-        return { attempted: true };
-      }
-      const response =
-        await this.#dependencies.transport.send<Protocol.Runtime.CallFunctionOnResponse>(
-          target.session,
-          'Runtime.callFunctionOn',
-          {
-            objectId: fileInputObjectId,
-            functionDeclaration: PASTE_IMAGE_FUNCTION,
-            arguments: [
-              { value: base64 },
-              { value: mimeType },
-              { value: fileName },
-              { value: IMAGE_PASTE_SETTLE_TIMEOUT_MS },
-            ],
-            awaitPromise: true,
-            returnByValue: true,
-            silent: true,
-            userGesture: true,
-          },
-        );
-      const pasted = response.result.value as
-        | {
-            readonly dispatched?: unknown;
-            readonly strategy?: unknown;
-            readonly fileCount?: unknown;
-            readonly handled?: unknown;
-            readonly verified?: unknown;
-            readonly mutations?: unknown;
-            readonly previewCount?: unknown;
+        backendNodeId,
+        async (fileInputObjectId) => {
+          if (typeof fileInputObjectId !== 'string' || fileInputObjectId.length === 0) {
+            return { attempted: true };
           }
-        | undefined;
-      try {
-        if (
-          response.exceptionDetails !== undefined ||
-          pasted?.dispatched !== true ||
-          pasted.strategy !== 'file_input' ||
-          pasted.verified !== true
-        ) {
-          return { attempted: true };
-        }
-      } finally {
-        await this.#dependencies.transport
-          .send(target.session, 'Runtime.releaseObject', {
-            objectId: fileInputObjectId,
-          })
-          .catch(() => undefined);
-      }
-      return {
-        attempted: true,
-        data: {
-          dispatched: true,
-          strategy: 'file_input',
-          fileCount: 1,
-          handled: pasted.handled === true,
-          verified: true,
-          mutations:
-            typeof pasted.mutations === 'number' && Number.isSafeInteger(pasted.mutations)
-              ? pasted.mutations
-              : 0,
-          previewCount:
-            typeof pasted.previewCount === 'number' && Number.isSafeInteger(pasted.previewCount)
-              ? pasted.previewCount
-              : 0,
+          const response =
+            await this.#dependencies.transport.send<Protocol.Runtime.CallFunctionOnResponse>(
+              target.session,
+              'Runtime.callFunctionOn',
+              {
+                objectId: fileInputObjectId,
+                functionDeclaration: PASTE_IMAGE_FUNCTION,
+                arguments: [
+                  { value: base64 },
+                  { value: mimeType },
+                  { value: fileName },
+                  { value: IMAGE_PASTE_SETTLE_TIMEOUT_MS },
+                ],
+                awaitPromise: true,
+                returnByValue: true,
+                silent: true,
+                userGesture: true,
+              },
+            );
+          const pasted = response.result.value as
+            | {
+                readonly dispatched?: unknown;
+                readonly strategy?: unknown;
+                readonly fileCount?: unknown;
+                readonly handled?: unknown;
+                readonly verified?: unknown;
+                readonly mutations?: unknown;
+                readonly previewCount?: unknown;
+              }
+            | undefined;
+          if (
+            response.exceptionDetails !== undefined ||
+            pasted?.dispatched !== true ||
+            pasted.strategy !== 'file_input' ||
+            pasted.verified !== true
+          ) {
+            return { attempted: true };
+          }
+          return {
+            attempted: true,
+            data: {
+              dispatched: true,
+              strategy: 'file_input',
+              fileCount: 1,
+              handled: pasted.handled === true,
+              verified: true,
+              mutations:
+                typeof pasted.mutations === 'number' && Number.isSafeInteger(pasted.mutations)
+                  ? pasted.mutations
+                  : 0,
+              previewCount:
+                typeof pasted.previewCount === 'number' && Number.isSafeInteger(pasted.previewCount)
+                  ? pasted.previewCount
+                  : 0,
+            },
+          };
         },
-      };
+      );
     } catch (error) {
       if (signal.aborted || (error instanceof Error && error.name === 'AbortError')) throw error;
       return { attempted: clicked };
     } finally {
       chooser?.cancel();
-      if (interceptEnabled) {
+      if (interceptAttempted) {
         await this.#dependencies.transport
           .send(target.session, 'Page.setInterceptFileChooserDialog', {
             enabled: false,
@@ -2708,32 +2759,26 @@ export class BrowserActionExecutor implements BrowserActionPort {
 
     let selected = partialAxSelectionState(partial, stateBackendNodeId, reference.role);
     if (selected === undefined) {
-      const resolved = await this.#dependencies.transport.send<Protocol.DOM.ResolveNodeResponse>(
+      selected = await this.#withElementObject(
         target.session,
-        'DOM.resolveNode',
-        { backendNodeId: stateBackendNodeId },
+        stateBackendNodeId,
+        async (objectId) => {
+          if (!objectId) return undefined;
+          const runtime =
+            await this.#dependencies.transport.send<Protocol.Runtime.CallFunctionOnResponse>(
+              target.session,
+              'Runtime.callFunctionOn',
+              {
+                objectId,
+                functionDeclaration: READ_SELECTION_STATE_FUNCTION,
+                arguments: [{ value: reference.role }],
+                returnByValue: true,
+                silent: true,
+              },
+            );
+          return runtimeSelectionState(runtime);
+        },
       );
-      const objectId = resolved.object.objectId;
-      if (!objectId) return undefined;
-      try {
-        const runtime =
-          await this.#dependencies.transport.send<Protocol.Runtime.CallFunctionOnResponse>(
-            target.session,
-            'Runtime.callFunctionOn',
-            {
-              objectId,
-              functionDeclaration: READ_SELECTION_STATE_FUNCTION,
-              arguments: [{ value: reference.role }],
-              returnByValue: true,
-              silent: true,
-            },
-          );
-        selected = runtimeSelectionState(runtime);
-      } finally {
-        await this.#dependencies.transport
-          .send(target.session, 'Runtime.releaseObject', { objectId })
-          .catch(() => undefined);
-      }
     }
     if (selected === undefined) return undefined;
 
@@ -2853,40 +2898,28 @@ export class BrowserActionExecutor implements BrowserActionPort {
     tabId: number,
     ref: string,
   ): Promise<boolean> {
-    let objectId: string | undefined;
-    let session: DebuggerSession | undefined;
     try {
       const reference = this.#dependencies.refs.resolve(ref, tabId);
-      session = this.#sessionForReference(snapshot, reference);
-      const resolved = await this.#dependencies.transport.send<Protocol.DOM.ResolveNodeResponse>(
-        session,
-        'DOM.resolveNode',
-        { backendNodeId: reference.backendNodeId },
-      );
-      objectId = resolved.object.objectId;
-      if (!objectId) return false;
-      const response =
-        await this.#dependencies.transport.send<Protocol.Runtime.CallFunctionOnResponse>(
-          session,
-          'Runtime.callFunctionOn',
-          {
-            objectId,
-            functionDeclaration: CLICK_ELEMENT_FUNCTION,
-            awaitPromise: false,
-            returnByValue: true,
-            userGesture: true,
-          },
-        );
-      const result = response.result.value as { readonly dispatched?: unknown } | undefined;
-      return response.exceptionDetails === undefined && result?.dispatched === true;
+      const session = this.#sessionForReference(snapshot, reference);
+      return await this.#withElementObject(session, reference.backendNodeId, async (objectId) => {
+        if (!objectId) return false;
+        const response =
+          await this.#dependencies.transport.send<Protocol.Runtime.CallFunctionOnResponse>(
+            session,
+            'Runtime.callFunctionOn',
+            {
+              objectId,
+              functionDeclaration: CLICK_ELEMENT_FUNCTION,
+              awaitPromise: false,
+              returnByValue: true,
+              userGesture: true,
+            },
+          );
+        const result = response.result.value as { readonly dispatched?: unknown } | undefined;
+        return response.exceptionDetails === undefined && result?.dispatched === true;
+      });
     } catch {
       return false;
-    } finally {
-      if (objectId && session) {
-        await this.#dependencies.transport
-          .send(session, 'Runtime.releaseObject', { objectId })
-          .catch(() => undefined);
-      }
     }
   }
 
@@ -2914,55 +2947,47 @@ export class BrowserActionExecutor implements BrowserActionPort {
         y: target.rect.y + target.rect.height * 0.85,
       },
     ];
-    let objectId: string | undefined;
     try {
-      const resolved = await this.#dependencies.transport.send<Protocol.DOM.ResolveNodeResponse>(
+      return await this.#withElementObject(
         target.session,
-        'DOM.resolveNode',
-        { backendNodeId: target.reference.backendNodeId },
+        target.reference.backendNodeId,
+        async (objectId) => {
+          if (!objectId) return target.point;
+          const response =
+            await this.#dependencies.transport.send<Protocol.Runtime.CallFunctionOnResponse>(
+              target.session,
+              'Runtime.callFunctionOn',
+              {
+                objectId,
+                functionDeclaration: FIND_ACTIONABLE_POINT_FUNCTION,
+                arguments: [{ value: candidates }],
+                returnByValue: true,
+                silent: true,
+              },
+            );
+          const index = response.exceptionDetails === undefined ? response.result.value : undefined;
+          if (index === -1) {
+            throw new BrowserActionError(
+              'ACTION_TARGET_OBSCURED',
+              'Every measured point inside the target is covered by another element.',
+            );
+          }
+          return typeof index === 'number' && Number.isInteger(index) && candidates[index]
+            ? candidates[index]
+            : target.point;
+        },
       );
-      objectId = resolved.object.objectId;
-      if (!objectId) return target.point;
-      const response =
-        await this.#dependencies.transport.send<Protocol.Runtime.CallFunctionOnResponse>(
-          target.session,
-          'Runtime.callFunctionOn',
-          {
-            objectId,
-            functionDeclaration: FIND_ACTIONABLE_POINT_FUNCTION,
-            arguments: [{ value: candidates }],
-            returnByValue: true,
-            silent: true,
-          },
-        );
-      const index = response.exceptionDetails === undefined ? response.result.value : undefined;
-      if (index === -1) {
-        throw new BrowserActionError(
-          'ACTION_TARGET_OBSCURED',
-          'Every measured point inside the target is covered by another element.',
-        );
-      }
-      return typeof index === 'number' && Number.isInteger(index) && candidates[index]
-        ? candidates[index]
-        : target.point;
     } catch (error) {
       if (error instanceof BrowserActionError) throw error;
       return target.point;
-    } finally {
-      if (objectId) {
-        await this.#dependencies.transport
-          .send(target.session, 'Runtime.releaseObject', { objectId })
-          .catch(() => undefined);
-      }
     }
   }
 
-  async #prepareElementTarget(
+  async #resolveElementTarget(
     snapshot: BrowserSessionSnapshot,
     ref: string,
     tabId: number,
-    allowRefresh = true,
-  ): Promise<PreparedElementTarget> {
+  ): Promise<Pick<PreparedElementTarget, 'reference' | 'session'>> {
     const reference = this.#dependencies.refs.resolve(ref, tabId);
     const session = this.#sessionForReference(snapshot, reference);
     let frameTree: Protocol.Page.GetFrameTreeResponse;
@@ -2978,10 +3003,23 @@ export class BrowserActionExecutor implements BrowserActionPort {
     if (loaderId !== reference.loaderId) {
       throw new ElementRefStoreError('STALE_REF', 'The element ref is stale.');
     }
+    return { reference, session };
+  }
+
+  async #prepareElementTarget(
+    snapshot: BrowserSessionSnapshot,
+    ref: string,
+    tabId: number,
+    allowRefresh = true,
+    revealTarget = true,
+  ): Promise<PreparedElementTarget> {
+    const { reference, session } = await this.#resolveElementTarget(snapshot, ref, tabId);
     try {
-      await this.#dependencies.transport.send(session, 'DOM.scrollIntoViewIfNeeded', {
-        backendNodeId: reference.backendNodeId,
-      });
+      if (revealTarget) {
+        await this.#dependencies.transport.send(session, 'DOM.scrollIntoViewIfNeeded', {
+          backendNodeId: reference.backendNodeId,
+        });
+      }
       const [model, metrics] = await Promise.all([
         this.#dependencies.transport.send<Protocol.DOM.GetBoxModelResponse>(
           session,
@@ -3004,6 +3042,17 @@ export class BrowserActionExecutor implements BrowserActionPort {
         x: pageBounds.x + pageBounds.width / 2,
         y: pageBounds.y + pageBounds.height / 2,
       };
+      if (!revealTarget) {
+        const left = Math.max(0, pageBounds.x);
+        const top = Math.max(0, pageBounds.y);
+        const right = Math.min(viewport.clientWidth, pageBounds.x + pageBounds.width);
+        const bottom = Math.min(viewport.clientHeight, pageBounds.y + pageBounds.height);
+        if (right <= left || bottom <= top) {
+          return this.#prepareElementTarget(snapshot, ref, tabId, allowRefresh, true);
+        }
+        point.x = (left + right) / 2;
+        point.y = (top + bottom) / 2;
+      }
       if (
         point.x < 0 ||
         point.y < 0 ||
@@ -3020,7 +3069,7 @@ export class BrowserActionExecutor implements BrowserActionPort {
         reference.semanticLocator &&
         (await this.#refreshElementReference(session, reference, ref, tabId))
       ) {
-        return this.#prepareElementTarget(snapshot, ref, tabId, false);
+        return this.#prepareElementTarget(snapshot, ref, tabId, false, revealTarget);
       }
       throw new ElementRefStoreError('STALE_REF', 'The element ref is stale.');
     }
@@ -3103,50 +3152,43 @@ export class BrowserActionExecutor implements BrowserActionPort {
   }
 
   async #editorTargetInfo(target: PreparedElementTarget): Promise<EditorTargetInfo> {
-    let objectId: string | undefined;
     try {
-      const resolved = await this.#dependencies.transport.send<Protocol.DOM.ResolveNodeResponse>(
+      return await this.#withElementObject(
         target.session,
-        'DOM.resolveNode',
-        { backendNodeId: target.reference.backendNodeId },
+        target.reference.backendNodeId,
+        async (objectId) => {
+          if (!objectId) return { editor: false, custom: false, value: '' };
+          const response =
+            await this.#dependencies.transport.send<Protocol.Runtime.CallFunctionOnResponse>(
+              target.session,
+              'Runtime.callFunctionOn',
+              {
+                objectId,
+                functionDeclaration: EDITOR_TARGET_INFO_FUNCTION,
+                awaitPromise: false,
+                returnByValue: true,
+              },
+            );
+          const value = response.result.value as
+            | {
+                readonly editor?: unknown;
+                readonly custom?: unknown;
+                readonly connected?: unknown;
+                readonly value?: unknown;
+              }
+            | undefined;
+          return {
+            editor: response.exceptionDetails === undefined && value?.editor === true,
+            custom: response.exceptionDetails === undefined && value?.custom === true,
+            ...(response.exceptionDetails === undefined && typeof value?.connected === 'boolean'
+              ? { connected: value.connected }
+              : {}),
+            value: typeof value?.value === 'string' ? value.value.slice(0, 20_000) : '',
+          };
+        },
       );
-      objectId = resolved.object.objectId;
-      if (!objectId) return { editor: false, custom: false, value: '' };
-      const response =
-        await this.#dependencies.transport.send<Protocol.Runtime.CallFunctionOnResponse>(
-          target.session,
-          'Runtime.callFunctionOn',
-          {
-            objectId,
-            functionDeclaration: EDITOR_TARGET_INFO_FUNCTION,
-            awaitPromise: false,
-            returnByValue: true,
-          },
-        );
-      const value = response.result.value as
-        | {
-            readonly editor?: unknown;
-            readonly custom?: unknown;
-            readonly connected?: unknown;
-            readonly value?: unknown;
-          }
-        | undefined;
-      return {
-        editor: response.exceptionDetails === undefined && value?.editor === true,
-        custom: response.exceptionDetails === undefined && value?.custom === true,
-        ...(response.exceptionDetails === undefined && typeof value?.connected === 'boolean'
-          ? { connected: value.connected }
-          : {}),
-        value: typeof value?.value === 'string' ? value.value.slice(0, 20_000) : '',
-      };
     } catch {
       return { editor: false, custom: false, value: '' };
-    } finally {
-      if (objectId) {
-        await this.#dependencies.transport
-          .send(target.session, 'Runtime.releaseObject', { objectId })
-          .catch(() => undefined);
-      }
     }
   }
 
@@ -3155,148 +3197,134 @@ export class BrowserActionExecutor implements BrowserActionPort {
     deltaX: number,
     deltaY: number,
   ): Promise<ElementScrollResult | undefined> {
-    let objectId: string | undefined;
     try {
-      const resolved = await this.#dependencies.transport.send<Protocol.DOM.ResolveNodeResponse>(
+      return await this.#withElementObject(
         target.session,
-        'DOM.resolveNode',
-        { backendNodeId: target.reference.backendNodeId },
-      );
-      objectId = resolved.object.objectId;
-      if (!objectId) return undefined;
-      const response =
-        await this.#dependencies.transport.send<Protocol.Runtime.CallFunctionOnResponse>(
-          target.session,
-          'Runtime.callFunctionOn',
-          {
-            objectId,
-            functionDeclaration: SCROLL_ELEMENT_FUNCTION,
-            arguments: [{ value: deltaX }, { value: deltaY }],
-            awaitPromise: false,
-            returnByValue: true,
-            silent: true,
-          },
-        );
-      const result = response.result.value as
-        | {
-            readonly found?: unknown;
-            readonly beforeX?: unknown;
-            readonly beforeY?: unknown;
-            readonly beforeMaxX?: unknown;
-            readonly beforeMaxY?: unknown;
-            readonly afterX?: unknown;
-            readonly afterY?: unknown;
-            readonly maxX?: unknown;
-            readonly maxY?: unknown;
-            readonly beforeContentKey?: unknown;
-            readonly afterContentKey?: unknown;
+        target.reference.backendNodeId,
+        async (objectId) => {
+          if (!objectId) return undefined;
+          const response =
+            await this.#dependencies.transport.send<Protocol.Runtime.CallFunctionOnResponse>(
+              target.session,
+              'Runtime.callFunctionOn',
+              {
+                objectId,
+                functionDeclaration: SCROLL_ELEMENT_FUNCTION,
+                arguments: [{ value: deltaX }, { value: deltaY }],
+                awaitPromise: false,
+                returnByValue: true,
+                silent: true,
+              },
+            );
+          const result = response.result.value as
+            | {
+                readonly found?: unknown;
+                readonly beforeX?: unknown;
+                readonly beforeY?: unknown;
+                readonly beforeMaxX?: unknown;
+                readonly beforeMaxY?: unknown;
+                readonly afterX?: unknown;
+                readonly afterY?: unknown;
+                readonly maxX?: unknown;
+                readonly maxY?: unknown;
+                readonly beforeContentKey?: unknown;
+                readonly afterContentKey?: unknown;
+              }
+            | undefined;
+          if (response.exceptionDetails !== undefined || result?.found !== true) return undefined;
+          const values = [
+            result.beforeX,
+            result.beforeY,
+            result.afterX,
+            result.afterY,
+            result.maxX,
+            result.maxY,
+          ];
+          if (values.some((value) => typeof value !== 'number' || !Number.isFinite(value))) {
+            return undefined;
           }
-        | undefined;
-      if (response.exceptionDetails !== undefined || result?.found !== true) return undefined;
-      const values = [
-        result.beforeX,
-        result.beforeY,
-        result.afterX,
-        result.afterY,
-        result.maxX,
-        result.maxY,
-      ];
-      if (values.some((value) => typeof value !== 'number' || !Number.isFinite(value))) {
-        return undefined;
-      }
-      return {
-        beforeX: result.beforeX as number,
-        beforeY: result.beforeY as number,
-        ...(typeof result.beforeMaxX === 'number' && Number.isFinite(result.beforeMaxX)
-          ? { beforeMaxX: result.beforeMaxX }
-          : {}),
-        ...(typeof result.beforeMaxY === 'number' && Number.isFinite(result.beforeMaxY)
-          ? { beforeMaxY: result.beforeMaxY }
-          : {}),
-        x: result.afterX as number,
-        y: result.afterY as number,
-        maxX: result.maxX as number,
-        maxY: result.maxY as number,
-        ...(typeof result.beforeContentKey === 'string'
-          ? { beforeContentKey: result.beforeContentKey }
-          : {}),
-        ...(typeof result.afterContentKey === 'string'
-          ? { contentKey: result.afterContentKey }
-          : {}),
-      };
+          return {
+            beforeX: result.beforeX as number,
+            beforeY: result.beforeY as number,
+            ...(typeof result.beforeMaxX === 'number' && Number.isFinite(result.beforeMaxX)
+              ? { beforeMaxX: result.beforeMaxX }
+              : {}),
+            ...(typeof result.beforeMaxY === 'number' && Number.isFinite(result.beforeMaxY)
+              ? { beforeMaxY: result.beforeMaxY }
+              : {}),
+            x: result.afterX as number,
+            y: result.afterY as number,
+            maxX: result.maxX as number,
+            maxY: result.maxY as number,
+            ...(typeof result.beforeContentKey === 'string'
+              ? { beforeContentKey: result.beforeContentKey }
+              : {}),
+            ...(typeof result.afterContentKey === 'string'
+              ? { contentKey: result.afterContentKey }
+              : {}),
+          };
+        },
+      );
     } catch {
       return undefined;
-    } finally {
-      if (objectId) {
-        await this.#dependencies.transport
-          .send(target.session, 'Runtime.releaseObject', { objectId })
-          .catch(() => undefined);
-      }
     }
   }
 
   async #readElementScrollState(
-    target: PreparedElementTarget,
+    target: Pick<PreparedElementTarget, 'reference' | 'session'>,
   ): Promise<ElementScrollState | undefined> {
-    let objectId: string | undefined;
     try {
-      const resolved = await this.#dependencies.transport.send<Protocol.DOM.ResolveNodeResponse>(
+      return await this.#withElementObject(
         target.session,
-        'DOM.resolveNode',
-        { backendNodeId: target.reference.backendNodeId },
-      );
-      objectId = resolved.object.objectId;
-      if (!objectId) return undefined;
-      const response =
-        await this.#dependencies.transport.send<Protocol.Runtime.CallFunctionOnResponse>(
-          target.session,
-          'Runtime.callFunctionOn',
-          {
-            objectId,
-            functionDeclaration: READ_SCROLL_STATE_FUNCTION,
-            awaitPromise: false,
-            returnByValue: true,
-            silent: true,
-          },
-        );
-      const result = response.result.value as
-        | {
-            readonly found?: unknown;
-            readonly x?: unknown;
-            readonly y?: unknown;
-            readonly maxX?: unknown;
-            readonly maxY?: unknown;
-            readonly clientWidth?: unknown;
-            readonly clientHeight?: unknown;
-            readonly contentKey?: unknown;
+        target.reference.backendNodeId,
+        async (objectId) => {
+          if (!objectId) return undefined;
+          const response =
+            await this.#dependencies.transport.send<Protocol.Runtime.CallFunctionOnResponse>(
+              target.session,
+              'Runtime.callFunctionOn',
+              {
+                objectId,
+                functionDeclaration: READ_SCROLL_STATE_FUNCTION,
+                awaitPromise: false,
+                returnByValue: true,
+                silent: true,
+              },
+            );
+          const result = response.result.value as
+            | {
+                readonly found?: unknown;
+                readonly x?: unknown;
+                readonly y?: unknown;
+                readonly maxX?: unknown;
+                readonly maxY?: unknown;
+                readonly clientWidth?: unknown;
+                readonly clientHeight?: unknown;
+                readonly contentKey?: unknown;
+              }
+            | undefined;
+          if (response.exceptionDetails !== undefined || result?.found !== true) return undefined;
+          const values = [result.x, result.y, result.maxX, result.maxY];
+          if (values.some((value) => typeof value !== 'number' || !Number.isFinite(value))) {
+            return undefined;
           }
-        | undefined;
-      if (response.exceptionDetails !== undefined || result?.found !== true) return undefined;
-      const values = [result.x, result.y, result.maxX, result.maxY];
-      if (values.some((value) => typeof value !== 'number' || !Number.isFinite(value))) {
-        return undefined;
-      }
-      return {
-        x: result.x as number,
-        y: result.y as number,
-        maxX: result.maxX as number,
-        maxY: result.maxY as number,
-        ...(typeof result.clientWidth === 'number' && Number.isFinite(result.clientWidth)
-          ? { clientWidth: result.clientWidth }
-          : {}),
-        ...(typeof result.clientHeight === 'number' && Number.isFinite(result.clientHeight)
-          ? { clientHeight: result.clientHeight }
-          : {}),
-        ...(typeof result.contentKey === 'string' ? { contentKey: result.contentKey } : {}),
-      };
+          return {
+            x: result.x as number,
+            y: result.y as number,
+            maxX: result.maxX as number,
+            maxY: result.maxY as number,
+            ...(typeof result.clientWidth === 'number' && Number.isFinite(result.clientWidth)
+              ? { clientWidth: result.clientWidth }
+              : {}),
+            ...(typeof result.clientHeight === 'number' && Number.isFinite(result.clientHeight)
+              ? { clientHeight: result.clientHeight }
+              : {}),
+            ...(typeof result.contentKey === 'string' ? { contentKey: result.contentKey } : {}),
+          };
+        },
+      );
     } catch {
       return undefined;
-    } finally {
-      if (objectId) {
-        await this.#dependencies.transport
-          .send(target.session, 'Runtime.releaseObject', { objectId })
-          .catch(() => undefined);
-      }
     }
   }
 
@@ -3304,6 +3332,7 @@ export class BrowserActionExecutor implements BrowserActionPort {
     target: PreparedElementTarget,
     before: ElementScrollState,
     signal: AbortSignal,
+    parentProgress: () => Promise<boolean>,
   ): Promise<ElementScrollState | undefined> {
     const changed = (current: ElementScrollState): boolean =>
       current.x !== before.x ||
@@ -3315,7 +3344,10 @@ export class BrowserActionExecutor implements BrowserActionPort {
         current.contentKey !== before.contentKey);
     let current = await this.#readElementScrollState(target);
     const deadline = Date.now() + SCROLL_SETTLE_TIMEOUT_MS;
-    while (current !== undefined && !changed(current) && Date.now() < deadline) {
+    while (true) {
+      const parentChanged = await parentProgress();
+      if (current === undefined || changed(current) || parentChanged || Date.now() >= deadline)
+        break;
       await this.#delay(Math.min(SCROLL_POLL_INTERVAL_MS, deadline - Date.now()), signal);
       current = await this.#readElementScrollState(target);
     }
@@ -3344,60 +3376,14 @@ export class BrowserActionExecutor implements BrowserActionPort {
     tabId: number,
   ): Promise<Awaited<ReturnType<BrowserPageActionPort['performAction']>> | null> {
     const page = this.#dependencies.page;
-    if (!page) return null;
-    switch (call.operation) {
-      case 'click': {
-        const { ref, button, count } = input<{
-          ref: string;
-          button: 'left' | 'right' | 'middle';
-          count: 1 | 2;
-        }>(call);
-        if (!ref.startsWith('page_')) return null;
-        return page.performAction(tabId, {
-          action: 'click',
-          ref,
-          button,
-          count,
-        });
-      }
-      case 'type': {
-        const { ref, text, replace, submit } = input<{
-          ref: string;
-          text: string;
-          replace: boolean;
-          submit: boolean;
-        }>(call);
-        if (!ref.startsWith('page_')) return null;
-        return page.performAction(tabId, {
-          action: 'type',
-          ref,
-          text,
-          replace,
-          submit,
-        });
-      }
-      case 'scroll': {
-        const { target, deltaX, deltaY } = input<{
-          target: string;
-          deltaX: number;
-          deltaY: number;
-        }>(call);
-        if (target !== 'viewport' && !target.startsWith('page_')) return null;
-        return page.performAction(tabId, {
-          action: 'scroll',
-          target,
-          deltaX,
-          deltaY,
-        });
-      }
-      case 'select': {
-        const { ref, value } = input<{ ref: string; value: string }>(call);
-        if (!ref.startsWith('page_')) return null;
-        return page.performAction(tabId, { action: 'select', ref, value });
-      }
-      default:
-        return null;
-    }
+    if (!page || call.operation !== 'scroll') return null;
+    const { target, deltaX, deltaY } = input<{
+      target: string;
+      deltaX: number;
+      deltaY: number;
+    }>(call);
+    if (target !== 'viewport') return null;
+    return page.performAction(tabId, { action: 'scroll', target, deltaX, deltaY });
   }
 
   async #showPointer(tabId: number, to: Point, from: Point, effect: PointerEffect): Promise<void> {
@@ -3428,29 +3414,27 @@ export class BrowserActionExecutor implements BrowserActionPort {
   }
 
   #getPrimaryModifier(): Promise<number> {
-    this.#primaryModifier ??= this.#dependencies.platform
+    this.#primaryModifier.value ??= this.#dependencies.platform
       .getOs()
       .then((os) => (os === 'mac' ? 4 : 2));
-    return this.#primaryModifier;
+    return this.#primaryModifier.value;
   }
 
   async #selectAll(session: DebuggerSession): Promise<void> {
     const modifiers = await this.#getPrimaryModifier();
-    await this.#dependencies.transport.send(session, 'Input.dispatchKeyEvent', {
-      type: 'rawKeyDown',
-      key: 'a',
-      code: 'KeyA',
-      modifiers,
-      windowsVirtualKeyCode: 65,
-      commands: ['selectAll'],
-    });
-    await this.#dependencies.transport.send(session, 'Input.dispatchKeyEvent', {
-      type: 'keyUp',
-      key: 'a',
-      code: 'KeyA',
-      modifiers,
-      windowsVirtualKeyCode: 65,
-    });
+    const key = { key: 'a', code: 'KeyA', modifiers, windowsVirtualKeyCode: 65 };
+    try {
+      await this.#dependencies.transport.send(session, 'Input.dispatchKeyEvent', {
+        ...key,
+        type: 'rawKeyDown',
+        commands: ['selectAll'],
+      });
+    } finally {
+      await this.#dependencies.transport.send(session, 'Input.dispatchKeyEvent', {
+        ...key,
+        type: 'keyUp',
+      });
+    }
   }
 
   async #insertFocusedText(
@@ -3458,57 +3442,42 @@ export class BrowserActionExecutor implements BrowserActionPort {
     text: string,
     replace: boolean,
     customEditor: boolean,
-    target: PreparedElementTarget | null,
+    target: PreparedElementTarget,
   ): Promise<void> {
-    const objectId = target
-      ? (
-          await this.#dependencies.transport.send<Protocol.DOM.ResolveNodeResponse>(
-            target.session,
-            'DOM.resolveNode',
-            { backendNodeId: target.reference.backendNodeId },
-          )
-        ).object.objectId
-      : (
-          await this.#dependencies.transport.send<Protocol.Runtime.EvaluateResponse>(
+    await this.#withElementObject(
+      target.session,
+      target.reference.backendNodeId,
+      async (objectId) => {
+        if (!objectId) {
+          throw new BrowserActionError(
+            'TYPE_VERIFICATION_FAILED',
+            'The focused editor could not receive the requested text.',
+            'insert',
+          );
+        }
+        const response =
+          await this.#dependencies.transport.send<Protocol.Runtime.CallFunctionOnResponse>(
             session,
-            'Runtime.evaluate',
-            { expression: 'globalThis' },
-          )
-        ).result.objectId;
-    if (!objectId) {
-      throw new BrowserActionError(
-        'TYPE_VERIFICATION_FAILED',
-        'The focused editor could not receive the requested text.',
-        'insert',
-      );
-    }
-    try {
-      const response =
-        await this.#dependencies.transport.send<Protocol.Runtime.CallFunctionOnResponse>(
-          session,
-          'Runtime.callFunctionOn',
-          {
-            objectId,
-            functionDeclaration: INSERT_FOCUSED_TEXT_FUNCTION,
-            arguments: [{ value: text }, { value: replace }, { value: customEditor }],
-            awaitPromise: false,
-            returnByValue: true,
-            userGesture: true,
-          },
-        );
-      const result = response.result.value as { readonly dispatched?: unknown } | undefined;
-      if (response.exceptionDetails || result?.dispatched !== true) {
-        throw new BrowserActionError(
-          'TYPE_VERIFICATION_FAILED',
-          'The focused editor could not receive the requested text.',
-          'insert',
-        );
-      }
-    } finally {
-      await this.#dependencies.transport
-        .send(session, 'Runtime.releaseObject', { objectId })
-        .catch(() => undefined);
-    }
+            'Runtime.callFunctionOn',
+            {
+              objectId,
+              functionDeclaration: INSERT_FOCUSED_TEXT_FUNCTION,
+              arguments: [{ value: text }, { value: replace }, { value: customEditor }],
+              awaitPromise: false,
+              returnByValue: true,
+              userGesture: true,
+            },
+          );
+        const result = response.result.value as { readonly dispatched?: unknown } | undefined;
+        if (response.exceptionDetails || result?.dispatched !== true) {
+          throw new BrowserActionError(
+            'TYPE_VERIFICATION_FAILED',
+            'The focused editor could not receive the requested text.',
+            'insert',
+          );
+        }
+      },
+    );
   }
 
   async #verifyTrustedInput(
@@ -3517,7 +3486,7 @@ export class BrowserActionExecutor implements BrowserActionPort {
     replace: boolean,
     before: string,
     signal: AbortSignal,
-    target: PreparedElementTarget | null,
+    target: PreparedElementTarget,
   ): Promise<string> {
     await this.#selectAll(session);
     await this.#dispatchKey(session, {
@@ -3527,16 +3496,14 @@ export class BrowserActionExecutor implements BrowserActionPort {
       modifiers: 0,
     });
     const expected = normalizeInputValue(text);
-    let verified = false;
+    let verified: boolean;
     let verifiedValue: string | null = null;
     const settleDeadline = Date.now() + INPUT_SETTLE_TIMEOUT_MS;
     do {
-      if (target) {
-        const exact = await this.#editorTargetInfo(target);
-        const candidate = normalizeInputValue(exact.value);
-        verified = verifiesInput(candidate, expected, replace, before);
-        if (verified) verifiedValue = candidate;
-      }
+      const exact = await this.#editorTargetInfo(target);
+      const candidate = normalizeInputValue(exact.value);
+      verified = verifiesInput(candidate, expected, replace, before);
+      if (verified) verifiedValue = candidate;
       try {
         if (!verified) {
           const response =
@@ -3620,10 +3587,9 @@ export class BrowserActionExecutor implements BrowserActionPort {
 
   /** Requires submitted text to leave the editable surface before reporting mutation success. */
   async #verifySubmittedInput(
-    session: DebuggerSession,
+    target: PreparedElementTarget,
     text: string,
     signal: AbortSignal,
-    target: PreparedElementTarget | null,
   ): Promise<void> {
     if (text.length === 0) return;
     const expected = text.replace(/\r\n?/g, '\n');
@@ -3631,49 +3597,16 @@ export class BrowserActionExecutor implements BrowserActionPort {
     let polling = true;
     do {
       throwIfAborted(signal);
-      let observed: string | null = null;
-      let observable = false;
-      if (target) {
-        try {
-          const exact = await this.#editorTargetInfo(target);
-          if (exact.connected === false) return;
-          if (exact.connected === true && !exact.editor) return;
-          observed = exact.value.replace(/\r\n?/g, '\n');
-          observable = true;
-        } catch {
-          return;
-        }
-      } else {
-        try {
-          const response =
-            await this.#dependencies.transport.send<Protocol.Runtime.EvaluateResponse>(
-              session,
-              'Runtime.evaluate',
-              {
-                expression: FOCUSED_EDITABLE_VALUE_EXPRESSION,
-                returnByValue: true,
-              },
-            );
-          observed = evaluatedEditableValue(response);
-          observable = observed !== null;
-        } catch {
-          // The focused AX editable remains the fallback when the page realm is unavailable.
-        }
-        if (!observable) {
-          try {
-            const tree =
-              await this.#dependencies.transport.send<Protocol.Accessibility.GetFullAXTreeResponse>(
-                session,
-                'Accessibility.getFullAXTree',
-              );
-            observed = focusedEditableValue(tree.nodes);
-            observable = observed !== null;
-          } catch {
-            return;
-          }
-        }
+      let observed: string;
+      try {
+        const exact = await this.#editorTargetInfo(target);
+        if (exact.connected === false) return;
+        if (exact.connected === true && !exact.editor) return;
+        observed = exact.value.replace(/\r\n?/g, '\n');
+      } catch {
+        return;
       }
-      if (!observable || !verifiesReplacement(observed, expected)) return;
+      if (!verifiesReplacement(observed, expected)) return;
       if (Date.now() >= settleDeadline) {
         polling = false;
       } else {
@@ -3700,20 +3633,23 @@ export class BrowserActionExecutor implements BrowserActionPort {
       button: 'none',
     });
     for (let clickCount = 1; clickCount <= count; clickCount += 1) {
-      await this.#dependencies.transport.send(session, 'Input.dispatchMouseEvent', {
-        type: 'mousePressed',
-        x: point.x,
-        y: point.y,
-        button,
-        clickCount,
-      });
-      await this.#dependencies.transport.send(session, 'Input.dispatchMouseEvent', {
-        type: 'mouseReleased',
-        x: point.x,
-        y: point.y,
-        button,
-        clickCount,
-      });
+      try {
+        await this.#dependencies.transport.send(session, 'Input.dispatchMouseEvent', {
+          type: 'mousePressed',
+          x: point.x,
+          y: point.y,
+          button,
+          clickCount,
+        });
+      } finally {
+        await this.#dependencies.transport.send(session, 'Input.dispatchMouseEvent', {
+          type: 'mouseReleased',
+          x: point.x,
+          y: point.y,
+          button,
+          clickCount,
+        });
+      }
     }
   }
 
@@ -3724,29 +3660,31 @@ export class BrowserActionExecutor implements BrowserActionPort {
       y: from.y,
       button: 'none',
     });
-    await this.#dependencies.transport.send(session, 'Input.dispatchMouseEvent', {
-      type: 'mousePressed',
-      x: from.x,
-      y: from.y,
-      button: 'left',
-      clickCount: 1,
-    });
-    for (const progress of [0.25, 0.5, 0.75, 1]) {
+    let point = from;
+    try {
       await this.#dependencies.transport.send(session, 'Input.dispatchMouseEvent', {
-        type: 'mouseMoved',
-        x: from.x + (to.x - from.x) * progress,
-        y: from.y + (to.y - from.y) * progress,
+        type: 'mousePressed',
+        ...from,
         button: 'left',
-        buttons: 1,
+        clickCount: 1,
+      });
+      for (const progress of [0.25, 0.5, 0.75, 1]) {
+        point = { x: from.x + (to.x - from.x) * progress, y: from.y + (to.y - from.y) * progress };
+        await this.#dependencies.transport.send(session, 'Input.dispatchMouseEvent', {
+          type: 'mouseMoved',
+          ...point,
+          button: 'left',
+          buttons: 1,
+        });
+      }
+    } finally {
+      await this.#dependencies.transport.send(session, 'Input.dispatchMouseEvent', {
+        type: 'mouseReleased',
+        ...point,
+        button: 'left',
+        clickCount: 1,
       });
     }
-    await this.#dependencies.transport.send(session, 'Input.dispatchMouseEvent', {
-      type: 'mouseReleased',
-      x: to.x,
-      y: to.y,
-      button: 'left',
-      clickCount: 1,
-    });
   }
 
   async #dispatchKey(
@@ -3769,8 +3707,7 @@ export class BrowserActionExecutor implements BrowserActionPort {
       return undefined;
     })();
     const text = chord.modifiers === 0 && chord.key === 'Enter' ? '\r' : undefined;
-    await this.#dependencies.transport.send(session, 'Input.dispatchKeyEvent', {
-      type: 'keyDown',
+    const key = {
       key: chord.key,
       code: chord.code,
       modifiers: chord.modifiers,
@@ -3780,20 +3717,19 @@ export class BrowserActionExecutor implements BrowserActionPort {
             windowsVirtualKeyCode: virtualKeyCode,
             nativeVirtualKeyCode: virtualKeyCode,
           }),
-      ...(text === undefined ? {} : { text, unmodifiedText: text }),
-    });
-    await this.#dependencies.transport.send(session, 'Input.dispatchKeyEvent', {
-      type: 'keyUp',
-      key: chord.key,
-      code: chord.code,
-      modifiers: chord.modifiers,
-      ...(virtualKeyCode === undefined
-        ? {}
-        : {
-            windowsVirtualKeyCode: virtualKeyCode,
-            nativeVirtualKeyCode: virtualKeyCode,
-          }),
-    });
+    };
+    try {
+      await this.#dependencies.transport.send(session, 'Input.dispatchKeyEvent', {
+        ...key,
+        type: 'keyDown',
+        ...(text === undefined ? {} : { text, unmodifiedText: text }),
+      });
+    } finally {
+      await this.#dependencies.transport.send(session, 'Input.dispatchKeyEvent', {
+        ...key,
+        type: 'keyUp',
+      });
+    }
   }
 
   async #navigateHistory(session: DebuggerSession, direction: 'back' | 'forward'): Promise<void> {

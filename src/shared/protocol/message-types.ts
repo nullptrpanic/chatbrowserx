@@ -60,21 +60,7 @@ export type PageCommand =
   | Message<'page.content.read', Record<string, never>>
   | Message<
       'page.action.perform',
-      | {
-          action: 'click';
-          ref: string;
-          button: 'left' | 'right' | 'middle';
-          count: 1 | 2;
-        }
-      | {
-          action: 'type';
-          ref: string;
-          text: string;
-          replace: boolean;
-          submit: boolean;
-        }
-      | { action: 'scroll'; target: string; deltaX: number; deltaY: number }
-      | { action: 'select'; ref: string; value: string }
+      { action: 'scroll'; target: 'viewport'; deltaX: number; deltaY: number }
     >
   | Message<
       'page.pointer.show',

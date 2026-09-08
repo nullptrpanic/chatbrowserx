@@ -2,6 +2,7 @@ import { describe, expect, it, vi } from 'vitest';
 import { parseBrowserToolCall } from '../../src/tools/browser/contract';
 import { BrowserToolExecutor } from '../../src/browser/browser-tool-executor';
 import { NetworkCaptureError } from '../../src/browser/network/network-capture-registry';
+import { DebuggerTransportError } from '../../src/browser/debugger/debugger-transport';
 import type { BrowserTabPort } from '../../src/browser/tab-service';
 
 function tabPort(overrides: Partial<BrowserTabPort> = {}): BrowserTabPort {
@@ -59,6 +60,29 @@ async function primeVisualFallback(
 }
 
 describe('BrowserToolExecutor', () => {
+  it('reports a native timeout as uncertain and not retryable without reloading or replaying', async () => {
+    const actions = {
+      execute: vi.fn(async () => {
+        throw new DebuggerTransportError('COMMAND_TIMEOUT', 'native timeout');
+      }),
+    };
+    const tabs = tabPort();
+    const executor = new BrowserToolExecutor({ tabs, actions });
+    const result = await executor.execute(
+      call('browser_keypress', { keys: 'ENTER' }),
+      new AbortController().signal,
+      { currentTabId: 7 },
+    );
+    expect(JSON.parse(result.output)).toMatchObject({
+      ok: false,
+      code: 'BROWSER_OPERATION_FAILED',
+      retryable: false,
+      needsInspect: true,
+    });
+    expect(actions.execute).toHaveBeenCalledTimes(1);
+    expect(tabs.reload).not.toHaveBeenCalled();
+  });
+
   it('resolves the task-bound current tab without querying active tabs', async () => {
     const tabs = tabPort();
     const executor = new BrowserToolExecutor({ tabs });
@@ -1047,6 +1071,108 @@ describe('BrowserToolExecutor', () => {
       since: 'snapshot_before',
     });
   });
+
+  it.each(['ref_outer', undefined])(
+    'continues through a known parent but only certifies a known page root (%s)',
+    async (root) => {
+      const hierarchy = {
+        ...(root === undefined ? {} : { root }),
+        parentByTarget: new Map([['ref_child', 'ref_outer']]),
+      };
+      let observation = 0;
+      const observer = {
+        inspect: vi.fn(async () => {
+          observation += 1;
+          return {
+            tabId: 7,
+            url: 'https://example.com/course',
+            data: {
+              mode: 'interactive',
+              snapshot: `snapshot_${observation}`,
+              elements: [],
+              coverage: {
+                contentKey: ['initial', 'child-a', 'child-b', 'child-a', 'child-a'][
+                  observation - 1
+                ],
+              },
+            },
+            observation: null,
+            attachmentIds: [],
+            debuggerSession: 'ephemeral' as const,
+            scrollHierarchy: hierarchy,
+          };
+        }),
+      };
+      const positions = new Map([
+        ['ref_child', 0],
+        ['ref_outer', 0],
+      ]);
+      const actions = {
+        execute: vi.fn(async (actionCall: ReturnType<typeof call>) => {
+          const { target } = actionCall.arguments as { readonly target: string };
+          const before = positions.get(target) ?? 0;
+          const after = Math.min(100, before + 100);
+          positions.set(target, after);
+          return {
+            tabId: 7,
+            url: 'https://example.com/course',
+            data: {
+              action: 'scroll',
+              moved: after !== before,
+              actualDeltaX: 0,
+              actualDeltaY: after - before,
+              remainingDeltaX: 0,
+              remainingDeltaY: 0,
+              requestedDeltaApplied: true,
+              contentChanged: false,
+              extentChanged: false,
+              loadedMore: false,
+              boundaryVerified: after === before,
+              position: { x: 0, y: after, maxX: 0, maxY: 100 },
+            },
+            observation: null,
+          };
+        }),
+      };
+      const executor = new BrowserToolExecutor({ tabs: tabPort(), observer, actions });
+      const signal = new AbortController().signal;
+      const context = { currentTabId: 7 };
+
+      await executor.execute(call('browser_inspect', { mode: 'interactive' }), signal, context);
+      const result = await executor.execute(
+        call('browser_scroll', {
+          target: 'ref_child',
+          deltaX: 0,
+          deltaY: 600,
+          maxSegments: 4,
+          stopText: '',
+        }),
+        signal,
+        context,
+      );
+
+      expect(
+        actions.execute.mock.calls.map(
+          ([actionCall]) => (actionCall.arguments as { readonly target: string }).target,
+        ),
+      ).toEqual(['ref_child', 'ref_child', 'ref_outer', 'ref_outer']);
+      expect(actions.execute).toHaveBeenCalledWith(
+        expect.objectContaining({ arguments: expect.objectContaining({ target: 'ref_child' }) }),
+        signal,
+        { containingTarget: 'ref_outer', revealTarget: false },
+      );
+      expect(JSON.parse(result.output)).toMatchObject({
+        ok: true,
+        data: {
+          target: 'ref_child',
+          finalTarget: 'ref_outer',
+          boundaryVerified: true,
+          boundaryScope: root === undefined ? 'target' : 'page',
+          stopReason: 'boundary_verified',
+        },
+      });
+    },
+  );
 
   it('consumes virtualized scroll remainder in ordered observed segments within one tool call', async () => {
     const order: string[] = [];

@@ -62,6 +62,8 @@ export interface SemanticPageTarget {
   readonly actions: readonly SemanticAction[];
   /** Internal ranking evidence; compact model entries never serialize geometry. */
   readonly scrollMetrics?: SemanticScrollMetrics;
+  /** Internal direct ownership evidence; compact model entries never serialize DOM ancestry. */
+  readonly scrollParentBackendNodeId?: number;
   /** Internal top-layer ranking evidence; never serialized into the model-visible result. */
   readonly paintOrder?: number;
 }
@@ -78,12 +80,20 @@ export interface SemanticPageSnapshot {
   readonly entries: readonly SemanticPageEntry[];
   readonly targets: readonly SemanticPageTarget[];
   readonly hasVisualSurface: boolean;
+  readonly scrollOwnerProbes: readonly SemanticScrollOwnerProbe[];
+}
+
+export interface SemanticScrollOwnerProbe {
+  readonly backendNodeId: number;
+  readonly documentFrameId: string;
+  readonly scrollParentBackendNodeId?: number;
 }
 
 interface BuildSemanticPageSnapshotInput {
   readonly axNodes: readonly Protocol.Accessibility.AXNode[];
   readonly domSnapshot: Protocol.DOMSnapshot.CaptureSnapshotResponse;
   readonly frame: string;
+  readonly scrollOwnerBackendNodeIds?: readonly number[];
   readonly viewport?: {
     readonly x: number;
     readonly y: number;
@@ -554,6 +564,15 @@ function scrollMetricsFor(node: SnapshotDomNode): SemanticScrollMetrics | undefi
   };
 }
 
+function nearestScrollableAncestorBackendNodeId(node: SnapshotDomNode): number | undefined {
+  let current = node.parent;
+  while (current) {
+    if (scrollMetricsFor(current) !== undefined) return current.backendNodeId;
+    current = current.parent;
+  }
+  return undefined;
+}
+
 function domNodesAreRelated(left: SnapshotDomNode, right: SnapshotDomNode): boolean {
   const reaches = (start: SnapshotDomNode, expected: SnapshotDomNode): boolean => {
     let current: SnapshotDomNode | null = start;
@@ -628,6 +647,7 @@ function fullyCoveredByHigherLayer(
   const coveringNodes = [...candidates].filter(
     (candidate) =>
       candidate !== target &&
+      candidate.documentFrameId === target.documentFrameId &&
       candidate.visible &&
       candidate.bounds !== undefined &&
       candidate.paintOrder !== undefined &&
@@ -1366,6 +1386,10 @@ export function buildSemanticPageSnapshot(
         targetIndex = targets.length;
         targetIndexes.set(targetDomNode.backendNodeId, targetIndex);
         const scrollMetrics = scrollMetricsFor(targetDomNode);
+        const scrollParentBackendNodeId =
+          scrollMetrics === undefined
+            ? undefined
+            : nearestScrollableAncestorBackendNodeId(targetDomNode);
         targets.push(
           semanticPageTarget(
             {
@@ -1381,6 +1405,7 @@ export function buildSemanticPageSnapshot(
               state,
               actions,
               ...(scrollMetrics === undefined ? {} : { scrollMetrics }),
+              ...(scrollParentBackendNodeId === undefined ? {} : { scrollParentBackendNodeId }),
             },
             targetDomNode.paintOrder,
           ),
@@ -1480,6 +1505,8 @@ export function buildSemanticPageSnapshot(
     const inViewport = viewportMembership(domNode, input.viewport);
     const targetIndex = targets.length;
     const scrollMetrics = scrollMetricsFor(domNode);
+    const scrollParentBackendNodeId =
+      scrollMetrics === undefined ? undefined : nearestScrollableAncestorBackendNodeId(domNode);
     targetIndexes.set(domNode.backendNodeId, targetIndex);
     targets.push(
       semanticPageTarget(
@@ -1492,6 +1519,7 @@ export function buildSemanticPageSnapshot(
           state,
           actions,
           ...(scrollMetrics === undefined ? {} : { scrollMetrics }),
+          ...(scrollParentBackendNodeId === undefined ? {} : { scrollParentBackendNodeId }),
         },
         domNode.paintOrder,
       ),
@@ -1510,8 +1538,23 @@ export function buildSemanticPageSnapshot(
     );
   }
 
+  const scrollOwnerProbes = [...new Set(input.scrollOwnerBackendNodeIds ?? [])].flatMap(
+    (backendNodeId): SemanticScrollOwnerProbe[] => {
+      const node = domByBackendId.get(backendNodeId);
+      if (!node) return [];
+      const scrollParentBackendNodeId = nearestScrollableAncestorBackendNodeId(node);
+      return [
+        {
+          backendNodeId,
+          documentFrameId: node.documentFrameId,
+          ...(scrollParentBackendNodeId === undefined ? {} : { scrollParentBackendNodeId }),
+        },
+      ];
+    },
+  );
   return {
     ...compactTargetEntries(entries, targets),
     hasVisualSurface: domNodes.some(isVisualSurface),
+    scrollOwnerProbes,
   };
 }

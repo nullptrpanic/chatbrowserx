@@ -208,7 +208,9 @@ describe('buildSemanticPageSnapshot', () => {
     const result = buildSemanticPageSnapshot({
       axNodes: [
         axNode('root', 1, 'RootWebArea', 'Document', { childIds: ['text'] }),
-        axNode('text', 2, 'StaticText', `${'x'.repeat(199)}😊`, { parentId: 'root' }),
+        axNode('text', 2, 'StaticText', `${'x'.repeat(199)}😊`, {
+          parentId: 'root',
+        }),
       ],
       domSnapshot: domSnapshot([
         { backendNodeId: 1, nodeName: '#document', parentIndex: -1 },
@@ -676,6 +678,94 @@ describe('buildSemanticPageSnapshot', () => {
     );
   });
 
+  it('records the nearest scrollable ancestor for a nested scroll target', () => {
+    const result = buildSemanticPageSnapshot({
+      axNodes: [axNode('root', 1, 'RootWebArea', 'Nested document')],
+      domSnapshot: domSnapshot([
+        { backendNodeId: 1, nodeName: '#document', parentIndex: -1 },
+        {
+          backendNodeId: 10,
+          nodeName: 'MAIN',
+          parentIndex: 0,
+          attributes: { 'aria-label': 'Outer document' },
+          overflowY: 'auto',
+          bounds: [0, 0, 1_000, 700],
+          clientRect: [0, 0, 1_000, 700],
+          scrollRect: [0, 0, 1_000, 5_000],
+        },
+        {
+          backendNodeId: 20,
+          nodeName: 'DIV',
+          parentIndex: 1,
+          attributes: { 'aria-label': 'Inner document' },
+          overflowY: 'auto',
+          bounds: [100, 100, 800, 500],
+          clientRect: [100, 100, 800, 500],
+          scrollRect: [100, 100, 800, 4_000],
+        },
+      ]),
+      frame: 'main',
+    });
+
+    expect(result.targets.find(({ backendNodeId }) => backendNodeId === 10)).not.toHaveProperty(
+      'scrollParentBackendNodeId',
+    );
+    expect(result.targets.find(({ backendNodeId }) => backendNodeId === 20)).toMatchObject({
+      scrollParentBackendNodeId: 10,
+    });
+  });
+
+  it.each([false, true])(
+    'retains a frame owner’s scrollable ancestor (child document: %s)',
+    (withChildDocument) => {
+      const snapshot = domSnapshot([
+        { backendNodeId: 1, nodeName: '#document', parentIndex: -1 },
+        {
+          backendNodeId: 10,
+          nodeName: 'MAIN',
+          parentIndex: 0,
+          paintOrder: 1,
+          overflowY: 'auto',
+          bounds: [0, 0, 1_000, 700],
+          clientRect: [0, 0, 1_000, 700],
+          scrollRect: [0, 0, 1_000, 5_000],
+        },
+        {
+          backendNodeId: 30,
+          nodeName: 'IFRAME',
+          parentIndex: 1,
+          bounds: [100, 100, 800, 500],
+        },
+      ]);
+      if (withChildDocument) {
+        const child = structuredClone(snapshot.documents[0]);
+        if (!child?.nodes.backendNodeId) throw new Error('Fixture document is missing.');
+        child.frameId = snapshot.strings.push('frame-child') - 1;
+        child.nodes.backendNodeId = child.nodes.backendNodeId.map((id) => id + 100);
+        child.layout.paintOrders = child.layout.nodeIndex.map(() => 100);
+        snapshot.documents.push(child);
+      }
+      const result = buildSemanticPageSnapshot({
+        axNodes: [axNode('root', 1, 'RootWebArea', 'Embedded document')],
+        domSnapshot: snapshot,
+        frame: 'main',
+        viewport: { x: 0, y: 0, width: 1_000, height: 700 },
+        scrollOwnerBackendNodeIds: [30],
+      });
+
+      expect(result.scrollOwnerProbes).toEqual([
+        {
+          backendNodeId: 30,
+          documentFrameId: 'frame-main',
+          scrollParentBackendNodeId: 10,
+        },
+      ]);
+      expect(result.targets.find(({ backendNodeId }) => backendNodeId === 10)).toMatchObject({
+        actions: ['scroll'],
+      });
+    },
+  );
+
   it('preserves scrolling when AX first exposes the container as clickable', () => {
     const focusable = {
       name: 'focusable',
@@ -683,7 +773,9 @@ describe('buildSemanticPageSnapshot', () => {
     } satisfies Protocol.Accessibility.AXProperty;
     const result = buildSemanticPageSnapshot({
       axNodes: [
-        axNode('root', 1, 'RootWebArea', 'Document', { childIds: ['document-pages'] }),
+        axNode('root', 1, 'RootWebArea', 'Document', {
+          childIds: ['document-pages'],
+        }),
         axNode('document-pages', 10, 'generic', 'Document pages', {
           parentId: 'root',
           properties: [focusable],

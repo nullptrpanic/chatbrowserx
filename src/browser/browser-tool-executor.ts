@@ -8,7 +8,11 @@ import type {
   BrowserToolFailureCode,
 } from './browser-execution-types';
 import { BrowserTabError, type BrowserTabPort, type BrowserTabState } from './tab-service';
-import type { PageInspectionOptions, PageObservationResult } from './observation/page-observer';
+import type {
+  PageInspectionOptions,
+  PageObservationResult,
+  PageScrollHierarchy,
+} from './observation/page-observer';
 import type { BrowserActionPort, BrowserActionResult } from './actions/browser-action-executor';
 import type { NetworkCapturePort } from './network/network-capture-registry';
 import { readSelectionState } from './selection-state';
@@ -181,6 +185,13 @@ function failureFor(error: unknown): BrowserToolFailure {
       ? String(error.code)
       : 'BROWSER_OPERATION_FAILED';
   switch (code) {
+    case 'COMMAND_TIMEOUT':
+      return failure(
+        'BROWSER_OPERATION_FAILED',
+        'The browser command timed out and its result is unknown. Inspect the current page before deciding what to do; do not repeat the action blindly.',
+        false,
+        true,
+      );
     case 'INVALID_TAB':
       return failure('INVALID_TAB', 'The browser tab ID is invalid.', false, false);
     case 'ASSET_NOT_AVAILABLE':
@@ -621,8 +632,8 @@ function bindScrollDelta(
   targetTabId: number,
   deltaX: number,
   deltaY: number,
+  target = (call.arguments as { readonly target: string }).target,
 ): ParsedBrowserToolCall {
-  const target = (call.arguments as { readonly target: string }).target;
   const arguments_ = {
     tabId: targetTabId,
     target,
@@ -798,6 +809,7 @@ export class BrowserToolExecutor implements BrowserExecutionPort {
   readonly #visualFallbackByTab = new Map<number, boolean>();
   readonly #stateMismatchFallbackByTab = new Set<number>();
   readonly #interactiveSnapshotByTab = new Map<number, string>();
+  readonly #scrollHierarchyByTab = new Map<number, PageScrollHierarchy>();
   readonly #selectableRefsByTab = new Map<number, ReadonlyMap<string, SelectableRefIdentity>>();
   readonly #semanticStructureByTab = new Map<number, string>();
   readonly #failedSelectionsByTab = new Map<number, Map<string, boolean>>();
@@ -812,6 +824,7 @@ export class BrowserToolExecutor implements BrowserExecutionPort {
     this.#visualFallbackByTab.clear();
     this.#stateMismatchFallbackByTab.clear();
     this.#interactiveSnapshotByTab.clear();
+    this.#scrollHierarchyByTab.clear();
     this.#selectableRefsByTab.clear();
     this.#semanticStructureByTab.clear();
     this.#failedSelectionsByTab.clear();
@@ -823,6 +836,7 @@ export class BrowserToolExecutor implements BrowserExecutionPort {
     this.#visualFallbackByTab.clear();
     this.#stateMismatchFallbackByTab.clear();
     this.#interactiveSnapshotByTab.clear();
+    this.#scrollHierarchyByTab.clear();
     this.#selectableRefsByTab.clear();
     this.#semanticStructureByTab.clear();
     this.#failedSelectionsByTab.clear();
@@ -898,6 +912,7 @@ export class BrowserToolExecutor implements BrowserExecutionPort {
           this.#visualFallbackByTab.delete(targetTabId);
           this.#stateMismatchFallbackByTab.delete(targetTabId);
           this.#interactiveSnapshotByTab.delete(targetTabId);
+          this.#scrollHierarchyByTab.delete(targetTabId);
           this.#selectableRefsByTab.delete(targetTabId);
           this.#semanticStructureByTab.delete(targetTabId);
           this.#failedSelectionsByTab.delete(targetTabId);
@@ -919,6 +934,7 @@ export class BrowserToolExecutor implements BrowserExecutionPort {
           this.#visualFallbackByTab.delete(targetTabId);
           this.#stateMismatchFallbackByTab.delete(targetTabId);
           this.#interactiveSnapshotByTab.delete(targetTabId);
+          this.#scrollHierarchyByTab.delete(targetTabId);
           this.#selectableRefsByTab.delete(targetTabId);
           this.#semanticStructureByTab.delete(targetTabId);
           this.#failedSelectionsByTab.delete(targetTabId);
@@ -942,6 +958,7 @@ export class BrowserToolExecutor implements BrowserExecutionPort {
           this.#visualFallbackByTab.delete(targetTabId);
           this.#stateMismatchFallbackByTab.delete(targetTabId);
           this.#interactiveSnapshotByTab.delete(targetTabId);
+          this.#scrollHierarchyByTab.delete(targetTabId);
           this.#selectableRefsByTab.delete(targetTabId);
           this.#semanticStructureByTab.delete(targetTabId);
           this.#failedSelectionsByTab.delete(targetTabId);
@@ -1006,17 +1023,7 @@ export class BrowserToolExecutor implements BrowserExecutionPort {
                   since: input.since,
                 });
           if (input.mode === 'interactive' || input.mode === 'interactive_deep') {
-            this.#rememberSelectableRefs(targetTabId, observed.data);
-            const snapshotId = interactiveSnapshotId(observed.data);
-            if (snapshotId === null) this.#interactiveSnapshotByTab.delete(targetTabId);
-            else this.#interactiveSnapshotByTab.set(targetTabId, snapshotId);
-            this.#visualFallbackByTab.set(
-              targetTabId,
-              observed.visualFallbackAllowed ?? this.#fallbackFromElements(observed.data),
-            );
-            if (hasSelectableRef(observed.data)) {
-              this.#stateMismatchFallbackByTab.delete(targetTabId);
-            }
+            this.#rememberInteractiveObservation(targetTabId, observed);
           }
           if (input.mode === 'screenshot') {
             const scale = screenshotCoordinateScale(observed.data);
@@ -1163,7 +1170,7 @@ export class BrowserToolExecutor implements BrowserExecutionPort {
           );
           this.#screenshotScales.delete(targetTabId);
           await this.#retainRunner(targetTabId, context?.sessionOwnerId);
-          let action = await this.#dependencies.actions.execute(boundCall, signal);
+          let action = await this.#executeAction(boundCall, signal);
           if (action.failure !== undefined) {
             const normalized = failureFor(action.failure);
             if (normalized.code === 'ACTION_STATE_MISMATCH') {
@@ -1450,6 +1457,20 @@ export class BrowserToolExecutor implements BrowserExecutionPort {
     }
   }
 
+  #rememberInteractiveObservation(tabId_: number, observed: PageObservationResult): void {
+    this.#rememberSelectableRefs(tabId_, observed.data);
+    const snapshotId = interactiveSnapshotId(observed.data);
+    if (snapshotId === null) this.#interactiveSnapshotByTab.delete(tabId_);
+    else this.#interactiveSnapshotByTab.set(tabId_, snapshotId);
+    if (observed.scrollHierarchy === undefined) this.#scrollHierarchyByTab.delete(tabId_);
+    else this.#scrollHierarchyByTab.set(tabId_, observed.scrollHierarchy);
+    this.#visualFallbackByTab.set(
+      tabId_,
+      observed.visualFallbackAllowed ?? this.#fallbackFromElements(observed.data),
+    );
+    if (hasSelectableRef(observed.data)) this.#stateMismatchFallbackByTab.delete(tabId_);
+  }
+
   #fallbackFromElements(data: Readonly<Record<string, unknown>>): boolean {
     if (!Array.isArray(data.elements)) return false;
     return !data.elements.some(
@@ -1558,6 +1579,26 @@ export class BrowserToolExecutor implements BrowserExecutionPort {
     }
   }
 
+  #executeAction(call: ParsedBrowserToolCall, signal: AbortSignal): Promise<BrowserActionResult> {
+    const actions = this.#dependencies.actions;
+    if (!actions) throw new Error('Browser actions are unavailable.');
+    if (call.operation === 'scroll') {
+      const { tabId, target } = call.arguments as {
+        readonly tabId: number;
+        readonly target: string;
+      };
+      const hierarchy = this.#scrollHierarchyByTab.get(tabId);
+      if (hierarchy && (target === hierarchy.root || hierarchy.parentByTarget.has(target))) {
+        const containingTarget = hierarchy.parentByTarget.get(target);
+        return actions.execute(call, signal, {
+          ...(containingTarget === undefined ? {} : { containingTarget }),
+          revealTarget: false,
+        });
+      }
+    }
+    return actions.execute(call, signal);
+  }
+
   async #continueScrollSegments(
     call: ParsedBrowserToolCall,
     tabId_: number,
@@ -1637,7 +1678,10 @@ export class BrowserToolExecutor implements BrowserExecutionPort {
 
       let nextAction: BrowserActionResult;
       try {
-        nextAction = await actions.execute(bindScrollDelta(call, tabId_, deltaX, deltaY), signal);
+        nextAction = await this.#executeAction(
+          bindScrollDelta(call, tabId_, deltaX, deltaY),
+          signal,
+        );
       } catch (error) {
         if (signal.aborted || (error instanceof Error && error.name === 'AbortError')) throw error;
         continuationLimited = 'action_failure';
@@ -1734,6 +1778,7 @@ export class BrowserToolExecutor implements BrowserExecutionPort {
     const observations: Readonly<Record<string, unknown>>[] = [];
     let nextDeltaX = effectiveDeltaX;
     let nextDeltaY = effectiveDeltaY;
+    let currentTarget = input.target;
     let latestAction: BrowserActionResult | null = null;
     let latestSnapshot: string | null = null;
     let stopReason: ScrollTraversalStopReason | null = null;
@@ -1746,6 +1791,7 @@ export class BrowserToolExecutor implements BrowserExecutionPort {
     let extentChanged = false;
     let loadedMore = false;
     let boundaryVerified = false;
+    let boundaryScope: 'page' | 'target' = 'target';
     let verificationUnavailable = false;
     let latestPosition: unknown;
     let growthSegments = 0;
@@ -1753,12 +1799,17 @@ export class BrowserToolExecutor implements BrowserExecutionPort {
 
     while (segments < input.maxSegments) {
       throwIfAborted(signal);
+      const hierarchy = this.#scrollHierarchyByTab.get(tabId_);
+      const followsPageHierarchy =
+        hierarchy !== undefined &&
+        (currentTarget === hierarchy.root || hierarchy.parentByTarget.has(currentTarget));
+      const containingTarget = followsPageHierarchy
+        ? hierarchy.parentByTarget.get(currentTarget)
+        : undefined;
       let action: BrowserActionResult;
       try {
-        action = await actions.execute(
-          bindScrollDelta(call, tabId_, nextDeltaX, nextDeltaY),
-          signal,
-        );
+        const bound = bindScrollDelta(call, tabId_, nextDeltaX, nextDeltaY, currentTarget);
+        action = await this.#executeAction(bound, signal);
       } catch (error) {
         if (signal.aborted || (error instanceof Error && error.name === 'AbortError')) throw error;
         const normalized = failureFor(error);
@@ -1785,15 +1836,34 @@ export class BrowserToolExecutor implements BrowserExecutionPort {
 
       latestAction = action;
       const data = action.data;
+      const ownerMovement =
+        typeof data.ownerMovement === 'object' &&
+        data.ownerMovement !== null &&
+        !Array.isArray(data.ownerMovement)
+          ? (data.ownerMovement as Readonly<Record<string, unknown>>)
+          : undefined;
+      const ownerDeltaX = finiteNumber(ownerMovement?.actualDeltaX) ?? 0;
+      const ownerDeltaY = finiteNumber(ownerMovement?.actualDeltaY) ?? 0;
+      const ownerMoved = ownerDeltaX !== 0 || ownerDeltaY !== 0;
       segments += 1;
       actualDeltaX += finiteNumber(data.actualDeltaX) ?? 0;
       actualDeltaY += finiteNumber(data.actualDeltaY) ?? 0;
-      moved ||= data.moved === true;
+      moved ||= data.moved === true || ownerMoved;
       contentChanged ||= data.contentChanged === true;
       extentChanged ||= data.extentChanged === true;
       loadedMore ||= data.loadedMore === true;
       if (data.loadedMore === true || data.extentChanged === true) growthSegments += 1;
       boundaryVerified = data.boundaryVerified === true;
+      const advancedToParent =
+        containingTarget !== undefined &&
+        (boundaryVerified || (ownerMovement?.target === containingTarget && ownerMoved));
+      if (advancedToParent) {
+        currentTarget = containingTarget;
+        boundaryVerified = false;
+      } else if (boundaryVerified) {
+        boundaryScope =
+          followsPageHierarchy && currentTarget === hierarchy.root ? 'page' : 'target';
+      }
       if (data.position !== undefined) latestPosition = data.position;
 
       const remainingDeltaX = continuationDelta(data.remainingDeltaX);
@@ -1854,6 +1924,7 @@ export class BrowserToolExecutor implements BrowserExecutionPort {
         stopReason = 'boundary_verified';
         break;
       }
+      if (advancedToParent) contentKeys.clear();
       const contentKey = semanticObservationContentKey(observed);
       if (contentKey !== null) {
         if (contentKeys.has(contentKey) && contentKeys.size >= 2) {
@@ -1863,7 +1934,9 @@ export class BrowserToolExecutor implements BrowserExecutionPort {
         contentKeys.add(contentKey);
       }
       const segmentProgressed =
+        advancedToParent ||
         data.moved === true ||
+        ownerMoved ||
         data.contentChanged === true ||
         data.extentChanged === true ||
         data.loadedMore === true ||
@@ -1916,6 +1989,7 @@ export class BrowserToolExecutor implements BrowserExecutionPort {
         action: 'scroll',
         mode: 'traverse',
         target: input.target,
+        ...(currentTarget === input.target ? {} : { finalTarget: currentTarget }),
         deltaX: input.deltaX,
         deltaY: input.deltaY,
         effectiveDeltaX,
@@ -1931,6 +2005,7 @@ export class BrowserToolExecutor implements BrowserExecutionPort {
         extentChanged,
         loadedMore,
         boundaryVerified,
+        ...(boundaryVerified ? { boundaryScope } : {}),
         matched: stopReason === 'text_seen',
         stopReason,
         continuationRequired,
@@ -1966,15 +2041,7 @@ export class BrowserToolExecutor implements BrowserExecutionPort {
       const observed = await observer.inspect(tabId_, 'interactive', signal, {
         since: baseSnapshot,
       });
-      this.#rememberSelectableRefs(tabId_, observed.data);
-      const snapshotId = interactiveSnapshotId(observed.data);
-      if (snapshotId === null) this.#interactiveSnapshotByTab.delete(tabId_);
-      else this.#interactiveSnapshotByTab.set(tabId_, snapshotId);
-      this.#visualFallbackByTab.set(
-        tabId_,
-        observed.visualFallbackAllowed ?? this.#fallbackFromElements(observed.data),
-      );
-      if (hasSelectableRef(observed.data)) this.#stateMismatchFallbackByTab.delete(tabId_);
+      this.#rememberInteractiveObservation(tabId_, observed);
       return observed.data;
     } catch (error) {
       if (signal.aborted || (error instanceof Error && error.name === 'AbortError')) throw error;

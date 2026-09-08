@@ -22,48 +22,17 @@ const contentSchema = z
     truncated: z.boolean(),
   })
   .strict();
-const coordinateSchema = z.number().finite().min(-1_000_000).max(1_000_000);
-const pageActionReasonSchema = z.enum([
-  'ref_not_found',
-  'scroll_target_not_found',
-  'unsupported_action',
-  'trusted_input_required',
-]);
-const pageActionBase = {
-  applied: z.boolean(),
-  url: z.string().max(4_096),
-  reason: pageActionReasonSchema.optional(),
-} as const;
-const pageActionResultSchema = z.discriminatedUnion('action', [
-  z.object({ action: z.literal('click'), ...pageActionBase, dispatched: z.boolean() }).strict(),
-  z
-    .object({
-      action: z.literal('type'),
-      ...pageActionBase,
-      dispatched: z.boolean(),
-      value: z.string().max(20_000),
-      submitted: z.boolean(),
-      target: z.object({ x: coordinateSchema, y: coordinateSchema }).strict().optional(),
-    })
-    .strict(),
-  z
-    .object({
-      action: z.literal('scroll'),
-      ...pageActionBase,
-      moved: z.boolean(),
-      actualDeltaX: z.number().finite(),
-      actualDeltaY: z.number().finite(),
-    })
-    .strict(),
-  z
-    .object({
-      action: z.literal('select'),
-      ...pageActionBase,
-      dispatched: z.boolean(),
-      value: z.string().max(2_000),
-    })
-    .strict(),
-]);
+const pageActionResultSchema = z
+  .object({
+    action: z.literal('scroll'),
+    applied: z.boolean(),
+    url: z.string().max(4_096),
+    reason: z.literal('scroll_target_not_found').optional(),
+    moved: z.boolean(),
+    actualDeltaX: z.number().finite(),
+    actualDeltaY: z.number().finite(),
+  })
+  .strict();
 const overlayStateSchema = z.object({ hidden: z.boolean() }).strict();
 
 export type PageActionInput = Extract<

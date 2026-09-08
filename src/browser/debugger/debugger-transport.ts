@@ -1,6 +1,8 @@
 const CDP_PROTOCOL_VERSION = '1.3';
 const MAX_METHOD_LENGTH = 160;
 const MAX_SESSION_ID_LENGTH = 512;
+const COMMAND_TIMEOUT_MS = 60_000;
+const CLEANUP_TIMEOUT_MS = 5_000;
 
 export interface DebuggerSession {
   readonly tabId: number;
@@ -8,7 +10,12 @@ export interface DebuggerSession {
 }
 
 export type DebuggerTransportErrorCode =
-  'INVALID_TARGET' | 'INVALID_COMMAND' | 'ATTACH_FAILED' | 'DETACH_FAILED' | 'COMMAND_FAILED';
+  | 'INVALID_TARGET'
+  | 'INVALID_COMMAND'
+  | 'ATTACH_FAILED'
+  | 'DETACH_FAILED'
+  | 'COMMAND_FAILED'
+  | 'COMMAND_TIMEOUT';
 
 export class DebuggerTransportError extends Error {
   readonly code: DebuggerTransportErrorCode;
@@ -61,6 +68,7 @@ export interface DebuggerTransport {
     session: DebuggerSession,
     method: string,
     params?: Readonly<Record<string, unknown>>,
+    signal?: AbortSignal,
   ): Promise<TResult>;
   onEvent(listener: DebuggerEventListener): () => void;
   onDetach(listener: DebuggerDetachListener): () => void;
@@ -100,6 +108,86 @@ function normalizeSession(source: DebuggerSession): DebuggerSession | undefined 
     : { tabId: source.tabId, sessionId: source.sessionId };
 }
 
+/** Stops waiting, not the dispatched browser effect; callers must never infer safe replay. */
+function boundedNativeCall<T>(
+  invoke: () => Promise<T>,
+  timeoutMs: number,
+  signal?: AbortSignal,
+): Promise<T> {
+  if (signal?.aborted)
+    return Promise.reject(new DOMException('Browser command was aborted.', 'AbortError'));
+  return new Promise<T>((resolve, reject) => {
+    const clear = () => {
+      clearTimeout(timer);
+      signal?.removeEventListener('abort', abort);
+    };
+    const abort = () => {
+      clear();
+      reject(new DOMException('Browser command was aborted.', 'AbortError'));
+    };
+    const timer = setTimeout(() => {
+      clear();
+      reject(
+        new DebuggerTransportError(
+          'COMMAND_TIMEOUT',
+          'The browser command timed out; its result is unknown.',
+        ),
+      );
+    }, timeoutMs);
+    signal?.addEventListener('abort', abort, { once: true });
+    // Both handlers remain attached after cancellation, so late native failures are consumed.
+    try {
+      void invoke().then(
+        (value) => {
+          clear();
+          resolve(value);
+        },
+        (error: unknown) => {
+          clear();
+          reject(error);
+        },
+      );
+    } catch (error) {
+      clear();
+      reject(error);
+    }
+  });
+}
+
+/** Binds cancellation to one operation, without mutating a shared transport or session. */
+export function withDebuggerSignal(
+  transport: DebuggerTransport,
+  signal: AbortSignal,
+): DebuggerTransport {
+  let timedOut: DebuggerTransportError | undefined;
+  return {
+    attach: (tabId) => transport.attach(tabId),
+    detach: (tabId) => transport.detach(tabId),
+    async send(session, method, params) {
+      const cleanup = isCleanup(method, params);
+      if (timedOut && !cleanup) throw timedOut;
+      try {
+        return await transport.send(session, method, params, cleanup ? undefined : signal);
+      } catch (error) {
+        if (error instanceof DebuggerTransportError && error.code === 'COMMAND_TIMEOUT')
+          timedOut ??= error;
+        throw timedOut ?? error;
+      }
+    },
+    onEvent: (listener) => transport.onEvent(listener),
+    onDetach: (listener) => transport.onDetach(listener),
+  };
+}
+
+function isCleanup(method: string, params?: Readonly<Record<string, unknown>>): boolean {
+  return (
+    method === 'Runtime.releaseObject' ||
+    (method === 'Page.setInterceptFileChooserDialog' && params?.enabled === false) ||
+    (method === 'Input.dispatchMouseEvent' && params?.type === 'mouseReleased') ||
+    (method === 'Input.dispatchKeyEvent' && params?.type === 'keyUp')
+  );
+}
+
 /** Wraps chrome.debugger behind validation, stable failures, and removable listeners. */
 export class ChromeDebuggerTransport implements DebuggerTransport {
   readonly #api: ChromeDebuggerApi;
@@ -111,7 +199,10 @@ export class ChromeDebuggerTransport implements DebuggerTransport {
   async attach(tabId: number): Promise<void> {
     validateSession({ tabId });
     try {
-      await this.#api.attach({ tabId }, CDP_PROTOCOL_VERSION);
+      await boundedNativeCall(
+        () => this.#api.attach({ tabId }, CDP_PROTOCOL_VERSION),
+        COMMAND_TIMEOUT_MS,
+      );
     } catch {
       throw new DebuggerTransportError('ATTACH_FAILED', 'The browser tab could not be attached.');
     }
@@ -120,7 +211,7 @@ export class ChromeDebuggerTransport implements DebuggerTransport {
   async detach(tabId: number): Promise<void> {
     validateSession({ tabId });
     try {
-      await this.#api.detach({ tabId });
+      await boundedNativeCall(() => this.#api.detach({ tabId }), CLEANUP_TIMEOUT_MS);
     } catch {
       throw new DebuggerTransportError('DETACH_FAILED', 'The browser tab could not be detached.');
     }
@@ -130,6 +221,7 @@ export class ChromeDebuggerTransport implements DebuggerTransport {
     session: DebuggerSession,
     method: string,
     params?: Readonly<Record<string, unknown>>,
+    signal?: AbortSignal,
   ): Promise<TResult> {
     validateSession(session);
     if (!isBoundedText(method, MAX_METHOD_LENGTH)) {
@@ -140,8 +232,17 @@ export class ChromeDebuggerTransport implements DebuggerTransport {
     }
 
     try {
-      return (await this.#api.sendCommand(session, method, params)) as TResult;
-    } catch {
+      return (await boundedNativeCall(
+        () => this.#api.sendCommand(session, method, params),
+        isCleanup(method, params) ? CLEANUP_TIMEOUT_MS : COMMAND_TIMEOUT_MS,
+        signal,
+      )) as TResult;
+    } catch (error) {
+      if (
+        error instanceof DebuggerTransportError ||
+        (error instanceof DOMException && error.name === 'AbortError')
+      )
+        throw error;
       throw new DebuggerTransportError(
         'COMMAND_FAILED',
         'The browser command could not be completed.',

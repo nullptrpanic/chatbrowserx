@@ -7,9 +7,10 @@ import {
   pasteImageIntoEditor,
   type BrowserActionExecutorDependencies,
 } from '../../../src/browser/actions/browser-action-executor';
-import type {
-  DebuggerSession,
-  DebuggerTransport,
+import {
+  ChromeDebuggerTransport,
+  type DebuggerSession,
+  type DebuggerTransport,
 } from '../../../src/browser/debugger/debugger-transport';
 import type { BrowserSessionSnapshot } from '../../../src/browser/debugger/target-session-registry';
 import {
@@ -160,6 +161,7 @@ function call(name: string, arguments_: unknown) {
 function harness(
   options: {
     readonly os?: string;
+    readonly editorValue?: () => string;
     readonly pointerPending?: boolean;
     readonly pointerRejects?: boolean;
     readonly page?: BrowserActionExecutorDependencies['page'];
@@ -189,6 +191,23 @@ function harness(
     }
     if (method === 'Runtime.evaluate' && params?.returnByValue !== true) {
       return { result: { type: 'object', objectId: 'page_global' } };
+    }
+    if (
+      options.editorValue &&
+      method === 'Runtime.callFunctionOn' &&
+      typeof params?.functionDeclaration === 'string' &&
+      params.functionDeclaration.includes('__chatbrowserxEditorTargetInfo')
+    ) {
+      return {
+        result: {
+          type: 'object',
+          value: {
+            editor: true,
+            custom: true,
+            value: options.editorValue(),
+          },
+        },
+      };
     }
     if (options.responder) {
       const response = options.responder(session, method, params);
@@ -277,13 +296,20 @@ function harness(
     if (method === 'DOM.resolveNode') return { object: { objectId: 'object_1' } };
     return {};
   }) as unknown as DebuggerTransport['send'];
-  const transport: DebuggerTransport = {
+  const eventCleanups = new Map<unknown, (() => void) | undefined>();
+  const transport = new ChromeDebuggerTransport({
     attach: vi.fn(async () => undefined),
     detach: vi.fn(async () => undefined),
-    send,
-    onEvent: options.onEvent ?? (() => () => undefined),
-    onDetach: () => () => undefined,
-  };
+    sendCommand: send,
+    onEvent: {
+      addListener: (listener) => eventCleanups.set(listener, options.onEvent?.(listener)),
+      removeListener: (listener) => {
+        eventCleanups.get(listener)?.();
+        eventCleanups.delete(listener);
+      },
+    },
+    onDetach: { addListener: () => undefined, removeListener: () => undefined },
+  });
   let refId = 0;
   const refs = new ElementRefStore({ create: () => `ref_${String(++refId)}` });
   refs.replaceSnapshot(
@@ -1049,227 +1075,198 @@ describe('BrowserActionExecutor', () => {
     );
   });
 
-  it('uses a trusted local image trigger before falling back to the system clipboard', async () => {
-    let pasteCalls = 0;
-    let eventListener: Parameters<DebuggerTransport['onEvent']>[0] | undefined;
-    const { executor, send } = harness({
-      onEvent: (listener) => {
-        eventListener = listener;
-        return () => undefined;
-      },
-      attachments: {
-        get: vi.fn(async () => ({
-          id: 'attachment_capture',
-          blob: new Blob(['image-bytes'], { type: 'image/png' }),
-          mimeType: 'image/png',
-          byteSize: 11,
-          width: 640,
-          height: 480,
-          source: 'viewport_capture' as const,
-          createdAt: 1,
-          fileName: 'capture.png',
-        })),
-      },
-      targets: [
-        {
-          frameTargetId: null,
-          documentFrameId: 'frame-main',
-          loaderId: 'loader-1',
-          backendNodeId: 42,
-          role: 'textbox',
-          name: 'Message',
-          state: ['editable'],
-          actions: ['type'],
-          frame: 'main',
+  it.each(['success', 'failure', 'cancel_enable', 'cancel_paste'])(
+    'cleans up a trusted image trigger (%s)',
+    async (mode) => {
+      const controller = new AbortController();
+      const transportFails = mode === 'failure';
+      const cancelEnable = mode === 'cancel_enable';
+      const cancelPaste = mode === 'cancel_paste';
+      let pasteCalls = 0;
+      let eventListener: Parameters<DebuggerTransport['onEvent']>[0] | undefined;
+      const { executor, send } = harness({
+        onEvent: (listener) => {
+          eventListener = listener;
+          return () => undefined;
         },
-      ],
-      responder: (_session, method, params) => {
-        if (method === 'Input.dispatchMouseEvent' && params?.type === 'mouseReleased') {
-          queueMicrotask(() =>
-            eventListener?.(SNAPSHOT.root, 'Page.fileChooserOpened', { backendNodeId: 99 }),
-          );
-          return {};
-        }
-        if (method === 'DOM.resolveNode' && params?.backendNodeId === 99) {
-          return { object: { objectId: 'file_input' } };
-        }
-        if (
-          method !== 'Runtime.callFunctionOn' ||
-          typeof params?.functionDeclaration !== 'string'
-        ) {
+        attachments: {
+          get: vi.fn(async () => ({
+            id: 'attachment_capture',
+            blob: new Blob(['image-bytes'], { type: 'image/png' }),
+            mimeType: 'image/png',
+            byteSize: 11,
+            width: 640,
+            height: 480,
+            source: 'viewport_capture' as const,
+            createdAt: 1,
+            fileName: 'capture.png',
+          })),
+        },
+        targets: [
+          {
+            frameTargetId: null,
+            documentFrameId: 'frame-main',
+            loaderId: 'loader-1',
+            backendNodeId: 42,
+            role: 'textbox',
+            name: 'Message',
+            state: ['editable'],
+            actions: ['type'],
+            frame: 'main',
+          },
+        ],
+        responder: (_session, method, params) => {
+          if (cancelEnable && method === 'Page.setInterceptFileChooserDialog' && params?.enabled) {
+            controller.abort();
+            return new Promise(() => undefined);
+          }
+          if (method === 'Input.dispatchMouseEvent' && params?.type === 'mouseReleased') {
+            queueMicrotask(() =>
+              eventListener?.(SNAPSHOT.root, 'Page.fileChooserOpened', { backendNodeId: 99 }),
+            );
+            return {};
+          }
+          if (method === 'DOM.resolveNode' && params?.backendNodeId === 99) {
+            return { object: { objectId: 'file_input' } };
+          }
+          if (
+            method !== 'Runtime.callFunctionOn' ||
+            typeof params?.functionDeclaration !== 'string'
+          ) {
+            return undefined;
+          }
+          if (params.functionDeclaration.includes('__chatbrowserxPasteImage')) {
+            pasteCalls += 1;
+            if (cancelPaste && params.objectId === 'file_input') {
+              controller.abort();
+              return new Promise(() => undefined);
+            }
+            if (transportFails && params.objectId === 'file_input') {
+              throw new Error('File input execution failed.');
+            }
+            return {
+              result: {
+                type: 'object',
+                value:
+                  pasteCalls === 1
+                    ? {
+                        dispatched: true,
+                        strategy: 'clipboard_event',
+                        fileCount: 1,
+                        handled: true,
+                        verified: false,
+                        previewCount: 0,
+                      }
+                    : {
+                        dispatched: true,
+                        strategy: 'file_input',
+                        fileCount: 1,
+                        handled: true,
+                        verified: true,
+                        mutations: 4,
+                        previewCount: 1,
+                      },
+              },
+            };
+          }
+          if (params.functionDeclaration.includes('__chatbrowserxImageFileInputTrigger')) {
+            return {
+              result: { type: 'object', value: { found: true, x: 80, y: 120 } },
+            };
+          }
           return undefined;
-        }
-        if (params.functionDeclaration.includes('__chatbrowserxPasteImage')) {
-          pasteCalls += 1;
-          return {
-            result: {
-              type: 'object',
-              value:
-                pasteCalls === 1
-                  ? {
-                      dispatched: true,
-                      strategy: 'clipboard_event',
-                      fileCount: 1,
-                      handled: true,
-                      verified: false,
-                      previewCount: 0,
-                    }
-                  : {
-                      dispatched: true,
-                      strategy: 'file_input',
-                      fileCount: 1,
-                      handled: true,
-                      verified: true,
-                      mutations: 4,
-                      previewCount: 1,
-                    },
-            },
-          };
-        }
-        if (params.functionDeclaration.includes('__chatbrowserxImageFileInputTrigger')) {
-          return {
-            result: { type: 'object', value: { found: true, x: 80, y: 120 } },
-          };
-        }
-        return undefined;
-      },
-    });
+        },
+      });
 
-    await expect(
-      executor.execute(
+      const result = executor.execute(
         call('browser_paste_image', {
           tabId: 7,
           ref: 'ref_1',
           assetId: 'attachment_capture',
         }),
-        new AbortController().signal,
-      ),
-    ).resolves.toMatchObject({
-      data: {
-        action: 'paste_image',
-        strategy: 'file_input',
-        fileCount: 1,
-        handled: true,
-        verified: true,
-        previewCount: 1,
-      },
-    });
-    expect(pasteCalls).toBe(2);
-    expect(send).toHaveBeenCalledWith(SNAPSHOT.root, 'Page.setInterceptFileChooserDialog', {
-      enabled: true,
-    });
-    expect(send).toHaveBeenCalledWith(SNAPSHOT.root, 'Page.setInterceptFileChooserDialog', {
-      enabled: false,
-    });
-    expect(send).toHaveBeenCalledWith(
-      SNAPSHOT.root,
-      'Input.dispatchMouseEvent',
-      expect.objectContaining({ type: 'mousePressed', x: 80, y: 120 }),
-    );
-    expect(send).not.toHaveBeenCalledWith(
-      SNAPSHOT.root,
-      'Input.dispatchKeyEvent',
-      expect.objectContaining({ commands: ['Paste'] }),
-    );
-  });
+        controller.signal,
+      );
+      if (cancelEnable || cancelPaste) {
+        await expect(result).rejects.toMatchObject({ name: 'AbortError' });
+      } else if (transportFails) {
+        await expect(result).rejects.toMatchObject({ code: 'ATTACHMENT_VERIFICATION_FAILED' });
+      } else {
+        await expect(result).resolves.toMatchObject({
+          data: {
+            action: 'paste_image',
+            strategy: 'file_input',
+            fileCount: 1,
+            handled: true,
+            verified: true,
+            previewCount: 1,
+          },
+        });
+      }
+      expect(pasteCalls).toBe(cancelEnable ? 1 : 2);
+      for (const objectId of cancelEnable ? ['object_1'] : ['file_input', 'object_1']) {
+        expect(send).toHaveBeenCalledWith(SNAPSHOT.root, 'Runtime.releaseObject', { objectId });
+      }
+      expect(send).toHaveBeenCalledWith(SNAPSHOT.root, 'Page.setInterceptFileChooserDialog', {
+        enabled: true,
+      });
+      expect(send).toHaveBeenCalledWith(SNAPSHOT.root, 'Page.setInterceptFileChooserDialog', {
+        enabled: false,
+      });
+      if (!cancelEnable) {
+        expect(send).toHaveBeenCalledWith(
+          SNAPSHOT.root,
+          'Input.dispatchMouseEvent',
+          expect.objectContaining({ type: 'mousePressed', x: 80, y: 120 }),
+        );
+      }
+      expect(send).not.toHaveBeenCalledWith(
+        SNAPSHOT.root,
+        'Input.dispatchKeyEvent',
+        expect.objectContaining({ commands: ['Paste'] }),
+      );
+    },
+  );
 
-  it('uses the page bridge for a DOM ref without attaching a debugger session', async () => {
+  it('scrolls the viewport through the page bridge without attaching a debugger', async () => {
     const page = {
       performAction: vi.fn(async () => ({
-        action: 'click' as const,
+        action: 'scroll' as const,
         applied: true,
-        dispatched: true,
+        moved: true,
+        actualDeltaX: 0,
+        actualDeltaY: 100,
         url: 'https://example.test/current',
       })),
     };
     const { executor, sessions, send } = harness({ page });
-
     const result = await executor.execute(
-      call('browser_click', {
+      call('browser_scroll', {
         tabId: 7,
-        ref: 'page_1_1',
-        button: 'left',
-        count: 1,
+        target: 'viewport',
+        deltaX: 0,
+        deltaY: 100,
+        maxSegments: 1,
+        stopText: '',
       }),
       new AbortController().signal,
     );
-
     expect(page.performAction).toHaveBeenCalledWith(7, {
-      action: 'click',
-      ref: 'page_1_1',
-      button: 'left',
-      count: 1,
+      action: 'scroll',
+      target: 'viewport',
+      deltaX: 0,
+      deltaY: 100,
     });
     expect(sessions.ensure).not.toHaveBeenCalled();
     expect(send).not.toHaveBeenCalled();
     expect(result).toMatchObject({
-      tabId: 7,
-      data: { action: 'click', applied: true, dispatched: true },
+      data: { action: 'scroll', applied: true, moved: true, actualDeltaY: 100 },
     });
   });
 
-  it('types through the page bridge without attaching a debugger when the value is verified', async () => {
-    const page = {
-      performAction: vi.fn(async () => ({
-        action: 'type' as const,
-        applied: true,
-        dispatched: true,
-        value: 'hello',
-        submitted: false,
-        url: 'https://example.test/current',
-      })),
-    };
-    const { executor, sessions, send } = harness({ page });
-
-    const result = await executor.execute(
-      call('browser_type', {
-        tabId: 7,
-        ref: 'page_1_1',
-        text: 'hello',
-        replace: true,
-        submit: false,
-      }),
-      new AbortController().signal,
-    );
-
-    expect(result).toMatchObject({
-      data: {
-        action: 'type',
-        applied: true,
-        strategy: 'dom',
-        verified: true,
-        replaced: true,
-        submitted: false,
-        valueLength: 5,
-        verification: {
-          valueLength: 5,
-          valueHash: '4f9f2cab',
-          prefixMatch: true,
-          suffixMatch: true,
-        },
-      },
-    });
-    expect(JSON.stringify(result)).not.toContain('"value":"hello"');
-    expect(sessions.ensure).not.toHaveBeenCalled();
-    expect(send).not.toHaveBeenCalled();
-  });
-
-  it('replaces multiline editor text atomically at its measured point', async () => {
+  it('replaces multiline editor text atomically at its observed CDP target', async () => {
     const replacement = 'hello\n    world';
-    const page = {
-      performAction: vi.fn(async () => ({
-        action: 'type' as const,
-        applied: false,
-        dispatched: false,
-        reason: 'trusted_input_required' as const,
-        target: { x: 60, y: 35 },
-        value: 'starter',
-        submitted: false,
-        url: 'https://example.test/current',
-      })),
-    };
     const { executor, sessions, send } = harness({
-      page,
+      editorValue: () => 'starter',
       os: 'mac',
       responder: (_session, method) =>
         method === 'Accessibility.getFullAXTree'
@@ -1296,7 +1293,7 @@ describe('BrowserActionExecutor', () => {
       executor.execute(
         call('browser_type', {
           tabId: 7,
-          ref: 'page_1_1',
+          ref: 'ref_1',
           text: replacement,
           replace: true,
           submit: false,
@@ -1318,11 +1315,7 @@ describe('BrowserActionExecutor', () => {
       },
     });
     expect(sessions.ensure).toHaveBeenCalledOnce();
-    expect(send).toHaveBeenCalledWith(
-      { tabId: 7 },
-      'Input.dispatchMouseEvent',
-      expect.objectContaining({ type: 'mousePressed', x: 60, y: 35 }),
-    );
+    expect(send).toHaveBeenCalledWith({ tabId: 7 }, 'DOM.focus', { backendNodeId: 42 });
     expect(send).toHaveBeenCalledWith(
       { tabId: 7 },
       'Input.dispatchKeyEvent',
@@ -1383,20 +1376,8 @@ describe('BrowserActionExecutor', () => {
       insertedFromPaste = true;
       editorModel = inputEvent.data;
     });
-    const page = {
-      performAction: vi.fn(async () => ({
-        action: 'type' as const,
-        applied: false,
-        dispatched: false,
-        reason: 'trusted_input_required' as const,
-        target: { x: 60, y: 35 },
-        value: editor.value,
-        submitted: false,
-        url: 'https://leetcode.com/problems/median-of-two-sorted-arrays/',
-      })),
-    };
     const { executor } = harness({
-      page,
+      editorValue: () => 'starter',
       os: 'mac',
       responder: (_session, method, params) => {
         if (method === 'Input.insertText') {
@@ -1419,13 +1400,13 @@ describe('BrowserActionExecutor', () => {
           const replace = arguments_[1] as { readonly value?: unknown } | undefined;
           const customEditor = arguments_[2] as { readonly value?: unknown } | undefined;
           const pageFunction = Function(`return (${declaration});`)() as (
-            this: Window,
+            this: Element,
             text: string,
             replace: boolean,
             customEditor: boolean,
           ) => unknown;
           const value = pageFunction.call(
-            window,
+            editor,
             typeof text?.value === 'string' ? text.value : '',
             replace?.value === true,
             customEditor?.value === true,
@@ -1459,7 +1440,7 @@ describe('BrowserActionExecutor', () => {
         executor.execute(
           call('browser_type', {
             tabId: 7,
-            ref: 'page_1_1',
+            ref: 'ref_1',
             text: replacement,
             replace: true,
             submit: false,
@@ -1476,20 +1457,8 @@ describe('BrowserActionExecutor', () => {
 
   it('verifies a full editor replacement from the selected DOM value when AX is stale', async () => {
     const replacement = `class Solution {\n${'    return 0;\n'.repeat(60)}};`;
-    const page = {
-      performAction: vi.fn(async () => ({
-        action: 'type' as const,
-        applied: false,
-        dispatched: false,
-        reason: 'trusted_input_required' as const,
-        target: { x: 60, y: 35 },
-        value: 'previous malformed code',
-        submitted: false,
-        url: 'https://leetcode.com/problems/median-of-two-sorted-arrays/',
-      })),
-    };
     const { executor } = harness({
-      page,
+      editorValue: () => 'starter',
       responder: (_session, method) => {
         if (method === 'Runtime.evaluate') {
           return { result: { type: 'string', value: replacement } };
@@ -1515,7 +1484,7 @@ describe('BrowserActionExecutor', () => {
       executor.execute(
         call('browser_type', {
           tabId: 7,
-          ref: 'page_1_1',
+          ref: 'ref_1',
           text: replacement,
           replace: true,
           submit: false,
@@ -1535,20 +1504,8 @@ describe('BrowserActionExecutor', () => {
   it('uses an explicit CDP select-all command for a Monaco replacement', async () => {
     const replacement = 'class Solution {\n    return 0;\n};';
     let recognizedSelectAllCount = 0;
-    const page = {
-      performAction: vi.fn(async () => ({
-        action: 'type' as const,
-        applied: false,
-        dispatched: false,
-        reason: 'trusted_input_required' as const,
-        target: { x: 60, y: 35 },
-        value: 'previous malformed code',
-        submitted: false,
-        url: 'https://leetcode.com/problems/median-of-two-sorted-arrays/',
-      })),
-    };
     const { executor } = harness({
-      page,
+      editorValue: () => 'starter',
       os: 'mac',
       responder: (_session, method, params) => {
         if (
@@ -1590,7 +1547,7 @@ describe('BrowserActionExecutor', () => {
       executor.execute(
         call('browser_type', {
           tabId: 7,
-          ref: 'page_1_1',
+          ref: 'ref_1',
           text: replacement,
           replace: true,
           submit: false,
@@ -1604,20 +1561,8 @@ describe('BrowserActionExecutor', () => {
   });
 
   it('rejects a trusted replacement when the focused editable value does not match', async () => {
-    const page = {
-      performAction: vi.fn(async () => ({
-        action: 'type' as const,
-        applied: false,
-        dispatched: false,
-        reason: 'trusted_input_required' as const,
-        target: { x: 60, y: 35 },
-        value: 'starter',
-        submitted: false,
-        url: 'https://example.test/current',
-      })),
-    };
     const { executor } = harness({
-      page,
+      editorValue: () => 'starter',
       responder: (_session, method) =>
         method === 'Accessibility.getFullAXTree'
           ? {
@@ -1643,7 +1588,7 @@ describe('BrowserActionExecutor', () => {
       executor.execute(
         call('browser_type', {
           tabId: 7,
-          ref: 'page_1_1',
+          ref: 'ref_1',
           text: 'hello',
           replace: true,
           submit: false,
@@ -1657,22 +1602,12 @@ describe('BrowserActionExecutor', () => {
   });
 
   it('identifies a trusted input dispatch failure as an insert-stage failure', async () => {
-    const page = {
-      performAction: vi.fn(async () => ({
-        action: 'type' as const,
-        applied: false,
-        dispatched: false,
-        reason: 'trusted_input_required' as const,
-        target: { x: 60, y: 35 },
-        value: '',
-        submitted: false,
-        url: 'https://example.test/current',
-      })),
-    };
     const { executor } = harness({
-      page,
+      editorValue: () => 'starter',
       responder: (_session, method, params) =>
-        method === 'Runtime.callFunctionOn' && params?.objectId === 'page_global'
+        method === 'Runtime.callFunctionOn' &&
+        typeof params?.functionDeclaration === 'string' &&
+        params.functionDeclaration.startsWith('function(text, replace, customEditor)')
           ? { result: { type: 'object', value: { dispatched: false } } }
           : undefined,
     });
@@ -1681,7 +1616,7 @@ describe('BrowserActionExecutor', () => {
       executor.execute(
         call('browser_type', {
           tabId: 7,
-          ref: 'page_1_1',
+          ref: 'ref_1',
           text: 'hello',
           replace: true,
           submit: false,
@@ -1696,22 +1631,20 @@ describe('BrowserActionExecutor', () => {
 
   it('accepts trailing editor placeholders before submitting a trusted replacement', async () => {
     const text = 'message to submit';
-    let accessibilityReads = 0;
-    const page = {
-      performAction: vi.fn(async () => ({
-        action: 'type' as const,
-        applied: false,
-        dispatched: false,
-        reason: 'trusted_input_required' as const,
-        target: { x: 60, y: 35 },
-        value: '',
-        submitted: false,
-        url: 'https://example.test/current',
-      })),
-    };
+    let submitted = false;
+    let targetReads = 0;
     const { executor, send } = harness({
-      page,
+      editorValue: () => {
+        targetReads += 1;
+        return submitted ? '' : text + ' \u200b \u200b \u200b';
+      },
       responder: (_session, method, params) => {
+        if (
+          method === 'Input.dispatchKeyEvent' &&
+          params?.key === 'Enter' &&
+          params.type === 'keyDown'
+        )
+          submitted = true;
         if (method === 'Runtime.evaluate') {
           return params?.returnByValue === true
             ? { result: { type: 'object', value: null } }
@@ -1719,29 +1652,6 @@ describe('BrowserActionExecutor', () => {
         }
         if (method === 'Runtime.callFunctionOn') {
           return { result: { type: 'object', value: { dispatched: true } } };
-        }
-        if (method === 'Accessibility.getFullAXTree') {
-          accessibilityReads += 1;
-          return {
-            nodes: [
-              {
-                nodeId: 'editor',
-                ignored: false,
-                role: { type: 'role', value: 'generic' },
-                value: {
-                  type: 'string',
-                  value: accessibilityReads === 1 ? `${text} \u200b \u200b \u200b` : '',
-                },
-                properties: [
-                  { name: 'focused', value: { type: 'boolean', value: true } },
-                  {
-                    name: 'editable',
-                    value: { type: 'token', value: 'richtext' },
-                  },
-                ],
-              },
-            ],
-          };
         }
         return undefined;
       },
@@ -1751,7 +1661,7 @@ describe('BrowserActionExecutor', () => {
       executor.execute(
         call('browser_type', {
           tabId: 7,
-          ref: 'page_1_1',
+          ref: 'ref_1',
           text,
           replace: true,
           submit: true,
@@ -1768,7 +1678,7 @@ describe('BrowserActionExecutor', () => {
       },
     });
 
-    expect(accessibilityReads).toBeGreaterThanOrEqual(2);
+    expect(targetReads).toBeGreaterThanOrEqual(4);
     expect(
       send.mock.calls.filter(
         ([, method, params]) =>
@@ -2104,20 +2014,8 @@ describe('BrowserActionExecutor', () => {
   it('rejects a submitted editor action when the requested text remains in the editor', async () => {
     vi.useFakeTimers();
     const text = 'message that was not sent';
-    const page = {
-      performAction: vi.fn(async () => ({
-        action: 'type' as const,
-        applied: false,
-        dispatched: false,
-        reason: 'trusted_input_required' as const,
-        target: { x: 60, y: 35 },
-        value: '',
-        submitted: false,
-        url: 'https://example.test/current',
-      })),
-    };
     const { executor } = harness({
-      page,
+      editorValue: () => text,
       responder: (_session, method, params) => {
         if (method === 'Runtime.evaluate') {
           return params?.returnByValue === true
@@ -2134,7 +2032,7 @@ describe('BrowserActionExecutor', () => {
     const operation = executor.execute(
       call('browser_type', {
         tabId: 7,
-        ref: 'page_1_1',
+        ref: 'ref_1',
         text,
         replace: true,
         submit: true,
@@ -2149,14 +2047,16 @@ describe('BrowserActionExecutor', () => {
     await rejection;
   });
 
-  it('falls back to CDP only when the page bridge proves it did not dispatch', async () => {
+  it('uses CDP for observed element refs even when a page bridge is available', async () => {
     const page = {
       performAction: vi.fn(async () => ({
-        action: 'click' as const,
+        action: 'scroll' as const,
         applied: false,
-        dispatched: false,
+        moved: false,
+        actualDeltaX: 0,
+        actualDeltaY: 0,
         url: 'https://example.test/current',
-        reason: 'ref_not_found' as const,
+        reason: 'scroll_target_not_found' as const,
       })),
     };
     const { executor, sessions, send } = harness({ page });
@@ -2171,6 +2071,7 @@ describe('BrowserActionExecutor', () => {
       new AbortController().signal,
     );
 
+    expect(page.performAction).not.toHaveBeenCalled();
     expect(sessions.ensure).toHaveBeenCalledOnce();
     expect(send).toHaveBeenCalledWith(
       { tabId: 7 },
@@ -4356,6 +4257,113 @@ describe('BrowserActionExecutor', () => {
     expect(send.mock.calls.some(([, method]) => method === 'Input.dispatchMouseEvent')).toBe(false);
   });
 
+  it('aborts a stalled click without letting its late response dispatch mouse presses', async () => {
+    let release: () => void = () => undefined;
+    let started: () => void = () => undefined;
+    const ready = new Promise<void>((resolve) => {
+      started = resolve;
+    });
+    const native = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const { executor, send } = harness({
+      responder: (_session, method, params) => {
+        if (method === 'Input.dispatchMouseEvent' && params?.type === 'mouseMoved') {
+          started();
+          return native;
+        }
+        return undefined;
+      },
+    });
+    const controller = new AbortController();
+    const pending = executor.execute(
+      call('browser_click_point', {
+        tabId: 7,
+        x: 10,
+        y: 20,
+        button: 'left',
+        count: 1,
+      }),
+      controller.signal,
+    );
+    const outcome = expect(pending).rejects.toMatchObject({ name: 'AbortError' });
+    await ready;
+    controller.abort();
+    await outcome;
+    release();
+    await Promise.resolve();
+    expect(
+      send.mock.calls.some(
+        ([, method, params]) =>
+          method === 'Input.dispatchMouseEvent' && params?.type === 'mousePressed',
+      ),
+    ).toBe(false);
+  });
+
+  it.each([
+    [
+      'browser_click_point',
+      { tabId: 7, x: 10, y: 20, button: 'left', count: 1 },
+      'Input.dispatchMouseEvent',
+      'mousePressed',
+      ['mouseMoved', 'mousePressed', 'mouseReleased'],
+    ],
+    [
+      'browser_drag_point',
+      { tabId: 7, fromX: 10, fromY: 20, toX: 30, toY: 40 },
+      'Input.dispatchMouseEvent',
+      'mousePressed',
+      ['mouseMoved', 'mousePressed', 'mouseReleased'],
+    ],
+    [
+      'browser_keypress',
+      { tabId: 7, keys: 'ENTER' },
+      'Input.dispatchKeyEvent',
+      'keyDown',
+      ['keyDown', 'keyUp'],
+    ],
+    [
+      'browser_type',
+      { tabId: 7, ref: 'ref_1', text: 'new text', replace: true, submit: false },
+      'Input.dispatchKeyEvent',
+      'rawKeyDown',
+      ['rawKeyDown', 'keyUp'],
+    ],
+  ])(
+    'releases input state when cancellation interrupts %s acknowledgement',
+    async (name, args, inputMethod, pressedType, expected) => {
+      let started: () => void = () => undefined;
+      let release: () => void = () => undefined;
+      const ready = new Promise<void>((resolve) => {
+        started = resolve;
+      });
+      const native = new Promise<void>((resolve) => {
+        release = resolve;
+      });
+      const { executor, send } = harness({
+        responder: (_session, method, params) => {
+          if (method === inputMethod && params?.type === pressedType) {
+            started();
+            return native;
+          }
+          return undefined;
+        },
+      });
+      const controller = new AbortController();
+      const pending = executor.execute(call(name, args), controller.signal);
+      const outcome = expect(pending).rejects.toMatchObject({ name: 'AbortError' });
+      await ready;
+      controller.abort();
+      await outcome;
+      release();
+      expect(
+        send.mock.calls
+          .filter(([, method]) => method === inputMethod)
+          .map(([, , params]) => params?.type),
+      ).toEqual(expected);
+    },
+  );
+
   it('reports the actual viewport movement after a CDP scroll', async () => {
     let pageY = 0;
     const { executor } = harness({
@@ -4419,7 +4427,8 @@ describe('BrowserActionExecutor', () => {
     ).resolves.toEqual({ width: 1_024, height: 750 });
   });
 
-  it('measures the nearest nested scroll container in CSS pixels', async () => {
+  it('measures a nested scroll container without moving its ancestor', async () => {
+    let ancestorScrollY = 640;
     const { executor } = harness({
       targets: [
         {
@@ -4435,6 +4444,7 @@ describe('BrowserActionExecutor', () => {
         },
       ],
       responder: (_session, method, params) => {
+        if (method === 'DOM.scrollIntoViewIfNeeded') ancestorScrollY = 0;
         if (
           method === 'Runtime.callFunctionOn' &&
           typeof params?.functionDeclaration === 'string' &&
@@ -4463,7 +4473,152 @@ describe('BrowserActionExecutor', () => {
     await expect(
       executor.measureScrollTarget(7, 'ref_1', new AbortController().signal),
     ).resolves.toEqual({ width: 320, height: 400 });
+    expect(ancestorScrollY).toBe(640);
   });
+
+  it.each([
+    ['immediate element parent', 0, false, false, false],
+    ['delayed element parent', 100, false, false, false],
+    ['viewport parent', 100, true, false, false],
+    ['partially visible parent', 0, false, true, false],
+    ['parent-controlled child with apparent DOM progress', 100, false, false, true],
+  ] as const)(
+    'reports wheel movement in a %s without revealing it',
+    async (_, delay, viewportParent, largeParent, transientChild) => {
+      vi.useFakeTimers();
+      let wheelAt: number | undefined;
+      const parentMoved = () => wheelAt !== undefined && Date.now() - wheelAt >= delay;
+      const { executor, send } = harness({
+        targets: [42, 43].map((backendNodeId) => ({
+          frameTargetId: null,
+          documentFrameId: 'frame-main',
+          loaderId: 'loader-1',
+          backendNodeId,
+          role: 'region',
+          name: backendNodeId === 42 ? 'Child document' : 'Outer page',
+          state: [],
+          actions: ['scroll'],
+          frame: 'main',
+        })),
+        responder: (_session, method, params) => {
+          if (method === 'Page.getLayoutMetrics' && viewportParent) {
+            return {
+              cssVisualViewport: {
+                pageX: 0,
+                pageY: parentMoved() ? 300 : 0,
+                clientWidth: 800,
+                clientHeight: 600,
+              },
+              cssContentSize: { x: 0, y: 0, width: 800, height: 1_600 },
+            };
+          }
+          if (method === 'DOM.getBoxModel' && params?.backendNodeId === 43 && largeParent) {
+            return { model: { border: [0, 0, 800, 0, 800, 1_800, 0, 1_800] } };
+          }
+          if (method === 'DOM.resolveNode') {
+            return {
+              object: {
+                objectId: params?.backendNodeId === 43 ? 'object_owner' : 'object_child',
+              },
+            };
+          }
+          if (method === 'Input.dispatchMouseEvent' && params?.type === 'mouseWheel') {
+            wheelAt = Date.now();
+            return {};
+          }
+          if (
+            method === 'Runtime.callFunctionOn' &&
+            typeof params?.functionDeclaration === 'string' &&
+            params.functionDeclaration.includes('__chatbrowserxScrollTarget')
+          ) {
+            return {
+              result: {
+                type: 'object',
+                value: {
+                  found: true,
+                  beforeX: 0,
+                  beforeY: transientChild ? 100 : 800,
+                  afterX: 0,
+                  afterY: transientChild ? 700 : 800,
+                  beforeMaxX: 0,
+                  beforeMaxY: transientChild ? 2_000 : 800,
+                  maxX: 0,
+                  maxY: transientChild ? 2_000 : 800,
+                  beforeContentKey: 'child',
+                  afterContentKey: 'child',
+                },
+              },
+            };
+          }
+          if (
+            method === 'Runtime.callFunctionOn' &&
+            typeof params?.functionDeclaration === 'string' &&
+            params.functionDeclaration.includes('__chatbrowserxScrollState')
+          ) {
+            const owner = params.objectId === 'object_owner';
+            return {
+              result: {
+                type: 'object',
+                value: {
+                  found: true,
+                  x: 0,
+                  y: owner ? (parentMoved() ? 300 : 0) : transientChild ? 100 : 800,
+                  maxX: 0,
+                  maxY: owner ? 1_000 : transientChild ? 2_000 : 800,
+                  clientWidth: 800,
+                  clientHeight: 600,
+                  contentKey: owner ? 'outer' : 'child',
+                },
+              },
+            };
+          }
+          return undefined;
+        },
+      });
+
+      const startedAt = Date.now();
+      let completedAt = 0;
+      const pending = executor
+        .execute(
+          call('browser_scroll', {
+            tabId: 7,
+            target: 'ref_1',
+            deltaX: 0,
+            deltaY: 600,
+            maxSegments: 1,
+            stopText: '',
+          }),
+          new AbortController().signal,
+          { containingTarget: viewportParent ? 'viewport' : 'ref_2', revealTarget: false },
+        )
+        .then((result) => {
+          completedAt = Date.now() - startedAt;
+          return result;
+        });
+      await vi.runAllTimersAsync();
+      const result = await pending;
+
+      expect(result.data).toMatchObject({
+        ownerMovement: {
+          target: viewportParent ? 'viewport' : 'ref_2',
+          actualDeltaX: 0,
+          actualDeltaY: 300,
+        },
+        actualDeltaX: 0,
+        actualDeltaY: 300,
+        remainingDeltaX: 0,
+        remainingDeltaY: 300,
+        requestedDeltaApplied: false,
+        boundaryVerified: false,
+      });
+      expect(send).not.toHaveBeenCalledWith(
+        { tabId: 7 },
+        'DOM.scrollIntoViewIfNeeded',
+        expect.anything(),
+      );
+      expect(completedAt).toBeLessThanOrEqual(150);
+    },
+  );
 
   it('requires one same-direction viewport probe before verifying a finite boundary', async () => {
     let pageY = 0;
@@ -4615,70 +4770,88 @@ describe('BrowserActionExecutor', () => {
     });
   });
 
-  it('scrolls the nearest nested container directly and reports its real position', async () => {
-    const { executor, send } = harness({
-      targets: [
-        {
-          frameTargetId: null,
-          documentFrameId: 'frame-main',
-          loaderId: 'loader-1',
-          backendNodeId: 42,
-          role: 'region',
-          name: 'Message history',
-          state: [],
-          actions: ['scroll'],
-          frame: 'main',
-        },
-      ],
-      responder: (_session, method) => {
-        if (method === 'Runtime.callFunctionOn') {
-          return {
-            result: {
-              type: 'object',
-              value: {
-                found: true,
-                beforeX: 0,
-                beforeY: 120,
-                afterX: 0,
-                afterY: 320,
-                maxX: 0,
-                maxY: 800,
+  it.each([
+    { y: 20, height: 30, revealTarget: true, reveals: 1 },
+    { y: 20, height: 30, revealTarget: false, reveals: 0 },
+    { y: -1_400, height: 1_800, revealTarget: false, reveals: 0 },
+    { y: -1_800, height: 600, revealTarget: false, reveals: 1 },
+  ])(
+    'scrolls a nested container at y=$y, revealing only when required ($revealTarget)',
+    async ({ y, height, revealTarget, reveals }) => {
+      let revealed = false;
+      const { executor, send } = harness({
+        targets: [
+          {
+            frameTargetId: null,
+            documentFrameId: 'frame-main',
+            loaderId: 'loader-1',
+            backendNodeId: 42,
+            role: 'region',
+            name: 'Message history',
+            state: [],
+            actions: ['scroll'],
+            frame: 'main',
+          },
+        ],
+        responder: (_session, method) => {
+          if (method === 'DOM.scrollIntoViewIfNeeded') revealed = true;
+          if (method === 'DOM.getBoxModel') {
+            const top = revealed ? 20 : y;
+            return { model: { border: [10, top, 110, top, 110, top + height, 10, top + height] } };
+          }
+          if (method === 'Runtime.callFunctionOn') {
+            return {
+              result: {
+                type: 'object',
+                value: {
+                  found: true,
+                  beforeX: 0,
+                  beforeY: 120,
+                  afterX: 0,
+                  afterY: 320,
+                  maxX: 0,
+                  maxY: 800,
+                },
               },
-            },
-          };
-        }
-        return undefined;
-      },
-    });
+            };
+          }
+          return undefined;
+        },
+      });
 
-    const result = await executor.execute(
-      call('browser_scroll', {
-        tabId: 7,
-        target: 'ref_1',
-        deltaX: 0,
-        deltaY: 200,
-        maxSegments: 1,
-        stopText: '',
-      }),
-      new AbortController().signal,
-    );
+      const result = await executor.execute(
+        call('browser_scroll', {
+          tabId: 7,
+          target: 'ref_1',
+          deltaX: 0,
+          deltaY: 200,
+          maxSegments: 1,
+          stopText: '',
+        }),
+        new AbortController().signal,
+        { revealTarget },
+      );
 
-    expect(result.data).toMatchObject({
-      action: 'scroll',
-      dispatched: true,
-      strategy: 'element',
-      moved: true,
-      actualDeltaX: 0,
-      actualDeltaY: 200,
-      position: { x: 0, y: 320, maxX: 0, maxY: 800 },
-    });
-    expect(
-      send.mock.calls.some(
-        ([, method, params]) =>
-          method === 'Input.dispatchMouseEvent' && params?.type === 'mouseWheel',
-      ),
-    ).toBe(false);
-  });
+      expect(result.data).toMatchObject({
+        action: 'scroll',
+        dispatched: true,
+        strategy: 'element',
+        moved: true,
+        actualDeltaX: 0,
+        actualDeltaY: 200,
+        position: { x: 0, y: 320, maxX: 0, maxY: 800 },
+      });
+      expect(
+        send.mock.calls.some(
+          ([, method, params]) =>
+            method === 'Input.dispatchMouseEvent' && params?.type === 'mouseWheel',
+        ),
+      ).toBe(false);
+      expect(
+        send.mock.calls.filter(([, method]) => method === 'DOM.scrollIntoViewIfNeeded'),
+      ).toHaveLength(reveals);
+    },
+  );
 
   it('uses a trusted wheel fallback when a virtualized list loads content at its boundary', async () => {
     let wheelDispatched = false;
@@ -5291,7 +5464,9 @@ describe('BrowserActionExecutor', () => {
       .finally(() => {
         settled = true;
       });
-    await vi.waitFor(() => expect(send).toHaveBeenCalledWith({ tabId: 7 }, 'Network.enable'));
+    await vi.waitFor(() =>
+      expect(send).toHaveBeenCalledWith({ tabId: 7 }, 'Network.enable', undefined),
+    );
     listener?.({ tabId: 7 }, 'Network.requestWillBeSent', {
       requestId: 'request_1',
     });

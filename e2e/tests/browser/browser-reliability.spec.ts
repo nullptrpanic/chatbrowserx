@@ -97,6 +97,147 @@ function functionOutputs(body: unknown): readonly string[] {
   });
 }
 
+for (const delegated of [false, true]) {
+  extensionTest(
+    `scrolls an embedded document with ${delegated ? 'parent-controlled' : 'independent'} wheel handling`,
+    async ({ extensionSession }) => {
+      const fixtureServer = createServer((_request, response) => {
+        response.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
+        response.end(`<!doctype html><html><body style="margin:0;overflow:hidden">
+          <main id="outer" aria-label="Outer course"
+            style="height:480px;width:600px;overflow:auto">
+            <div style="height:1800px;padding-top:40px">
+              <section id="inner" aria-label="Embedded document" role="region"
+                style="height:300px;width:550px;overflow:auto">
+                <div style="height:1200px">Embedded document content</div>
+              </section>
+            </div>
+          </main>
+          <script>
+            const outer = document.querySelector('#outer');
+            const inner = document.querySelector('#inner');
+            inner.scrollTop = 100;
+            inner.addEventListener('wheel', event => {
+              inner.dataset.trustedWheel = String(event.isTrusted);
+              if (${String(delegated)}) {
+                event.preventDefault();
+                // The host owns paging; DOM writes to the child do not advance it.
+                outer.scrollTop += Math.sign(event.deltaY) * 200;
+                inner.scrollTop = outer.scrollTop / 2;
+              }
+            }, { passive: false });
+          </script>
+        </body></html>`);
+      });
+      const port = await listen(fixtureServer);
+      const fixtureUrl = `http://127.0.0.1:${String(port)}/embedded`;
+      const page = await extensionSession.context.newPage();
+      await page.goto(fixtureUrl);
+      let turn = 0;
+      let scrollOutput: unknown;
+      await extensionSession.context.route(
+        'https://chatgpt.com/backend-api/codex/responses',
+        async (route) => {
+          const outputs = functionOutputs(route.request().postDataJSON());
+          turn += 1;
+          let body: string;
+          if (turn === 1) {
+            body = toolResponse('inspect', 'inspect_item', 'inspect_call', 'browser_inspect', {
+              tabId: 0,
+              mode: 'interactive',
+              since: '',
+            });
+          } else if (turn === 2) {
+            const observation = JSON.parse(outputs.at(-1) ?? '{}') as {
+              data?: { elements?: { ref: string; n: string }[] };
+            };
+            const ref = observation.data?.elements?.find(
+              (item) => item.n === 'Embedded document' && typeof item.ref === 'string',
+            )?.ref;
+            if (!ref) throw new Error('Embedded scroll target unavailable.');
+            body = toolResponse('scroll', 'scroll_item', 'scroll_call', 'browser_scroll', {
+              tabId: 0,
+              target: ref,
+              deltaX: 0,
+              deltaY: 200,
+              maxSegments: 1,
+              stopText: '',
+            });
+          } else {
+            scrollOutput = JSON.parse(outputs.at(-1) ?? '{}');
+            body = finalTextResponse('done', 'Scroll checked.');
+          }
+          await route.fulfill({
+            status: 200,
+            headers: { 'Content-Type': 'text/event-stream' },
+            body,
+          });
+        },
+      );
+      try {
+        const tabs = await extensionSession.sidePanelPage.evaluate(
+          async (url) => chrome.tabs.query({ url }),
+          fixtureUrl,
+        );
+        const tabId = tabs[0]?.id;
+        if (typeof tabId !== 'number') throw new Error('Fixture tab ID unavailable.');
+        await sendExtensionMessage(extensionSession.sidePanelPage, {
+          version: 1,
+          requestId: 'scroll_settings',
+          type: 'settings.save',
+          payload: {
+            reasoningEffort: 'low',
+            systemPrompt: 'Use browser tools.',
+            language: 'en',
+            historyMessageLimit: 50,
+            codexAccessToken: syntheticAccessToken(),
+          },
+        });
+        const submitted = await sendExtensionMessage<{ task: { id: string } }>(
+          extensionSession.sidePanelPage,
+          {
+            version: 1,
+            requestId: 'scroll_submit',
+            type: 'chat.submit',
+            payload: {
+              tabId,
+              text: 'Scroll the embedded document down by 200 pixels.',
+              attachmentIds: [],
+            },
+          },
+        );
+        await expect
+          .poll(
+            async () => {
+              const snapshot = await sendExtensionMessage<{ task: { status: string } }>(
+                extensionSession.sidePanelPage,
+                {
+                  version: 1,
+                  requestId: `scroll_snapshot_${String(Date.now())}`,
+                  type: 'task.getSnapshot',
+                  payload: { taskId: submitted.task.id },
+                },
+              );
+              return snapshot.task.status;
+            },
+            { timeout: 30_000 },
+          )
+          .toBe('completed');
+        expect(scrollOutput).toMatchObject({
+          ok: true,
+          data: { moved: true, actualDeltaY: 200, boundaryVerified: false },
+        });
+        await expect(page.locator('#inner')).toHaveAttribute('data-trusted-wheel', 'true');
+        await expect(page.locator('#outer')).toHaveJSProperty('scrollTop', delegated ? 200 : 0);
+        await expect(page.locator('#inner')).toHaveJSProperty('scrollTop', delegated ? 100 : 300);
+      } finally {
+        await page.close();
+        await closeHttpFixtureServer(fixtureServer);
+      }
+    },
+  );
+}
+
 extensionTest(
   'completes a long reactive form through deep AX inspection after the selected node is replaced',
   async ({ extensionSession }) => {

@@ -1,6 +1,10 @@
 import type { Protocol } from 'devtools-protocol';
 import type { AttachmentSource } from '../../attachments/attachment-types';
-import type { DebuggerSession, DebuggerTransport } from '../debugger/debugger-transport';
+import {
+  withDebuggerSignal,
+  type DebuggerSession,
+  type DebuggerTransport,
+} from '../debugger/debugger-transport';
 import type { TargetSessionRegistry } from '../debugger/target-session-registry';
 import type { ReadablePageContent } from './content-extractor';
 import type { ElementRefStore, ObservedElementTarget } from './element-ref-store';
@@ -48,6 +52,14 @@ export interface PageObservationResult {
   readonly debuggerSession: 'none' | 'ephemeral';
   /** Internal AX-first policy signal; it is not serialized into the model-visible result. */
   readonly visualFallbackAllowed?: boolean;
+  /** Internal scroll ownership, independent of the recommended initial target. */
+  readonly scrollHierarchy?: PageScrollHierarchy;
+}
+
+export interface PageScrollHierarchy {
+  /** The dominant outer surface, only when its page-level ownership is known. */
+  readonly root?: string;
+  readonly parentByTarget: ReadonlyMap<string, string>;
 }
 
 export interface PageObserverDependencies {
@@ -98,6 +110,110 @@ interface InteractiveCoverage {
     'page_summary',
   ];
   readonly contentKey: string;
+}
+
+interface ObservedInteractiveTarget extends ObservedElementTarget {
+  readonly scrollMetrics?: SemanticScrollMetrics;
+  /** null is a verified root; undefined means ownership could not be resolved. */
+  readonly scrollParentTargetKey: string | null | undefined;
+  readonly paintOrder?: number;
+}
+
+interface ObservedFrameOwner {
+  readonly parentFrameTargetId: string | null;
+  readonly frame: Protocol.Page.Frame;
+  readonly backendNodeId: number;
+}
+
+interface FrameParent {
+  readonly parentDocumentKey: string;
+  readonly scrollParentTargetKey?: string;
+}
+
+function frameDocumentKey(frameTargetId: string | null, documentFrameId: string): string {
+  return JSON.stringify([frameTargetId, documentFrameId]);
+}
+
+function descendantFrames(frameTree: Protocol.Page.FrameTree): readonly Protocol.Page.Frame[] {
+  const frames: Protocol.Page.Frame[] = [];
+  const visit = (tree: Protocol.Page.FrameTree): void => {
+    for (const child of tree.childFrames ?? []) {
+      frames.push(child.frame);
+      visit(child);
+    }
+  };
+  visit(frameTree);
+  return frames;
+}
+
+function scrollTargetKey(
+  target: Pick<
+    ObservedInteractiveTarget,
+    'frameTargetId' | 'documentFrameId' | 'loaderId' | 'backendNodeId'
+  >,
+): string {
+  return JSON.stringify([
+    target.frameTargetId,
+    target.documentFrameId,
+    target.loaderId,
+    target.backendNodeId,
+  ]);
+}
+
+function pageScrollHierarchy(
+  documentCoverage: DocumentViewportCoverage | undefined,
+  selectedTargetIndexes: readonly number[],
+  targets: readonly ObservedInteractiveTarget[],
+  refs: readonly string[],
+): PageScrollHierarchy | undefined {
+  const targetByRef = new Map<string, ObservedInteractiveTarget>();
+  const refByTargetKey = new Map<string, string>();
+  selectedTargetIndexes.forEach((targetIndex, index) => {
+    const target = targets[targetIndex];
+    const ref = refs[index];
+    if (!target || !ref || target.scrollMetrics === undefined) return;
+    targetByRef.set(ref, target);
+    refByTargetKey.set(scrollTargetKey(target), ref);
+  });
+
+  const parentByTarget = new Map<string, string>();
+  const outerTargets: InteractiveScrollTarget[] = [];
+  for (const [ref, target] of targetByRef) {
+    const parent =
+      target.scrollParentTargetKey === 'viewport'
+        ? 'viewport'
+        : typeof target.scrollParentTargetKey === 'string'
+          ? refByTargetKey.get(target.scrollParentTargetKey)
+          : undefined;
+    if (parent !== undefined) {
+      parentByTarget.set(ref, parent);
+    } else {
+      // Unresolved owners remain candidates so they cannot falsely certify another root.
+      outerTargets.push({
+        ref,
+        name: target.name,
+        depth: 0,
+        ...(target.scrollMetrics === undefined ? {} : { metrics: target.scrollMetrics }),
+      });
+    }
+  }
+  if (documentCoverage !== undefined) {
+    outerTargets.push({
+      ref: 'viewport',
+      name: 'Document viewport',
+      depth: -1,
+      metrics: documentCoverage.scrollMetrics,
+    });
+  }
+  const candidate = primaryScrollTarget(rankedScrollTargets(outerTargets));
+  const root =
+    candidate !== undefined &&
+    (candidate === 'viewport' || targetByRef.get(candidate)?.scrollParentTargetKey === null)
+      ? candidate
+      : undefined;
+  return root === undefined && parentByTarget.size === 0
+    ? undefined
+    : { ...(root === undefined ? {} : { root }), parentByTarget };
 }
 
 function compactSemanticEntry(entry: SemanticPageEntry, ref?: string): CompactSemanticPageEntry {
@@ -361,19 +477,17 @@ function documentViewportCoverage(
   const maxY = Math.max(0, content.height - viewport.clientHeight);
   const moreBefore = viewport.pageX > 1 || viewport.pageY > 1;
   const moreAfter = viewport.pageX < maxX - 1 || viewport.pageY < maxY - 1;
-  return moreBefore || moreAfter
-    ? {
-        moreBefore,
-        moreAfter,
-        scrollMetrics: {
-          bounds: [viewport.pageX, viewport.pageY, viewport.clientWidth, viewport.clientHeight],
-          clientWidth: Math.max(0, viewport.clientWidth),
-          clientHeight: Math.max(0, viewport.clientHeight),
-          scrollWidth: Math.max(0, content.width),
-          scrollHeight: Math.max(0, content.height),
-        },
-      }
-    : undefined;
+  return {
+    moreBefore,
+    moreAfter,
+    scrollMetrics: {
+      bounds: [viewport.pageX, viewport.pageY, viewport.clientWidth, viewport.clientHeight],
+      clientWidth: Math.max(0, viewport.clientWidth),
+      clientHeight: Math.max(0, viewport.clientHeight),
+      scrollWidth: Math.max(0, content.width),
+      scrollHeight: Math.max(0, content.height),
+    },
+  };
 }
 
 interface InteractiveScrollTarget {
@@ -631,6 +745,7 @@ export class PageObserver {
   ): Promise<PageObservationResult> {
     const persist = this.#dependencies.persistScreenshot;
     if (!persist) throw new Error('Screenshot persistence is unavailable.');
+    const transport = withDebuggerSignal(this.#dependencies.transport, signal);
     const browserSession = await this.#dependencies.sessions.ensure(tabId, signal);
     throwIfAborted(signal);
     let overlayHideAttempted = false;
@@ -643,11 +758,11 @@ export class PageObserver {
       }
       throwIfAborted(signal);
       const [metrics, captured, metadata] = await Promise.all([
-        this.#dependencies.transport.send<Protocol.Page.GetLayoutMetricsResponse>(
+        transport.send<Protocol.Page.GetLayoutMetricsResponse>(
           browserSession.root,
           'Page.getLayoutMetrics',
         ),
-        this.#dependencies.transport.send<Protocol.Page.CaptureScreenshotResponse>(
+        transport.send<Protocol.Page.CaptureScreenshotResponse>(
           browserSession.root,
           'Page.captureScreenshot',
           {
@@ -657,7 +772,7 @@ export class PageObserver {
             optimizeForSpeed: true,
           },
         ),
-        this.#pageMetadata(browserSession.root),
+        this.#pageMetadata(browserSession.root, transport),
       ]);
       throwIfAborted(signal);
       const blob = screenshotPng(captured.data);
@@ -719,40 +834,99 @@ export class PageObserver {
     signal: AbortSignal,
     options: PageInspectionOptions,
   ): Promise<PageObservationResult> {
+    const transport = withDebuggerSignal(this.#dependencies.transport, signal);
     const browserSession = await this.#dependencies.sessions.ensure(tabId, signal);
     throwIfAborted(signal);
-    const targets: (ObservedElementTarget & {
-      readonly scrollMetrics?: SemanticScrollMetrics;
-      readonly paintOrder?: number;
-    })[] = [];
+    const targets: ObservedInteractiveTarget[] = [];
     const entries: SemanticPageEntry[] = [];
     const documentEpochParts: string[] = [];
-    let mainDocumentCoverage: DocumentViewportCoverage | undefined;
     let hasVisualSurface = false;
+    const childBySessionId = new Map(
+      [...browserSession.children.values()].map((child) => [child.session.sessionId, child]),
+    );
     const sessionTargets: readonly {
       session: DebuggerSession;
       frame: string;
       frameTargetId: string | null;
+      parentSession?: DebuggerSession;
+      parentFrameTargetId?: string | null;
     }[] = [
       { session: browserSession.root, frame: 'main', frameTargetId: null },
-      ...[...browserSession.children.values()].map((child) => ({
-        session: child.session,
-        frame: child.targetId,
-        frameTargetId: child.targetId,
-      })),
+      ...[...browserSession.children.values()].map((child) => {
+        const parentChild =
+          child.parentSessionId === null ? undefined : childBySessionId.get(child.parentSessionId);
+        return {
+          session: child.session,
+          frame: child.targetId,
+          frameTargetId: child.targetId,
+          ...(child.parentSessionId === null
+            ? { parentSession: browserSession.root, parentFrameTargetId: null }
+            : parentChild === undefined
+              ? {}
+              : {
+                  parentSession: parentChild.session,
+                  parentFrameTargetId: parentChild.targetId,
+                }),
+        };
+      }),
     ];
 
-    const sessionObservations = await mapConcurrentOrdered(
+    const rawSessionObservations = await mapConcurrentOrdered(
       sessionTargets,
       MAX_SESSION_OBSERVATION_CONCURRENCY,
       async (sessionTarget) => {
         throwIfAborted(signal);
-        const [tree, domSnapshot, frameTree, metrics] = await Promise.all([
-          this.#dependencies.transport.send<Protocol.Accessibility.GetFullAXTreeResponse>(
+        const frameTreePromise = transport.send<Protocol.Page.GetFrameTreeResponse>(
+          sessionTarget.session,
+          'Page.getFrameTree',
+        );
+        const frameOwnersPromise = frameTreePromise.then(async ({ frameTree }) => {
+          const frameOwners = descendantFrames(frameTree).map((frame) => ({
+            frame,
+            session: sessionTarget.session,
+            parentFrameTargetId: sessionTarget.frameTargetId,
+          }));
+          if (sessionTarget.parentSession !== undefined) {
+            frameOwners.push({
+              frame: frameTree.frame,
+              session: sessionTarget.parentSession,
+              parentFrameTargetId: sessionTarget.parentFrameTargetId ?? null,
+            });
+          }
+          const owners = await mapConcurrentOrdered(
+            frameOwners,
+            MAX_SESSION_OBSERVATION_CONCURRENCY,
+            async ({
+              frame,
+              session,
+              parentFrameTargetId,
+            }): Promise<ObservedFrameOwner | undefined> => {
+              try {
+                const { backendNodeId } = await transport.send<Protocol.DOM.GetFrameOwnerResponse>(
+                  session,
+                  'DOM.getFrameOwner',
+                  { frameId: frame.id },
+                );
+                return Number.isInteger(backendNodeId) && backendNodeId > 0
+                  ? {
+                      parentFrameTargetId,
+                      frame,
+                      backendNodeId,
+                    }
+                  : undefined;
+              } catch {
+                return undefined;
+              }
+            },
+          );
+          return owners.filter((owner): owner is ObservedFrameOwner => owner !== undefined);
+        });
+        const [tree, domSnapshot, frameTree, metrics, frameOwners] = await Promise.all([
+          transport.send<Protocol.Accessibility.GetFullAXTreeResponse>(
             sessionTarget.session,
             'Accessibility.getFullAXTree',
           ),
-          this.#dependencies.transport.send<Protocol.DOMSnapshot.CaptureSnapshotResponse>(
+          transport.send<Protocol.DOMSnapshot.CaptureSnapshotResponse>(
             sessionTarget.session,
             'DOMSnapshot.captureSnapshot',
             {
@@ -761,16 +935,14 @@ export class PageObserver {
               includePaintOrder: true,
             },
           ),
-          this.#dependencies.transport.send<Protocol.Page.GetFrameTreeResponse>(
-            sessionTarget.session,
-            'Page.getFrameTree',
-          ),
-          this.#dependencies.transport
+          frameTreePromise,
+          transport
             .send<Protocol.Page.GetLayoutMetricsResponse>(
               sessionTarget.session,
               'Page.getLayoutMetrics',
             )
             .catch(() => ({}) as Protocol.Page.GetLayoutMetricsResponse),
+          frameOwnersPromise,
         ]);
         const loaders = this.#frameLoaders(frameTree.frameTree);
         const viewport = snapshotViewportFromLayoutMetrics(metrics);
@@ -778,35 +950,128 @@ export class PageObserver {
           sessionTarget,
           loaders,
           metrics,
+          viewport,
+          topDocumentFrameId: frameTree.frameTree.frame.id,
           pageUrl:
             sessionTarget.frame === 'main' && frameTree.frameTree.frame.url.length > 0
               ? frameTree.frameTree.frame.url.slice(0, 4_096)
               : null,
-          semantic: buildSemanticPageSnapshot({
-            axNodes: tree.nodes,
-            domSnapshot,
-            frame: sessionTarget.frame,
-            ...(viewport === undefined ? {} : { viewport }),
-          }),
+          tree,
+          domSnapshot,
+          frameOwners,
         };
       },
     );
 
-    for (const { sessionTarget, loaders, metrics, semantic } of sessionObservations) {
+    const ownerBackendNodeIdsByFrame = new Map<string | null, number[]>();
+    for (const { frameOwners } of rawSessionObservations) {
+      for (const frameOwner of frameOwners) {
+        const backendNodeIds = ownerBackendNodeIdsByFrame.get(frameOwner.parentFrameTargetId) ?? [];
+        backendNodeIds.push(frameOwner.backendNodeId);
+        ownerBackendNodeIdsByFrame.set(frameOwner.parentFrameTargetId, backendNodeIds);
+      }
+    }
+    const sessionObservations = rawSessionObservations.map((observation) => ({
+      ...observation,
+      semantic: buildSemanticPageSnapshot({
+        axNodes: observation.tree.nodes,
+        domSnapshot: observation.domSnapshot,
+        frame: observation.sessionTarget.frame,
+        ...(observation.viewport === undefined ? {} : { viewport: observation.viewport }),
+        scrollOwnerBackendNodeIds:
+          ownerBackendNodeIdsByFrame.get(observation.sessionTarget.frameTargetId) ?? [],
+      }),
+    }));
+    const observationByFrame = new Map(
+      sessionObservations.map((observation) => [
+        observation.sessionTarget.frameTargetId,
+        observation,
+      ]),
+    );
+    const mainObservation = observationByFrame.get(null);
+    const mainDocumentKey =
+      mainObservation === undefined
+        ? undefined
+        : frameDocumentKey(null, mainObservation.topDocumentFrameId);
+    const mainViewport =
+      mainObservation === undefined ? undefined : documentViewportCoverage(mainObservation.metrics);
+    const mainDocumentCoverage =
+      mainViewport?.moreBefore || mainViewport?.moreAfter ? mainViewport : undefined;
+    const frameParents = new Map<string, FrameParent>();
+    for (const observation of sessionObservations) {
+      for (const frameOwner of observation.frameOwners) {
+        if (observation.loaders.get(frameOwner.frame.id) !== frameOwner.frame.loaderId) continue;
+        const parentObservation = observationByFrame.get(frameOwner.parentFrameTargetId);
+        const ownerProbe = parentObservation?.semantic.scrollOwnerProbes.find(
+          ({ backendNodeId }) => backendNodeId === frameOwner.backendNodeId,
+        );
+        if (!parentObservation || !ownerProbe) continue;
+        const parentLoaderId = parentObservation.loaders.get(ownerProbe.documentFrameId);
+        if (!parentLoaderId) continue;
+        frameParents.set(
+          frameDocumentKey(observation.sessionTarget.frameTargetId, frameOwner.frame.id),
+          {
+            parentDocumentKey: frameDocumentKey(
+              frameOwner.parentFrameTargetId,
+              ownerProbe.documentFrameId,
+            ),
+            ...(ownerProbe.scrollParentBackendNodeId === undefined
+              ? {}
+              : {
+                  scrollParentTargetKey: scrollTargetKey({
+                    frameTargetId: frameOwner.parentFrameTargetId,
+                    documentFrameId: ownerProbe.documentFrameId,
+                    loaderId: parentLoaderId,
+                    backendNodeId: ownerProbe.scrollParentBackendNodeId,
+                  }),
+                }),
+          },
+        );
+      }
+    }
+    const frameScrollParentFor = (documentKey: string): string | null | undefined => {
+      if (mainDocumentKey === undefined) return undefined;
+      const seen = new Set<string>();
+      let current = documentKey;
+      while (current !== mainDocumentKey) {
+        if (seen.has(current)) return undefined;
+        seen.add(current);
+        const parent = frameParents.get(current);
+        if (parent === undefined) return undefined;
+        if (parent.scrollParentTargetKey !== undefined) {
+          return parent.scrollParentTargetKey;
+        }
+        current = parent.parentDocumentKey;
+      }
+      if (mainViewport === undefined) return undefined;
+      return mainDocumentCoverage === undefined ? null : 'viewport';
+    };
+
+    for (const { sessionTarget, loaders, semantic } of sessionObservations) {
       documentEpochParts.push(
         JSON.stringify([
           sessionTarget.frame,
           [...loaders.entries()].toSorted(([left], [right]) => left.localeCompare(right)),
         ]),
       );
-      if (sessionTarget.frame === 'main') {
-        mainDocumentCoverage = documentViewportCoverage(metrics);
-      }
       hasVisualSurface ||= semantic.hasVisualSurface;
       const localTargetIndexes = new Map<number, number>();
       semantic.targets.forEach((target, localIndex) => {
         const loaderId = loaders.get(target.documentFrameId);
         if (!loaderId) return;
+        const scrollParent =
+          target.scrollMetrics === undefined
+            ? undefined
+            : target.scrollParentBackendNodeId === undefined
+              ? frameScrollParentFor(
+                  frameDocumentKey(sessionTarget.frameTargetId, target.documentFrameId),
+                )
+              : scrollTargetKey({
+                  frameTargetId: sessionTarget.frameTargetId,
+                  documentFrameId: target.documentFrameId,
+                  loaderId,
+                  backendNodeId: target.scrollParentBackendNodeId,
+                });
         localTargetIndexes.set(localIndex, targets.length);
         targets.push({
           frameTargetId: sessionTarget.frameTargetId,
@@ -823,6 +1088,7 @@ export class PageObserver {
           actions: target.actions,
           frame: sessionTarget.frame,
           ...(target.scrollMetrics === undefined ? {} : { scrollMetrics: target.scrollMetrics }),
+          scrollParentTargetKey: scrollParent,
           ...(target.paintOrder === undefined ? {} : { paintOrder: target.paintOrder }),
         });
       });
@@ -896,10 +1162,16 @@ export class PageObserver {
       if (ref && metrics) scrollMetricsByRef.set(ref, metrics);
     });
     const coverage = interactiveCoverage(visibleElements, mainDocumentCoverage, scrollMetricsByRef);
+    const scrollHierarchy = pageScrollHierarchy(
+      mainDocumentCoverage,
+      selectedTargetIndexes,
+      targets,
+      refs,
+    );
     const frameUrl = sessionObservations.find(
       ({ sessionTarget }) => sessionTarget.frame === 'main',
     )?.pageUrl;
-    const pageUrl = frameUrl ?? (await this.#pageMetadata(browserSession.root)).url;
+    const pageUrl = frameUrl ?? (await this.#pageMetadata(browserSession.root, transport)).url;
     const snapshotId = createInteractiveSnapshotId();
     const truncated = boundedEntries.length < originalCount;
     const previous = this.#interactiveSnapshots.get(tabId);
@@ -947,6 +1219,7 @@ export class PageObserver {
             attachmentIds: [],
             debuggerSession: 'ephemeral',
             visualFallbackAllowed,
+            ...(scrollHierarchy === undefined ? {} : { scrollHierarchy }),
           };
       }
     }
@@ -965,6 +1238,7 @@ export class PageObserver {
       attachmentIds: [],
       debuggerSession: 'ephemeral',
       visualFallbackAllowed,
+      ...(scrollHierarchy === undefined ? {} : { scrollHierarchy }),
     };
   }
 
@@ -986,13 +1260,15 @@ export class PageObserver {
     return loaders;
   }
 
-  async #pageMetadata(session: DebuggerSession): Promise<{ url: string | null; title: string }> {
+  async #pageMetadata(
+    session: DebuggerSession,
+    transport: DebuggerTransport,
+  ): Promise<{ url: string | null; title: string }> {
     try {
-      const history =
-        await this.#dependencies.transport.send<Protocol.Page.GetNavigationHistoryResponse>(
-          session,
-          'Page.getNavigationHistory',
-        );
+      const history = await transport.send<Protocol.Page.GetNavigationHistoryResponse>(
+        session,
+        'Page.getNavigationHistory',
+      );
       const entry = history.entries[history.currentIndex];
       return {
         url: entry?.url.slice(0, 4_096) ?? null,
