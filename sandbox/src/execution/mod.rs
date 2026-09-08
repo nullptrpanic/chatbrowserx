@@ -15,7 +15,9 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::io::AsyncReadExt;
-use tokio::sync::mpsc;
+use tokio::time::{timeout, timeout_at};
+
+const CLEANUP_TIMEOUT: Duration = Duration::from_secs(1);
 
 pub(crate) fn select_runtime(
     sandbox: Option<&crate::config::SandboxSettings>,
@@ -124,7 +126,10 @@ impl ExecutionService {
         }
     }
 
-    pub(crate) fn execution_by_request_id(&self, request_id: &str) -> Option<ExecutionRecord> {
+    pub(crate) fn execution_by_request_id(
+        &self,
+        request_id: &str,
+    ) -> anyhow::Result<Option<ExecutionRecord>> {
         self.audit.execution_by_request_id(request_id)
     }
 
@@ -134,6 +139,7 @@ impl ExecutionService {
         request_id: Option<&str>,
     ) -> Result<ExecutionAttempt, ShellError> {
         let started = Instant::now();
+        let deadline = tokio::time::Instant::now() + self.timeout;
         let execution_id = match self
             .audit
             .start_execution_once(
@@ -147,24 +153,33 @@ impl ExecutionService {
             ExecutionStart::Existing(record) => return Ok(ExecutionAttempt::Existing(record)),
         };
         let context = RuntimeContext::new(execution_id, self.audit.clone());
-        let mut running = match self.runtime.spawn(command, context).await {
-            Ok(running) => running,
-            Err(error) => {
+        let mut running = match timeout_at(deadline, self.runtime.spawn(command, context)).await {
+            Ok(Ok(running)) => running,
+            result => {
+                let error = match result {
+                    Err(_) => ShellError::Timeout,
+                    Ok(Err(error)) => ShellError::Execute(error),
+                    Ok(Ok(_)) => unreachable!(),
+                };
                 self.finish(
                     execution_id,
-                    ExecutionStatus::Failed,
+                    if matches!(error, ShellError::Timeout) {
+                        ExecutionStatus::TimedOut
+                    } else {
+                        ExecutionStatus::Failed
+                    },
                     None,
                     started.elapsed(),
                     &CapturedOutput::default(),
                 )?;
-                return Err(ShellError::Execute(error));
+                return Err(error);
             }
         };
         self.audit
             .record_process_identity(execution_id, running.pid(), Some(std::process::id()))
             .map_err(ShellError::Execute)?;
         let Some(stdout) = running.take_stdout() else {
-            let _ = running.terminate().await;
+            let _ = timeout(CLEANUP_TIMEOUT, running.terminate()).await;
             self.finish(
                 execution_id,
                 ExecutionStatus::Failed,
@@ -177,7 +192,7 @@ impl ExecutionService {
             )));
         };
         let Some(stderr) = running.take_stderr() else {
-            let _ = running.terminate().await;
+            let _ = timeout(CLEANUP_TIMEOUT, running.terminate()).await;
             self.finish(
                 execution_id,
                 ExecutionStatus::Failed,
@@ -189,90 +204,44 @@ impl ExecutionService {
                 "stderr pipe is unavailable"
             )));
         };
-        let (overflow_sender, mut overflow_receiver) = mpsc::channel(1);
-        let _overflow_guard = overflow_sender.clone();
-        let stdout_reader = tokio::spawn(read_bounded(
-            stdout,
-            self.stdout_limit,
-            overflow_sender.clone(),
-        ));
-        let stderr_reader = tokio::spawn(read_bounded(stderr, self.stderr_limit, overflow_sender));
-        enum Completion {
-            Exited(RuntimeExit),
-            Overflow,
-        }
-        let completion = tokio::time::timeout(self.timeout, async {
-            tokio::select! {
-                result = running.wait() => result.map(Completion::Exited),
-                _ = overflow_receiver.recv() => Ok(Completion::Overflow),
-            }
+        // All three futures are scoped to this execution. Cancellation drops the pipes,
+        // while the borrowed buffers retain output already read; no detached reader tasks.
+        let mut stdout_output = BoundedOutput::default();
+        let mut stderr_output = BoundedOutput::default();
+        let completion = timeout_at(deadline, async {
+            let (exit, (), ()) = tokio::try_join!(
+                async { running.wait().await.map_err(ShellError::Execute) },
+                read_bounded(stdout, self.stdout_limit, &mut stdout_output),
+                read_bounded(stderr, self.stderr_limit, &mut stderr_output),
+            )?;
+            Ok::<_, ShellError>(exit)
         })
-        .await;
-        let exit = match completion {
-            Err(_) => {
-                let _ = running.terminate().await;
-                let output = collect_output(stdout_reader, stderr_reader)
-                    .await
-                    .unwrap_or_default();
-                self.finish(
-                    execution_id,
-                    ExecutionStatus::TimedOut,
-                    None,
-                    started.elapsed(),
-                    &output,
-                )?;
-                return Err(ShellError::Timeout);
-            }
-            Ok(Ok(Completion::Overflow)) => {
-                let _ = running.terminate().await;
-                let output = collect_output(stdout_reader, stderr_reader)
-                    .await
-                    .unwrap_or_default();
-                self.finish(
-                    execution_id,
-                    ExecutionStatus::OutputLimit,
-                    None,
-                    started.elapsed(),
-                    &output,
-                )?;
-                return Err(ShellError::OutputLimit);
-            }
-            Ok(Ok(Completion::Exited(exit))) => exit,
-            Ok(Err(error)) => {
-                let _ = running.terminate().await;
-                self.finish(
-                    execution_id,
-                    ExecutionStatus::Failed,
-                    None,
-                    started.elapsed(),
-                    &CapturedOutput::default(),
-                )?;
-                return Err(ShellError::Execute(error));
-            }
+        .await
+        .unwrap_or(Err(ShellError::Timeout));
+        let output = CapturedOutput {
+            stdout: String::from_utf8_lossy(&stdout_output.bytes).into_owned(),
+            stderr: String::from_utf8_lossy(&stderr_output.bytes).into_owned(),
+            stdout_truncated: stdout_output.exceeded,
+            stderr_truncated: stderr_output.exceeded,
         };
-        let output = match collect_output(stdout_reader, stderr_reader).await {
-            Ok(output) => output,
+        let exit = match completion {
+            Ok(exit) => exit,
             Err(error) => {
+                let _ = timeout(CLEANUP_TIMEOUT, running.terminate()).await;
                 self.finish(
                     execution_id,
-                    ExecutionStatus::Failed,
-                    Some(exit.code),
+                    match error {
+                        ShellError::Timeout => ExecutionStatus::TimedOut,
+                        ShellError::OutputLimit => ExecutionStatus::OutputLimit,
+                        ShellError::Execute(_) => ExecutionStatus::Failed,
+                    },
+                    None,
                     started.elapsed(),
-                    &CapturedOutput::default(),
+                    &output,
                 )?;
                 return Err(error);
             }
         };
-        if output.stdout_truncated || output.stderr_truncated {
-            self.finish(
-                execution_id,
-                ExecutionStatus::OutputLimit,
-                None,
-                started.elapsed(),
-                &output,
-            )?;
-            return Err(ShellError::OutputLimit);
-        }
         let status = if exit.code == 0 {
             ExecutionStatus::Succeeded
         } else {
@@ -317,6 +286,7 @@ impl ExecutionService {
     }
 }
 
+#[derive(Default)]
 struct BoundedOutput {
     bytes: Vec<u8>,
     exceeded: bool,
@@ -330,54 +300,30 @@ struct CapturedOutput {
     stderr_truncated: bool,
 }
 
-async fn collect_output(
-    stdout: tokio::task::JoinHandle<Result<BoundedOutput, std::io::Error>>,
-    stderr: tokio::task::JoinHandle<Result<BoundedOutput, std::io::Error>>,
-) -> Result<CapturedOutput, ShellError> {
-    let (stdout, stderr) = tokio::join!(join_reader(stdout), join_reader(stderr));
-    let stdout = stdout?;
-    let stderr = stderr?;
-    Ok(CapturedOutput {
-        stdout: String::from_utf8_lossy(&stdout.bytes).into_owned(),
-        stderr: String::from_utf8_lossy(&stderr.bytes).into_owned(),
-        stdout_truncated: stdout.exceeded,
-        stderr_truncated: stderr.exceeded,
-    })
-}
-
 async fn read_bounded(
     mut reader: BoxReader,
     limit: usize,
-    overflow: mpsc::Sender<()>,
-) -> Result<BoundedOutput, std::io::Error> {
-    let mut bytes = Vec::with_capacity(limit.min(64 * 1024));
+    output: &mut BoundedOutput,
+) -> Result<(), ShellError> {
     let mut buffer = [0_u8; 8 * 1024];
-    let mut exceeded = false;
     loop {
-        let read = reader.read(&mut buffer).await?;
+        let read = reader
+            .read(&mut buffer)
+            .await
+            .map_err(|error| ShellError::Execute(error.into()))?;
         if read == 0 {
             break;
         }
-        if exceeded {
-            continue;
-        }
-        let remaining = limit.saturating_sub(bytes.len());
-        bytes.extend_from_slice(&buffer[..read.min(remaining)]);
+        let remaining = limit.saturating_sub(output.bytes.len());
+        output
+            .bytes
+            .extend_from_slice(&buffer[..read.min(remaining)]);
         if read > remaining {
-            exceeded = true;
-            let _ = overflow.try_send(());
+            output.exceeded = true;
+            return Err(ShellError::OutputLimit);
         }
     }
-    Ok(BoundedOutput { bytes, exceeded })
-}
-
-async fn join_reader(
-    reader: tokio::task::JoinHandle<Result<BoundedOutput, std::io::Error>>,
-) -> Result<BoundedOutput, ShellError> {
-    reader
-        .await
-        .map_err(|error| ShellError::Execute(anyhow::Error::new(error)))?
-        .map_err(|error| ShellError::Execute(anyhow::Error::new(error)))
+    Ok(())
 }
 
 #[cfg(test)]

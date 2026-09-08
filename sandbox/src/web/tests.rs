@@ -242,3 +242,65 @@ fn websocket_request(address: SocketAddr) -> axum::http::Request<()> {
         .insert("origin", format!("http://{address}").parse().unwrap());
     request
 }
+
+#[tokio::test]
+async fn lagged_viewer_resumes_after_its_snapshot_without_replaying_older_updates() {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let audit = AuditLog::in_memory();
+    let execution = audit.start_execution("first", None).unwrap();
+    let guard = ViewerGuard::new(address);
+    let token = guard.token().to_owned();
+    let server = tokio::spawn(axum::serve(listener, router(audit.clone(), guard)).into_future());
+    let (mut socket, _) = tokio_tungstenite::connect_async(websocket_request(address))
+        .await
+        .unwrap();
+    socket
+        .send(tokio_tungstenite::tungstenite::Message::Text(
+            format!(r#"{{"type":"auth","token":"{token}"}}"#).into(),
+        ))
+        .await
+        .unwrap();
+    let _initial_snapshot = socket.next().await.unwrap().unwrap();
+
+    // No await: this current-thread runtime cannot drain the subscriber during the burst.
+    for pid in 0..1_100 {
+        audit
+            .record_process_identity(execution, Some(pid), None)
+            .unwrap();
+    }
+    audit.clear_executions().unwrap();
+    let retained = audit.start_execution("retained", None).unwrap();
+    let snapshot = tokio::time::timeout(std::time::Duration::from_secs(1), socket.next())
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap()
+        .into_text()
+        .unwrap();
+    let snapshot: serde_json::Value = serde_json::from_str(&snapshot).unwrap();
+    assert_eq!(snapshot["type"], "snapshot");
+    assert_eq!(
+        snapshot["snapshot"]["executions"].as_array().unwrap().len(),
+        1
+    );
+    assert_eq!(
+        snapshot["snapshot"]["executions"][0]["id"],
+        retained.to_string()
+    );
+
+    let next = audit.start_execution("next", None).unwrap();
+    let update = tokio::time::timeout(std::time::Duration::from_secs(1), socket.next())
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap()
+        .into_text()
+        .unwrap();
+    let update: serde_json::Value = serde_json::from_str(&update).unwrap();
+    server.abort();
+    let _ = server.await;
+
+    assert_eq!(update["type"], "execution");
+    assert_eq!(update["execution"]["id"], next.to_string());
+}

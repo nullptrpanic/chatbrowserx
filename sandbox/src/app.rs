@@ -109,10 +109,17 @@ async fn run_exec(State(state): State<AppState>, headers: HeaderMap, body: Bytes
     {
         return error(StatusCode::BAD_REQUEST, "invalid execution id");
     }
-    if let Some(execution_id) = request.execution_id.as_deref()
-        && let Some(execution) = state.executor.execution_by_request_id(execution_id)
-    {
-        return duplicate_execution_response(execution_id, execution);
+    if let Some(execution_id) = request.execution_id.as_deref() {
+        match state.executor.execution_by_request_id(execution_id) {
+            Ok(Some(execution)) => return duplicate_execution_response(execution_id, execution),
+            Ok(None) => {}
+            Err(_) => {
+                return error(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "execution receipt unavailable",
+                );
+            }
+        }
     }
     let _permit = match state.commands.try_acquire_owned() {
         Ok(permit) => permit,
@@ -191,10 +198,13 @@ async fn get_exec(
     if !valid_execution_id(&execution_id) {
         return error(StatusCode::BAD_REQUEST, "invalid execution id");
     }
-    receipt_response(
-        &execution_id,
-        state.executor.execution_by_request_id(&execution_id),
-    )
+    match state.executor.execution_by_request_id(&execution_id) {
+        Ok(execution) => receipt_response(&execution_id, execution),
+        Err(_) => error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "execution receipt unavailable",
+        ),
+    }
 }
 
 async fn get_console(State(state): State<AppState>, headers: HeaderMap) -> Response {

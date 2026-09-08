@@ -143,7 +143,9 @@ async fn serve_socket(mut socket: WebSocket, state: WebState) {
                     Ok(AuditUpdate::Event { event }) => ServerMessage::Event { event },
                     Ok(AuditUpdate::ExecutionsCleared) => ServerMessage::ExecutionsCleared,
                     Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {
-                        ServerMessage::Snapshot { snapshot: state.audit.snapshot() }
+                        let (replacement, snapshot) = state.audit.subscribe_with_snapshot();
+                        receiver = replacement;
+                        ServerMessage::Snapshot { snapshot }
                     }
                     Err(tokio::sync::broadcast::error::RecvError::Closed) => return,
                 };

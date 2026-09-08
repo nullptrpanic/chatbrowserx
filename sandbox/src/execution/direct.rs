@@ -26,18 +26,20 @@ impl ShellRuntime for DirectRuntime {
             command.current_dir(cwd);
         }
         let child = command.spawn().context("failed to spawn /bin/bash")?;
-        Ok(Box::new(DirectCommand { child }))
+        let pid = child.id();
+        Ok(Box::new(DirectCommand { child, pid }))
     }
 }
 
 struct DirectCommand {
     child: Child,
+    pid: Option<u32>,
 }
 
 #[async_trait]
 impl RunningCommand for DirectCommand {
     fn pid(&self) -> Option<u32> {
-        self.child.id()
+        self.pid
     }
 
     fn take_stdout(&mut self) -> Option<BoxReader> {
@@ -67,7 +69,7 @@ impl RunningCommand for DirectCommand {
 
     async fn terminate(&mut self) -> Result<()> {
         #[cfg(unix)]
-        if let Some(process_id) = self.child.id() {
+        if let Some(process_id) = self.pid {
             unsafe {
                 libc::kill(-(process_id as i32), libc::SIGKILL);
             }

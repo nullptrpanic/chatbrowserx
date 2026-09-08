@@ -1,7 +1,7 @@
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { JSDOM } from 'jsdom';
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 
 const html = readFileSync(resolve('sandbox/src/web/assets/index.html'), 'utf8');
 const script = readFileSync(resolve('sandbox/src/web/assets/app.js'), 'utf8');
@@ -49,8 +49,23 @@ function openViewer(url) {
     configurable: true,
     value: ViewerSocket,
   });
+  const frames = new Map();
+  let frameId = 0;
+  dom.window.requestAnimationFrame = (callback) => {
+    frames.set(++frameId, callback);
+    return frameId;
+  };
+  dom.window.cancelAnimationFrame = (id) => frames.delete(id);
   dom.window.eval(script);
-  return { dom, socket: ViewerSocket.instances[0] };
+  return {
+    dom,
+    socket: ViewerSocket.instances[0],
+    flushFrame() {
+      const pending = [...frames.values()];
+      frames.clear();
+      for (const callback of pending) callback(0);
+    },
+  };
 }
 
 describe('Sandbox audit viewer', () => {
@@ -698,6 +713,7 @@ describe('Sandbox audit viewer', () => {
         path: '/new-child',
       },
     });
+    viewer.flushFrame();
 
     expect(
       [...viewer.dom.window.document.querySelectorAll('[role="treeitem"]')].map(
@@ -710,6 +726,122 @@ describe('Sandbox audit viewer', () => {
         ?.getAttribute('aria-expanded'),
     ).toBe('false');
 
+    viewer.dom.window.close();
+  });
+
+  it('renders a burst of live events once while retaining every event in the burst', () => {
+    const viewer = openViewer('http://127.0.0.1:43130/#token=viewer-token');
+    viewer.socket.message({
+      type: 'snapshot',
+      snapshot: { executions: [executionFixture()], events: [] },
+    });
+    viewer.flushFrame();
+    const list = viewer.dom.window.document.querySelector('#execution-list');
+    const repaint = vi.spyOn(list, 'replaceChildren');
+
+    for (let sequence = 1; sequence <= 100; sequence += 1) {
+      viewer.socket.message({ type: 'event', event: fileEventFixture(sequence, 'open', sequence) });
+    }
+    expect(repaint.mock.calls.length).toBe(0);
+    viewer.flushFrame();
+    expect(repaint).toHaveBeenCalledTimes(1);
+    expect(viewer.dom.window.document.querySelector('#event-total').textContent).toBe('100 events');
+    expect(viewer.dom.window.document.querySelectorAll('#timeline-rows .event-row')).toHaveLength(
+      101,
+    );
+    viewer.dom.window.close();
+  });
+
+  it('evicts the oldest live event at the server retention boundary', () => {
+    const viewer = openViewer('http://127.0.0.1:43130/#token=viewer-token');
+    const oldest = { ...fileEventFixture(1, 'open', 1), path: '/oldest' };
+    const events = Array.from({ length: 65_536 }, (_, index) =>
+      index === 0
+        ? oldest
+        : {
+            ...fileEventFixture(index + 1, 'open', index + 1),
+            execution_id: 'older-run',
+          },
+    );
+    viewer.socket.message({
+      type: 'snapshot',
+      snapshot: { executions: [executionFixture()], events },
+    });
+    viewer.socket.message({
+      type: 'event',
+      event: { ...fileEventFixture(65_537, 'open', 65_537), path: '/newest' },
+    });
+    viewer.flushFrame();
+
+    expect(viewer.dom.window.document.querySelector('#event-total').textContent).toBe(
+      '65536 events',
+    );
+    const timeline = viewer.dom.window.document.querySelector('#timeline-rows').textContent;
+    expect(timeline).not.toContain('/oldest');
+    expect(timeline).toContain('/newest');
+    viewer.dom.window.close();
+  });
+
+  it('evicts the oldest execution even after updates and moves an evicted selection', () => {
+    const viewer = openViewer('http://127.0.0.1:43130/#token=viewer-token');
+    const search = viewer.dom.window.document.querySelector('#search');
+    search.value = 'command-0';
+    const executions = Array.from({ length: 2_048 }, (_, index) =>
+      executionFixture({
+        id: 'execution-' + index,
+        command: 'command-' + index,
+        started_at_ms: index,
+      }),
+    );
+    viewer.socket.message({ type: 'snapshot', snapshot: { executions, events: [] } });
+    viewer.dom.window.document.querySelector('.execution').click();
+    const follow = viewer.dom.window.document.querySelector('#follow');
+    follow.click();
+    viewer.socket.message({
+      type: 'execution',
+      execution: { ...executions[0], stdout: 'updated' },
+    });
+    viewer.socket.message({
+      type: 'execution',
+      execution: executionFixture({
+        id: 'execution-2048',
+        command: 'newest-command',
+        started_at_ms: 2_048,
+      }),
+    });
+    viewer.flushFrame();
+
+    expect(viewer.dom.window.document.querySelector('#execution-list').textContent).not.toContain(
+      'command-0',
+    );
+    expect(viewer.dom.window.document.querySelector('#selected-command').textContent).toBe(
+      'newest-command',
+    );
+    viewer.dom.window.close();
+  });
+
+  it('does not resurrect queued data after clearing or replacing the snapshot', () => {
+    const viewer = openViewer('http://127.0.0.1:43130/#token=viewer-token');
+    viewer.socket.message({ type: 'execution', execution: executionFixture() });
+    viewer.socket.message({ type: 'event', event: fileEventFixture(1, 'open', 1) });
+    viewer.socket.message({ type: 'executions_cleared' });
+    viewer.flushFrame();
+    expect(viewer.dom.window.document.querySelector('#event-total').textContent).toBe('0 events');
+    expect(viewer.dom.window.document.querySelectorAll('.execution')).toHaveLength(0);
+
+    viewer.socket.message({
+      type: 'snapshot',
+      snapshot: {
+        executions: [executionFixture({ command: 'replacement' })],
+        events: [],
+      },
+    });
+    viewer.socket.message({ type: 'event', event: fileEventFixture(2, 'open', 2) });
+    viewer.flushFrame();
+    expect(viewer.dom.window.document.querySelector('#selected-command').textContent).toBe(
+      'replacement',
+    );
+    expect(viewer.dom.window.document.querySelector('#event-total').textContent).toBe('1 event');
     viewer.dom.window.close();
   });
 

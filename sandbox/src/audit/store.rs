@@ -5,9 +5,9 @@ use super::model::{
     ExecutionStart, ExecutionStatus, PersistedRecord,
 };
 use anyhow::{Context, Result, bail};
-use std::collections::{HashSet, VecDeque};
+use std::collections::{HashMap, VecDeque};
 use std::fs::{File, OpenOptions};
-use std::io::{BufRead, BufReader, Write};
+use std::io::{BufRead, BufReader, Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -26,10 +26,11 @@ pub(crate) struct AuditLog {
 
 struct State {
     file: Option<File>,
+    path: Option<PathBuf>,
     executions: VecDeque<ExecutionRecord>,
-    receipts: VecDeque<ExecutionRecord>,
+    receipts: HashMap<String, ExecutionId>,
     events: VecDeque<AuditEvent>,
-    suppressed_execution_ids: HashSet<ExecutionId>,
+    hidden_executions: HashMap<ExecutionId, ExecutionRecord>,
     next_sequence: u64,
 }
 
@@ -41,13 +42,24 @@ impl AuditLog {
             })?;
         }
         let mut state = load(path)?;
-        state.file = Some(
-            OpenOptions::new()
-                .create(true)
-                .append(true)
-                .open(path)
-                .with_context(|| format!("failed to open audit log {}", path.display()))?,
-        );
+        let mut file = OpenOptions::new()
+            .create(true)
+            .read(true)
+            .append(true)
+            .open(path)
+            .with_context(|| format!("failed to open audit log {}", path.display()))?;
+        // Preserve an unterminated record (valid or partial), but never join the next record to it.
+        if file.metadata()?.len() > 0 {
+            file.seek(SeekFrom::End(-1))?;
+            let mut last = [0];
+            file.read_exact(&mut last)?;
+            if last[0] != b'\n' {
+                file.write_all(b"\n")
+                    .context("failed to repair audit log boundary")?;
+                file.flush()?;
+            }
+        }
+        state.file = Some(file);
         Ok(Self::from_state(state))
     }
 
@@ -86,12 +98,9 @@ impl AuditLog {
     ) -> Result<ExecutionStart> {
         let mut state = self.lock()?;
         if let Some(request_id) = request_id.as_deref()
-            && let Some(execution) = state
-                .receipts
-                .iter()
-                .find(|execution| execution.request_id.as_deref() == Some(request_id))
+            && let Some(execution) = state.receipt(request_id)?
         {
-            return Ok(ExecutionStart::Existing(Box::new(execution.clone())));
+            return Ok(ExecutionStart::Existing(Box::new(execution)));
         }
         let execution = ExecutionRecord {
             id: Uuid::new_v4(),
@@ -116,23 +125,16 @@ impl AuditLog {
         };
         let id = execution.id;
         state.append(&PersistedRecord::Execution(execution.clone()))?;
-        state.executions.push_back(execution.clone());
-        trim_front(&mut state.executions, MAX_EXECUTIONS_IN_MEMORY);
-        upsert_receipt(&mut state.receipts, &execution);
+        state.remember(execution.clone());
         let _ = self.updates.send(AuditUpdate::Execution { execution });
         Ok(ExecutionStart::Started(id))
     }
 
-    pub(crate) fn execution_by_request_id(&self, request_id: &str) -> Option<ExecutionRecord> {
-        let state = self
-            .inner
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
-        state
-            .receipts
-            .iter()
-            .find(|execution| execution.request_id.as_deref() == Some(request_id))
-            .cloned()
+    pub(crate) fn execution_by_request_id(
+        &self,
+        request_id: &str,
+    ) -> Result<Option<ExecutionRecord>> {
+        self.lock()?.receipt(request_id)
     }
 
     pub(crate) fn record_process_identity(
@@ -141,21 +143,10 @@ impl AuditLog {
         pid: Option<u32>,
         ppid: Option<u32>,
     ) -> Result<()> {
-        let mut state = self.lock()?;
-        let Some(position) = state.executions.iter().position(|item| item.id == id) else {
-            if state.suppressed_execution_ids.contains(&id) {
-                return Ok(());
-            }
-            bail!("unknown audit execution {id}");
-        };
-        let mut execution = state.executions[position].clone();
-        execution.pid = pid;
-        execution.ppid = ppid;
-        state.append(&PersistedRecord::Execution(execution.clone()))?;
-        state.executions[position] = execution.clone();
-        upsert_receipt(&mut state.receipts, &execution);
-        let _ = self.updates.send(AuditUpdate::Execution { execution });
-        Ok(())
+        self.update_execution(id, |execution| {
+            execution.pid = pid;
+            execution.ppid = ppid;
+        })
     }
 
     pub(crate) fn record_user_command_started(
@@ -163,46 +154,41 @@ impl AuditLog {
         id: ExecutionId,
         timestamp_ms: u64,
     ) -> Result<()> {
-        let mut state = self.lock()?;
-        let Some(position) = state.executions.iter().position(|item| item.id == id) else {
-            if state.suppressed_execution_ids.contains(&id) {
-                return Ok(());
-            }
-            bail!("unknown audit execution {id}");
-        };
-        let mut execution = state.executions[position].clone();
-        execution.user_command_started_at_ms = Some(timestamp_ms);
-        state.append(&PersistedRecord::Execution(execution.clone()))?;
-        state.executions[position] = execution.clone();
-        upsert_receipt(&mut state.receipts, &execution);
-        let _ = self.updates.send(AuditUpdate::Execution { execution });
-        Ok(())
+        self.update_execution(id, |execution| {
+            execution.user_command_started_at_ms = Some(timestamp_ms);
+        })
     }
 
     pub(crate) fn finish_execution(&self, id: ExecutionId, finish: ExecutionFinish) -> Result<()> {
-        {
-            let mut state = self.lock()?;
-            let Some(position) = state.executions.iter().position(|item| item.id == id) else {
-                if state.suppressed_execution_ids.remove(&id) {
-                    return Ok(());
-                }
-                bail!("unknown audit execution {id}");
-            };
-            let mut execution = state.executions[position].clone();
+        let finished_at_ms = unix_time_ms()?;
+        self.update_execution(id, |execution| {
             execution.status = finish.status;
             execution.exit_code = finish.exit_code;
             execution.duration_ms = Some(finish.duration_ms);
-            execution.finished_at_ms = Some(unix_time_ms()?);
+            execution.finished_at_ms = Some(finished_at_ms);
             execution.stdout = finish.stdout;
             execution.stderr = finish.stderr;
             execution.stdout_truncated = finish.stdout_truncated;
             execution.stderr_truncated = finish.stderr_truncated;
-            state.append(&PersistedRecord::Execution(execution.clone()))?;
-            state.executions[position] = execution.clone();
-            upsert_receipt(&mut state.receipts, &execution);
-            let _ = self.updates.send(AuditUpdate::Execution {
-                execution: execution.clone(),
-            });
+        })
+    }
+
+    fn update_execution(
+        &self,
+        id: ExecutionId,
+        update: impl FnOnce(&mut ExecutionRecord),
+    ) -> Result<()> {
+        let mut state = self.lock()?;
+        let mut execution = state
+            .execution(id)
+            .cloned()
+            .context("unknown audit execution")?;
+        update(&mut execution);
+        state.append(&PersistedRecord::Execution(execution.clone()))?;
+        let visible = !state.hidden_executions.contains_key(&id);
+        state.remember(execution.clone());
+        if visible {
+            let _ = self.updates.send(AuditUpdate::Execution { execution });
         }
         Ok(())
     }
@@ -221,7 +207,7 @@ impl AuditLog {
                 .iter()
                 .position(|item| item.id == execution_id)
             else {
-                if state.suppressed_execution_ids.contains(&execution_id) {
+                if state.hidden_executions.contains_key(&execution_id) {
                     let event = AuditEvent {
                         sequence: state.next_sequence,
                         execution_id,
@@ -255,24 +241,12 @@ impl AuditLog {
     pub(crate) fn clear_executions(&self) -> Result<()> {
         let mut state = self.lock()?;
         state.append(&PersistedRecord::ExecutionsCleared)?;
-        let running = state
-            .executions
-            .iter()
-            .filter(|execution| execution.status == ExecutionStatus::Running)
-            .map(|execution| execution.id)
-            .collect::<Vec<_>>();
-        for receipt in &mut state.receipts {
-            if running.contains(&receipt.id) {
-                receipt.status = ExecutionStatus::Interrupted;
-            }
-        }
-        state.suppressed_execution_ids.extend(running);
-        state.executions.clear();
-        state.events.clear();
+        state.hide_executions();
         let _ = self.updates.send(AuditUpdate::ExecutionsCleared);
         Ok(())
     }
 
+    #[cfg(test)]
     pub(crate) fn snapshot(&self) -> AuditSnapshot {
         let state = self
             .inner
@@ -307,6 +281,81 @@ impl AuditLog {
 }
 
 impl State {
+    fn execution(&self, id: ExecutionId) -> Option<&ExecutionRecord> {
+        self.executions
+            .iter()
+            .find(|execution| execution.id == id)
+            .or_else(|| self.hidden_executions.get(&id))
+    }
+
+    fn receipt(&self, request_id: &str) -> Result<Option<ExecutionRecord>> {
+        let Some(&id) = self.receipts.get(request_id) else {
+            return Ok(None);
+        };
+        if let Some(execution) = self.execution(id) {
+            return Ok(Some(execution.clone()));
+        }
+        // Eviction affects the viewer, never idempotency. A missing/unreadable receipt is an
+        // error, not permission to dispatch the command again.
+        let path = self
+            .path
+            .as_ref()
+            .context("execution receipt is no longer in memory")?;
+        let mut latest = None;
+        for line in BufReader::new(File::open(path)?).lines() {
+            let line = line?;
+            if let Ok(PersistedRecord::Execution(execution)) = serde_json::from_str(&line)
+                && execution.id == id
+            {
+                latest = Some(execution);
+            }
+        }
+        let mut execution = latest.context("persisted execution receipt is missing")?;
+        if execution.status == ExecutionStatus::Running {
+            execution.status = ExecutionStatus::Interrupted;
+        }
+        Ok(Some(execution))
+    }
+
+    fn remember(&mut self, execution: ExecutionRecord) {
+        if let Some(request_id) = &execution.request_id {
+            self.receipts.insert(request_id.clone(), execution.id);
+        }
+        if self.hidden_executions.contains_key(&execution.id) {
+            if execution.status == ExecutionStatus::Running {
+                self.hidden_executions.insert(execution.id, execution);
+            } else {
+                self.hidden_executions.remove(&execution.id);
+            }
+        } else if let Some(position) = self
+            .executions
+            .iter()
+            .position(|item| item.id == execution.id)
+        {
+            self.executions[position] = execution;
+        } else {
+            self.executions.push_back(execution);
+            while self.executions.len() > MAX_EXECUTIONS_IN_MEMORY {
+                let oldest = self
+                    .executions
+                    .pop_front()
+                    .expect("non-empty execution list");
+                if oldest.status == ExecutionStatus::Running {
+                    self.hidden_executions.insert(oldest.id, oldest);
+                }
+            }
+        }
+    }
+
+    fn hide_executions(&mut self) {
+        for execution in self.executions.drain(..) {
+            if execution.status == ExecutionStatus::Running {
+                self.hidden_executions.insert(execution.id, execution);
+            }
+        }
+        self.events.clear();
+    }
+
     fn append(&mut self, record: &PersistedRecord) -> Result<()> {
         let Some(file) = self.file.as_mut() else {
             return Ok(());
@@ -324,27 +373,28 @@ impl Default for State {
     fn default() -> Self {
         Self {
             file: None,
+            path: None,
             executions: VecDeque::new(),
-            receipts: VecDeque::new(),
+            receipts: HashMap::new(),
             events: VecDeque::new(),
-            suppressed_execution_ids: HashSet::new(),
+            hidden_executions: HashMap::new(),
             next_sequence: 1,
         }
     }
 }
 
 fn load(path: &Path) -> Result<State> {
-    let mut state = State::default();
+    let mut state = State {
+        path: Some(path.to_path_buf()),
+        ..State::default()
+    };
     if !path.exists() {
         return Ok(state);
     }
     let file =
         File::open(path).with_context(|| format!("failed to read audit log {}", path.display()))?;
-    for (index, line) in BufReader::new(file)
-        .lines()
-        .map_while(Result::ok)
-        .enumerate()
-    {
+    for (index, line) in BufReader::new(file).lines().enumerate() {
+        let line = line.with_context(|| format!("failed to read audit log {}", path.display()))?;
         let Ok(value) = serde_json::from_str::<serde_json::Value>(&line) else {
             continue;
         };
@@ -359,22 +409,7 @@ fn load(path: &Path) -> Result<State> {
             )
         })?;
         match record {
-            PersistedRecord::Execution(mut execution) => {
-                if execution.status == ExecutionStatus::Running {
-                    execution.status = ExecutionStatus::Interrupted;
-                }
-                upsert_receipt(&mut state.receipts, &execution);
-                if let Some(position) = state
-                    .executions
-                    .iter()
-                    .position(|item| item.id == execution.id)
-                {
-                    state.executions[position] = execution;
-                } else {
-                    state.executions.push_back(execution);
-                    trim_front(&mut state.executions, MAX_EXECUTIONS_IN_MEMORY);
-                }
-            }
+            PersistedRecord::Execution(execution) => state.remember(execution),
             PersistedRecord::Event(event) => {
                 state.next_sequence = state.next_sequence.max(event.sequence + 1);
                 state.events.push_back(event);
@@ -385,18 +420,14 @@ fn load(path: &Path) -> Result<State> {
                     .events
                     .retain(|event| event.execution_id != execution_id);
             }
-            PersistedRecord::ExecutionsCleared => {
-                for receipt in &mut state.receipts {
-                    if receipt.status == ExecutionStatus::Running {
-                        receipt.status = ExecutionStatus::Interrupted;
-                    }
-                }
-                state.executions.clear();
-                state.events.clear();
-            }
+            PersistedRecord::ExecutionsCleared => state.hide_executions(),
         }
     }
+    state.hidden_executions.clear();
     for execution in &mut state.executions {
+        if execution.status == ExecutionStatus::Running {
+            execution.status = ExecutionStatus::Interrupted;
+        }
         execution.process_events = 0;
         execution.file_events = 0;
         execution.network_events = 0;
@@ -419,18 +450,6 @@ fn trim_front<T>(items: &mut VecDeque<T>, limit: usize) {
     }
 }
 
-fn upsert_receipt(receipts: &mut VecDeque<ExecutionRecord>, execution: &ExecutionRecord) {
-    if execution.request_id.is_none() {
-        return;
-    }
-    if let Some(position) = receipts.iter().position(|item| item.id == execution.id) {
-        receipts[position] = execution.clone();
-    } else {
-        receipts.push_back(execution.clone());
-        trim_front(receipts, MAX_EXECUTIONS_IN_MEMORY);
-    }
-}
-
 fn unix_time_ms() -> Result<u64> {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -445,11 +464,26 @@ fn redact_command(command: &str) -> String {
     let Ok(arguments) = shell_words::split(command) else {
         return "[unparseable command omitted]".to_owned();
     };
-    redact_arguments(&arguments)
-        .join(" ")
+    let redacted = redact_arguments(&arguments);
+    let display = if redacted == arguments {
+        command.to_owned()
+    } else {
+        // shell-words is an argv parser, not a Bash parser. Never present its reconstructed
+        // preview as the original executable script; quoted/compound syntax may differ.
+        format!(
+            "[redacted preview; not executable]\n{}",
+            shell_words::join(redacted)
+        )
+    };
+    if display.chars().count() <= MAX_COMMAND_CHARS {
+        return display;
+    }
+    let marker = "\n[command truncated; not executable]";
+    display
         .chars()
-        .take(MAX_COMMAND_CHARS)
-        .collect()
+        .take(MAX_COMMAND_CHARS - marker.len())
+        .collect::<String>()
+        + marker
 }
 
 pub(super) fn redact_arguments(arguments: &[String]) -> Vec<String> {

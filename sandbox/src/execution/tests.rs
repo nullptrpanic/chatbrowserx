@@ -112,6 +112,55 @@ async fn records_timeout_and_output_limit_terminal_states() {
 }
 
 #[tokio::test]
+async fn deadline_includes_output_pipes_inherited_by_background_children() {
+    let audit = AuditLog::in_memory();
+    // Leave room for the real login shell to initialize; the inherited pipe still outlives
+    // the deadline by several seconds, so a wait-only timeout cannot pass this regression.
+    let executor = service(audit.clone(), Duration::from_secs(2), 4096, 4096);
+    let started = std::time::Instant::now();
+    let result = executor
+        .execute(ShellCommand::new("printf before-timeout; /bin/sleep 8 &"))
+        .await;
+    assert!(matches!(result, Err(ShellError::Timeout)));
+    assert!(started.elapsed() < Duration::from_secs(4));
+    let record = &audit.snapshot().executions[0];
+    assert_eq!(record.status, ExecutionStatus::TimedOut);
+    assert_eq!(record.stdout, "before-timeout");
+}
+
+#[tokio::test]
+async fn deadline_includes_runtime_startup() {
+    struct SlowRuntime;
+    #[async_trait::async_trait]
+    impl super::ShellRuntime for SlowRuntime {
+        async fn spawn(
+            &self,
+            _command: ShellCommand,
+            _context: super::RuntimeContext,
+        ) -> anyhow::Result<Box<dyn super::RunningCommand>> {
+            tokio::time::sleep(Duration::from_millis(300)).await;
+            anyhow::bail!("startup did not finish")
+        }
+    }
+    let audit = AuditLog::in_memory();
+    let executor = ExecutionService::new(
+        Arc::new(SlowRuntime),
+        audit.clone(),
+        Duration::from_millis(30),
+        4096,
+        4096,
+    );
+    assert!(matches!(
+        executor.execute(ShellCommand::new("true")).await,
+        Err(ShellError::Timeout)
+    ));
+    assert_eq!(
+        audit.snapshot().executions[0].status,
+        ExecutionStatus::TimedOut
+    );
+}
+
+#[tokio::test]
 async fn records_non_zero_exit_as_a_completed_failed_command() {
     let audit = AuditLog::in_memory();
     let executor = service(audit.clone(), Duration::from_secs(2), 4096, 4096);

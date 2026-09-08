@@ -1,6 +1,11 @@
 (() => {
   'use strict';
 
+  // Match AuditLog's transient retention; persisted history and receipts are unaffected.
+  const MAX_EXECUTIONS = 2_048;
+  const MAX_EVENTS = 65_536;
+  let renderFrame = null;
+
   const state = {
     executions: new Map(),
     events: new Map(),
@@ -138,15 +143,29 @@
   function applyExecution(execution) {
     const isNew = !state.executions.has(execution.id);
     state.executions.set(execution.id, execution);
+    trimOldest(state.executions, MAX_EXECUTIONS);
     if (state.selectedExecutionId === null || (isNew && state.follow)) {
       selectExecution(execution.id, false);
     }
-    render();
+    scheduleRender();
   }
 
   function applyEvent(event) {
     state.events.set(eventKey(event), event);
-    render();
+    trimOldest(state.events, MAX_EVENTS);
+    scheduleRender();
+  }
+
+  function trimOldest(records, limit) {
+    while (records.size > limit) records.delete(records.keys().next().value);
+  }
+
+  function scheduleRender() {
+    if (renderFrame !== null) return;
+    renderFrame = requestAnimationFrame(() => {
+      renderFrame = null;
+      render();
+    });
   }
 
   function applyExecutionsCleared() {
@@ -251,6 +270,15 @@
   }
 
   function render() {
+    if (renderFrame !== null) cancelAnimationFrame(renderFrame);
+    renderFrame = null;
+    ensureSelection();
+    for (const id of state.collapsedNodes) {
+      const retained = id.startsWith('command:')
+        ? state.executions.has(id.slice('command:'.length))
+        : state.events.has(id.slice('process:'.length));
+      if (!retained) state.collapsedNodes.delete(id);
+    }
     const shouldFollow = state.follow && nearBottom();
     renderExecutions();
     renderSummary();
