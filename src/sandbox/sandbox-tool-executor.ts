@@ -19,6 +19,7 @@ fi
 LC_ALL=C awk -v start="$start" -v limit="$limit" 'NR >= start && NR < start + limit { print }' "$path"`;
 
 export interface SandboxExecutionPort {
+  configurationKey(): Promise<object | null>;
   execute(
     call: SandboxToolCall,
     signal: AbortSignal,
@@ -96,6 +97,10 @@ export class SandboxToolExecutor implements SandboxExecutionPort {
     this.#client = client;
   }
 
+  configurationKey(): Promise<object | null> {
+    return this.#client.configurationKey();
+  }
+
   async execute(
     call: SandboxToolCall,
     signal: AbortSignal,
@@ -162,13 +167,24 @@ export class SandboxToolExecutor implements SandboxExecutionPort {
     const selected = lines.slice(0, maxLines);
     const content = selected.length === 0 ? '' : `${selected.join('\n')}\n`;
     const bounded = boundUtf8(content);
+    const completeContent = bounded.truncated
+      ? bounded.text.slice(0, bounded.text.lastIndexOf('\n') + 1)
+      : bounded.text;
+    const deliveredLines =
+      completeContent.length === 0 ? 0 : completeContent.split('\n').length - 1;
+    const oversizedLine = bounded.truncated && deliveredLines === 0;
     return JSON.stringify({
       code: 0,
       path,
       startLine,
-      endLine: selected.length === 0 ? startLine - 1 : startLine + selected.length - 1,
+      endLine: startLine + deliveredLines - 1,
       truncated: lines.length > maxLines || bounded.truncated,
-      content: bounded.text,
+      content: oversizedLine ? bounded.text : completeContent,
+      ...(oversizedLine
+        ? {
+            error: `Line ${startLine} exceeds the read byte limit; only a prefix is shown. Use sandbox_exec to read bounded byte ranges of this line.`,
+          }
+        : {}),
     });
   }
 

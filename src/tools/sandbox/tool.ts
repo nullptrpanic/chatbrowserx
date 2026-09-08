@@ -1,7 +1,5 @@
-import { z } from 'zod';
 import { register } from '../register';
 import type { ToolDeclaration, ToolRuntimeContext, ToolRuntimeHooks } from '../types';
-import { strictFunctionTool } from '../model-tool';
 import {
   sandboxExecDefinition,
   sandboxExecSchema,
@@ -24,18 +22,6 @@ const sandboxPolicy = {
 const sandboxAvailable = (context: ToolRuntimeContext): boolean =>
   context.sandboxAvailable === true;
 
-export const skillLoaderTool: ToolDeclaration<Record<string, never>> = {
-  name: 'skill_loader',
-  definition: strictFunctionTool('skill_loader', 'Load configured Sandbox Skills.', {}),
-  schema: z.object({}).strict(),
-  order: 199,
-  policy: sandboxPolicy,
-  available: () => false,
-  async execute() {
-    throw new Error('skill_loader is not model-callable.');
-  },
-};
-
 export const sandboxReadTool: ToolDeclaration<SandboxReadInput> = {
   name: 'sandbox_read',
   definition: sandboxReadDefinition,
@@ -45,9 +31,7 @@ export const sandboxReadTool: ToolDeclaration<SandboxReadInput> = {
   available: sandboxAvailable,
   createCall: (call) => ({
     ...call,
-    family: 'sandbox' as const,
     operation: 'read' as const,
-    replay: 'safe' as const,
   }),
   async execute(call, _context, services, signal) {
     return {
@@ -72,9 +56,7 @@ export const sandboxExecTool: ToolDeclaration<SandboxExecInput> = {
   available: sandboxAvailable,
   createCall: (call) => ({
     ...call,
-    family: 'sandbox' as const,
     operation: 'exec' as const,
-    replay: 'mutation' as const,
   }),
   async execute(call, context, services, signal) {
     return {
@@ -113,17 +95,19 @@ export const sandboxRuntime = {
     return typeof context.sandboxSkillPrompt === 'string' ? context.sandboxSkillPrompt : null;
   },
   async prepare(context, services, signal) {
-    if (!services.has(sandboxService)) return { context: { sandboxAvailable: false } };
-    const prompt = await loadSandboxSkillPrompt(services, signal);
+    const key = services.has(sandboxService)
+      ? await services.get(sandboxService).execution.configurationKey()
+      : null;
+    if (key === null) return { context: { sandboxAvailable: false, sandboxSkillPrompt: null } };
+    const prompt = await loadSandboxSkillPrompt(services, signal, key);
     return {
       context: {
         sandboxAvailable: true,
-        ...(prompt === null ? {} : { sandboxSkillPrompt: prompt }),
+        sandboxSkillPrompt: prompt,
       },
     };
   },
 } satisfies ToolRuntimeHooks;
 
-register(skillLoaderTool, sandboxRuntime);
 register(sandboxReadTool, sandboxRuntime);
 register(sandboxExecTool, sandboxRuntime);

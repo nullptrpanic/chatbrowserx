@@ -1,25 +1,25 @@
 import { describe, expect, it, vi } from 'vitest';
 import { sandboxExecDefinition, sandboxReadDefinition } from '../../../src/tools/sandbox/contract';
-import {
-  sandboxExecTool,
-  skillLoaderTool,
-  sandboxReadTool,
-  sandboxRuntime,
-} from '../../../src/tools/sandbox/tool';
+import { sandboxExecTool, sandboxReadTool, sandboxRuntime } from '../../../src/tools/sandbox/tool';
 import { ToolDeclarationCatalog } from '../../../src/tools/register';
 import { bindToolRuntime } from '../../../src/tools/registry';
 import { ToolServiceResolver } from '../../../src/tools/service-resolver';
 import { createSandboxToolService, sandboxService } from '../../../src/tools/sandbox/service';
+import { SandboxClient } from '../../../src/sandbox/sandbox-client';
+import { SandboxToolExecutor } from '../../../src/sandbox/sandbox-tool-executor';
+import { DEFAULT_APP_SETTINGS } from '../../../src/persistence/settings-store';
 
 const SANDBOX_TOOL_DEFINITIONS = [sandboxReadDefinition, sandboxExecDefinition];
 const catalog = new ToolDeclarationCatalog();
-catalog.register(skillLoaderTool, sandboxRuntime);
 catalog.register(sandboxReadTool, sandboxRuntime);
 catalog.register(sandboxExecTool, sandboxRuntime);
 const services = new ToolServiceResolver();
 services.bind(
   sandboxService,
   createSandboxToolService({
+    async configurationKey() {
+      return this;
+    },
     execute: async () =>
       JSON.stringify({
         code: 0,
@@ -77,7 +77,65 @@ describe('SANDBOX_TOOL_DEFINITIONS', () => {
 });
 
 describe('registered Sandbox tool parsing', () => {
+  it('omits unconfigured tools and invalidates Skills when the endpoint or token changes', async () => {
+    let server = '';
+    let token = 'token-a';
+    let reachable = true;
+    const fetch = vi.fn(async () => {
+      if (!reachable) throw new Error('temporarily unavailable');
+      return new Response(
+        JSON.stringify({
+          code: 0,
+          stdout: [
+            '/home/test/.codex/skills/example/SKILL.md',
+            `name: example\ndescription: Catalog ${server} ${token}`,
+            '__CHATBROWSERX_SCAN_END__',
+            '0',
+            '',
+          ].join('\0'),
+          stderr: '',
+        }),
+        { headers: { 'Content-Type': 'application/json' } },
+      );
+    });
+    const client = new SandboxClient(
+      { get: async () => ({ ...DEFAULT_APP_SETTINGS, sandboxServer: server }) },
+      { getSandboxToken: async () => token },
+      fetch,
+    );
+    const connectedServices = new ToolServiceResolver();
+    connectedServices.bind(
+      sandboxService,
+      createSandboxToolService(new SandboxToolExecutor(client)),
+    );
+    const connected = bindToolRuntime(catalog.seal(), connectedServices);
+    expect((await connected.contract({})).definitions).toEqual([]);
+    expect(fetch).not.toHaveBeenCalled();
+    server = 'https://server-a.invalid';
+    expect((await connected.contract({})).systemPrompt).toContain(
+      'Catalog https://server-a.invalid token-a',
+    );
+    server = 'https://server-b.invalid';
+    expect((await connected.contract({})).systemPrompt).toContain(
+      'Catalog https://server-b.invalid token-a',
+    );
+    token = 'token-b';
+    expect((await connected.contract({})).systemPrompt).toContain(
+      'Catalog https://server-b.invalid token-b',
+    );
+    reachable = false;
+    expect((await connected.contract({})).definitions.map(({ name }) => name)).toEqual([
+      'sandbox_read',
+      'sandbox_exec',
+    ]);
+    token = '';
+    const disabled = await connected.contract({ sandboxSkillPrompt: 'stale catalog' });
+    expect(disabled.definitions).toEqual([]);
+    expect(disabled.systemPrompt).not.toContain('stale catalog');
+  });
   it('parses reads as replay-safe and execs as mutations', async () => {
+    expect(runtime.policyFor('sandbox_read')?.mutation ?? false).toBe(false);
+    expect(runtime.policyFor('sandbox_exec')?.mutation).toBe(true);
     const contract = await runtime.contract({ sandboxAvailable: true });
     expect(
       contract.parse({
@@ -86,9 +144,7 @@ describe('registered Sandbox tool parsing', () => {
         argumentsJson: JSON.stringify(READ),
       }),
     ).toEqual({
-      family: 'sandbox',
       operation: 'read',
-      replay: 'safe',
       callId: 'call_read',
       name: 'sandbox_read',
       argumentsJson: JSON.stringify(READ),
@@ -101,9 +157,7 @@ describe('registered Sandbox tool parsing', () => {
         argumentsJson: JSON.stringify({ ...EXEC, cwd: null }),
       }),
     ).toEqual({
-      family: 'sandbox',
       operation: 'exec',
-      replay: 'mutation',
       callId: 'call_exec',
       name: 'sandbox_exec',
       argumentsJson: JSON.stringify({ ...EXEC, cwd: null }),
@@ -175,6 +229,9 @@ describe('registered Sandbox tool parsing', () => {
     services.bind(
       sandboxService,
       createSandboxToolService({
+        async configurationKey() {
+          return this;
+        },
         execute: async () =>
           JSON.stringify({
             code: 0,
@@ -228,6 +285,9 @@ describe('registered Sandbox tool parsing', () => {
     changingServices.bind(
       sandboxService,
       createSandboxToolService({
+        async configurationKey() {
+          return this;
+        },
         execute,
         recover: async () => ({ status: 'not_found' }),
       }),
@@ -247,6 +307,11 @@ describe('registered Sandbox tool parsing', () => {
       expect(stale.definitions.map(({ name }) => name)).toEqual(['sandbox_read', 'sandbox_exec']);
       expect(stale.systemPrompt).toContain('Run the example workflow.');
       expect(execute).toHaveBeenCalledTimes(2);
+      now.mockReturnValue(910_000);
+      execute.mockRejectedValue(new Error('Still unavailable'));
+      const expired = await changingRuntime.contract({});
+      expect(expired.definitions.map(({ name }) => name)).toEqual(['sandbox_read', 'sandbox_exec']);
+      expect(expired.systemPrompt).not.toContain('Run the example workflow.');
     } finally {
       now.mockRestore();
     }

@@ -20,9 +20,7 @@ function readCall(
     ...overrides,
   };
   return {
-    family: 'sandbox',
     operation: 'read',
-    replay: 'safe',
     callId: 'call_read',
     name: 'sandbox_read',
     argumentsJson: JSON.stringify(arguments_),
@@ -33,9 +31,7 @@ function readCall(
 function execCall(cwd: string | null = '/home/test/.codex/skills/example') {
   const arguments_ = { command: 'bash scripts/run.sh', cwd };
   return {
-    family: 'sandbox',
     operation: 'exec',
-    replay: 'mutation',
     callId: 'call_exec',
     name: 'sandbox_exec',
     argumentsJson: JSON.stringify(arguments_),
@@ -53,6 +49,9 @@ function fixture(
   const execute = vi.fn<SandboxClientPort['execute']>(async () => response);
   const getExecution = vi.fn<SandboxClientPort['getExecution']>(async () => receipt);
   const client: SandboxClientPort = {
+    async configurationKey() {
+      return this;
+    },
     isConfigured: vi.fn(async () => true),
     execute,
     getExecution,
@@ -123,8 +122,26 @@ describe('SandboxToolExecutor sandbox_read', () => {
     expect(new TextEncoder().encode(output.error).byteLength).toBe(64 * 1024);
   });
 
+  it('reports only complete delivered lines so a byte-limited next page cannot skip content', async () => {
+    const lines = Array.from({ length: 10 }, (_, index) => `${index + 1}:` + 'x'.repeat(10_000));
+    const current = fixture({ code: 0, stdout: lines.join('\n') + '\n', stderr: '' });
+    const output = JSON.parse(await current.executor.execute(readCall({ maxLines: 10 }), SIGNAL));
+    expect(output).toMatchObject({ startLine: 1, endLine: 6, truncated: true });
+    expect(output.content).toBe(lines.slice(0, 6).join('\n') + '\n');
+  });
+
+  it('does not advance past an oversized first line and explains how to read it', async () => {
+    const current = fixture({ code: 0, stdout: 'x'.repeat(70 * 1024) + '\n', stderr: '' });
+    const output = JSON.parse(await current.executor.execute(readCall({ startLine: 7 }), SIGNAL));
+    expect(output).toMatchObject({ startLine: 7, endLine: 6, truncated: true });
+    expect(output.error).toContain('sandbox_exec');
+  });
+
   it('propagates sanitized client failures', async () => {
     const client: SandboxClientPort = {
+      async configurationKey() {
+        return this;
+      },
       isConfigured: vi.fn(async () => true),
       execute: vi.fn(async () => {
         throw new SandboxClientError('AUTH', 'definitely_not_dispatched');

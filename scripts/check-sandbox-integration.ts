@@ -9,12 +9,7 @@ import { fileURLToPath } from 'node:url';
 import { promisify } from 'node:util';
 import { SandboxClient, type SandboxClientPort } from '../src/sandbox/sandbox-client';
 import { SandboxToolExecutor } from '../src/sandbox/sandbox-tool-executor';
-import {
-  sandboxExecTool,
-  skillLoaderTool,
-  sandboxReadTool,
-  sandboxRuntime,
-} from '../src/tools/sandbox/tool';
+import { sandboxExecTool, sandboxReadTool, sandboxRuntime } from '../src/tools/sandbox/tool';
 import { ToolDeclarationCatalog } from '../src/tools/register';
 import { bindToolRuntime } from '../src/tools/registry';
 import { ToolServiceResolver } from '../src/tools/service-resolver';
@@ -154,6 +149,7 @@ async function checkSandbox(): Promise<void> {
     let requestCount = 0;
     const countedClient: SandboxClientPort = {
       isConfigured: () => client.isConfigured(),
+      configurationKey: () => client.configurationKey(),
       execute: (request, signal) => {
         requestCount += 1;
         return client.execute(request, signal);
@@ -163,7 +159,6 @@ async function checkSandbox(): Promise<void> {
     const executor = new SandboxToolExecutor(countedClient);
     const signal = new AbortController().signal;
     const toolCatalog = new ToolDeclarationCatalog();
-    toolCatalog.register(skillLoaderTool, sandboxRuntime);
     toolCatalog.register(sandboxReadTool, sandboxRuntime);
     toolCatalog.register(sandboxExecTool, sandboxRuntime);
     const services = new ToolServiceResolver();

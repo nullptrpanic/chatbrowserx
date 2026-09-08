@@ -36,7 +36,6 @@ describe('built-in tool discovery', () => {
       'tavily_search',
       'tavily_extract',
       'tavily_crawl',
-      'skill_loader',
       'sandbox_read',
       'sandbox_exec',
       'history_read',

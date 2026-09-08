@@ -11,6 +11,7 @@ const MAX_DESCRIPTION_CHARACTERS = 1_024;
 const MAX_FRONTMATTER_BYTES = 64 * 1_024;
 const MAX_DISCOVERY_BYTES = 60_000;
 const SNAPSHOT_TTL_MS = 5 * 60 * 1_000;
+const MAX_SNAPSHOT_AGE_MS = 2 * SNAPSHOT_TTL_MS;
 const SCAN_END = '__CHATBROWSERX_SCAN_END__';
 
 const DISCOVERY_COMMAND = `set -euo pipefail
@@ -71,8 +72,8 @@ type SkillEntry = Readonly<{ name: string; description: string; path: string }>;
 type LoadedSkills = Readonly<{ entries: readonly SkillEntry[]; truncated: boolean }>;
 type SkillSnapshot = Readonly<{ prompt: string; scannedAt: number }>;
 
-const snapshots = new WeakMap<SandboxExecutionPort, SkillSnapshot>();
-const refreshes = new WeakMap<SandboxExecutionPort, Promise<string | null>>();
+const snapshots = new WeakMap<object, SkillSnapshot>();
+const refreshes = new WeakMap<object, Promise<string | null>>();
 
 const outputSchema = z
   .object({
@@ -214,9 +215,7 @@ async function discoverSkillPrompt(
             name: 'sandbox_exec',
             argumentsJson: JSON.stringify(arguments_),
             arguments: arguments_,
-            family: 'sandbox',
             operation: 'exec',
-            replay: 'mutation',
           },
           signal,
         ),
@@ -233,18 +232,19 @@ async function discoverSkillPrompt(
 function refreshSkillPrompt(
   execution: SandboxExecutionPort,
   signal: AbortSignal,
+  key: object,
 ): Promise<string | null> {
-  const existing = refreshes.get(execution);
+  const existing = refreshes.get(key);
   if (existing !== undefined) return existing;
   const refresh = discoverSkillPrompt(execution, signal)
     .then((prompt) => {
-      if (prompt !== null) snapshots.set(execution, { prompt, scannedAt: Date.now() });
+      if (prompt !== null) snapshots.set(key, { prompt, scannedAt: Date.now() });
       return prompt;
     })
     .finally(() => {
-      if (refreshes.get(execution) === refresh) refreshes.delete(execution);
+      if (refreshes.get(key) === refresh) refreshes.delete(key);
     });
-  refreshes.set(execution, refresh);
+  refreshes.set(key, refresh);
   return refresh;
 }
 
@@ -252,11 +252,14 @@ function refreshSkillPrompt(
 export async function loadSandboxSkillPrompt(
   services: ToolServiceResolver,
   signal: AbortSignal,
+  configurationKey?: object,
 ): Promise<string | null> {
   if (!services.has(sandboxService)) return null;
   const execution = services.get(sandboxService).execution;
+  const key = configurationKey ?? (await execution.configurationKey());
+  if (key === null) return null;
   const now = Date.now();
-  const snapshot = snapshots.get(execution);
+  const snapshot = snapshots.get(key);
   if (
     snapshot !== undefined &&
     now >= snapshot.scannedAt &&
@@ -264,9 +267,13 @@ export async function loadSandboxSkillPrompt(
   ) {
     return snapshot.prompt;
   }
-  if (snapshot !== undefined) {
-    void refreshSkillPrompt(execution, signal);
+  if (
+    snapshot !== undefined &&
+    now >= snapshot.scannedAt &&
+    now - snapshot.scannedAt < MAX_SNAPSHOT_AGE_MS
+  ) {
+    void refreshSkillPrompt(execution, signal, key);
     return snapshot.prompt;
   }
-  return refreshSkillPrompt(execution, signal);
+  return refreshSkillPrompt(execution, signal, key);
 }

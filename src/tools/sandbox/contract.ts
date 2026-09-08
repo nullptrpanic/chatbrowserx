@@ -59,13 +59,9 @@ export const sandboxExecDefinition = strictFunctionTool(
 export type SandboxToolCall =
   | (ValidatedToolCall<SandboxReadInput> & {
       readonly name: 'sandbox_read';
-      readonly family: 'sandbox';
       readonly operation: 'read';
-      readonly replay: 'safe';
     })
   | (ValidatedToolCall<SandboxExecInput> & {
       readonly name: 'sandbox_exec';
-      readonly family: 'sandbox';
       readonly operation: 'exec';
-      readonly replay: 'mutation';
     });

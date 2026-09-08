@@ -13,6 +13,9 @@ const execFileAsync = promisify(execFile);
 
 function localSandbox(home: string): SandboxExecutionPort {
   return {
+    async configurationKey() {
+      return this;
+    },
     async execute(call, signal) {
       if (call.operation !== 'exec') throw new Error('Expected a Sandbox command.');
       const result = await execFileAsync('/bin/bash', ['-c', call.arguments.command], {
@@ -75,6 +78,9 @@ describe('Sandbox Skill loader', () => {
       sandboxService,
       createSandboxToolService({
         execute,
+        async configurationKey() {
+          return this;
+        },
         recover: async () => ({ status: 'not_found' as const }),
       }),
     );
@@ -278,13 +284,16 @@ describe('Sandbox Skill loader', () => {
       sandboxService,
       createSandboxToolService({
         execute,
+        async configurationKey() {
+          return this;
+        },
         recover: async () => ({ status: 'not_found' as const }),
       }),
     );
 
     const first = loadSandboxSkillPrompt(services, new AbortController().signal);
     const second = loadSandboxSkillPrompt(services, new AbortController().signal);
-    expect(execute).toHaveBeenCalledOnce();
+    await vi.waitFor(() => expect(execute).toHaveBeenCalledOnce());
     resolveExecution?.(
       JSON.stringify({
         code: 0,

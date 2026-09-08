@@ -37,6 +37,7 @@ export type SandboxExecutionReceipt =
 
 export interface SandboxClientPort {
   isConfigured(): Promise<boolean>;
+  configurationKey(): Promise<object | null>;
   execute(request: SandboxExecRequest, signal: AbortSignal): Promise<SandboxExecResponse>;
   getExecution(executionId: string, signal: AbortSignal): Promise<SandboxExecutionReceipt>;
 }
@@ -185,6 +186,8 @@ export class SandboxClient implements SandboxClientPort, SandboxConsoleClientPor
   readonly #settings: Pick<SettingsStore, 'get'>;
   readonly #credentials: Pick<CredentialStore, 'getSandboxToken'>;
   readonly #fetch: SandboxFetchPort;
+  #configuration: { readonly server: string; readonly token: string; readonly key: object } | null =
+    null;
 
   constructor(
     settings: Pick<SettingsStore, 'get'>,
@@ -197,14 +200,20 @@ export class SandboxClient implements SandboxClientPort, SandboxConsoleClientPor
   }
 
   async isConfigured(): Promise<boolean> {
+    return (await this.configurationKey()) !== null;
+  }
+
+  /** Opaque cache identity: credentials never leave the client through this method. */
+  async configurationKey(): Promise<object | null> {
     try {
-      const [settings, token] = await Promise.all([
-        this.#settings.get(),
-        this.#credentials.getSandboxToken(),
-      ]);
-      return (settings.sandboxServer?.length ?? 0) > 0 && Boolean(token?.trim());
+      const { server, token } = await this.#getConnection();
+      if (this.#configuration?.server !== server || this.#configuration.token !== token) {
+        this.#configuration = { server, token, key: {} };
+      }
+      return this.#configuration.key;
     } catch {
-      return false;
+      this.#configuration = null;
+      return null;
     }
   }
 
