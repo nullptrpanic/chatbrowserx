@@ -1,9 +1,11 @@
 import { describe, expect, it } from 'vitest';
 import {
   BROWSER_TOOL_DEFINITIONS,
+  BROWSER_TOOL_SPECS,
   browserOperationForName,
   parseBrowserToolCall,
 } from '../../../src/tools/browser/contract';
+import { browserTool } from '../../../src/tools/browser/declaration';
 
 const CASES = [
   ['browser_get_current_tab', 'get_current_tab', 'safe', {}],
@@ -415,11 +417,12 @@ describe('parseBrowserToolCall', () => {
     'parses %s into one typed browser operation',
     (name, operation, replay, arguments_) => {
       const argumentsJson = JSON.stringify(arguments_);
+      const spec = BROWSER_TOOL_SPECS.find((entry) => entry.name === name);
+      if (spec === undefined) throw new Error(`Missing browser tool: ${name}`);
+      expect(browserTool(spec, 0).policy.mutation).toBe(replay !== 'safe');
 
       expect(parseBrowserToolCall({ callId: 'call_1', name, argumentsJson })).toEqual({
-        family: 'browser',
         operation,
-        replay,
         callId: 'call_1',
         name,
         argumentsJson,

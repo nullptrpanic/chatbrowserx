@@ -526,13 +526,11 @@ export type BrowserToolInput = z.infer<BrowserToolSpec['schema']>;
 export type BrowserToolCallSource = ModelToolCallSource;
 
 export interface ParsedBrowserToolCall {
-  readonly family: 'browser';
   readonly operation: BrowserOperation;
   readonly callId: string;
   readonly name: BrowserToolName;
   readonly argumentsJson: string;
   readonly arguments: BrowserToolInput;
-  readonly replay: 'safe' | 'mutation';
 }
 
 export const SAFE_TO_REPLAY_BROWSER_TOOLS = new Set<BrowserToolName>([
@@ -559,13 +557,11 @@ export function parseBrowserToolCall(input: BrowserToolCallSource): ParsedBrowse
     const name = input.name as BrowserToolName;
     const spec = BROWSER_TOOL_SPEC_BY_NAME[name];
     return {
-      family: 'browser',
       operation: browserOperationForName(name),
       callId: input.callId,
       name,
       argumentsJson: input.argumentsJson,
       arguments: spec.schema.parse(parseToolCallArguments(input)) as BrowserToolInput,
-      replay: SAFE_TO_REPLAY_BROWSER_TOOLS.has(name) ? 'safe' : 'mutation',
     };
   } catch {
     throw Object.assign(new Error('Browser tool call is invalid.'), {

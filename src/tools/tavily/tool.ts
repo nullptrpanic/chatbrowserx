@@ -76,7 +76,6 @@ export const tavilySearchTool: ToolDeclaration<TavilySearchInput> = {
   order: 100,
   policy,
   available: (context) => context.tavilyConfigured === true,
-  createCall: (call) => ({ ...call, operation: 'search' as const }),
   async execute(call, _context, services, signal) {
     const result = await services.get(tavilyService).search(call.arguments, signal);
     return { output: JSON.stringify({ ok: true, ...result }) };
@@ -91,7 +90,6 @@ export const tavilyExtractTool: ToolDeclaration<TavilyExtractInput> = {
   order: 101,
   policy,
   available: (context) => context.tavilyConfigured === true,
-  createCall: (call) => ({ ...call, operation: 'extract' as const }),
   async execute(call, _context, services, signal) {
     const result = await services.get(tavilyService).extract(call.arguments, signal);
     return { output: JSON.stringify({ ok: true, ...result }) };
@@ -106,7 +104,6 @@ export const tavilyCrawlTool: ToolDeclaration<TavilyCrawlInput> = {
   order: 102,
   policy,
   available: (context) => context.tavilyConfigured === true,
-  createCall: (call) => ({ ...call, operation: 'crawl' as const }),
   async execute(call, _context, services, signal) {
     const result = await services.get(tavilyService).crawl(call.arguments, signal);
     return { output: JSON.stringify({ ok: true, ...result }) };

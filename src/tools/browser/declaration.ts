@@ -63,7 +63,6 @@ export function browserTool(
   order: number,
 ): ToolDeclaration<BrowserToolInput> {
   const { name } = spec;
-  const replay = SAFE_TO_REPLAY_BROWSER_TOOLS.has(name) ? 'safe' : 'forbidden';
   return {
     name,
     definition: spec.definition,
@@ -72,7 +71,7 @@ export function browserTool(
     policy: {
       budgetGroup: 'browser',
       maxCalls: 256,
-      mutation: replay !== 'safe',
+      mutation: !SAFE_TO_REPLAY_BROWSER_TOOLS.has(name),
       errorSource: 'browser',
       ambiguousMessage:
         'The previous browser action may already have run. Inspect the current page before choosing the next action.',
@@ -101,9 +100,7 @@ export function browserTool(
     },
     createCall: (call) => ({
       ...call,
-      family: 'browser' as const,
       operation: browserOperationForName(name),
-      replay: replay === 'safe' ? ('safe' as const) : ('mutation' as const),
     }),
     async execute(call, context, services, signal) {
       const currentTabId = context.currentTabId ?? null;

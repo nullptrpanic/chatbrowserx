@@ -148,7 +148,6 @@ describe('registered Tavily tool parsing', () => {
         argumentsJson: JSON.stringify(SEARCH),
       }),
     ).toEqual({
-      operation: 'search',
       callId: 'call_1',
       name: 'tavily_search',
       argumentsJson: JSON.stringify(SEARCH),
