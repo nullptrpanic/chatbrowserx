@@ -1,12 +1,12 @@
 import { describe, expect, it } from 'vitest';
-import { CODEX_MODEL, CODEX_RESPONSES_URL } from '../../../src/providers/codex/codex-constants';
+import { CODEX_RESPONSES_URL } from '../../../src/providers/codex/codex-constants';
 import { buildCodexRequest } from '../../../src/providers/codex/codex-request';
 import type { ModelRequest } from '../../../src/agent/model/model-provider';
 
 const GENERIC_TOOL_NAMES = ['lookup', 'lookup_record', 'lookup-record'] as const;
 
 const MODEL_REQUEST: ModelRequest = {
-  model: 'caller-supplied-model-is-ignored',
+  model: 'custom-model-id',
   reasoningEffort: 'medium',
   systemPrompt: 'Use only approved tools.',
   input: [
@@ -275,7 +275,7 @@ describe('buildCodexRequest', () => {
     expect(String(thrown)).not.toContain('synthetic-token-value');
   });
 
-  it('builds the single fixed Codex HTTP contract and maps normalized input', () => {
+  it('preserves the requested model ID in the Codex HTTP contract and maps normalized input', () => {
     const request = buildCodexRequest({
       accessToken: 'synthetic-token-value',
       accountId: 'acct_123',
@@ -291,7 +291,7 @@ describe('buildCodexRequest', () => {
     });
     expect(request.headers).not.toHaveProperty('OpenAI-Beta');
     expect(request.body).toEqual({
-      model: CODEX_MODEL,
+      model: 'custom-model-id',
       instructions: 'Use only approved tools.',
       input: [
         {

@@ -98,6 +98,7 @@ export interface SupplementPanelMessageInput {
 }
 
 export interface SavePanelSettingsInput {
+  readonly model?: string | undefined;
   readonly reasoningEffort: ReasoningEffort;
   readonly systemPrompt: string;
   readonly language: AppLanguage;
@@ -594,6 +595,7 @@ export class PanelService {
     const sandboxServer = input.sandboxServer ?? currentSandboxServer;
     await this.#dependencies.settings.save({
       ...current,
+      model: input.model ?? current.model,
       reasoningEffort: input.reasoningEffort,
       systemPrompt: input.systemPrompt,
       language: input.language,

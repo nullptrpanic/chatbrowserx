@@ -23,7 +23,6 @@ import type { ModelToolContract, ToolRuntimePort } from '../../tools/types';
 
 export interface ModelTurnPlannerDependencies {
   readonly provider: ModelProviderPort;
-  readonly model: string;
   readonly tools: ToolRuntimePort;
   readonly settings: Pick<SettingsStore, 'get'>;
   readonly conversations: Pick<ConversationRepository, 'listMessages' | 'updateMessage'>;
@@ -189,7 +188,7 @@ export class ModelTurnPlanner implements AgentPlanner {
     try {
       for await (const event of this.#dependencies.provider.stream(
         {
-          model: this.#dependencies.model,
+          model: settings.model,
           reasoningEffort: settings.reasoningEffort,
           systemPrompt,
           input: context.input,

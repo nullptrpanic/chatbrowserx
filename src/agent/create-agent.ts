@@ -4,7 +4,6 @@ import type { ConversationRepository } from '../persistence/conversation-reposit
 import type { CredentialStore } from '../persistence/credential-store';
 import type { SettingsStore } from '../persistence/settings-store';
 import type { TaskRepository } from '../persistence/task-repository';
-import { CODEX_MODEL } from '../providers/codex/codex-constants';
 import { CodexProvider } from '../providers/codex/codex-provider';
 import type { TavilyExecutionPort } from '../tools/tavily/types';
 import type { SandboxExecutionPort } from '../sandbox/sandbox-tool-executor';
@@ -54,7 +53,6 @@ export async function createAgent(host: AgentHost): Promise<Agent> {
   const commands = new TaskCommandService(host.tasks, host.clock, host.ids, host.conversations);
   const planner = new ModelTurnPlanner({
     provider: new CodexProvider(host.credentials),
-    model: CODEX_MODEL,
     tools,
     settings: host.settings,
     conversations: host.conversations,

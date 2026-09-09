@@ -5,6 +5,26 @@ import {
 } from '../../../src/shared/protocol/parse-message';
 
 describe('parseExtensionMessage', () => {
+  it('accepts arbitrary nonempty model IDs without a whitelist', () => {
+    const message = {
+      version: 1,
+      requestId: 'req_model',
+      type: 'settings.save',
+      payload: {
+        reasoningEffort: 'medium',
+        systemPrompt: '',
+        language: 'en',
+        model: 'custom/model:latest',
+      },
+    };
+    expect(parseExtensionMessage(message)).toMatchObject({
+      payload: { model: 'custom/model:latest' },
+    });
+    expect(() =>
+      parseExtensionMessage({ ...message, payload: { ...message.payload, model: '  ' } }),
+    ).toThrow();
+  });
+
   it('accepts a bounded assistant reply target on a chat submission', () => {
     expect(
       parseExtensionMessage({

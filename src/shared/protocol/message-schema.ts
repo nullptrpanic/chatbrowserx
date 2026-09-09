@@ -116,6 +116,7 @@ const settingsSaveSchema = z
     type: z.literal('settings.save'),
     payload: z
       .object({
+        model: z.string().trim().min(1).max(256).optional(),
         reasoningEffort: z.enum(['low', 'medium', 'high', 'xhigh']),
         systemPrompt: z.string().max(20_000),
         language: z.enum(['system', 'zh-CN', 'en', 'ja']),

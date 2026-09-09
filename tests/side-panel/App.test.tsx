@@ -129,7 +129,7 @@ describe('App background connection', () => {
     expect(screen.queryByText('回复 ChatBrowserX')).not.toBeInTheDocument();
   });
 
-  it('edits and saves the model history message limit', async () => {
+  it('edits and saves an arbitrary model ID and the history message limit', async () => {
     const send = vi.fn<RuntimePort['send']>(async (message) => {
       const settings = {
         model: 'gpt-5.6-terra',
@@ -163,12 +163,15 @@ describe('App background connection', () => {
     });
     await user.clear(input);
     await user.type(input, '24');
+    const model = screen.getByRole('textbox', { name: '模型' });
+    await user.clear(model);
+    await user.type(model, 'custom-model-id');
     await user.click(screen.getByRole('button', { name: '保存设置' }));
 
     expect(send).toHaveBeenCalledWith(
       expect.objectContaining({
         type: 'settings.save',
-        payload: expect.objectContaining({ historyMessageLimit: 24 }),
+        payload: expect.objectContaining({ model: 'custom-model-id', historyMessageLimit: 24 }),
       }),
     );
   });

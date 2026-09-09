@@ -10,7 +10,6 @@ import type { CredentialStore } from '../../src/persistence/credential-store';
 import type { SettingsStore } from '../../src/persistence/settings-store';
 import type { TaskRepository } from '../../src/persistence/task-repository';
 import { CodexProvider } from '../../src/providers/codex/codex-provider';
-import { CODEX_MODEL } from '../../src/providers/codex/codex-constants';
 import { providerErrorFromCode } from '../../src/agent/model/model-provider-error';
 import type { ModelProviderPort, ModelRequest } from '../../src/agent/model/model-provider';
 import type { ModelStreamEvent } from '../../src/agent/model/model-stream-event';
@@ -97,7 +96,7 @@ const USER_MESSAGE: MessageRecord = {
 };
 
 /** Injects the fixed test model while exercising the provider-neutral planner implementation. */
-type TestPlannerDependencies = Omit<ModelTurnPlannerDependencies, 'model' | 'tools'> & {
+type TestPlannerDependencies = Omit<ModelTurnPlannerDependencies, 'tools'> & {
   readonly tavilyAvailability: { isConfigured(): Promise<boolean> };
   readonly sandbox?: SandboxExecutionPort;
 };
@@ -137,7 +136,6 @@ class CodexAgentPlanner extends ModelTurnPlanner {
     });
     super({
       ...plannerDependencies,
-      model: CODEX_MODEL,
       tools: bindToolRuntime(discoverTools(), services),
     });
   }
@@ -336,7 +334,7 @@ function repositories(
 function settings(): SettingsStore {
   return {
     get: vi.fn(async () => ({
-      model: 'ignored-model-setting',
+      model: 'custom-model-id',
       reasoningEffort: 'medium' as const,
       systemPrompt: 'Custom safe preference.',
       language: 'system' as const,
@@ -534,7 +532,7 @@ describe('CodexAgentPlanner', () => {
     expect(storage.listMessages).toHaveBeenCalledTimes(1);
     expect(storage.listTasks).toHaveBeenCalledTimes(1);
     expect(model.requests[0]).toMatchObject({
-      model: 'gpt-5.6-terra',
+      model: 'custom-model-id',
       reasoningEffort: 'medium',
       systemPrompt: 'Custom safe preference.',
       input: [

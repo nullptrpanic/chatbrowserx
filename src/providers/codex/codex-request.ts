@@ -4,7 +4,7 @@ import type {
   ModelRequest,
 } from '../../agent/model/model-provider';
 import { providerErrorFromCode } from '../../agent/model/model-provider-error';
-import { CODEX_MODEL, CODEX_RESPONSES_URL } from './codex-constants';
+import { CODEX_RESPONSES_URL } from './codex-constants';
 import { toCodexToolName } from './codex-tool-name';
 
 export interface BuildCodexRequestInput {
@@ -119,7 +119,7 @@ export function buildCodexRequest(input: BuildCodexRequestInput): CodexHttpReque
       Accept: 'text/event-stream',
     },
     body: {
-      model: CODEX_MODEL,
+      model: input.request.model,
       instructions: input.request.systemPrompt,
       input: input.request.input.map(mapInputItem),
       ...toolContract,

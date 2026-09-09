@@ -1336,6 +1336,7 @@ describe('PanelService', () => {
     const service = new PanelService(fixture.dependencies);
 
     await service.saveSettings({
+      model: 'custom-model-id',
       reasoningEffort: 'high',
       systemPrompt: 'Be concise',
       language: 'en',
@@ -1348,7 +1349,7 @@ describe('PanelService', () => {
     expect(fixture.dependencies.credentials.setCodexAccessToken).toHaveBeenCalledWith('new-token');
     expect(fixture.dependencies.credentials.setTavilyKey).toHaveBeenCalledWith('new-tavily-key');
     expect(fixture.dependencies.settings.save).toHaveBeenCalledWith(
-      expect.objectContaining({ historyMessageLimit: 24 }),
+      expect.objectContaining({ model: 'custom-model-id', historyMessageLimit: 24 }),
     );
     expect(fixture.dependencies.conversations.clearConversation).toHaveBeenCalledWith(
       fixture.conversation.id,
@@ -1382,6 +1383,7 @@ describe('PanelService', () => {
 
     expect(fixture.dependencies.settings.save).toHaveBeenCalledWith(
       expect.objectContaining({
+        model: 'gpt-5.6-terra',
         sandboxServer: 'https://new-sandbox.example.com/root',
       }),
     );

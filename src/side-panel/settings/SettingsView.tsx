@@ -15,9 +15,10 @@ export interface SettingsViewProps {
   readonly onSave: (input: SavePanelSettingsInput) => Promise<unknown>;
 }
 
-/** Renders the fixed Codex settings surface plus the optional Sandbox connection. */
+/** Renders Codex settings plus the optional Sandbox connection. */
 export function SettingsView({ settings, t, onLoad, onSave }: SettingsViewProps) {
   const [activeTab, setActiveTab] = useState<'general' | 'sandbox'>('general');
+  const [model, setModel] = useState(settings.model);
   const [reasoningEffort, setReasoningEffort] = useState(settings.reasoningEffort);
   const [systemPrompt, setSystemPrompt] = useState(settings.systemPrompt);
   const [language, setLanguage] = useState(settings.language);
@@ -30,6 +31,7 @@ export function SettingsView({ settings, t, onLoad, onSave }: SettingsViewProps)
   const [loadFailed, setLoadFailed] = useState(false);
 
   useEffect(() => {
+    setModel(settings.model);
     setReasoningEffort(settings.reasoningEffort);
     setSystemPrompt(settings.systemPrompt);
     setLanguage(settings.language);
@@ -38,6 +40,7 @@ export function SettingsView({ settings, t, onLoad, onSave }: SettingsViewProps)
   }, [
     settings.historyMessageLimit,
     settings.language,
+    settings.model,
     settings.reasoningEffort,
     settings.sandboxServer,
     settings.systemPrompt,
@@ -49,6 +52,7 @@ export function SettingsView({ settings, t, onLoad, onSave }: SettingsViewProps)
       .then((loaded) => {
         if (!active) return;
         setLoadFailed(false);
+        setModel(loaded.model);
         setReasoningEffort(loaded.reasoningEffort);
         setSystemPrompt(loaded.systemPrompt);
         setLanguage(loaded.language);
@@ -71,6 +75,7 @@ export function SettingsView({ settings, t, onLoad, onSave }: SettingsViewProps)
     setLoadFailed(false);
     setStatus('saving');
     const input: SavePanelSettingsInput = {
+      model: model.trim(),
       reasoningEffort,
       systemPrompt,
       language,
@@ -147,7 +152,13 @@ export function SettingsView({ settings, t, onLoad, onSave }: SettingsViewProps)
             />
             <label className="form-field" htmlFor="model">
               <span>{t('model')}</span>
-              <input id="model" value={settings.model} readOnly />
+              <input
+                id="model"
+                value={model}
+                required
+                maxLength={256}
+                onChange={(event) => setModel(event.target.value)}
+              />
             </label>
             <label className="form-field" htmlFor="reasoning-effort">
               <span>{t('reasoningEffort')}</span>
