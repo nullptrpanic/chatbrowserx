@@ -409,6 +409,7 @@ describe('TaskExecutor', () => {
       tavily: tavilyPort(),
       browser: browserPort(),
       history: {
+        readAttachments: vi.fn(async () => null),
         readHistory,
         readDetail: vi.fn(),
         readResult: vi.fn(),

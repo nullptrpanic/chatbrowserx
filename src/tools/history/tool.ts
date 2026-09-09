@@ -1,3 +1,4 @@
+import { validateImageBatch } from '../../attachments/attachment-policy';
 import type {
   HistoryDetailReadInput,
   HistoryReadInput,
@@ -6,6 +7,8 @@ import type {
 import { register } from '../register';
 import type { ToolDeclaration, ToolRuntimeContext, ToolRuntimeHooks } from '../types';
 import {
+  attachmentReadDefinition,
+  attachmentReadSchema,
   historyDetailReadDefinition,
   historyDetailReadSchema,
   historyReadDefinition,
@@ -95,6 +98,42 @@ export const historyRuntime = {
   },
 } satisfies ToolRuntimeHooks;
 
+export const attachmentReadTool: ToolDeclaration<{ readonly attachmentIds: readonly string[] }> = {
+  name: 'attachment_read',
+  definition: attachmentReadDefinition,
+  schema: attachmentReadSchema,
+  order: 303,
+  policy: historyPolicy,
+  available: historyAvailable,
+  async execute(call, context, services) {
+    const images = await services
+      .get(historyService)
+      .readAttachments(taskIdentity(context), call.arguments.attachmentIds);
+    if (images === null)
+      return {
+        output: JSON.stringify({
+          ok: false,
+          code: 'ATTACHMENT_NOT_FOUND',
+          message: 'An image is unavailable in this conversation.',
+          retryable: false,
+        }),
+      };
+    const validation = validateImageBatch(images.map((image) => image.blob));
+    if (!validation.ok)
+      return {
+        output: JSON.stringify({
+          ok: false,
+          code: validation.code,
+          message: 'The requested images exceed the supported image limits or format.',
+          retryable: false,
+        }),
+      };
+    const attachmentIds = images.map((image) => image.id);
+    return { output: JSON.stringify({ attachmentIds }), attachmentIds };
+  },
+};
+
 register(historyReadTool, historyRuntime);
 register(historyDetailReadTool, historyRuntime);
 register(resultReadTool, historyRuntime);
+register(attachmentReadTool, historyRuntime);

@@ -70,8 +70,8 @@ async function createBackgroundServices(
   });
   const repository = new IndexedDbTaskRepository(database, () => panelChanges.changed());
   const conversations = new IndexedDbConversationRepository(database, () => panelChanges.changed());
-  const history = new TaskHistoryReader({ tasks: repository, conversations });
   const attachments = new IndexedDbAttachmentRepository(database);
+  const history = new TaskHistoryReader({ tasks: repository, conversations, attachments });
   const attachmentService = new AttachmentService(attachments, {
     clock: systemClock,
     ids: cryptoIds,

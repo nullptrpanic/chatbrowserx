@@ -121,6 +121,7 @@ function reader(
   const archiveResults = input.archiveResults ?? results;
   const readableResults = [...archiveResults, ...(input.extraResults ?? [])];
   return new TaskHistoryReader({
+    attachments: { get: async () => undefined },
     tasks: {
       listByConversation: async () => [...allTasks],
       listEvents: async (taskId) =>
@@ -138,6 +139,25 @@ function reader(
 }
 
 describe('TaskHistoryReader', () => {
+  it('exposes image references on messages, supplements and tool results without loading images', async () => {
+    const page = await reader({
+      messages: messages.map((message) => ({ ...message, attachmentIds: [`image_${message.id}`] })),
+      archiveResults: results.map((result) => ({ ...result, attachmentIds: ['image_result'] })),
+    }).readHistory(
+      { conversationId, currentTaskId },
+      { taskId: null, offset: 1, cursor: '', limit: 20 },
+    );
+    expect(page).toMatchObject({
+      ok: true,
+      items: [
+        { type: 'message', attachmentCount: 1, attachmentIds: ['image_message_2'] },
+        { type: 'tool_call' },
+        { type: 'supplement', attachmentCount: 1, attachmentIds: ['image_supplement_2'] },
+        { type: 'tool_result', attachmentCount: 1, attachmentIds: ['image_result'] },
+      ],
+    });
+  });
+
   it('reads the previous logical task in stable event order with cursor counts', async () => {
     const first = await reader().readHistory(
       { conversationId, currentTaskId },

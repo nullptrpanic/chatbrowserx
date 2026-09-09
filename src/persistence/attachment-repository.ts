@@ -1,11 +1,11 @@
 import type { IDBPDatabase } from 'idb';
 import type { AttachmentRecord, NewAttachment } from '../attachments/attachment-types';
-import type { AttachmentId } from '../shared/ids';
+import type { AttachmentId, ConversationId } from '../shared/ids';
 import type { ChatBrowserDatabase } from './database-schema';
 
 export interface AttachmentRepository {
   put(input: NewAttachment): Promise<AttachmentRecord>;
-  get(id: AttachmentId): Promise<AttachmentRecord | undefined>;
+  get(id: AttachmentId, conversationId?: ConversationId): Promise<AttachmentRecord | undefined>;
   addReference(id: AttachmentId, referenceId: string): Promise<void>;
   removeReference(id: AttachmentId, referenceId: string): Promise<void>;
   deleteUnreferenced(before: number): Promise<number>;
@@ -41,9 +41,40 @@ export class IndexedDbAttachmentRepository implements AttachmentRepository {
   }
 
   /**
-   * Retrieves one stored attachment without materializing or duplicating its Blob bytes.
+   * Retrieves a Blob without copying its bytes; an optional conversation scope requires a live owner.
    */
-  async get(id: AttachmentId): Promise<AttachmentRecord | undefined> {
+  async get(
+    id: AttachmentId,
+    conversationId?: ConversationId,
+  ): Promise<AttachmentRecord | undefined> {
+    if (conversationId !== undefined) {
+      const transaction = this.#database.transaction(
+        ['attachments', 'attachment-references', 'messages', 'tool-results', 'tasks'],
+        'readonly',
+      );
+      const references = await transaction
+        .objectStore('attachment-references')
+        .index('by-attachment')
+        .getAll(id);
+      for (const { referenceId } of references) {
+        if (referenceId.startsWith('message:')) {
+          const message = await transaction
+            .objectStore('messages')
+            .get(referenceId.slice('message:'.length));
+          if (message?.conversationId === conversationId && message.attachmentIds.includes(id)) {
+            return transaction.objectStore('attachments').get(id);
+          }
+        } else {
+          const result = await transaction.objectStore('tool-results').get(referenceId);
+          if (result?.attachmentIds.includes(id)) {
+            const task = await transaction.objectStore('tasks').get(result.taskId);
+            if (task?.conversationId === conversationId)
+              return transaction.objectStore('attachments').get(id);
+          }
+        }
+      }
+      return undefined;
+    }
     return this.#database.get('attachments', id);
   }
 

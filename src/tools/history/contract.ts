@@ -1,4 +1,5 @@
 import { z } from 'zod';
+import { IMAGE_POLICY } from '../../attachments/attachment-policy';
 import { strictFunctionTool } from '../model-tool';
 
 const MAX_CURSOR_CHARACTERS = 1_024;
@@ -60,5 +61,24 @@ export const resultReadDefinition = strictFunctionTool(
     resultId: { type: 'string', minLength: 1, maxLength: MAX_IDENTIFIER_CHARACTERS },
     offset: { type: 'integer', minimum: 0, maximum: Number.MAX_SAFE_INTEGER },
     limit: { type: 'integer', minimum: 1, maximum: MAX_RESULT_CHARACTERS },
+  },
+);
+
+export const attachmentReadSchema = z
+  .object({
+    attachmentIds: z.array(z.string().min(1).max(256)).min(1).max(IMAGE_POLICY.maxCount),
+  })
+  .strict();
+
+export const attachmentReadDefinition = strictFunctionTool(
+  'attachment_read',
+  'Read original images by attachment IDs from message references or history_read. Use when image details are needed; references alone do not contain image content. Reads only this conversation and returns images in the requested order. Ordinary text history does not require this tool.',
+  {
+    attachmentIds: {
+      type: 'array',
+      minItems: 1,
+      maxItems: IMAGE_POLICY.maxCount,
+      items: { type: 'string', minLength: 1, maxLength: 256 },
+    },
   },
 );

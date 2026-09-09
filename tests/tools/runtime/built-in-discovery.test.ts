@@ -41,6 +41,7 @@ describe('built-in tool discovery', () => {
       'history_read',
       'history_detail_read',
       'result_read',
+      'attachment_read',
     ]);
     for (const { name, definition } of declarations) {
       expect(definition.name).toBe(name);

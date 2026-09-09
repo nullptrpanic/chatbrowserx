@@ -1,3 +1,5 @@
+import type { AttachmentRecord } from '../attachments/attachment-types';
+import type { AttachmentRepository } from '../persistence/attachment-repository';
 import type { ConversationRepository } from '../persistence/conversation-repository';
 import type { TaskRepository } from '../persistence/task-repository';
 import type { ConversationId, TaskId } from '../shared/ids';
@@ -51,6 +53,7 @@ export type HistoryItem =
       readonly textLength: number;
       readonly textDetailId: string | null;
       readonly attachmentCount: number;
+      readonly attachmentIds: readonly string[];
       readonly applied?: boolean;
       readonly replyTo?: {
         readonly messageId: string;
@@ -88,6 +91,7 @@ export type HistoryItem =
       readonly preview: string;
       readonly outputLength: number;
       readonly attachmentCount: number;
+      readonly attachmentIds: readonly string[];
     }
   | {
       readonly sequence: number;
@@ -169,6 +173,10 @@ export type HistoryDetailReadResponse =
   | HistoryReadError;
 
 export interface TaskHistoryReaderPort {
+  readAttachments(
+    context: TaskHistoryContext,
+    attachmentIds: readonly string[],
+  ): Promise<readonly AttachmentRecord[] | null>;
   readHistory(context: TaskHistoryContext, input: HistoryReadInput): Promise<HistoryReadResponse>;
   readDetail(
     context: TaskHistoryContext,
@@ -354,6 +362,7 @@ function messageItem(
     textLength: text.length,
     textDetailId: text.detailId,
     attachmentCount: message.attachmentIds.length,
+    attachmentIds: message.attachmentIds,
     ...(supplement ? { applied: appliedSupplements.has(message.id) } : {}),
     ...(message.replyTo === undefined
       ? {}
@@ -501,6 +510,7 @@ function historyItems(
           preview: result.output.slice(0, TOOL_RESULT_PREVIEW_CHARACTERS),
           outputLength: result.output.length,
           attachmentCount: result.attachmentIds.length,
+          attachmentIds: result.attachmentIds,
         },
       ];
     }
@@ -585,6 +595,7 @@ export class TaskHistoryReader implements TaskHistoryReaderPort {
     'listByConversation' | 'listEvents' | 'getToolResult' | 'get'
   >;
   readonly #conversations: Pick<ConversationRepository, 'listTaskMessages'>;
+  readonly #attachments: Pick<AttachmentRepository, 'get'>;
 
   constructor(dependencies: {
     readonly tasks: Pick<
@@ -592,9 +603,21 @@ export class TaskHistoryReader implements TaskHistoryReaderPort {
       'listByConversation' | 'listEvents' | 'getToolResult' | 'get'
     >;
     readonly conversations: Pick<ConversationRepository, 'listTaskMessages'>;
+    readonly attachments: Pick<AttachmentRepository, 'get'>;
   }) {
     this.#tasks = dependencies.tasks;
     this.#conversations = dependencies.conversations;
+    this.#attachments = dependencies.attachments;
+  }
+
+  async readAttachments(
+    context: TaskHistoryContext,
+    attachmentIds: readonly string[],
+  ): Promise<readonly AttachmentRecord[] | null> {
+    const records = await Promise.all(
+      [...new Set(attachmentIds)].map((id) => this.#attachments.get(id, context.conversationId)),
+    );
+    return records.every((record) => record !== undefined) ? records : null;
   }
 
   async readHistory(

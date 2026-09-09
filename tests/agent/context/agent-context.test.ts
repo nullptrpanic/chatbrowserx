@@ -1300,7 +1300,82 @@ describe('buildAgentContext', () => {
     expect(historyText.at(-1)).toBe(historicalMessages.at(-1)?.text);
   });
 
-  it('prioritizes current images and fills the remaining budget from newest history', async () => {
+  it('reports tool images omitted by the request budget without losing the text result', async () => {
+    const currentIds = Array.from(
+      { length: IMAGE_POLICY.maxCount },
+      (_, index) => `current_${index}`,
+    );
+    const context = await buildAgentContext(
+      {
+        task: TASK,
+        checkpoint: {
+          ...CHECKPOINT,
+          continuationItems: [
+            { type: 'message_ref', messageId: 'current' },
+            {
+              type: 'function_call',
+              callId: 'read_image',
+              name: 'attachment_read',
+              argumentsJson: '{"attachmentIds":["old_image"]}',
+            },
+            {
+              type: 'function_call_output_ref',
+              callId: 'read_image',
+              resultId: 'image_result',
+              attachmentIds: ['old_image'],
+            },
+          ],
+        },
+        toolResults: [
+          {
+            callId: 'read_image',
+            toolName: 'attachment_read',
+            argumentsJson: '{"attachmentIds":["old_image"]}',
+            resultId: 'image_result',
+            output: '{"attachmentIds":["old_image"]}',
+            attachmentIds: ['old_image'],
+          },
+        ],
+        customSystemPrompt: '',
+        historyMessageLimit: 50,
+      },
+      contextDependencies(
+        [
+          message({
+            id: 'current',
+            role: 'user',
+            text: 'Compare images',
+            attachmentIds: currentIds,
+          }),
+        ],
+        {
+          get: async (id) => ({
+            id,
+            blob: new Blob(['x'], { type: 'image/png' }),
+            mimeType: 'image/png',
+            byteSize: 1,
+            width: 1,
+            height: 1,
+            source: 'file',
+            createdAt: 1,
+          }),
+        },
+      ),
+    );
+    const result = context.input.at(-1);
+    if (result?.type !== 'function_call_output' || typeof result.output !== 'string')
+      throw new Error('Expected a text-only result.');
+    expect(JSON.parse(result.output)).toMatchObject({
+      output: '{"attachmentIds":["old_image"]}',
+      imageError: { code: 'IMAGE_BUDGET_EXCEEDED', attachmentIds: ['old_image'] },
+    });
+    const currentImages = context.input.flatMap((item) =>
+      item.type === 'message' ? item.content.filter((part) => part.type === 'input_image') : [],
+    );
+    expect(currentImages).toHaveLength(8);
+  });
+
+  it('keeps current images but projects historical images as references without reading their bytes', async () => {
     const currentIds = Array.from({ length: 6 }, (_, index) => `current_${String(index)}`);
     const recentIds = ['recent_0', 'recent_1'];
     const get = vi.fn(async (id: string) => ({
@@ -1338,7 +1413,7 @@ describe('buildAgentContext', () => {
             id: 'recent',
             taskId: 'task_recent',
             role: 'user',
-            text: 'Recent images',
+            text: '',
             attachmentIds: recentIds,
             createdAt: 120,
           }),
@@ -1358,9 +1433,71 @@ describe('buildAgentContext', () => {
     const imageParts = context.input.flatMap((item) =>
       item.type === 'message' ? item.content.filter((part) => part.type === 'input_image') : [],
     );
-    expect(imageParts).toHaveLength(IMAGE_POLICY.maxCount);
+    expect(imageParts).toHaveLength(currentIds.length);
     expect(get).not.toHaveBeenCalledWith('older_0');
-    expect(get.mock.calls.map(([id]) => id)).toEqual([...currentIds, ...recentIds]);
+    expect(get.mock.calls.map(([id]) => id)).toEqual(currentIds);
+    expect(context.input.slice(0, 2)).toEqual([
+      {
+        type: 'message',
+        role: 'user',
+        content: [{ type: 'input_text', text: 'Older image\nAttachments: ["older_0"]' }],
+      },
+      {
+        type: 'message',
+        role: 'user',
+        content: [{ type: 'input_text', text: 'Attachments: ["recent_0","recent_1"]' }],
+      },
+    ]);
+  });
+
+  it('counts historical attachment references in the existing text budget', async () => {
+    const history = Array.from({ length: 50 }, (_, index) =>
+      message({
+        id: `image-history-${index}`,
+        taskId: `old-task-${index}`,
+        role: 'user',
+        text: '',
+        attachmentIds: Array.from(
+          { length: 8 },
+          (_, imageIndex) => `${index}-${imageIndex}-${'x'.repeat(240)}`,
+        ),
+      }),
+    );
+    const context = await buildAgentContext(
+      {
+        task: TASK,
+        checkpoint: {
+          ...CHECKPOINT,
+          continuationItems: [{ type: 'message_ref', messageId: 'current' }],
+        },
+        toolResults: [],
+        customSystemPrompt: '',
+        historyMessageLimit: 50,
+      },
+      contextDependencies([...history, message({ id: 'current', role: 'user', text: 'Current' })], {
+        get: vi.fn(async (id) => ({
+          id,
+          blob: new Blob(['x'], { type: 'image/png' }),
+          mimeType: 'image/png',
+          byteSize: 1,
+          width: 1,
+          height: 1,
+          source: 'file' as const,
+          createdAt: 100,
+        })),
+      }),
+    );
+    expect(context.input.length).toBeGreaterThan(0);
+    expect(context.input.length).toBeLessThan(50);
+    const texts = context.input
+      .slice(0, -1)
+      .flatMap((item) =>
+        item.type === 'message'
+          ? item.content.flatMap((part) => (part.type === 'input_text' ? [part.text] : []))
+          : [],
+      );
+    expect(texts.join('').length).toBeLessThanOrEqual(MAX_MODEL_HISTORY_TEXT_CHARACTERS);
+    expect(texts.at(-1)).toContain('49-7-');
   });
 
   it('keeps 50 successful-history messages and replays one active task in exact order', async () => {

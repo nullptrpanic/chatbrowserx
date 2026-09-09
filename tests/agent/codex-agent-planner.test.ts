@@ -115,6 +115,7 @@ class CodexAgentPlanner extends ModelTurnPlanner {
       services.bind(sandboxService, createSandboxToolService(sandbox));
     }
     services.bind(historyService, {
+      readAttachments: async () => null,
       readHistory: async () => ({
         ok: false,
         code: 'HISTORY_NOT_FOUND',
@@ -622,10 +623,11 @@ describe('CodexAgentPlanner', () => {
 
     await collect(planner);
 
-    expect(model.requests[0]?.tools.map(({ name }) => name).slice(-3)).toEqual([
+    expect(model.requests[0]?.tools.map(({ name }) => name).slice(-4)).toEqual([
       'history_read',
       'history_detail_read',
       'result_read',
+      'attachment_read',
     ]);
   });
 
@@ -721,10 +723,11 @@ describe('CodexAgentPlanner', () => {
         },
       },
     ]);
-    expect(model.requests[0]?.tools.map(({ name }) => name).slice(-3)).toEqual([
+    expect(model.requests[0]?.tools.map(({ name }) => name).slice(-4)).toEqual([
       'history_read',
       'history_detail_read',
       'result_read',
+      'attachment_read',
     ]);
   });
 

@@ -191,6 +191,151 @@ async function waitForTaskStatus(
 }
 
 extensionTest(
+  'keeps historical image references across tasks and rereads original bytes on demand',
+  async ({ extensionSession }) => {
+    const { context, sidePanelPage: panel } = extensionSession;
+    await context.route('https://image-history.test/**', (route) =>
+      route.fulfill({
+        contentType: 'text/html',
+        body: '<!doctype html><title>Image history fixture</title><h1>Image history fixture</h1>',
+      }),
+    );
+    const page = await context.newPage();
+    await page.goto('https://image-history.test/');
+    const tabs = await panel.evaluate(async (url) => chrome.tabs.query({ url }), page.url());
+    const tabId = tabs[0]?.id;
+    if (typeof tabId !== 'number') throw new Error('Image history tab unavailable.');
+    type Part = { type: string; image_url?: string };
+    type RequestBody = { input: { type: string; content?: Part[]; output?: string | Part[] }[] };
+    const requests: RequestBody[] = [];
+    const images = (body: RequestBody | undefined) => {
+      if (body === undefined) throw new Error('Expected Provider request was not captured.');
+      return body.input.flatMap((item) =>
+        [...(item.content ?? []), ...(Array.isArray(item.output) ? item.output : [])]
+          .filter((part) => part.type === 'input_image')
+          .map((part) => part.image_url),
+      );
+    };
+    let originalTaskId = '';
+    let attachmentId = '';
+    let historyOutput: unknown;
+    await context.route('https://chatgpt.com/backend-api/codex/responses', async (route) => {
+      const body = route.request().postDataJSON() as RequestBody;
+      const turn = requests.push(body);
+      let response = finalTextResponse(`image_response_${turn}`, `Image fixture answer ${turn}.`);
+      if (turn === 7) {
+        response = toolResponse('image_history', 'item_history', 'call_history', 'history_read', {
+          taskId: originalTaskId,
+          offset: null,
+          cursor: '',
+          limit: 100,
+        });
+      } else if (turn === 8) {
+        historyOutput = JSON.parse(functionOutputs(body).at(-1) ?? 'null');
+        response = toolResponse('image_read', 'item_image', 'call_image', 'attachment_read', {
+          attachmentIds: [attachmentId],
+        });
+      }
+      await route.fulfill({
+        status: 200,
+        headers: { 'Content-Type': 'text/event-stream' },
+        body: response,
+      });
+    });
+    await sendExtensionMessage(panel, {
+      version: 1,
+      requestId: 'image_settings',
+      type: 'settings.save',
+      payload: {
+        reasoningEffort: 'low',
+        systemPrompt: 'Answer the user.',
+        language: 'en',
+        historyMessageLimit: 50,
+        codexAccessToken: syntheticAccessToken(),
+      },
+    });
+    await panel.locator('input[type="file"]').setInputFiles({
+      name: 'reference.png',
+      mimeType: 'image/png',
+      buffer: Buffer.from(
+        'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+aD1sAAAAASUVORK5CYII=',
+        'base64',
+      ),
+    });
+    await expect(panel.locator('.attachment-thumbnail')).toHaveCount(1);
+    await panel.getByRole('textbox').fill('Remember the uploaded reference image.');
+    await panel.getByRole('button', { name: 'Send' }).click();
+    const snapshot = () =>
+      sendExtensionMessage<PanelSnapshot>(panel, {
+        version: 1,
+        requestId: `image_snapshot_${Date.now()}`,
+        type: 'panel.getSnapshot',
+        payload: { tabId },
+      });
+    await expect.poll(async () => (await snapshot()).task?.status).toBe('completed');
+    const initial = await snapshot();
+    if (!initial.task || !initial.conversation) throw new Error('Initial image task unavailable.');
+    originalTaskId = initial.task.id;
+    const conversationId = initial.conversation.id;
+    const originalMessage = initial.messages.find((message) => message.role === 'user');
+    attachmentId = originalMessage?.attachmentIds[0] ?? '';
+    expect(attachmentId).not.toBe('');
+    expect(requests).toHaveLength(1);
+    expect(images(requests[0])).toHaveLength(1);
+    const originalImages = images(requests[0]);
+    // Reopening the UI must retain the image and its stable reference, not only a draft cache.
+    await panel.reload();
+    await expect(panel.locator('.connection-dot.is-ready')).toBeVisible();
+    const submit = async (text: string) => {
+      const task = await sendExtensionMessage<{ task: { id: string } }>(panel, {
+        version: 1,
+        requestId: `image_submit_${requests.length}`,
+        type: 'chat.submit',
+        payload: { tabId, conversationId, text, attachmentIds: [] },
+      });
+      await waitForTask(panel, task.task.id);
+      return task.task.id;
+    };
+    for (let index = 0; index < 5; index += 1) {
+      await submit(`Unrelated text-only question ${index}.`);
+      expect(requests).toHaveLength(index + 2);
+      expect(images(requests.at(-1))).toEqual([]);
+      expect(inputTexts(requests.at(-1)).join('\n')).toContain(attachmentId);
+    }
+    const rereadTaskId = await submit('Inspect a detail in the original image.');
+    expect(requests).toHaveLength(9);
+    expect(images(requests[6])).toEqual([]);
+    expect(images(requests[7])).toEqual([]);
+    expect(historyOutput).toMatchObject({
+      ok: true,
+      items: expect.arrayContaining([
+        expect.objectContaining({ type: 'message', attachmentIds: [attachmentId] }),
+      ]),
+    });
+    expect(images(requests[8])).toEqual(originalImages);
+    const details = await sendExtensionMessage<{
+      toolResults: { toolName: string; attachmentIds: string[] }[];
+    }>(panel, {
+      version: 1,
+      requestId: 'image_reread_details',
+      type: 'task.getSnapshot',
+      payload: { taskId: rereadTaskId },
+    });
+    expect(details.toolResults.map(({ toolName }) => toolName)).toEqual([
+      'history_read',
+      'attachment_read',
+    ]);
+    expect(details.toolResults.at(-1)?.attachmentIds).toEqual([attachmentId]);
+    await submit('Another unrelated text-only question after rereading.');
+    expect(requests).toHaveLength(10);
+    expect(images(requests[9])).toEqual([]);
+    expect(
+      (await snapshot()).messages.find(({ id }) => id === originalMessage?.id)?.attachmentIds,
+    ).toEqual([attachmentId]);
+  },
+);
+
+extensionTest(
   'replies to an answer outside the automatic 50-message history and reads its exact task',
   async ({ extensionSession }) => {
     extensionTest.setTimeout(120_000);

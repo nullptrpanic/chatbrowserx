@@ -57,6 +57,14 @@ export interface AgentContext {
   readonly activeInput: readonly ModelInputItem[];
 }
 
+/** Keeps historical images discoverable without materializing their bytes. */
+function historicalMessageText(message: MessageRecord): string {
+  if (message.attachmentIds.length === 0) return message.text;
+  return [message.text, `Attachments: ${JSON.stringify(message.attachmentIds)}`]
+    .filter(Boolean)
+    .join('\n');
+}
+
 /** Selects complete visible messages only from successful historical tasks. */
 function selectedHistoryMessages(
   messages: readonly MessageRecord[],
@@ -110,7 +118,7 @@ function selectedHistoryMessages(
   for (let index = candidates.length - 1; index >= 0; index -= 1) {
     const candidate = candidates[index];
     if (candidate === undefined) continue;
-    const nextCharacters = selectedCharacters + candidate.text.length;
+    const nextCharacters = selectedCharacters + historicalMessageText(candidate).length;
     if (nextCharacters > MAX_MODEL_HISTORY_TEXT_CHARACTERS) break;
     selectedStart = index;
     selectedCharacters = nextCharacters;
@@ -206,7 +214,7 @@ async function resolveMessageImages(
   }
 }
 
-/** Rehydrates the newest screenshot outputs before spending the remaining budget on history. */
+/** Rehydrates the newest tool images within the remaining request budget. */
 async function resolveFunctionOutputImages(
   items: readonly MaterializedContinuationItem[],
   attachments: Pick<AttachmentRepository, 'get'>,
@@ -516,7 +524,6 @@ export async function buildAgentContext(
     dependencies.attachments,
     imageBudget,
   );
-  await resolveMessageImages(history, dependencies.attachments, imageBudget, images);
 
   const taskPageContextMessageId = activeMessages.findLast(
     (message) => message.kind === 'conversation' && message.role === 'user',
@@ -524,7 +531,7 @@ export async function buildAgentContext(
 
   const historyInput: ModelInputItem[] = [];
   for (const message of history) {
-    const item = modelMessage(message, images.get(message.id));
+    const item = modelMessage({ ...message, text: historicalMessageText(message) });
     if (item) historyInput.push(item);
   }
   const activeInput: ModelInputItem[] = [];
@@ -568,12 +575,24 @@ export async function buildAgentContext(
       });
     } else if (item.type === 'function_call_output') {
       const imageUrls = functionOutputImages.get(item.resultId) ?? [];
+      const output =
+        imageUrls.length === 0 && (item.attachmentIds?.length ?? 0) > 0
+          ? JSON.stringify({
+              output: item.output,
+              imageError: {
+                code: 'IMAGE_BUDGET_EXCEEDED',
+                attachmentIds: item.attachmentIds,
+                message:
+                  'These images were not included in this request because its image budget is exhausted.',
+              },
+            })
+          : item.output;
       activeInput.push({
         type: 'function_call_output',
         callId: item.callId,
         output:
           imageUrls.length === 0
-            ? item.output
+            ? output
             : [
                 { type: 'input_text', text: item.output },
                 ...imageUrls.map(
