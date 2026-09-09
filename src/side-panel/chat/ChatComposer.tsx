@@ -1,6 +1,7 @@
 import { Camera, ChevronDown, ImagePlus, Send, Square, X } from 'lucide-react';
 import { useLayoutEffect, useRef, useState } from 'react';
 import type { Translator } from '../../shared/i18n/i18n';
+import type { MessageKey } from '../../shared/i18n/messages.zh-CN';
 import type { PanelMessage } from '../../shared/protocol/panel-types';
 import type { PanelClient } from '../state/panel-client';
 import { ImageAttachmentStrip } from './ImageAttachmentStrip';
@@ -25,6 +26,22 @@ function resizeComposerInput(element: HTMLTextAreaElement): void {
   element.style.height = `${String(Math.min(element.scrollHeight, 220))}px`;
 }
 
+/** Maps only public screenshot reasons to localized guidance, never raw browser errors. */
+function screenshotErrorMessage(cause: unknown): MessageKey {
+  switch (cause instanceof Error ? cause.message : '') {
+    case 'TAB_NOT_VISIBLE':
+      return 'screenshotTabChanged';
+    case 'PAGE_ACCESS_UNAVAILABLE':
+      return 'screenshotPageAccess';
+    case 'SELECTION_FAILED':
+      return 'screenshotSelectionError';
+    case 'IMAGE_PROCESSING_FAILED':
+      return 'screenshotProcessingError';
+    default:
+      return 'screenshotError';
+  }
+}
+
 /** Renders the image/screenshot-aware task composer with send and stop consistency. */
 export function ChatComposer({
   client,
@@ -44,9 +61,7 @@ export function ChatComposer({
   const textInput = useRef<HTMLTextAreaElement>(null);
   const [screenshotMenu, setScreenshotMenu] = useState(false);
   const [busy, setBusy] = useState(false);
-  const [error, setError] = useState<'send' | 'supplement' | 'screenshot' | 'task-running' | null>(
-    null,
-  );
+  const [error, setError] = useState<MessageKey | null>(null);
   const canSend = text.trim().length > 0 || draft.items.length > 0;
   const inputLocked = taskLocked && !running;
 
@@ -86,10 +101,10 @@ export function ChatComposer({
     } catch (cause) {
       setError(
         !running && cause instanceof Error && cause.message === 'TASK_ALREADY_RUNNING'
-          ? 'task-running'
+          ? 'taskAlreadyRunning'
           : running
-            ? 'supplement'
-            : 'send',
+            ? 'supplementError'
+            : 'sendError',
       );
     } finally {
       setBusy(false);
@@ -104,8 +119,8 @@ export function ChatComposer({
     try {
       const id = await client.captureScreenshot(mode);
       if (id !== null) await draft.addExisting(id);
-    } catch {
-      setError('screenshot');
+    } catch (cause) {
+      setError(screenshotErrorMessage(cause));
     } finally {
       setBusy(false);
     }
@@ -169,15 +184,7 @@ export function ChatComposer({
       </div>
       {draft.error === null && error === null ? null : (
         <p className="composer-error" role="alert">
-          {error === 'task-running'
-            ? t('taskAlreadyRunning')
-            : error === 'screenshot'
-              ? t('screenshotError')
-              : error === 'supplement'
-                ? t('supplementError')
-                : error === 'send'
-                  ? t('sendError')
-                  : t('attachmentError')}
+          {t(error ?? 'attachmentError')}
         </p>
       )}
       <div className="composer-toolbar">

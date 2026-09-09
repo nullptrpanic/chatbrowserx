@@ -36,6 +36,14 @@ export const ja = {
   previewImage: '画像をプレビュー',
   attachmentError: '画像を追加できません。形式、枚数、サイズを確認してください。',
   screenshotError: 'スクリーンショットに失敗しました。タブを表示したまま権限を確認してください。',
+  screenshotTabChanged:
+    '撮影中にページが切り替えられたか閉じられました。対象ページに戻って再試行してください。',
+  screenshotPageAccess:
+    'ページへのアクセスが許可されていません。サイトへのアクセスを許可するか、通常のウェブページに切り替えてください。',
+  screenshotSelectionError:
+    '範囲選択を完了できませんでした。ページを開いたまま再読み込みして再試行してください。',
+  screenshotProcessingError:
+    '画像の処理または保存に失敗しました。再試行し、解決しない場合はストレージの空き容量を確認してください。',
   sendError: '送信できませんでした。下書きは保持されています。もう一度お試しください。',
   taskAlreadyRunning: '別のタスクが実行中です。',
   supplementError:

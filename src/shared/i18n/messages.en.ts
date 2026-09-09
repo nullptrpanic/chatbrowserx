@@ -35,6 +35,14 @@ export const en = {
   previewImage: 'Preview image',
   attachmentError: 'The image could not be added. Check its format, count, or size.',
   screenshotError: 'Screenshot failed. Keep the tab visible and check page access.',
+  screenshotTabChanged:
+    'The page was switched or closed during capture. Return to the target page and try again.',
+  screenshotPageAccess:
+    'Page access is unavailable. Grant site access or switch to a regular web page.',
+  screenshotSelectionError:
+    'Region selection could not complete. Keep the page open, reload it, and try again.',
+  screenshotProcessingError:
+    'The screenshot could not be processed or saved. Try again and check local storage space if it persists.',
   sendError: 'Sending failed. Your draft is preserved; please try again.',
   taskAlreadyRunning: 'Another task is already running.',
   supplementError: 'Could not add the detail. Your draft is preserved; the task may have ended.',

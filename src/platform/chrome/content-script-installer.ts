@@ -115,7 +115,7 @@ export class ContentScriptInstaller {
     }
 
     await this.#dependencies.scripting.executeScript({
-      target: { tabId, allFrames: true },
+      target: { tabId, allFrames: false },
       files: [this.#dependencies.scriptFile],
     });
     return {

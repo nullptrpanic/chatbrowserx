@@ -60,7 +60,7 @@ describe('ContentScriptInstaller', () => {
     expect(dependencies.scripting.executeScript).not.toHaveBeenCalled();
   });
 
-  it('injects the standalone bundle into all frames after an unanswered ping', async () => {
+  it('installs the top-frame command listener without requiring access to child origins', async () => {
     const dependencies = buildDependencies();
     vi.mocked(dependencies.tabs.sendMessage).mockRejectedValue(new Error('No receiver'));
     const installer = new ContentScriptInstaller(dependencies);
@@ -70,7 +70,7 @@ describe('ContentScriptInstaller', () => {
       originPattern: 'https://example.test/*',
     });
     expect(dependencies.scripting.executeScript).toHaveBeenCalledWith({
-      target: { tabId: 7, allFrames: true },
+      target: { tabId: 7, allFrames: false },
       files: ['assets/page-content.js'],
     });
   });

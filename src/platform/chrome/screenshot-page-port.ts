@@ -1,4 +1,5 @@
 import type { ScreenshotSelection } from '../../page/screenshot/screenshot-types';
+import { ScreenshotError } from '../../attachments/screenshot-error';
 import { PROTOCOL_VERSION, type PageCommand } from '../../shared/protocol/message-types';
 import type { IdGenerator } from '../../shared/ids';
 import type { ContentScriptInstaller } from './content-script-installer';
@@ -7,7 +8,11 @@ export interface ScreenshotPagePortDependencies {
   readonly installer: Pick<ContentScriptInstaller, 'ensureInstalled'>;
   readonly tabs: {
     get(tabId: number): Promise<{ readonly url?: string | undefined }>;
-    sendMessage(tabId: number, message: PageCommand): Promise<unknown>;
+    sendMessage(
+      tabId: number,
+      message: PageCommand,
+      options: { readonly frameId: number },
+    ): Promise<unknown>;
   };
   readonly ids: IdGenerator;
 }
@@ -69,12 +74,11 @@ export class ChromeScreenshotPagePort {
   async selectRegion(tabId: number): Promise<ScreenshotSelection | null> {
     await this.#ensurePage(tabId);
     const requestId = this.#dependencies.ids.create('page_request');
-    const response = await this.#dependencies.tabs.sendMessage(tabId, {
-      version: PROTOCOL_VERSION,
-      requestId,
-      type: 'page.screenshot.select',
-      payload: {},
-    });
+    const response = await this.#dependencies.tabs.sendMessage(
+      tabId,
+      { version: PROTOCOL_VERSION, requestId, type: 'page.screenshot.select', payload: {} },
+      { frameId: 0 },
+    );
     const data = readResponse(response, requestId);
     if (data === null) return null;
     if (!isScreenshotSelection(data)) throw new Error('Screenshot selection is invalid.');
@@ -85,12 +89,16 @@ export class ChromeScreenshotPagePort {
   async openImagePreview(tabId: number, preview: PageImagePreview): Promise<void> {
     await this.#ensurePage(tabId);
     const requestId = this.#dependencies.ids.create('page_request');
-    const response = await this.#dependencies.tabs.sendMessage(tabId, {
-      version: PROTOCOL_VERSION,
-      requestId,
-      type: 'page.imagePreview.open',
-      payload: preview,
-    });
+    const response = await this.#dependencies.tabs.sendMessage(
+      tabId,
+      {
+        version: PROTOCOL_VERSION,
+        requestId,
+        type: 'page.imagePreview.open',
+        payload: preview,
+      },
+      { frameId: 0 },
+    );
     readResponse(response, requestId);
   }
 
@@ -98,12 +106,16 @@ export class ChromeScreenshotPagePort {
   async setOverlaysHidden(tabId: number, hidden: boolean): Promise<void> {
     await this.#ensurePage(tabId);
     const requestId = this.#dependencies.ids.create('page_request');
-    const response = await this.#dependencies.tabs.sendMessage(tabId, {
-      version: PROTOCOL_VERSION,
-      requestId,
-      type: 'page.overlays.setHidden',
-      payload: { hidden },
-    });
+    const response = await this.#dependencies.tabs.sendMessage(
+      tabId,
+      {
+        version: PROTOCOL_VERSION,
+        requestId,
+        type: 'page.overlays.setHidden',
+        payload: { hidden },
+      },
+      { frameId: 0 },
+    );
     readResponse(response, requestId);
   }
 
@@ -115,7 +127,7 @@ export class ChromeScreenshotPagePort {
       installation.status === 'permission_required' ||
       installation.status === 'unsupported_origin'
     ) {
-      throw new Error('Screenshot page access is unavailable.');
+      throw new ScreenshotError('PAGE_ACCESS_UNAVAILABLE');
     }
   }
 }

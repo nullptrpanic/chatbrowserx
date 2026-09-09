@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from 'vitest';
 import { ScreenshotController } from '../../src/tasks/screenshot-controller';
+import { ScreenshotError } from '../../src/attachments/screenshot-error';
 import type { ScreenshotSelection } from '../../src/page/screenshot/screenshot-types';
 
 const selection = {
@@ -24,6 +25,44 @@ function fixture() {
 }
 
 describe('ScreenshotController', () => {
+  it.each([
+    ['selectRegion', 'SELECTION_FAILED'],
+    ['crop', 'IMAGE_PROCESSING_FAILED'],
+    ['persist', 'IMAGE_PROCESSING_FAILED'],
+  ] as const)('reports a safe %s failure without private error details', async (stage, code) => {
+    const deps = fixture();
+    const operation = stage === 'selectRegion' ? deps.page.selectRegion : deps[stage];
+    operation.mockRejectedValueOnce(new Error('private browser and image details'));
+    const error: unknown = await new ScreenshotController(deps)
+      .captureRegion(7)
+      .catch((cause: unknown) => cause);
+    expect(error).toMatchObject({ code });
+    expect(String(error)).not.toContain('private browser and image details');
+  });
+
+  it('preserves the known tab-switch reason without saving a wrong-page image', async () => {
+    const deps = fixture();
+    deps.capture.mockRejectedValueOnce(new ScreenshotError('TAB_NOT_VISIBLE'));
+    await expect(new ScreenshotController(deps).captureRegion(7)).rejects.toMatchObject({
+      code: 'TAB_NOT_VISIBLE',
+    });
+    expect(deps.crop).not.toHaveBeenCalled();
+    expect(deps.persist).not.toHaveBeenCalled();
+  });
+
+  it('still captures and restores when optional overlay hiding is unavailable', async () => {
+    const deps = fixture();
+    deps.page.setOverlaysHidden.mockRejectedValueOnce(new Error('Page receiver unavailable'));
+    await expect(new ScreenshotController(deps).captureViewport(7)).resolves.toEqual({
+      id: 'attachment_viewport_capture',
+    });
+    expect(deps.page.setOverlaysHidden.mock.calls).toEqual([
+      [7, true],
+      [7, false],
+    ]);
+    expect(deps.persist).toHaveBeenCalledWith(deps.captured, 'viewport_capture');
+  });
+
   it('captures and persists the current viewport while restoring overlays', async () => {
     const deps = fixture();
     const controller = new ScreenshotController(deps);

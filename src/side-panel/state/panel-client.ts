@@ -351,11 +351,13 @@ export class PanelClient {
 
   /** Captures a viewport or selected region and returns its new attachment identifier. */
   async captureScreenshot(mode: 'viewport' | 'region'): Promise<string | null> {
+    const activeTab = await this.#environment.getActiveTab();
+    if (activeTab === null) throw new Error('TAB_NOT_VISIBLE');
     const data = await this.#send({
       version: PROTOCOL_VERSION,
       requestId: requestId(),
       type: 'screenshot.capture',
-      payload: { tabId: this.#requireTabId(), mode },
+      payload: { tabId: activeTab.id, mode },
     });
     if (data === null) return null;
     if (typeof data !== 'object' || !('id' in data) || typeof data.id !== 'string') {
@@ -367,11 +369,13 @@ export class PanelClient {
   /** Opens an attachment on the current page, falling back to the Side Panel when unavailable. */
   async openImagePreview(attachmentId: string): Promise<boolean> {
     try {
+      const activeTab = await this.#environment.getActiveTab();
+      if (activeTab === null) return false;
       const data = await this.#send({
         version: PROTOCOL_VERSION,
         requestId: requestId(),
         type: 'image.preview.open',
-        payload: { tabId: this.#requireTabId(), attachmentId },
+        payload: { tabId: activeTab.id, attachmentId },
       });
       return typeof data === 'object' && data !== null && 'opened' in data && data.opened === true;
     } catch {
@@ -636,12 +640,6 @@ export class PanelClient {
     const response = await this.#runtime.send(message);
     if (!response.ok) throw new Error(response.error.code);
     return response.data;
-  }
-
-  /** Returns the current active tab identifier or rejects commands before connection. */
-  #requireTabId(): number {
-    if (this.#tabId === null) throw new Error('Panel is not connected to a browser tab.');
-    return this.#tabId;
   }
 
   /** Publishes one immutable state replacement to a stable listener snapshot. */

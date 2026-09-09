@@ -2,6 +2,22 @@ import { describe, expect, it, vi } from 'vitest';
 import { captureVisibleTab } from '../../../src/platform/chrome/capture-visible-tab';
 
 describe('captureVisibleTab', () => {
+  it('discards the image if the user switches tabs during capture', async () => {
+    const api = {
+      get: vi.fn(async () => ({ id: 7, windowId: 3, active: true })),
+      query: vi
+        .fn()
+        .mockResolvedValueOnce([{ id: 7 }])
+        .mockResolvedValueOnce([{ id: 9 }]),
+      captureVisibleTab: vi.fn(async () => 'data:image/png;base64,cG5n'),
+    };
+    const decodeDataUrl = vi.fn(async () => new Blob(['wrong tab']));
+    await expect(captureVisibleTab(7, { api, decodeDataUrl })).rejects.toMatchObject({
+      code: 'TAB_NOT_VISIBLE',
+    });
+    expect(decodeDataUrl).not.toHaveBeenCalled();
+  });
+
   it('captures only when the requested tab is active in its own window', async () => {
     const blob = new Blob(['png'], { type: 'image/png' });
     const api = {

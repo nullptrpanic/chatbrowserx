@@ -79,6 +79,61 @@ afterEach(() => {
 });
 
 describe('PanelClient', () => {
+  it('does not reuse the cached tab when no active page remains for capture', async () => {
+    const environment = {
+      getActiveTab: vi
+        .fn<() => Promise<PanelSnapshot['tab'] | null>>()
+        .mockResolvedValue(snapshot().tab),
+    };
+    const send = vi.fn<RuntimePort['send']>(async (message) => ({
+      version: 1,
+      requestId: message.requestId,
+      ok: true,
+      data: message.type === 'panel.getSnapshot' ? snapshot() : {},
+    }));
+    const client = new PanelClient({ send }, environment, { pollIntervalMs: 60_000 });
+    await client.connect();
+    try {
+      environment.getActiveTab.mockResolvedValue(null);
+      send.mockClear();
+      await expect(client.captureScreenshot('viewport')).rejects.toThrow('TAB_NOT_VISIBLE');
+      expect(send).not.toHaveBeenCalled();
+    } finally {
+      client.dispose();
+    }
+  });
+
+  it.each(['viewport', 'region'] as const)(
+    'captures %s on the newly active tab before the next poll',
+    async (mode) => {
+      let activeTabId = 7;
+      const send = vi.fn<RuntimePort['send']>(async (message) => ({
+        version: 1,
+        requestId: message.requestId,
+        ok: true,
+        data: message.type === 'panel.getSnapshot' ? snapshot() : { id: 'attachment_capture' },
+      }));
+      const client = new PanelClient(
+        { send },
+        { getActiveTab: vi.fn(async () => ({ ...snapshot().tab, id: activeTabId })) },
+        { pollIntervalMs: 60_000 },
+      );
+      await client.connect();
+      try {
+        activeTabId = 9;
+        await expect(client.captureScreenshot(mode)).resolves.toBe('attachment_capture');
+        expect(send).toHaveBeenCalledWith(
+          expect.objectContaining({
+            type: 'screenshot.capture',
+            payload: { tabId: 9, mode },
+          }),
+        );
+      } finally {
+        client.dispose();
+      }
+    },
+  );
+
   it('refreshes once for a newer pushed state version and ignores duplicate notifications', async () => {
     let current = { ...snapshot(), stateVersion: 1 };
     let notify: ((value: unknown) => void) | undefined;

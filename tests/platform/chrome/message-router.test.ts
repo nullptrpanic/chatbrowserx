@@ -1,4 +1,5 @@
 import { describe, expect, it, vi } from 'vitest';
+import { ScreenshotError } from '../../../src/attachments/screenshot-error';
 import type { Agent } from '../../../src/agent/agent';
 import { PROTOCOL_VERSION } from '../../../src/shared/protocol/message-types';
 import { TaskCommandError, type TaskSnapshot } from '../../../src/tasks/task-command-service';
@@ -400,6 +401,24 @@ describe('createMessageRouter', () => {
       },
     });
     expect(JSON.stringify(unexpected)).not.toContain('private storage details');
+  });
+
+  it('preserves a safe screenshot error code for the panel instead of erasing it', async () => {
+    const screenshots = buildScreenshots();
+    screenshots.captureViewport.mockRejectedValueOnce(new ScreenshotError('TAB_NOT_VISIBLE'));
+    const router = createMessageRouter({
+      agent: buildAgent(buildSnapshot()),
+      panel: buildPanel(),
+      screenshots,
+    });
+    await expect(
+      router({
+        version: 1,
+        requestId: 'req_capture',
+        type: 'screenshot.capture',
+        payload: { tabId: 7, mode: 'viewport' },
+      }),
+    ).resolves.toMatchObject({ ok: false, error: { code: 'TAB_NOT_VISIBLE' } });
   });
 
   it('routes viewport and region screenshot capture without exposing image bytes', async () => {

@@ -6,6 +6,30 @@ import { ChatComposer } from '../../../src/side-panel/chat/ChatComposer';
 import type { PanelClient } from '../../../src/side-panel/state/panel-client';
 
 describe('ChatComposer', () => {
+  it('explains a tab-switch capture failure and preserves the message draft', async () => {
+    const client = {
+      captureScreenshot: vi.fn().mockRejectedValue(new Error('TAB_NOT_VISIBLE')),
+    } as unknown as PanelClient;
+    const user = userEvent.setup();
+    render(
+      <ChatComposer
+        client={client}
+        attachments={{ addFiles: vi.fn(async () => []), get: vi.fn(async () => undefined) }}
+        text="保留草稿"
+        running={false}
+        taskLocked={false}
+        hasToken
+        t={createTranslator('zh-CN')}
+        onTextChange={vi.fn()}
+        onOpenSettings={vi.fn()}
+      />,
+    );
+    await user.click(screen.getByRole('button', { name: '截图' }));
+    await user.click(screen.getByRole('menuitem', { name: '当前视口' }));
+    expect(await screen.findByRole('alert')).toHaveTextContent('截图期间页面已切换或关闭');
+    expect(screen.getByRole('textbox')).toHaveValue('保留草稿');
+  });
+
   it('sends a stable reply reference and clears it only after a successful submit', async () => {
     const submit = vi.fn(async () => undefined);
     const onCancelReply = vi.fn();

@@ -7,6 +7,7 @@ import { parseExtensionMessage } from '../../shared/protocol/parse-message';
 import type { SandboxConsoleClientPort } from '../../sandbox/sandbox-client';
 import type { Agent } from '../../agent/agent';
 import { TaskCommandError } from '../../tasks/task-command-service';
+import { ScreenshotError } from '../../attachments/screenshot-error';
 import type { PanelService } from '../../tasks/panel-service';
 
 export interface RuntimeMessageContext {
@@ -221,7 +222,7 @@ export function createMessageRouter(dependencies: MessageRouterDependencies): Me
     try {
       return await routeMessage(message, dependencies, context);
     } catch (error) {
-      if (error instanceof TaskCommandError) {
+      if (error instanceof TaskCommandError || error instanceof ScreenshotError) {
         return errorResponse(message.requestId, error.code, error.message);
       }
       return errorResponse(
