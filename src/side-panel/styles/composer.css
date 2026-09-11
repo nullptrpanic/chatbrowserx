@@ -135,6 +135,11 @@
   background: var(--cbx-hover);
 }
 
+.composer-tool[aria-pressed='true'] {
+  color: var(--cbx-accent);
+  border-color: currentColor;
+}
+
 .primary-action {
   color: #fff;
   background: var(--cbx-accent);

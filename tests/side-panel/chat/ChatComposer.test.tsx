@@ -6,6 +6,77 @@ import { ChatComposer } from '../../../src/side-panel/chat/ChatComposer';
 import type { PanelClient } from '../../../src/side-panel/state/panel-client';
 
 describe('ChatComposer', () => {
+  it('asks to reload an outdated background instead of blaming model settings', async () => {
+    const client = {
+      toggleRegionTranslation: vi.fn(async () => {
+        throw new Error('INVALID_MESSAGE');
+      }),
+    } as unknown as PanelClient;
+    render(
+      <ChatComposer
+        client={client}
+        attachments={{ addFiles: vi.fn(async () => []), get: vi.fn(async () => undefined) }}
+        text="保留草稿"
+        running={false}
+        taskLocked={false}
+        hasToken
+        t={createTranslator('zh-CN')}
+        onTextChange={vi.fn()}
+        onOpenSettings={vi.fn()}
+      />,
+    );
+    await userEvent.setup().click(screen.getByRole('button', { name: '区域翻译' }));
+    expect(await screen.findByRole('alert')).toHaveTextContent('重新加载 ChatBrowserX');
+    expect(screen.getByRole('alert')).not.toHaveTextContent('模型');
+    expect(screen.getByRole('textbox')).toHaveValue('保留草稿');
+  });
+
+  it('toggles region translation without submitting or changing the draft', async () => {
+    const toggleRegionTranslation = vi.fn(async () => undefined);
+    const onTextChange = vi.fn();
+    render(
+      <ChatComposer
+        client={{ toggleRegionTranslation } as unknown as PanelClient}
+        attachments={{ addFiles: vi.fn(async () => []), get: vi.fn(async () => undefined) }}
+        text="保留草稿"
+        running={false}
+        taskLocked={false}
+        hasToken
+        t={createTranslator('zh-CN')}
+        onTextChange={onTextChange}
+        onOpenSettings={vi.fn()}
+      />,
+    );
+    await userEvent.setup().click(screen.getByRole('button', { name: '区域翻译' }));
+    expect(toggleRegionTranslation).toHaveBeenCalledOnce();
+    expect(onTextChange).not.toHaveBeenCalled();
+    expect(screen.getByRole('textbox')).toHaveValue('保留草稿');
+  });
+
+  it('shows an enabled lens as pressed and lets the user close it even without credentials', async () => {
+    const toggleRegionTranslation = vi.fn(async () => undefined);
+    const onOpenSettings = vi.fn();
+    render(
+      <ChatComposer
+        client={{ toggleRegionTranslation } as unknown as PanelClient}
+        attachments={{ addFiles: async () => [], get: async () => undefined }}
+        text=""
+        running={false}
+        taskLocked={false}
+        hasToken={false}
+        regionTranslationActive
+        t={createTranslator('zh-CN')}
+        onTextChange={vi.fn()}
+        onOpenSettings={onOpenSettings}
+      />,
+    );
+    const button = screen.getByRole('button', { name: '关闭区域翻译' });
+    expect(button).toHaveAttribute('aria-pressed', 'true');
+    await userEvent.setup().click(button);
+    expect(toggleRegionTranslation).toHaveBeenCalledOnce();
+    expect(onOpenSettings).not.toHaveBeenCalled();
+  });
+
   it('explains a tab-switch capture failure and preserves the message draft', async () => {
     const client = {
       captureScreenshot: vi.fn().mockRejectedValue(new Error('TAB_NOT_VISIBLE')),

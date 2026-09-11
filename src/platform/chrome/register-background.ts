@@ -24,6 +24,7 @@ export interface ChromeListenerRegistry<TListener> {
 
 export interface BackgroundChromeApi {
   readonly runtime: {
+    readonly id: string;
     readonly onInstalled: ChromeListenerRegistry<BackgroundInstalledListener>;
     readonly onStartup: ChromeListenerRegistry<BackgroundStartupListener>;
     readonly onMessage: ChromeListenerRegistry<BackgroundMessageListener>;
@@ -55,6 +56,7 @@ export interface RegisterBackgroundDependencies {
   readonly router: MessageRouter;
   readonly recovery: RecoveryTriggerPort;
   readonly credentialStore: CredentialInitializationPort;
+  readonly onTabInvalidated?: (tabId: number) => Promise<void>;
   readonly onError?: (error: unknown) => void;
 }
 
@@ -92,8 +94,15 @@ function backgroundUnavailableResponse(): ExtensionResponse {
 }
 
 /** Extracts the sender tab identifier without trusting arbitrary runtime sender fields. */
-function senderTabId(sender: unknown): number | null {
+function senderTabId(sender: unknown, extensionId: string): number | null {
   if (typeof sender !== 'object' || sender === null || !('tab' in sender)) return null;
+  // Extension documents can also be opened as tabs; their browser-owned URL identifies the UI.
+  if (
+    'url' in sender &&
+    typeof sender.url === 'string' &&
+    sender.url.startsWith(`chrome-extension://${extensionId}/`)
+  )
+    return null;
   const tab = sender.tab;
   if (typeof tab !== 'object' || tab === null || !('id' in tab)) return null;
   return typeof tab.id === 'number' && Number.isInteger(tab.id) && tab.id >= 0 ? tab.id : null;
@@ -130,7 +139,17 @@ export function registerBackground(
     }
   });
   api.runtime.onMessage.addListener((message, sender, sendResponse) => {
-    void router(message, { senderTabId: senderTabId(sender) })
+    const frameId =
+      typeof sender === 'object' &&
+      sender !== null &&
+      'frameId' in sender &&
+      typeof sender.frameId === 'number'
+        ? sender.frameId
+        : null;
+    void router(message, {
+      senderTabId: senderTabId(sender, api.runtime.id),
+      senderFrameId: frameId,
+    })
       .then(sendResponse)
       .catch((error: unknown) => {
         onError(error);
@@ -138,10 +157,20 @@ export function registerBackground(
       });
     return true;
   });
-  api.tabs.onRemoved.addListener(() => {
+  api.tabs.onRemoved.addListener((tabId) => {
+    if (dependencies.onTabInvalidated)
+      observeOperation(dependencies.onTabInvalidated(tabId), onError);
     observeOperation(recovery.requestRecoveryScan(), onError);
   });
-  api.tabs.onUpdated.addListener(() => {
+  api.tabs.onUpdated.addListener((tabId, change) => {
+    if (
+      dependencies.onTabInvalidated &&
+      typeof change === 'object' &&
+      change !== null &&
+      (('status' in change && change.status === 'loading') || 'url' in change)
+    ) {
+      observeOperation(dependencies.onTabInvalidated(tabId), onError);
+    }
     observeOperation(recovery.requestRecoveryScan(), onError);
   });
 

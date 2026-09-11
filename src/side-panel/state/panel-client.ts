@@ -24,6 +24,7 @@ export interface PanelClientState {
   readonly activeConversationId: string | null | undefined;
   readonly sandboxConsoleUrl: string | null;
   readonly sandboxConsoleStatus: SandboxConsoleConnectionStatus;
+  readonly regionTranslationActive: boolean;
 }
 
 export interface PanelEnvironment {
@@ -131,6 +132,7 @@ export class PanelClient {
     activeConversationId: undefined,
     sandboxConsoleUrl: null,
     sandboxConsoleStatus: 'checking',
+    regionTranslationActive: false,
   };
   #tabId: number | null = null;
   #generation = 0;
@@ -138,6 +140,8 @@ export class PanelClient {
   #unsubscribeRuntime: (() => void) | null = null;
   #notificationRefresh: Promise<void> | null = null;
   #sandboxConsoleRefresh: Promise<void> | null = null;
+  #translationRefresh: Promise<void> | null = null;
+  #translationRevision = 0;
   #requestedStateVersion = -1;
   #disposed = false;
   #featuresEnsuredKey: string | null = null;
@@ -178,6 +182,7 @@ export class PanelClient {
     }).catch(() => undefined);
     await this.refresh();
     this.#queueSandboxConsoleRefresh();
+    this.#queueTranslationRefresh();
     this.#schedulePoll();
   }
 
@@ -189,6 +194,8 @@ export class PanelClient {
       if (activeTab === null) throw new Error('No active browser tab is available.');
       if (this.#tabId !== activeTab.id) {
         this.#tabId = activeTab.id;
+        this.#translationRevision++;
+        this.#setState({ ...this.#state, regionTranslationActive: false });
       }
       const activeConversationId = this.#state.activeConversationId;
       const data = await this.#send({
@@ -220,6 +227,7 @@ export class PanelClient {
         error: null,
         sandboxConsoleUrl: this.#state.sandboxConsoleUrl,
         sandboxConsoleStatus: this.#state.sandboxConsoleStatus,
+        regionTranslationActive: this.#state.regionTranslationActive,
         activeConversationId:
           activeConversationId === undefined
             ? undefined
@@ -347,6 +355,25 @@ export class PanelClient {
       payload: { taskId, text, attachmentIds },
     });
     await this.refresh();
+  }
+
+  /** Toggles only the currently visible page, without touching the chat draft or task state. */
+  async toggleRegionTranslation(): Promise<void> {
+    const tab = await this.#environment.getActiveTab();
+    if (!tab) throw new Error('TAB_NOT_VISIBLE');
+    const revision = ++this.#translationRevision;
+    const data = await this.#send({
+      version: PROTOCOL_VERSION,
+      requestId: requestId(),
+      type: 'translation.toggle',
+      payload: { tabId: tab.id },
+    });
+    if (!this.#disposed && revision === this.#translationRevision && tab.id === this.#tabId) {
+      this.#setState({
+        ...this.#state,
+        regionTranslationActive: this.#readTranslationActive(data),
+      });
+    }
   }
 
   /** Captures a viewport or selected region and returns its new attachment identifier. */
@@ -496,6 +523,24 @@ export class PanelClient {
 
   /** Coalesces pushed versions and refreshes only when they are newer than rendered state. */
   readonly #handleRuntimeNotification = (value: unknown): void => {
+    if (
+      typeof value === 'object' &&
+      value !== null &&
+      'version' in value &&
+      value.version === 1 &&
+      'type' in value &&
+      value.type === 'translation.cancel' &&
+      'payload' in value &&
+      typeof value.payload === 'object' &&
+      value.payload !== null &&
+      'close' in value.payload &&
+      value.payload.close === true
+    ) {
+      // Treat the event as an invalidation only; never trust its payload as UI state.
+      this.#translationRevision++;
+      this.#queueTranslationRefresh();
+      return;
+    }
     const stateVersion = readPushedStateVersion(value);
     if (
       this.#disposed ||
@@ -508,6 +553,39 @@ export class PanelClient {
     this.#requestedStateVersion = stateVersion;
     this.#queueNotificationRefresh();
   };
+
+  #readTranslationActive(value: unknown): boolean {
+    return (
+      typeof value === 'object' && value !== null && 'active' in value && value.active === true
+    );
+  }
+
+  /** Reuses panel polling plus page-close notifications; never blocks chat refresh on a page probe. */
+  #queueTranslationRefresh(): void {
+    if (this.#translationRefresh !== null || this.#disposed) return;
+    const revision = this.#translationRevision;
+    this.#translationRefresh = (async () => {
+      const tab = await this.#environment.getActiveTab();
+      const data =
+        tab === null
+          ? null
+          : await this.#send({
+              version: PROTOCOL_VERSION,
+              requestId: requestId(),
+              type: 'translation.getState',
+              payload: { tabId: tab.id },
+            }).catch(() => null);
+      if (this.#disposed || revision !== this.#translationRevision) return;
+      const active = tab?.id === this.#tabId && this.#readTranslationActive(data);
+      if (active !== this.#state.regionTranslationActive)
+        this.#setState({ ...this.#state, regionTranslationActive: active });
+    })()
+      .catch(() => undefined)
+      .finally(() => {
+        this.#translationRefresh = null;
+        if (revision !== this.#translationRevision) this.#queueTranslationRefresh();
+      });
+  }
 
   /** Runs at most one pushed refresh at a time and follows only genuinely newer queued versions. */
   #queueNotificationRefresh(): void {
@@ -678,6 +756,7 @@ export class PanelClient {
     this.#timer = setTimeout(() => {
       this.#timer = null;
       this.#queueSandboxConsoleRefresh();
+      this.#queueTranslationRefresh();
       void this.#recoverIfChanged()
         .catch(() => undefined)
         .finally(() => this.#schedulePoll());

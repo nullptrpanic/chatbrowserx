@@ -1,4 +1,4 @@
-import { Camera, ChevronDown, ImagePlus, Send, Square, X } from 'lucide-react';
+import { Camera, ChevronDown, ImagePlus, Languages, Send, Square, X } from 'lucide-react';
 import { useLayoutEffect, useRef, useState } from 'react';
 import type { Translator } from '../../shared/i18n/i18n';
 import type { MessageKey } from '../../shared/i18n/messages.zh-CN';
@@ -14,6 +14,7 @@ export interface ChatComposerProps {
   readonly running: boolean;
   readonly taskLocked: boolean;
   readonly hasToken: boolean;
+  readonly regionTranslationActive?: boolean;
   readonly t: Translator;
   readonly onTextChange: (value: string) => void;
   readonly replyTarget?: PanelMessage | null;
@@ -50,6 +51,7 @@ export function ChatComposer({
   running,
   taskLocked,
   hasToken,
+  regionTranslationActive = false,
   t,
   onTextChange,
   replyTarget = null,
@@ -231,6 +233,34 @@ export function ChatComposer({
             </div>
           ) : null}
         </div>
+        <button
+          type="button"
+          className="composer-tool"
+          disabled={busy}
+          aria-pressed={regionTranslationActive}
+          aria-label={t(regionTranslationActive ? 'stopRegionTranslation' : 'regionTranslation')}
+          title={t(regionTranslationActive ? 'stopRegionTranslation' : 'regionTranslation')}
+          onClick={() => {
+            if (!hasToken && !regionTranslationActive) {
+              onOpenSettings();
+              return;
+            }
+            setBusy(true);
+            setError(null);
+            void client
+              .toggleRegionTranslation()
+              .catch((error: unknown) =>
+                setError(
+                  error instanceof Error && error.message === 'INVALID_MESSAGE'
+                    ? 'translationReloadRequired'
+                    : 'translationError',
+                ),
+              )
+              .finally(() => setBusy(false));
+          }}
+        >
+          <Languages size={16} /> {t('regionTranslation')}
+        </button>
         <div className="composer-actions">
           {running ? (
             <button

@@ -1,4 +1,5 @@
 import { handlePageCommand } from '../page/browser-command-handler';
+import { closeTranslationLens } from '../page/translation/mount-translation-lens';
 
 interface PageContentGlobal {
   __chatBrowserXPageCommandsV1__?:
@@ -7,6 +8,7 @@ interface PageContentGlobal {
         readonly listener: Parameters<typeof chrome.runtime.onMessage.addListener>[0];
         /** Removes listeners installed by builds that included selected-text actions. */
         readonly disposeSelection?: (() => void) | undefined;
+        readonly disposeTranslation?: (() => void) | undefined;
       };
 }
 
@@ -21,6 +23,7 @@ if (typeof previous === 'object') {
   }
   try {
     previous.disposeSelection?.();
+    previous.disposeTranslation?.();
   } catch {
     // Reinstallation must continue even if the previous context can no longer clean itself up.
   }
@@ -42,4 +45,5 @@ const listener: Parameters<typeof chrome.runtime.onMessage.addListener>[0] = (
 chrome.runtime.onMessage.addListener(listener);
 pageGlobal.__chatBrowserXPageCommandsV1__ = {
   listener,
+  disposeTranslation: () => closeTranslationLens(),
 };

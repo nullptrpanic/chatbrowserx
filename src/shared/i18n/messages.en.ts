@@ -25,6 +25,14 @@ export const en = {
   image: 'Images',
   screenshot: 'Screenshot',
   regionScreenshot: 'Select region',
+  regionTranslation: 'Translate region',
+  stopRegionTranslation: 'Stop region translation',
+  translationLoading: 'Translating…',
+  translationFailed: 'Translation failed. Move to retry, or press Esc to exit.',
+  translationError:
+    'Cannot start translation. Use a regular web page with extension access. After an update, reload the extension and refresh the page.',
+  translationReloadRequired:
+    'The translation UI and background versions differ. Reload ChatBrowserX in Extensions, then refresh the page.',
   viewportScreenshot: 'Current viewport',
   send: 'Send',
   supplement: 'Add detail',

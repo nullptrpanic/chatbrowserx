@@ -22,6 +22,7 @@ import { ChromePointerPagePort } from '../platform/chrome/pointer-page-port';
 import { captureVisibleTab } from '../platform/chrome/capture-visible-tab';
 import { createMessageRouter, type MessageRouter } from '../platform/chrome/message-router';
 import { ChromeScreenshotPagePort } from '../platform/chrome/screenshot-page-port';
+import { ChromeTranslationPagePort } from '../platform/chrome/translation-page-port';
 import {
   registerBackground,
   type BackgroundChromeApi,
@@ -36,10 +37,13 @@ import { PanelService } from '../tasks/panel-service';
 import { PanelChangeNotifier } from '../tasks/panel-change-notifier';
 import { ScreenshotController } from '../tasks/screenshot-controller';
 import { TaskHistoryReader } from '../tasks/task-history-reader';
+import { TranslationController } from '../translation/translation-controller';
+import { CodexProvider } from '../providers/codex/codex-provider';
 
 interface BackgroundServices {
   readonly router: MessageRouter;
   readonly agent: Pick<Agent, 'recover' | 'handleBrowserStartup'>;
+  readonly translation: TranslationController;
 }
 
 const systemClock: Clock = {
@@ -93,6 +97,30 @@ async function createBackgroundServices(
     },
   });
   const tavily = new TavilyClient(credentials);
+  const translationPage = new ChromeTranslationPagePort({
+    installer,
+    tabs: chrome.tabs,
+    ids: cryptoIds,
+  });
+  const translation = new TranslationController({
+    provider: new CodexProvider(credentials),
+    settings,
+    toggle: (tabId, options) => translationPage.toggle(tabId, options),
+    getSession: (tabId) => translationPage.getSession(tabId),
+    progress: async (tabId, value) => {
+      await chrome.tabs.sendMessage(tabId, value, { frameId: 0 });
+    },
+    async capture(tabId, selection, signal) {
+      signal.throwIfAborted();
+      const blob = await captureVisibleTab(tabId, {
+        signal,
+        beforeCapture: () => screenshotPage.setOverlaysHidden(tabId, true),
+        afterCapture: () => screenshotPage.setOverlaysHidden(tabId, false).catch(() => undefined),
+      });
+      signal.throwIfAborted();
+      return cropCapturedImage(blob, selection);
+    },
+  });
   const sandboxClient = new SandboxClient(settings, credentials);
   const sandbox = new SandboxToolExecutor(sandboxClient);
   const debuggerTransport = new ChromeDebuggerTransport();
@@ -171,6 +199,7 @@ async function createBackgroundServices(
     },
   });
   const router = createMessageRouter({
+    translation,
     agent,
     panel,
     screenshots,
@@ -183,12 +212,12 @@ async function createBackgroundServices(
       },
     },
   });
-  return { router, agent };
+  return { router, agent, translation };
 }
 
 const credentialStore = new ChromeCredentialStore();
 const services = createBackgroundServices(credentialStore);
-const lazyRouter: MessageRouter = async (value) => (await services).router(value);
+const lazyRouter: MessageRouter = async (value, context) => (await services).router(value, context);
 const lazyRecovery: RecoveryTriggerPort = {
   requestRecoveryScan: async () => (await services).agent.recover(),
   handleBrowserStartup: async () => (await services).agent.handleBrowserStartup(),
@@ -199,6 +228,7 @@ const registration = registerBackground({
   router: lazyRouter,
   recovery: lazyRecovery,
   credentialStore,
+  onTabInvalidated: async (tabId) => (await services).translation.cancelTab(tabId),
 });
 
 void registration.ready.catch(() => undefined);

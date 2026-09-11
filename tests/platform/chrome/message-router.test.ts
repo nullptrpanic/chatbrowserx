@@ -5,6 +5,10 @@ import { PROTOCOL_VERSION } from '../../../src/shared/protocol/message-types';
 import { TaskCommandError, type TaskSnapshot } from '../../../src/tasks/task-command-service';
 import { createMessageRouter } from '../../../src/platform/chrome/message-router';
 import { createTaskRecords } from '../../../src/tasks/task-factory';
+import { TranslationController } from '../../../src/translation/translation-controller';
+import { DEFAULT_APP_SETTINGS } from '../../../src/persistence/settings-store';
+import { ProviderError } from '../../../src/agent/model/model-provider-error';
+import { ChromeTranslationPagePort } from '../../../src/platform/chrome/translation-page-port';
 import type { Checkpoint } from '../../../src/tasks/checkpoint-types';
 import type {
   PanelEditableSettings,
@@ -12,6 +16,98 @@ import type {
   PanelSnapshot,
   PanelTask,
 } from '../../../src/shared/protocol/panel-types';
+
+it.each([
+  { failure: new ProviderError('AUTH'), code: 'MODEL_AUTH' },
+  { failure: new ProviderError('RATE_LIMIT'), code: 'MODEL_RATE_LIMIT' },
+  {
+    failure: new ProviderError('INVALID_RESPONSE', { invalidResponseStage: 'sse_protocol' }),
+    code: 'MODEL_INVALID_RESPONSE_SSE_PROTOCOL',
+  },
+  {
+    failure: new DOMException('private timeout text', 'TimeoutError'),
+    code: 'TRANSLATION_TIMEOUT',
+  },
+  { output: 'not JSON: private output', code: 'TRANSLATION_RESPONSE_INVALID' },
+  { output: '{"blocks":[]}', code: 'TRANSLATION_RESPONSE_INVALID' },
+  { output: '{"blocks":"private malformed output"}', code: 'TRANSLATION_RESPONSE_INVALID' },
+  { failure: new Error('private unexpected error'), code: 'COMMAND_FAILED' },
+])('preserves a safe translation failure reason: $code', async ({ failure, output, code }) => {
+  const translation = new TranslationController({
+    getSession: async () => 's',
+    toggle: async () => true,
+    capture: vi.fn(),
+    settings: { get: async () => DEFAULT_APP_SETTINGS },
+    provider: {
+      async *stream() {
+        if (failure) throw failure;
+        if (output === undefined) throw new Error('Missing fixture output');
+        yield { type: 'text.delta' as const, delta: output };
+        yield { type: 'response.completed' as const, responseId: 'r', usage: null };
+      },
+    },
+  });
+  const router = createMessageRouter({
+    agent: buildAgent(buildSnapshot()),
+    panel: buildPanel(),
+    screenshots: buildScreenshots(),
+    translation,
+  });
+  const result = await router(
+    {
+      version: 1,
+      requestId: 'safe-error',
+      type: 'translation.read',
+      payload: { sessionId: 's', texts: [{ id: 'p', text: 'Hello' }] },
+    },
+    { senderTabId: 7, senderFrameId: 0 },
+  );
+  expect(result).toMatchObject({ ok: false, error: { code } });
+  expect(JSON.stringify(result)).not.toContain('private');
+});
+
+it.each([
+  { unavailable: true, code: 'TRANSLATION_PAGE_UNAVAILABLE' },
+  { unavailable: false, code: 'TRANSLATION_SESSION_CLOSED' },
+])('reports $code instead of a generic text command failure', async ({ unavailable, code }) => {
+  const page = new ChromeTranslationPagePort({
+    ids: { create: () => 'page-session' },
+    installer: { ensureInstalled: vi.fn() },
+    tabs: {
+      get: async () => ({ active: true }),
+      sendMessage: async (_tab, message) => {
+        if (unavailable) throw new Error('private page details');
+        return { version: 1, requestId: message.requestId, ok: true, data: { sessionId: null } };
+      },
+    },
+  });
+  const stream = vi.fn();
+  const translation = new TranslationController({
+    getSession: (id) => page.getSession(id),
+    toggle: async () => false,
+    capture: vi.fn(),
+    settings: { get: async () => DEFAULT_APP_SETTINGS },
+    provider: { stream },
+  });
+  const router = createMessageRouter({
+    agent: buildAgent(buildSnapshot()),
+    panel: buildPanel(),
+    screenshots: buildScreenshots(),
+    translation,
+  });
+  const result = await router(
+    {
+      version: 1,
+      requestId: 'page-error',
+      type: 'translation.read',
+      payload: { sessionId: 's', texts: [{ id: 'p', text: 'Hello' }] },
+    },
+    { senderTabId: 7, senderFrameId: 0 },
+  );
+  expect(result).toMatchObject({ ok: false, error: { code } });
+  expect(JSON.stringify(result)).not.toContain('private');
+  expect(stream).not.toHaveBeenCalled();
+});
 
 /**
  * Builds a complete queued snapshot returned by command doubles.
@@ -150,6 +246,77 @@ function buildPanel() {
 }
 
 describe('createMessageRouter', () => {
+  it('uses the runtime sender for translation reads and only allows the UI to enable them', async () => {
+    const translation = {
+      toggle: vi.fn(async () => ({ active: true })),
+      getState: vi.fn(async () => ({ active: false })),
+      read: vi.fn(async () => ({ blocks: [], colors: [], cacheKey: 'configured' })),
+      inspect: vi.fn(async () => ({ tiles: [] })),
+      cancel: vi.fn(),
+    };
+    const router = createMessageRouter({
+      agent: buildAgent(buildSnapshot()),
+      panel: buildPanel(),
+      screenshots: buildScreenshots(),
+      translation,
+    });
+    const toggle = {
+      version: 1,
+      requestId: 'enable',
+      type: 'translation.toggle',
+      payload: { tabId: 7 },
+    };
+    expect(await router(toggle, { senderTabId: 8 })).toMatchObject({ ok: false });
+    expect(translation.toggle).not.toHaveBeenCalled();
+    expect(await router(toggle)).toMatchObject({ ok: true });
+    expect(translation.toggle).toHaveBeenCalledWith(7);
+    expect(await router({ ...toggle, type: 'translation.getState' })).toMatchObject({
+      ok: true,
+      data: { active: false },
+    });
+    const payload = {
+      sessionId: 'enabled',
+      devicePixelRatio: 1,
+      viewportWidth: 800,
+      viewportHeight: 600,
+      rect: { x: 10, y: 10, width: 100, height: 100 },
+    };
+    const read = { version: 1, requestId: 'read', type: 'translation.read', payload };
+    expect(await router(read)).toMatchObject({ ok: false });
+    expect(translation.read).not.toHaveBeenCalled();
+    expect(await router(read, { senderTabId: 7, senderFrameId: 3 })).toMatchObject({ ok: false });
+    expect(translation.read).not.toHaveBeenCalled();
+    expect(await router(read, { senderTabId: 7, senderFrameId: 0 })).toMatchObject({ ok: true });
+    expect(translation.read).toHaveBeenCalledWith(7, payload, 'read');
+    await router(
+      {
+        version: 1,
+        requestId: 'close',
+        type: 'translation.cancel',
+        payload: { sessionId: 'enabled', close: true },
+      },
+      { senderTabId: 7, senderFrameId: 0 },
+    );
+    expect(translation.cancel).toHaveBeenCalledWith(7, 'enabled', true, undefined);
+    await router(
+      {
+        ...read,
+        type: 'translation.cancel',
+        payload: { sessionId: 'enabled', close: false, kind: 'pixels' },
+      },
+      { senderTabId: 7, senderFrameId: 0 },
+    );
+    expect(translation.cancel).toHaveBeenLastCalledWith(7, 'enabled', false, 'pixels');
+    const inspect = { ...read, type: 'translation.inspect' };
+    expect(await router(inspect)).toMatchObject({ ok: false });
+    expect(await router(inspect, { senderTabId: 7, senderFrameId: 3 })).toMatchObject({
+      ok: false,
+    });
+    expect(translation.inspect).not.toHaveBeenCalled();
+    expect(await router(inspect, { senderTabId: 7, senderFrameId: 0 })).toMatchObject({ ok: true });
+    expect(translation.inspect).toHaveBeenCalledWith(7, payload);
+  });
+
   it('returns a redacted INVALID_MESSAGE envelope for malformed input', async () => {
     const secret = 'must-not-appear';
     const router = createMessageRouter({

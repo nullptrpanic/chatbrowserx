@@ -10,6 +10,7 @@ import { openPageImagePreview } from './image-preview/mount-image-preview';
 import { selectScreenshotRegion } from './screenshot/mount-screenshot-overlay';
 import { showVirtualPointer } from './browser/mount-virtual-pointer';
 import { performPageAction } from './browser/page-action-performer';
+import { toggleTranslationLens, getTranslationSession } from './translation/mount-translation-lens';
 
 export interface PageCommandEnvironment {
   readonly document: Document;
@@ -48,6 +49,26 @@ export async function handlePageCommand(
       requestId: command.requestId,
       ok: true,
       data: { installed: true },
+    };
+  }
+
+  if (command?.type === 'page.translation.toggle') {
+    return {
+      version: PROTOCOL_VERSION,
+      requestId: command.requestId,
+      ok: true,
+      data: {
+        active: toggleTranslationLens(command.payload, environment.document, environment.window),
+      },
+    };
+  }
+
+  if (command?.type === 'page.translation.getState') {
+    return {
+      version: PROTOCOL_VERSION,
+      requestId: command.requestId,
+      ok: true,
+      data: { sessionId: getTranslationSession(environment.document) },
     };
   }
 
@@ -99,7 +120,16 @@ export async function handlePageCommand(
   }
 
   if (command?.type === 'page.overlays.setHidden') {
-    setPageOverlaysHidden(command.payload.hidden);
+    try {
+      await setPageOverlaysHidden(command.payload.hidden, environment.window);
+    } catch {
+      return {
+        version: PROTOCOL_VERSION,
+        requestId: command.requestId,
+        ok: false,
+        error: { code: 'PAGE_RENDER_UNAVAILABLE', message: 'Page rendering is unavailable.' },
+      };
+    }
     return {
       version: PROTOCOL_VERSION,
       requestId: command.requestId,

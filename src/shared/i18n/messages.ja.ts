@@ -26,6 +26,14 @@ export const ja = {
   image: '画像',
   screenshot: 'スクリーンショット',
   regionScreenshot: '範囲を選択',
+  regionTranslation: '範囲翻訳',
+  stopRegionTranslation: '範囲翻訳を終了',
+  translationLoading: '翻訳中…',
+  translationFailed: '翻訳できませんでした。移動して再試行、Esc キーで終了します。',
+  translationError:
+    '翻訳を開始できません。拡張機能がアクセスできる通常のウェブページを開いてください。更新後は拡張機能とページを再読み込みしてください。',
+  translationReloadRequired:
+    '翻訳画面とバックグラウンドのバージョンが一致しません。拡張機能の管理で ChatBrowserX を再読み込みし、ページを更新してください。',
   viewportScreenshot: '現在の表示範囲',
   send: '送信',
   supplement: '補足',

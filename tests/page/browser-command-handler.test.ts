@@ -1,9 +1,33 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { handlePageCommand } from '../../src/page/browser-command-handler';
+import { registerPageOverlayHost } from '../../src/page/page-overlay-registry';
 
 afterEach(() => vi.useRealTimers());
 
 describe('handlePageCommand', () => {
+  it('reports suspended rendering through the protocol instead of starting a stale capture', async () => {
+    vi.useFakeTimers();
+    const raf = vi.spyOn(window, 'requestAnimationFrame').mockReturnValue(42);
+    const unregister = registerPageOverlayHost(document.createElement('div'));
+    try {
+      const response = handlePageCommand({
+        version: 1,
+        requestId: 'req_hide',
+        type: 'page.overlays.setHidden',
+        payload: { hidden: true },
+      });
+      await vi.advanceTimersByTimeAsync(1000);
+      expect(await response).toMatchObject({
+        requestId: 'req_hide',
+        ok: false,
+        error: { code: 'PAGE_RENDER_UNAVAILABLE' },
+      });
+    } finally {
+      unregister();
+      raf.mockRestore();
+    }
+  });
+
   it('scrolls the document for a viewport target even when the center covers a nested scroller', async () => {
     document.body.innerHTML = '<div id="nested"></div>';
     const nested = document.querySelector<HTMLElement>('#nested');

@@ -79,6 +79,49 @@ afterEach(() => {
 });
 
 describe('PanelClient', () => {
+  it('reconciles page-owned translation state after Escape without reloading chat history', async () => {
+    let active = false;
+    let notify!: (value: unknown) => void;
+    const send = vi.fn<RuntimePort['send']>(async (m) => {
+      if (m.type === 'translation.toggle') active = !active;
+      return {
+        version: 1,
+        requestId: m.requestId,
+        ok: true,
+        data:
+          m.type === 'panel.getSnapshot'
+            ? snapshot()
+            : m.type.startsWith('translation.')
+              ? { active }
+              : {},
+      };
+    });
+    const client = new PanelClient(
+      {
+        send,
+        subscribe: (fn) => {
+          notify = fn;
+          return () => {};
+        },
+      },
+      { getActiveTab: async () => snapshot().tab },
+    );
+    await client.connect();
+    try {
+      await client.toggleRegionTranslation();
+      expect(client.getSnapshot().regionTranslationActive).toBe(true);
+      active = false;
+      notify({
+        version: 1,
+        type: 'translation.cancel',
+        payload: { sessionId: 'page-session', close: true },
+      });
+      await vi.waitFor(() => expect(client.getSnapshot().regionTranslationActive).toBe(false));
+      expect(send.mock.calls.filter(([m]) => m.type === 'panel.getSnapshot')).toHaveLength(1);
+    } finally {
+      client.dispose();
+    }
+  });
   it('does not reuse the cached tab when no active page remains for capture', async () => {
     const environment = {
       getActiveTab: vi

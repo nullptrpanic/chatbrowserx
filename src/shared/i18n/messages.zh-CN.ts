@@ -22,6 +22,14 @@ export const zhCN = {
   image: '图片',
   screenshot: '截图',
   regionScreenshot: '区域截图',
+  regionTranslation: '区域翻译',
+  stopRegionTranslation: '关闭区域翻译',
+  translationLoading: '翻译中…',
+  translationFailed: '翻译失败，移动镜框可重试，按 Esc 退出',
+  translationError:
+    '无法开启翻译，请确认当前是允许插件访问的普通网页；若刚更新插件，请重新加载插件并刷新网页。',
+  translationReloadRequired:
+    '翻译入口与后台版本不一致，请在扩展管理中重新加载 ChatBrowserX，再刷新网页。',
   viewportScreenshot: '当前视口',
   send: '发送',
   supplement: '补充',

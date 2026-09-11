@@ -42,6 +42,7 @@ function buildChromeApi() {
   const setPanelBehavior = vi.fn(async () => undefined);
   const api: BackgroundChromeApi = {
     runtime: {
+      id: 'extension-under-test',
       onInstalled: events.installed,
       onStartup: events.startup,
       onMessage: events.message,
@@ -55,6 +56,61 @@ function buildChromeApi() {
 }
 
 describe('registerBackground', () => {
+  it('cancels transient page requests on tab removal and navigation, not a title-only update', async () => {
+    const chromeApi = buildChromeApi();
+    const invalidated: number[] = [];
+    await registerBackground({
+      api: chromeApi.api,
+      router: vi.fn(),
+      recovery: {
+        requestRecoveryScan: async () => undefined,
+        handleBrowserStartup: async () => undefined,
+      },
+      credentialStore: { initialize: async () => undefined },
+      onTabInvalidated: async (id) => {
+        invalidated.push(id);
+      },
+    }).ready;
+    chromeApi.events.updated.listeners[0]?.(7, { title: 'New title' }, {});
+    chromeApi.events.updated.listeners[0]?.(8, { status: 'loading' }, {});
+    chromeApi.events.updated.listeners[0]?.(9, { url: 'https://example.test/new' }, {});
+    chromeApi.events.removed.listeners[0]?.(10);
+    expect(invalidated).toEqual([8, 9, 10]);
+  });
+  it('distinguishes our extension document in a tab from injected page scripts', async () => {
+    const chromeApi = buildChromeApi();
+    const router = vi.fn(async () => ({
+      version: 1 as const,
+      requestId: 'r',
+      ok: true as const,
+      data: {},
+    }));
+    await registerBackground({
+      api: chromeApi.api,
+      router,
+      recovery: {
+        requestRecoveryScan: vi.fn(async () => undefined),
+        handleBrowserStartup: vi.fn(async () => undefined),
+      },
+      credentialStore: { initialize: vi.fn(async () => undefined) },
+    }).ready;
+    const listener = chromeApi.events.message.listeners[0];
+    listener?.(
+      {},
+      { tab: { id: 7 }, url: 'chrome-extension://extension-under-test/panel.html' },
+      vi.fn(),
+    );
+    expect(router).toHaveBeenLastCalledWith({}, { senderTabId: null, senderFrameId: null });
+    for (const url of [
+      'https://example.com/',
+      'chrome-extension://another-extension/panel.html',
+      'https://example.com/?url=chrome-extension://extension-under-test/',
+    ]) {
+      listener?.({}, { tab: { id: 7 }, url, frameId: 0 }, vi.fn());
+      expect(router).toHaveBeenLastCalledWith({}, { senderTabId: 7, senderFrameId: 0 });
+    }
+  });
+
   it('registers recovery triggers, initializes credentials, and routes async messages', async () => {
     const chromeApi = buildChromeApi();
     const requestRecoveryScan = vi.fn(async () => undefined);
@@ -107,7 +163,10 @@ describe('registerBackground', () => {
     });
 
     expect(keepChannelOpen).toBe(true);
-    expect(router).toHaveBeenCalledWith({ type: 'system.ping' }, { senderTabId: 7 });
+    expect(router).toHaveBeenCalledWith(
+      { type: 'system.ping' },
+      { senderTabId: 7, senderFrameId: null },
+    );
     expect(onError).not.toHaveBeenCalled();
   });
 

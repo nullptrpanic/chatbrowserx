@@ -1,0 +1,38 @@
+{
+  "sourceReport": "e2e/samples/translation-lens-visual/benchmark/20260909T071230.661Z/01.json",
+  "model": "gpt-5.6-terra",
+  "viewport": [1440, 834],
+  "canvasBox": [170, 159, 1100, 430],
+  "blocks": [
+    {
+      "text": "A lens for translated reading",
+      "translation": "用于翻译阅读的透镜",
+      "box": [118, 64, 281, 29]
+    },
+    {
+      "text": "Move the lens across this page.",
+      "translation": "在此页面上移动透镜。",
+      "box": [118, 123, 241, 22]
+    },
+    {
+      "text": "Start a new project",
+      "translation": "开始一个新项目",
+      "box": [163, 260, 166, 29]
+    },
+    {
+      "text": "Your changes are saved automatically.",
+      "translation": "您的更改会自动保存。",
+      "box": [163, 332, 331, 29]
+    },
+    {
+      "text": "Review before publishing",
+      "translation": "发布前检查",
+      "box": [163, 524, 217, 29]
+    },
+    {
+      "text": "Keep your team informed.",
+      "translation": "让您的团队随时了解情况。",
+      "box": [163, 596, 223, 29]
+    }
+  ]
+}

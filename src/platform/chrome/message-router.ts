@@ -9,9 +9,14 @@ import type { Agent } from '../../agent/agent';
 import { TaskCommandError } from '../../tasks/task-command-service';
 import { ScreenshotError } from '../../attachments/screenshot-error';
 import type { PanelService } from '../../tasks/panel-service';
+import type { TranslationController } from '../../translation/translation-controller';
+import { TranslationResponseError } from '../../translation/region-translation';
+import { isProviderError } from '../../agent/model/model-provider-error';
+import { TranslationStateError } from '../../translation/translation-state-error';
 
 export interface RuntimeMessageContext {
   readonly senderTabId: number | null;
+  readonly senderFrameId?: number | null;
 }
 
 export type MessageRouter = (
@@ -41,6 +46,10 @@ export interface MessageRouterDependencies {
     captureRegion(tabId: number): Promise<{ readonly id: string } | null>;
   };
   readonly sandboxConsole?: SandboxConsoleClientPort;
+  readonly translation?: Pick<
+    TranslationController,
+    'toggle' | 'getState' | 'read' | 'inspect' | 'cancel'
+  >;
   readonly pageFeatures?: {
     ensure(tabId: number): Promise<unknown>;
   };
@@ -95,6 +104,70 @@ async function routeMessage(
   context: RuntimeMessageContext,
 ): Promise<ExtensionResponse> {
   switch (message.type) {
+    case 'translation.getState': {
+      const tabId =
+        'tabId' in message.payload
+          ? context.senderTabId === null
+            ? message.payload.tabId
+            : null
+          : context.senderFrameId === 0
+            ? context.senderTabId
+            : null;
+      if (tabId === null)
+        return errorResponse(
+          message.requestId,
+          'INVALID_CONTEXT',
+          'Translation requires its owning page or extension UI.',
+        );
+      if (!dependencies.translation) throw new Error('Translation unavailable.');
+      return successResponse(
+        message.requestId,
+        await dependencies.translation.getState(
+          tabId,
+          'sessionId' in message.payload ? message.payload.sessionId : undefined,
+        ),
+      );
+    }
+    case 'translation.toggle':
+      if (context.senderTabId !== null)
+        return errorResponse(
+          message.requestId,
+          'INVALID_CONTEXT',
+          'Translation requires the extension UI.',
+        );
+      if (!dependencies.translation) throw new Error('Translation unavailable.');
+      return successResponse(
+        message.requestId,
+        await dependencies.translation.toggle(message.payload.tabId),
+      );
+    case 'translation.read':
+    case 'translation.inspect':
+    case 'translation.cancel':
+      if (context.senderTabId === null || context.senderFrameId !== 0)
+        return errorResponse(
+          message.requestId,
+          'INVALID_CONTEXT',
+          'Translation requires the enabled page.',
+        );
+      if (!dependencies.translation) throw new Error('Translation unavailable.');
+      if (message.type === 'translation.read' || message.type === 'translation.inspect')
+        return successResponse(
+          message.requestId,
+          message.type === 'translation.read'
+            ? await dependencies.translation.read(
+                context.senderTabId,
+                message.payload,
+                message.requestId,
+              )
+            : await dependencies.translation.inspect(context.senderTabId, message.payload),
+        );
+      dependencies.translation.cancel(
+        context.senderTabId,
+        message.payload.sessionId,
+        message.payload.close,
+        message.payload.kind,
+      );
+      return successResponse(message.requestId, {});
     case 'system.ping':
       await dependencies.agent.recover();
       return successResponse(message.requestId, { connected: true });
@@ -222,8 +295,25 @@ export function createMessageRouter(dependencies: MessageRouterDependencies): Me
     try {
       return await routeMessage(message, dependencies, context);
     } catch (error) {
-      if (error instanceof TaskCommandError || error instanceof ScreenshotError) {
+      if (
+        error instanceof TaskCommandError ||
+        error instanceof ScreenshotError ||
+        error instanceof TranslationResponseError ||
+        error instanceof TranslationStateError
+      ) {
         return errorResponse(message.requestId, error.code, error.message);
+      }
+      if (message.type === 'translation.read' || message.type === 'translation.inspect') {
+        if (isProviderError(error)) {
+          const stage = error.invalidResponseStage?.toUpperCase();
+          return errorResponse(
+            message.requestId,
+            `MODEL_${error.code}${stage ? `_${stage}` : ''}`,
+            error.message,
+          );
+        }
+        if (error instanceof DOMException && error.name === 'TimeoutError')
+          return errorResponse(message.requestId, 'TRANSLATION_TIMEOUT', 'Translation timed out.');
       }
       return errorResponse(
         message.requestId,

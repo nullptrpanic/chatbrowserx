@@ -68,6 +68,7 @@ function isInstalledResponse(value: unknown, requestId: string): value is Extens
 
 export class ContentScriptInstaller {
   readonly #dependencies: ContentScriptInstallerDependencies;
+  readonly #installations = new Map<string, Promise<ContentScriptInstallation>>();
 
   /**
    * Creates an on-demand installer over injected ports or the real Chrome extension APIs.
@@ -84,9 +85,28 @@ export class ContentScriptInstaller {
   }
 
   /**
-   * Reuses or injects the isolated page bundle only after required host access is available.
+   * Reuses or injects the isolated page bundle after checking host access. Replacement is explicit.
    */
-  async ensureInstalled(tabId: number, origin: string): Promise<ContentScriptInstallation> {
+  ensureInstalled(
+    tabId: number,
+    origin: string,
+    replaceExisting = false,
+  ): Promise<ContentScriptInstallation> {
+    const key = `${tabId}:${origin}:${replaceExisting}`;
+    const pending = this.#installations.get(key);
+    if (pending) return pending;
+    const operation = this.#install(tabId, origin, replaceExisting).finally(() =>
+      this.#installations.delete(key),
+    );
+    this.#installations.set(key, operation);
+    return operation;
+  }
+
+  async #install(
+    tabId: number,
+    origin: string,
+    replaceExisting: boolean,
+  ): Promise<ContentScriptInstallation> {
     const originPattern = toOriginPattern(origin);
     if (originPattern === null) {
       return { status: 'unsupported_origin', originPattern: null };
@@ -98,20 +118,22 @@ export class ContentScriptInstaller {
       return { status: 'permission_required', originPattern };
     }
 
-    const requestId = `page_ping_${crypto.randomUUID()}`;
-    const ping: PageCommand = {
-      version: PROTOCOL_VERSION,
-      requestId,
-      type: 'page.ping',
-      payload: {},
-    };
-    try {
-      const response = await this.#dependencies.tabs.sendMessage(tabId, ping, { frameId: 0 });
-      if (isInstalledResponse(response, requestId)) {
-        return { status: 'already_installed', originPattern };
+    if (!replaceExisting) {
+      const requestId = `page_ping_${crypto.randomUUID()}`;
+      const ping: PageCommand = {
+        version: PROTOCOL_VERSION,
+        requestId,
+        type: 'page.ping',
+        payload: {},
+      };
+      try {
+        const response = await this.#dependencies.tabs.sendMessage(tabId, ping, { frameId: 0 });
+        if (isInstalledResponse(response, requestId)) {
+          return { status: 'already_installed', originPattern };
+        }
+      } catch {
+        // An absent receiver is the expected signal to install the bundle.
       }
-    } catch {
-      // An absent receiver is the expected signal to install the bundle.
     }
 
     await this.#dependencies.scripting.executeScript({

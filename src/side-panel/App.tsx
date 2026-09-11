@@ -158,6 +158,7 @@ export function App({ runtimePort, environment, panelClient, attachmentClient }:
             running={running}
             taskLocked={taskLocked}
             hasToken={snapshot.settings.hasCodexToken}
+            regionTranslationActive={state.regionTranslationActive}
             t={t}
             onTextChange={setDraftText}
             replyTarget={replyTarget}

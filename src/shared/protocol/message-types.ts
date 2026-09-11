@@ -1,3 +1,9 @@
+import type {
+  TranslationSelection,
+  TranslationTexts,
+  TranslationLensOptions,
+} from '../../translation/region-translation';
+
 export const PROTOCOL_VERSION = 1 as const;
 
 export interface Message<TType extends string, TPayload> {
@@ -29,6 +35,7 @@ export type ExtensionMessage =
   | Message<
       'settings.save',
       {
+        model?: string | undefined;
         reasoningEffort: 'low' | 'medium' | 'high' | 'xhigh';
         systemPrompt: string;
         language: 'system' | 'zh-CN' | 'en' | 'ja';
@@ -47,7 +54,15 @@ export type ExtensionMessage =
   | Message<'task.clearContext', { taskId: string }>
   | Message<'screenshot.capture', { tabId: number; mode: 'viewport' | 'region' }>
   | Message<'image.preview.open', { tabId: number; attachmentId: string }>
-  | Message<'page.features.ensure', { tabId: number }>;
+  | Message<'page.features.ensure', { tabId: number }>
+  | Message<'translation.toggle', { tabId: number }>
+  | Message<'translation.getState', { tabId: number } | { sessionId: string }>
+  | Message<'translation.read', TranslationSelection | TranslationTexts>
+  | Message<'translation.inspect', TranslationSelection>
+  | Message<
+      'translation.cancel',
+      { sessionId: string; close: boolean; kind?: 'text' | 'pixels' | undefined }
+    >;
 
 export interface PanelStateChangedNotification {
   readonly version: typeof PROTOCOL_VERSION;
@@ -74,7 +89,9 @@ export type PageCommand =
     >
   | Message<'page.screenshot.select', Record<string, never>>
   | Message<'page.overlays.setHidden', { hidden: boolean }>
-  | Message<'page.imagePreview.open', { src: string; alt: string }>;
+  | Message<'page.imagePreview.open', { src: string; alt: string }>
+  | Message<'page.translation.toggle', TranslationLensOptions>
+  | Message<'page.translation.getState', Record<string, never>>;
 
 export interface ExtensionError {
   code: string;

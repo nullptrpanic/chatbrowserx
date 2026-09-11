@@ -104,7 +104,8 @@ export class ChromeScreenshotPagePort {
 
   /** Hides or restores all extension-owned page overlays around viewport capture. */
   async setOverlaysHidden(tabId: number, hidden: boolean): Promise<void> {
-    await this.#ensurePage(tabId);
+    // Restoration must be immediate and must not inject into a replacement document.
+    if (hidden) await this.#ensurePage(tabId);
     const requestId = this.#dependencies.ids.create('page_request');
     const response = await this.#dependencies.tabs.sendMessage(
       tabId,

@@ -2,6 +2,21 @@ import { describe, expect, it, vi } from 'vitest';
 import { ChromeScreenshotPagePort } from '../../../src/platform/chrome/screenshot-page-port';
 
 describe('ChromeScreenshotPagePort image preview', () => {
+  it('restores overlays without delaying on installation or injecting into a newly navigated page', async () => {
+    const port = new ChromeScreenshotPagePort({
+      tabs: {
+        get: async () => ({ url: 'https://example.com/new' }),
+        sendMessage: async (_id, message) => ({ requestId: message.requestId, ok: true, data: {} }),
+      },
+      installer: {
+        ensureInstalled: async () => {
+          throw new Error('Must not reinstall on restore.');
+        },
+      },
+      ids: { create: () => 'restore' },
+    });
+    await expect(port.setOverlaysHidden(7, false)).resolves.toBeUndefined();
+  });
   it('reports missing page permission without sending a selection request', async () => {
     const tabs = {
       get: vi.fn(async () => ({ url: 'https://example.com/page' })),

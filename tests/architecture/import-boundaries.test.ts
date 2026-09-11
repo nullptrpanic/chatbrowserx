@@ -47,14 +47,17 @@ describe('production import boundaries', () => {
     expect(missingEntrypoints).toEqual([]);
   });
 
-  it('keeps concrete Codex composition inside the Agent package', async () => {
+  it('keeps concrete Codex composition in the Agent and background composition roots', async () => {
     const violations: string[] = [];
     for (const file of await sourceFiles()) {
       const path = repositoryPath(file);
       if (path.startsWith('src/providers/codex/')) continue;
       for (const specifier of imports(await readFile(file, 'utf8'))) {
         if (!specifier.includes('providers/codex/')) continue;
-        if (path !== 'src/agent/create-agent.ts') violations.push(`${path} -> ${specifier}`);
+        // Region translation uses the same adapter without creating an Agent task.
+        if (path !== 'src/agent/create-agent.ts' && path !== 'src/entries/background.ts') {
+          violations.push(`${path} -> ${specifier}`);
+        }
       }
     }
 

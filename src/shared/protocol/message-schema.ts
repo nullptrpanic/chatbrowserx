@@ -1,5 +1,11 @@
 import { z } from 'zod';
 import { PROTOCOL_VERSION, type ExtensionMessage, type PageCommand } from './message-types';
+import {
+  translationSelectionSchema,
+  translationImageSelectionSchema,
+  translationTextsSchema,
+  translationLensOptionsSchema,
+} from '../../translation/region-translation';
 
 const requestIdSchema = z.string().trim().min(1).max(128);
 const identifierSchema = z.string().trim().min(1).max(256);
@@ -241,6 +247,55 @@ export const extensionMessageSchema: z.ZodType<ExtensionMessage> = z.discriminat
   screenshotCaptureSchema,
   imagePreviewOpenSchema,
   pageFeaturesEnsureSchema,
+  z
+    .object({
+      version: z.literal(PROTOCOL_VERSION),
+      requestId: requestIdSchema,
+      type: z.literal('translation.toggle'),
+      payload: z.object({ tabId: z.number().int().nonnegative() }).strict(),
+    })
+    .strict(),
+  z
+    .object({
+      version: z.literal(PROTOCOL_VERSION),
+      requestId: requestIdSchema,
+      type: z.literal('translation.getState'),
+      payload: z.union([
+        z.object({ tabId: z.number().int().nonnegative() }).strict(),
+        z.object({ sessionId: requestIdSchema }).strict(),
+      ]),
+    })
+    .strict(),
+  z
+    .object({
+      version: z.literal(PROTOCOL_VERSION),
+      requestId: requestIdSchema,
+      type: z.literal('translation.inspect'),
+      payload: translationSelectionSchema,
+    })
+    .strict(),
+  z
+    .object({
+      version: z.literal(PROTOCOL_VERSION),
+      requestId: requestIdSchema,
+      type: z.literal('translation.read'),
+      payload: z.union([translationImageSelectionSchema, translationTextsSchema]),
+    })
+    .strict(),
+  z
+    .object({
+      version: z.literal(PROTOCOL_VERSION),
+      requestId: requestIdSchema,
+      type: z.literal('translation.cancel'),
+      payload: z
+        .object({
+          sessionId: requestIdSchema,
+          close: z.boolean(),
+          kind: z.enum(['text', 'pixels']).optional(),
+        })
+        .strict(),
+    })
+    .strict(),
 ]);
 
 const pagePingSchema = z
@@ -347,4 +402,20 @@ export const pageCommandSchema: z.ZodType<PageCommand> = z.discriminatedUnion('t
   pageScreenshotSelectSchema,
   pageOverlaysSetHiddenSchema,
   pageImagePreviewOpenSchema,
+  z
+    .object({
+      version: z.literal(PROTOCOL_VERSION),
+      requestId: requestIdSchema,
+      type: z.literal('page.translation.toggle'),
+      payload: translationLensOptionsSchema,
+    })
+    .strict(),
+  z
+    .object({
+      version: z.literal(PROTOCOL_VERSION),
+      requestId: requestIdSchema,
+      type: z.literal('page.translation.getState'),
+      payload: z.object({}).strict(),
+    })
+    .strict(),
 ]);
