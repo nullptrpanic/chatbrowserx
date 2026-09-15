@@ -12,6 +12,7 @@ import type {
   PanelAttachment,
   PanelConversationSummary,
   PanelEditableSettings,
+  PanelMessage,
   PanelSettingsSnapshot,
   PanelSnapshot,
   PanelTask,
@@ -307,16 +308,66 @@ export class PanelService {
     );
     const timelineByTaskId = new Map(timelines.map((timeline) => [timeline.task.id, timeline]));
     const messageRunById = new Map<string, string>();
+    const messageSequenceById = new Map<string, number>();
+    const replySegmentById = new Map<string, NonNullable<PanelMessage['replySegment']>>();
+    const storedById = new Map(storedMessages.map((message) => [message.id, message]));
     for (const timeline of timelines) {
-      for (const event of timeline.events) {
+      const segments = new Map<
+        string,
+        {
+          id: string;
+          supplements: NonNullable<PanelMessage['replySegment']>['supplements'];
+          hasReply: boolean;
+        }
+      >();
+      for (const event of [...timeline.events].sort((a, b) => a.sequence - b.sequence)) {
+        if (event.type === 'supplement.applied') {
+          const previous = segments.get(event.runId);
+          const segment =
+            !previous || previous.hasReply
+              ? { id: event.messageId, supplements: [], hasReply: false }
+              : previous;
+          const supplement = storedById.get(event.messageId);
+          segments.set(event.runId, {
+            ...segment,
+            supplements:
+              supplement?.kind === 'supplement' && supplement.taskId === timeline.task.id
+                ? [
+                    ...segment.supplements,
+                    {
+                      id: supplement.id,
+                      text: supplement.text.slice(0, 20_000),
+                      attachmentIds: [...supplement.attachmentIds].slice(0, 8),
+                    },
+                  ].slice(-MAX_PANEL_SUPPLEMENTS)
+                : segment.supplements,
+          });
+          continue;
+        }
         if (event.type !== 'message.recorded') continue;
         const existing = messageRunById.get(event.messageId);
         if (existing !== undefined && existing !== event.runId) {
           throw new Error('Conversation message has conflicting TaskEvent associations.');
         }
         messageRunById.set(event.messageId, event.runId);
+        messageSequenceById.set(event.messageId, event.sequence);
+        const segment = segments.get(event.runId);
+        if (segment) {
+          replySegmentById.set(event.messageId, {
+            id: segment.id,
+            supplements: segment.supplements,
+          });
+          segment.hasReply = true;
+        }
       }
     }
+    const taskOrdinals = new Map(selectedTasks.map((task) => [task.id, task.ordinal]));
+    messages.sort(
+      (a, b) =>
+        (taskOrdinals.get(a.taskId) ?? 0) - (taskOrdinals.get(b.taskId) ?? 0) ||
+        (messageSequenceById.get(a.id) ?? Infinity) - (messageSequenceById.get(b.id) ?? Infinity) ||
+        a.createdAt - b.createdAt,
+    );
     const panelTasks = visibleTasks.flatMap((task) => {
       const timeline = timelineByTaskId.get(task.id);
       return timeline === undefined ? [] : [this.#projectTask(timeline, [], 'summary')];
@@ -349,6 +400,9 @@ export class PanelService {
           attachmentIds: [...message.attachmentIds],
           ...(sourcePage === undefined ? {} : { sourcePage }),
           ...(message.replyTo === undefined ? {} : { replyTo: { ...message.replyTo } }),
+          ...(message.role === 'assistant' && replySegmentById.has(message.id)
+            ? { replySegment: replySegmentById.get(message.id) }
+            : {}),
           createdAt: message.createdAt,
           updatedAt: message.updatedAt,
         };
@@ -666,6 +720,11 @@ export class PanelService {
             .slice(-MAX_PANEL_SUPPLEMENTS)
         : [];
     const lastError = runs.at(-1)?.error ?? null;
+    const supplementRuns = new Map(
+      events.flatMap((event) =>
+        event.type === 'supplement.queued' ? [[event.messageId, event.runId] as const] : [],
+      ),
+    );
     return {
       id: task.id,
       latestRunId: task.latestRunId,
@@ -723,6 +782,7 @@ export class PanelService {
       })),
       supplements: projectedSupplements.map((message) => ({
         id: message.id,
+        runId: supplementRuns.get(message.id),
         text: message.text.slice(0, 20_000),
         attachmentIds: [...message.attachmentIds].slice(0, 8),
         createdAt: message.createdAt,

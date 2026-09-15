@@ -397,6 +397,79 @@ const FIRST_TURN_BROWSER_TOOL_NAMES = [
 const CONFIGURED_TAVILY = { isConfigured: async () => true } as const;
 
 describe('CodexAgentPlanner', () => {
+  it('preserves the earlier answer when a newly applied supplement starts a continuation', async () => {
+    const original: MessageRecord = {
+      ...USER_MESSAGE,
+      id: 'assistant_original',
+      role: 'assistant',
+      status: 'interrupted',
+      text: 'Original answer',
+      createdAt: 300,
+      updatedAt: 300,
+    };
+    const supplement: MessageRecord = {
+      ...USER_MESSAGE,
+      id: 'supplement_followup',
+      kind: 'supplement',
+      text: 'Add a detail',
+      createdAt: 300,
+      updatedAt: 300,
+    };
+    const storage = repositories([original, supplement]);
+    const input = planInputFor(storage.messages);
+    const events: TaskEvent[] = [
+      ...input.events,
+      {
+        id: 'queued',
+        taskId: TASK.id,
+        runId: 'run_1',
+        sequence: 3,
+        at: 300,
+        type: 'supplement.queued',
+        messageId: supplement.id,
+      },
+      {
+        id: 'applied',
+        taskId: TASK.id,
+        runId: 'run_1',
+        sequence: 4,
+        at: 300,
+        type: 'supplement.applied',
+        messageId: supplement.id,
+      },
+    ];
+    const model = provider(async function* () {
+      yield { type: 'response.started', responseId: 'response_followup' };
+      yield { type: 'text.delta', delta: 'Continuation answer' };
+      yield { type: 'response.completed', responseId: 'response_followup', usage: null };
+    });
+    const planner = new CodexAgentPlanner({
+      provider: model.instance,
+      tavilyAvailability: CONFIGURED_TAVILY,
+      settings: settings(),
+      conversations: storage.conversations,
+      tasks: storage.tasks,
+      attachments: storage.attachments,
+      ids: { create: (prefix) => `${prefix}_followup` },
+      clock: { now: () => 300 },
+    });
+    await collect(planner, new AbortController().signal, {
+      ...input,
+      events,
+      checkpoint: {
+        ...input.checkpoint,
+        continuationItems: [
+          ...input.checkpoint.continuationItems,
+          { type: 'message_ref', messageId: supplement.id },
+        ],
+      },
+    });
+    expect(storage.messages.filter((m) => m.role === 'assistant')).toMatchObject([
+      { id: 'assistant_original', text: 'Original answer' },
+      { id: 'message_followup', text: 'Continuation answer', status: 'complete' },
+    ]);
+  });
+
   it('labels conversation-history failures before they cross the executor boundary', async () => {
     const model = provider(async function* () {
       yield { type: 'response.started', responseId: 'unused' };

@@ -1,4 +1,4 @@
-import { render, screen, within } from '@testing-library/react';
+import { fireEvent, render, screen, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { describe, expect, it, vi } from 'vitest';
 import { createTranslator } from '../../../src/shared/i18n/i18n';
@@ -48,6 +48,227 @@ function completedTask(id: string, goal: string, updatedAt: number): PanelTask {
 }
 
 describe('ConversationView answer execution details', () => {
+  it('appends quoted continuations in one stable answer card without disturbing older reading', () => {
+    const task: PanelTask = {
+      ...completedTask('task_segments', 'Original question', 1_500),
+      status: 'planning',
+      latestRunId: 'run_1',
+      runs: [
+        {
+          id: 'run_1',
+          attempt: 1,
+          status: 'planning',
+          startedAt: 1_000,
+          endedAt: null,
+          lastError: null,
+        },
+      ],
+    };
+    const original: PanelMessage = {
+      id: 'answer_original',
+      taskId: task.id,
+      runId: 'run_1',
+      role: 'assistant',
+      status: 'interrupted',
+      text: 'Original answer',
+      attachmentIds: [],
+      createdAt: 1_100,
+      updatedAt: 1_100,
+    };
+    const continuation: PanelMessage = {
+      ...original,
+      id: 'answer_followup',
+      status: 'streaming',
+      text: 'Continuation answer',
+      createdAt: 1_200,
+      updatedAt: 1_200,
+      replySegment: {
+        id: 'supplement_a',
+        supplements: [
+          { id: 'supplement_a', text: 'Add A', attachmentIds: [] },
+          { id: 'supplement_b', text: 'Add B', attachmentIds: [] },
+        ],
+      },
+    };
+    const props = {
+      tasks: [task],
+      task,
+      attachments,
+      t,
+      onSuggestion: vi.fn(),
+      onPause: vi.fn(),
+      onResume: vi.fn(),
+      onRetry: vi.fn(),
+      onCancel: vi.fn(),
+    };
+    const { container, rerender } = render(<ConversationView messages={[original]} {...props} />);
+    const originalNode = screen.getByText('Original answer');
+    const card = screen.getByRole('article');
+    const scroller = container.querySelector('.conversation-scroller');
+    if (scroller === null) throw new Error('Conversation scroller is missing.');
+    const scrollTo = vi.fn();
+    Object.defineProperties(scroller, {
+      scrollHeight: { configurable: true, value: 2_000 },
+      clientHeight: { configurable: true, value: 500 },
+      scrollTop: { configurable: true, get: () => 100, set: scrollTo },
+    });
+    fireEvent.scroll(scroller);
+    const withPending: PanelTask = {
+      ...task,
+      supplements: [
+        {
+          id: 'older_run',
+          runId: 'run_0',
+          text: 'Previous run supplement',
+          attachmentIds: [],
+          createdAt: 900,
+          applicationState: 'applied',
+          detailIndex: 1,
+        },
+        {
+          id: 'supplement_a',
+          runId: 'run_1',
+          text: 'Add A',
+          attachmentIds: [],
+          createdAt: 1_150,
+          applicationState: 'pending',
+          detailIndex: 2,
+        },
+        {
+          id: 'supplement_b',
+          runId: 'run_1',
+          text: 'Add B',
+          attachmentIds: [],
+          createdAt: 1_150,
+          applicationState: 'pending',
+          detailIndex: 3,
+        },
+      ],
+    };
+    const nextProps = { ...props, task: withPending, tasks: [withPending] };
+    rerender(<ConversationView messages={[original]} {...nextProps} />);
+    expect(screen.getByText('Add A').closest('blockquote')).not.toBeNull();
+    expect(screen.queryByText('Previous run supplement')).not.toBeInTheDocument();
+    rerender(<ConversationView messages={[original, continuation]} {...nextProps} />);
+    expect(screen.getAllByRole('article')).toHaveLength(1);
+    expect(screen.getByRole('article')).toBe(card);
+    expect(screen.getByText('Original answer')).toBe(originalNode);
+    expect(screen.getByText('Add A').closest('blockquote')).not.toBeNull();
+    expect(screen.getByText('Add B').closest('blockquote')).not.toBeNull();
+    expect(card.textContent).toMatch(/Original answer.*Add A.*Add B.*Continuation answer/s);
+    expect(container.querySelectorAll('.task-card')).toHaveLength(1);
+    expect(screen.queryByText(t('interrupted'))).not.toBeInTheDocument();
+    expect(scrollTo).not.toHaveBeenCalled();
+    const completed = { ...continuation, status: 'complete' as const, text: 'Continuation done' };
+    rerender(<ConversationView messages={[original, completed]} {...props} />);
+    expect(screen.getByText('Original answer')).toBe(originalNode);
+    expect(screen.getByText('Continuation done')).toBeVisible();
+    expect(screen.getAllByText('Add A')).toHaveLength(1);
+  });
+
+  it('replaces all supplements and process replies with only the final answer on completion and copy', async () => {
+    const user = userEvent.setup();
+    const task: PanelTask = {
+      ...completedTask('final_card', 'Create a calendar event', 1_500),
+      status: 'planning',
+      latestRunId: 'run_1',
+      runs: [
+        {
+          id: 'run_1',
+          attempt: 1,
+          status: 'planning',
+          startedAt: 1_000,
+          endedAt: null,
+          lastError: null,
+        },
+      ],
+    };
+    const original: PanelMessage = {
+      id: 'initial_process',
+      taskId: task.id,
+      runId: 'run_1',
+      role: 'assistant',
+      status: 'complete',
+      text: 'I will check the calendar.',
+      attachmentIds: [],
+      createdAt: 1_100,
+      updatedAt: 1_100,
+    };
+    const process: PanelMessage = {
+      ...original,
+      id: 'supplement_process',
+      text: 'I will choose a personal event.',
+      replySegment: {
+        id: 'personal',
+        supplements: [{ id: 'personal', text: 'Only myself', attachmentIds: [] }],
+      },
+    };
+    const final: PanelMessage = {
+      ...original,
+      id: 'final',
+      text: 'Created successfully: 17:00–18:00.',
+      replySegment: {
+        id: 'duration',
+        supplements: [{ id: 'duration', text: 'One hour, on the hour', attachmentIds: [] }],
+      },
+    };
+    const props = {
+      messages: [original, process, final],
+      tasks: [task],
+      task,
+      attachments,
+      t,
+      onSuggestion: vi.fn(),
+      onPause: vi.fn(),
+      onResume: vi.fn(),
+      onRetry: vi.fn(),
+      onCancel: vi.fn(),
+    };
+    const { rerender } = render(<ConversationView {...props} />);
+    const card = screen.getByRole('article');
+    expect(screen.getByText(original.text)).toBeVisible();
+    const completed: PanelTask = {
+      ...task,
+      status: 'completed',
+      runs: task.runs.map((run) => ({ ...run, status: 'completed', endedAt: 1_500 })),
+      supplements: [
+        {
+          id: 'personal',
+          runId: 'run_1',
+          text: 'Only myself',
+          attachmentIds: [],
+          createdAt: 1_200,
+          applicationState: 'applied',
+          detailIndex: 1,
+        },
+      ],
+    };
+    rerender(<ConversationView {...props} tasks={[completed]} task={completed} />);
+    expect(screen.getAllByRole('article')).toEqual([card]);
+    expect(screen.queryByText(original.text)).not.toBeInTheDocument();
+    expect(screen.queryByText(process.text)).not.toBeInTheDocument();
+    expect(screen.getByText(final.text)).toBeVisible();
+    expect(screen.queryByText('Only myself')).not.toBeInTheDocument();
+    expect(screen.queryByText('One hour, on the hour')).not.toBeInTheDocument();
+    expect(card.querySelector('.message-supplement-quote')).toBeNull();
+    await user.click(within(card).getByRole('button', { name: '复制' }));
+    await screen.findByRole('button', { name: '已复制' });
+    expect(await navigator.clipboard.readText()).toBe('Created successfully: 17:00–18:00.');
+    const summary: PanelTask = {
+      ...completed,
+      detailLevel: 'summary',
+      supplements: [],
+      events: [],
+      toolResults: [],
+    };
+    rerender(<ConversationView {...props} tasks={[summary]} task={null} />);
+    expect(screen.queryByText(original.text)).not.toBeInTheDocument();
+    expect(screen.queryByText('Only myself')).not.toBeInTheDocument();
+    expect(screen.queryByText('One hour, on the hour')).not.toBeInTheDocument();
+    expect(original.text).toBe('I will check the calendar.');
+    expect(process.text).toBe('I will choose a personal event.');
+  });
+
   it('keeps an earlier failed run answer with its own terminal status and error', () => {
     const task = {
       ...completedTask('task_multi_run', 'Continue the page task', 1_500),
@@ -77,12 +298,29 @@ describe('ConversationView answer execution details', () => {
     } as PanelTask;
     const messages = [
       {
+        id: 'assistant_run_1_process',
+        taskId: task.id,
+        runId: 'run_1',
+        role: 'assistant' as const,
+        status: 'interrupted' as const,
+        text: 'Earlier progress from the failed run.',
+        attachmentIds: [],
+        createdAt: 1_100,
+        updatedAt: 1_100,
+      },
+      {
         id: 'assistant_run_1',
         taskId: task.id,
         runId: 'run_1',
         role: 'assistant' as const,
         status: 'interrupted' as const,
         text: 'Partial answer from the failed run.',
+        replySegment: {
+          id: 'failed_run_supplement',
+          supplements: [
+            { id: 'failed_run_supplement', text: 'More detail please.', attachmentIds: [] },
+          ],
+        },
         attachmentIds: [],
         createdAt: 1_200,
         updatedAt: 1_200,
@@ -130,6 +368,9 @@ describe('ConversationView answer execution details', () => {
       ),
     ).toBeVisible();
     expect(within(previousAnswer as HTMLElement).getByText('任务失败')).toBeVisible();
+    expect(
+      within(previousAnswer as HTMLElement).getByText('Earlier progress from the failed run.'),
+    ).toBeVisible();
     expect((currentAnswer as HTMLElement).querySelector('.task-card')).not.toBeNull();
   });
 
@@ -1037,7 +1278,7 @@ describe('ConversationView answer execution details', () => {
     ).toBeVisible();
   });
 
-  it('shows runtime text and image supplements only inside the owning answer details', async () => {
+  it('keeps completed supplements only in explicitly expanded execution history, not the answer body', async () => {
     vi.spyOn(URL, 'createObjectURL').mockReturnValue('blob:runtime-supplement');
     vi.spyOn(URL, 'revokeObjectURL').mockImplementation(() => undefined);
     const user = userEvent.setup();
@@ -1142,6 +1383,8 @@ describe('ConversationView answer execution details', () => {
     expect(
       screen.queryByText('Please also inspect the mobile navigation.'),
     ).not.toBeInTheDocument();
+    expect(screen.getByText('The navigation now works on both layouts.')).toBeVisible();
+    expect(document.querySelector('.message-supplement-quote')).not.toBeInTheDocument();
     expect(document.querySelector('.message-user')).not.toBeInTheDocument();
 
     await user.click(

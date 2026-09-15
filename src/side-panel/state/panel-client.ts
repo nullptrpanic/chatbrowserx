@@ -355,6 +355,8 @@ export class PanelClient {
       payload: { taskId, text, attachmentIds },
     });
     await this.refresh();
+    // The input was accepted; a detail-read failure must not invite duplicate submission.
+    await this.loadTaskDetails(taskId).catch(() => undefined);
   }
 
   /** Toggles only the currently visible page, without touching the chat draft or task state. */
@@ -682,12 +684,16 @@ export class PanelClient {
       const detailed = this.#detailedTasks.get(task.id);
       if (detailed === undefined) return task;
       if (detailed.sequence > task.sequence) return detailed;
+      if (task.detailLevel === 'full') {
+        this.#detailedTasks.set(task.id, task);
+        return task;
+      }
       return {
         ...task,
         detailLevel: detailed.sequence === task.sequence ? ('full' as const) : ('summary' as const),
         events: detailed.events,
         toolResults: detailed.toolResults,
-        supplements: task.supplements,
+        supplements: detailed.supplements,
       };
     });
     const task =

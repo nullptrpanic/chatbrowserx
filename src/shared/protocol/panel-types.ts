@@ -44,6 +44,13 @@ export interface PanelMessage {
   readonly attachmentIds: readonly string[];
   readonly sourcePage?: PanelMessageSourcePage | undefined;
   readonly replyTo?: PanelMessageReplyReference | undefined;
+  /** Supplement batch preceding this answer, derived from permanent event order. */
+  readonly replySegment?:
+    | {
+        readonly id: string;
+        readonly supplements: readonly Pick<PanelTaskSupplement, 'id' | 'text' | 'attachmentIds'>[];
+      }
+    | undefined;
   readonly createdAt: number;
   readonly updatedAt: number;
 }
@@ -80,6 +87,7 @@ export interface PanelToolResult {
 
 export interface PanelTaskSupplement {
   readonly id: string;
+  readonly runId?: string | undefined;
   readonly text: string;
   readonly attachmentIds: readonly string[];
   readonly createdAt: number;

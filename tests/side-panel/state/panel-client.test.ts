@@ -79,6 +79,68 @@ afterEach(() => {
 });
 
 describe('PanelClient', () => {
+  it('keeps old supplements visible during submission and adds pending details before application', async () => {
+    let sequence = 1;
+    const supplements = [
+      {
+        id: 'supplement_a',
+        text: 'First detail',
+        attachmentIds: [],
+        createdAt: 1_000,
+        applicationState: 'applied' as 'applied' | 'pending',
+        detailIndex: 1,
+      },
+    ];
+    const observed: string[][] = [];
+    const send: RuntimePort['send'] = async (message) => {
+      if (message.type === 'chat.supplement') {
+        sequence++;
+        supplements.push({
+          id: 'supplement_b',
+          text: 'Second detail',
+          attachmentIds: [],
+          createdAt: 1_100,
+          applicationState: 'pending',
+          detailIndex: 2,
+        });
+      }
+      return {
+        version: 1,
+        requestId: message.requestId,
+        ok: true,
+        data:
+          message.type === 'panel.getSnapshot'
+            ? snapshot(sequence)
+            : message.type === 'panel.getTaskDetails'
+              ? { ...snapshot(sequence).task, detailLevel: 'full', supplements: [...supplements] }
+              : { accepted: true, id: 'supplement_b' },
+      };
+    };
+    const client = new PanelClient({ send }, { getActiveTab: async () => snapshot().tab });
+    try {
+      await client.connect();
+      await client.loadTaskDetails('task_1');
+      client.subscribe(() =>
+        observed.push(client.getSnapshot().snapshot?.task?.supplements.map(({ id }) => id) ?? []),
+      );
+      await client.supplement('Second detail', []);
+      expect(observed.length).toBeGreaterThan(0);
+      expect(observed.every((ids) => ids.includes('supplement_a'))).toBe(true);
+      expect(client.getSnapshot().snapshot?.task?.supplements).toMatchObject([
+        { id: 'supplement_a', applicationState: 'applied' },
+        { id: 'supplement_b', applicationState: 'pending' },
+      ]);
+      await client.refresh();
+      expect(client.getSnapshot().snapshot?.task?.supplements).toHaveLength(2);
+      supplements.length = 0;
+      sequence++;
+      await client.loadTaskDetails('task_1');
+      expect(client.getSnapshot().snapshot?.task?.supplements).toEqual([]);
+    } finally {
+      client.dispose();
+    }
+  });
+
   it('reconciles page-owned translation state after Escape without reloading chat history', async () => {
     let active = false;
     let notify!: (value: unknown) => void;
@@ -988,7 +1050,9 @@ describe('PanelClient', () => {
             ? snapshot()
             : message.type === 'chat.supplement'
               ? { accepted: true, id: 'supplement_1' }
-              : {},
+              : message.type === 'panel.getTaskDetails'
+                ? { ...snapshot().task, detailLevel: 'full' }
+                : {},
       };
     });
     const client = new PanelClient(
@@ -1011,8 +1075,30 @@ describe('PanelClient', () => {
         },
       }),
     );
-    expect(sentTypes).toEqual(['chat.supplement', 'panel.getSnapshot']);
+    expect(sentTypes).toEqual(['chat.supplement', 'panel.getSnapshot', 'panel.getTaskDetails']);
     client.dispose();
+  });
+
+  it('does not reject an accepted supplement when fetching its details fails', async () => {
+    const send = vi.fn<RuntimePort['send']>(async (message) => {
+      if (message.type === 'panel.getTaskDetails') throw new Error('Temporary detail failure');
+      return {
+        version: 1,
+        requestId: message.requestId,
+        ok: true,
+        data: message.type === 'panel.getSnapshot' ? snapshot() : { accepted: true },
+      };
+    });
+    const client = new PanelClient({ send }, { getActiveTab: async () => snapshot().tab });
+    try {
+      await client.connect();
+      await expect(client.supplement('Accepted detail', [])).resolves.toBeUndefined();
+      expect(
+        send.mock.calls.filter(([message]) => message.type === 'chat.supplement'),
+      ).toHaveLength(1);
+    } finally {
+      client.dispose();
+    }
   });
 
   it('requests a page-wide preview for one persisted attachment', async () => {

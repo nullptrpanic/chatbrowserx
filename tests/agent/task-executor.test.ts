@@ -3304,139 +3304,157 @@ describe('TaskExecutor', () => {
     database.close();
   });
 
-  it('keeps one reply bubble and replans when a supplement wins the completion race', async () => {
-    const database = await openChatBrowserDatabase(createTestDatabaseName('completion-supplement'));
-    const repository = new IndexedDbTaskRepository(database);
-    const conversations = new IndexedDbConversationRepository(database);
-    const dependencies = sources();
-    const conversation = {
-      id: 'conversation_1',
-      tabId: 7,
-      title: 'Answer this',
-      createdAt: 1_000,
-      updatedAt: 1_000,
-    } as const;
-    const userMessage: TaskMessageDraft = {
-      id: 'message_user',
-      kind: 'conversation',
-      conversationId: 'conversation_1',
-      role: 'user',
-      status: 'complete',
-      text: 'Answer this',
-      attachmentIds: [],
-      createdAt: 1_000,
-      updatedAt: 1_000,
-    };
-    const commands = new TaskCommandService(
-      repository,
-      dependencies.clock,
-      dependencies.ids,
-      conversations,
-    );
-    const created = await commands.createSubmission({
-      conversationId: 'conversation_1',
-      tabId: 7,
-      goal: 'Answer this',
-      conversation,
-      createConversation: true,
-      message: userMessage,
-    });
-    let turn = 0;
-    const plan = vi.fn<(input: AgentPlanInput) => AsyncGenerator<AgentEvent>>((input) => {
-      turn += 1;
-      return (async function* () {
-        const existing = (await conversations.listMessages('conversation_1')).find(
-          ({ id }) => id === 'message_answer',
-        );
-        if (turn === 1) {
-          const replyAt = dependencies.clock.now();
-          await repository.appendTaskMessage({
-            eventId: dependencies.ids.create('event'),
-            at: replyAt,
-            message: {
-              id: 'message_answer',
-              kind: 'conversation',
+  it.each(['completion', 'interrupted stream'] as const)(
+    'preserves the previous answer in model context when a supplement follows %s',
+    async (boundary) => {
+      const database = await openChatBrowserDatabase(
+        createTestDatabaseName('completion-supplement'),
+      );
+      const repository = new IndexedDbTaskRepository(database);
+      const conversations = new IndexedDbConversationRepository(database);
+      const dependencies = sources();
+      const conversation = {
+        id: 'conversation_1',
+        tabId: 7,
+        title: 'Answer this',
+        createdAt: 1_000,
+        updatedAt: 1_000,
+      } as const;
+      const userMessage: TaskMessageDraft = {
+        id: 'message_user',
+        kind: 'conversation',
+        conversationId: 'conversation_1',
+        role: 'user',
+        status: 'complete',
+        text: 'Answer this',
+        attachmentIds: [],
+        createdAt: 1_000,
+        updatedAt: 1_000,
+      };
+      const commands = new TaskCommandService(
+        repository,
+        dependencies.clock,
+        dependencies.ids,
+        conversations,
+      );
+      const created = await commands.createSubmission({
+        conversationId: 'conversation_1',
+        tabId: 7,
+        goal: 'Answer this',
+        conversation,
+        createConversation: true,
+        message: userMessage,
+      });
+      let turn = 0;
+      const plan = vi.fn<(input: AgentPlanInput) => AsyncGenerator<AgentEvent>>((input) => {
+        turn += 1;
+        return (async function* () {
+          const existing = (await conversations.listMessages('conversation_1')).find(
+            ({ id }) => id === 'message_answer',
+          );
+          if (turn === 1) {
+            const replyAt = dependencies.clock.now();
+            await repository.appendTaskMessage({
+              eventId: dependencies.ids.create('event'),
+              at: replyAt,
+              message: {
+                id: 'message_answer',
+                kind: 'conversation',
+                conversationId: 'conversation_1',
+                taskId: created.task.id,
+                role: 'assistant',
+                status: boundary === 'completion' ? 'complete' : 'streaming',
+                text: 'First answer',
+                attachmentIds: [],
+                createdAt: replyAt,
+                updatedAt: replyAt,
+              },
+            });
+            const supplementAt = dependencies.clock.now();
+            await commands.appendSupplement({
+              id: 'supplement_during_model',
+              kind: 'supplement',
               conversationId: 'conversation_1',
               taskId: created.task.id,
-              role: 'assistant',
+              role: 'user',
               status: 'complete',
-              text: 'First answer',
+              text: 'Add the missing detail.',
               attachmentIds: [],
-              createdAt: replyAt,
-              updatedAt: replyAt,
-            },
-          });
-          const supplementAt = dependencies.clock.now();
-          await commands.appendSupplement({
-            id: 'supplement_during_model',
-            kind: 'supplement',
-            conversationId: 'conversation_1',
-            taskId: created.task.id,
-            role: 'user',
-            status: 'complete',
-            text: 'Add the missing detail.',
-            attachmentIds: [],
-            createdAt: supplementAt,
-            updatedAt: supplementAt,
-          });
-        } else {
-          expect(input.checkpoint.continuationItems.at(-1)).toEqual({
-            type: 'message_ref',
-            messageId: 'supplement_during_model',
-          });
-          expect(existing).toMatchObject({
-            status: 'interrupted',
-            text: 'First answer',
-          });
-          if (existing === undefined) throw new Error('Assistant message fixture is missing.');
-          await conversations.updateMessage({
-            ...existing,
-            status: 'complete',
-            text: 'Revised answer with the missing detail.',
-            updatedAt: dependencies.clock.now(),
-          });
-        }
-        yield {
-          type: 'task.completed',
-          reason: 'model_response_completed',
-          messageId: 'message_answer',
-        };
-      })();
-    });
-    const executor = new TaskExecutor({
-      repository,
-      conversations,
-      planner: { plan },
-      tavily: tavilyPort(),
-      browser: browserPort(),
-      clock: dependencies.clock,
-      ids: dependencies.ids,
-    });
+              createdAt: supplementAt,
+              updatedAt: supplementAt,
+            });
+            if (boundary === 'interrupted stream') throw providerErrorFromCode('TRANSIENT');
+          } else {
+            expect(input.checkpoint.continuationItems.slice(-2)).toEqual([
+              { type: 'message_ref', messageId: 'message_answer' },
+              { type: 'message_ref', messageId: 'supplement_during_model' },
+            ]);
+            expect(existing).toMatchObject({
+              status: 'interrupted',
+              text: 'First answer',
+            });
+            if (existing === undefined) throw new Error('Assistant message fixture is missing.');
+            const at = dependencies.clock.now();
+            await repository.appendTaskMessage({
+              eventId: dependencies.ids.create('event'),
+              at,
+              message: {
+                ...existing,
+                id: 'message_continuation',
+                status: 'complete',
+                text: 'Continuation with the missing detail.',
+                createdAt: at,
+                updatedAt: at,
+              },
+            });
+          }
+          yield {
+            type: 'task.completed',
+            reason: 'model_response_completed',
+            messageId: turn === 1 ? 'message_answer' : 'message_continuation',
+          };
+        })();
+      });
+      const executor = new TaskExecutor({
+        repository,
+        conversations,
+        planner: { plan },
+        tavily: tavilyPort(),
+        browser: browserPort(),
+        clock: dependencies.clock,
+        ids: dependencies.ids,
+      });
 
-    const result = await executor.run(created.task.id, new AbortController().signal);
-    const assistantMessages = (await conversations.listMessages('conversation_1')).filter(
-      ({ role }) => role === 'assistant',
-    );
+      const result = await executor.run(created.task.id, new AbortController().signal);
+      const assistantMessages = (await conversations.listMessages('conversation_1')).filter(
+        ({ role }) => role === 'assistant',
+      );
 
-    expect(result.task.status).toBe('completed');
-    expect(result.events.map(({ type }) => type)).toEqual(
-      expect.arrayContaining([
-        'message.recorded',
-        'supplement.queued',
-        'supplement.applied',
-        'status.changed',
-      ]),
-    );
-    expect(plan).toHaveBeenCalledTimes(2);
-    expect(assistantMessages).toEqual([
-      expect.objectContaining({
-        id: 'message_answer',
-        status: 'complete',
-        text: 'Revised answer with the missing detail.',
-      }),
-    ]);
-    database.close();
-  });
+      expect(result.task.status).toBe('completed');
+      expect(result.events.map(({ type }) => type)).toEqual(
+        expect.arrayContaining([
+          'message.recorded',
+          'supplement.queued',
+          'supplement.applied',
+          'status.changed',
+        ]),
+      );
+      expect(plan).toHaveBeenCalledTimes(2);
+      expect(assistantMessages).toEqual([
+        expect.objectContaining({
+          id: 'message_answer',
+          status: 'interrupted',
+          text: 'First answer',
+        }),
+        expect.objectContaining({
+          id: 'message_continuation',
+          status: 'complete',
+          text: 'Continuation with the missing detail.',
+        }),
+      ]);
+      database.close();
+    },
+  );
 
   it('fails safely when the model repeats an already completed call ID', async () => {
     const database = await openChatBrowserDatabase(createTestDatabaseName('duplicate-tool-call'));

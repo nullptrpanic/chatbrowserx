@@ -74,6 +74,7 @@ const toolResultSchema = z
 const taskSupplementSchema = z
   .object({
     id: idSchema,
+    runId: idSchema.optional(),
     text: z.string().max(20_000),
     attachmentIds: z.array(idSchema).max(8),
     createdAt: timestampSchema,
@@ -171,6 +172,21 @@ export const panelSnapshotSchema: z.ZodType<PanelSnapshot> = z
             text: z.string().max(1_000_000),
             attachmentIds: z.array(idSchema).max(64),
             sourcePage: messageSourcePageSchema.optional(),
+            replySegment: z
+              .object({
+                id: idSchema,
+                supplements: z
+                  .array(
+                    taskSupplementSchema.pick({
+                      id: true,
+                      text: true,
+                      attachmentIds: true,
+                    }),
+                  )
+                  .max(100),
+              })
+              .strict()
+              .optional(),
             replyTo: z
               .object({
                 messageId: idSchema,

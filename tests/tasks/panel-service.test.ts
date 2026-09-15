@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from 'vitest';
 import type { PersistedTaskDetailWindow } from '../../src/persistence/task-repository';
 import { PanelService } from '../../src/tasks/panel-service';
+import { parsePanelSnapshot } from '../../src/side-panel/state/panel-state';
 import type { Checkpoint } from '../../src/tasks/checkpoint-types';
 import type { MessageRecord } from '../../src/tasks/message-types';
 import type { Task, TaskEvent, TaskRun } from '../../src/tasks/task-types';
@@ -241,6 +242,78 @@ function panelResult(
 }
 
 describe('PanelService', () => {
+  it('projects durable supplement batches onto reply segments even without expanded details', async () => {
+    const fixture = buildFixture();
+    const base = (await fixture.dependencies.conversations.listMessages())[0];
+    if (base === undefined) throw new Error('Fixture message is missing.');
+    const records: MessageRecord[] = [
+      base,
+      { ...base, id: 'reply_original', role: 'assistant', text: 'Original answer' },
+      { ...base, id: 'supplement_a', kind: 'supplement', text: 'Add A' },
+      { ...base, id: 'supplement_b', kind: 'supplement', text: 'Add B' },
+      { ...base, id: 'reply_tool', role: 'assistant', text: 'Working on both' },
+      { ...base, id: 'reply_final', role: 'assistant', text: 'Both answered' },
+      { ...base, id: 'supplement_c', kind: 'supplement', text: 'Add C' },
+      { ...base, id: 'reply_c', role: 'assistant', text: 'C answered' },
+    ];
+    // Equal timestamps can be returned in storage-key order, not process order.
+    fixture.dependencies.conversations.listMessages.mockResolvedValue([...records].reverse());
+    const sequence = [
+      ['message.recorded', 'message_1'],
+      ['message.recorded', 'reply_original'],
+      ['supplement.queued', 'supplement_a'],
+      ['supplement.queued', 'supplement_b'],
+      ['supplement.applied', 'supplement_a'],
+      ['supplement.applied', 'supplement_b'],
+      ['message.recorded', 'reply_tool'],
+      ['message.recorded', 'reply_final'],
+      ['supplement.queued', 'supplement_c'],
+      ['supplement.applied', 'supplement_c'],
+      ['message.recorded', 'reply_c'],
+    ] as const;
+    useArchive(fixture, {
+      events: sequence.map(([type, messageId], index): TaskEvent => ({
+        id: `event_${index}`,
+        taskId: base.taskId,
+        runId: fixture.run.id,
+        sequence: index + 1,
+        at: 1_100,
+        type,
+        messageId,
+      })),
+    });
+    const snapshot = parsePanelSnapshot(
+      await new PanelService(fixture.dependencies).getSnapshot(7),
+    );
+    expect(snapshot.messages.map((m) => m.id)).toEqual([
+      'message_1',
+      'reply_original',
+      'reply_tool',
+      'reply_final',
+      'reply_c',
+    ]);
+    expect(snapshot.messages.find((m) => m.id === 'reply_original')).not.toHaveProperty(
+      'replySegment',
+    );
+    for (const id of ['reply_tool', 'reply_final']) {
+      expect(snapshot.messages.find((m) => m.id === id)).toMatchObject({
+        replySegment: {
+          id: 'supplement_a',
+          supplements: [
+            { id: 'supplement_a', text: 'Add A' },
+            { id: 'supplement_b', text: 'Add B' },
+          ],
+        },
+      });
+    }
+    expect(snapshot.messages.find((m) => m.id === 'reply_c')).toMatchObject({
+      replySegment: {
+        id: 'supplement_c',
+        supplements: [{ id: 'supplement_c', text: 'Add C' }],
+      },
+    });
+  });
+
   it('reads all task summaries once instead of querying once per conversation', async () => {
     const fixture = buildFixture();
     const anotherConversation = {
@@ -792,6 +865,7 @@ describe('PanelService', () => {
     expect(details.supplements).toEqual([
       {
         id: 'supplement_1',
+        runId: 'run_1',
         text: 'Use official sources',
         attachmentIds: ['attachment_1'],
         createdAt: 1_100,

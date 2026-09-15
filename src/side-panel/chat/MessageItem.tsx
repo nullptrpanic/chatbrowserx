@@ -15,6 +15,7 @@ import { RestrictedMarkdown } from './RestrictedMarkdown';
 
 export interface MessageItemProps {
   readonly message: PanelMessage;
+  readonly segments?: readonly PanelMessage[] | undefined;
   readonly attachments: AttachmentDraftClient;
   readonly t: Translator;
   readonly task?: PanelTask | null;
@@ -34,6 +35,7 @@ export interface MessageItemProps {
 /** Renders one user, assistant, or system message with safe content and image references. */
 export function MessageItem({
   message,
+  segments,
   attachments,
   t,
   task = null,
@@ -56,9 +58,6 @@ export function MessageItem({
   const sourcePage = message.role === 'user' ? message.sourcePage : undefined;
   const cancelledRun = task?.status === 'cancelled' || run?.status === 'cancelled';
   const failedRun = task?.status === 'failed' || run?.status === 'failed';
-  const terminalRun =
-    run !== null &&
-    (run.status === 'failed' || run.status === 'cancelled' || run.status === 'completed');
   const displayedText =
     message.text.length > 0
       ? message.text
@@ -67,6 +66,45 @@ export function MessageItem({
         : message.role === 'assistant' && message.status === 'interrupted' && cancelledRun
           ? t('cancelledResponse')
           : '';
+  // Turn completion can still be a tool-use acknowledgement. Only the owning run's
+  // completion replaces all process replies and supplement quotes, including on copy.
+  const finalOnly = message.role === 'assistant' && (run?.status ?? task?.status) === 'completed';
+  const answers = finalOnly ? [{ ...message, replySegment: undefined }] : (segments ?? [message]);
+  const quotedIds = new Set(
+    answers.flatMap(
+      (answer) => answer.replySegment?.supplements.map((supplement) => supplement.id) ?? [],
+    ),
+  );
+  const trailingSupplements =
+    message.role === 'assistant' && !finalOnly
+      ? (task?.supplements.filter(
+          (s) =>
+            !quotedIds.has(s.id) && (s.runId === undefined || run === null || s.runId === run.id),
+        ) ?? [])
+      : [];
+  const copyText = answers
+    .map((answer) =>
+      [
+        ...(answer.replySegment?.supplements ?? []).map((s) =>
+          s.text
+            .split('\n')
+            .map((line) => `> ${line}`)
+            .join('\n'),
+        ),
+        answer.id === message.id ? displayedText : answer.text,
+      ]
+        .filter(Boolean)
+        .join('\n\n'),
+    )
+    .join('\n\n');
+  const answerAttachmentIds = [
+    ...new Set(
+      answers.flatMap((answer) => [
+        ...answer.attachmentIds,
+        ...(answer.replySegment?.supplements.flatMap((s) => s.attachmentIds) ?? []),
+      ]),
+    ),
+  ];
   const canClearTaskContext =
     message.role === 'assistant' && taskInteractive && task?.status === 'cancelled';
   const canReply =
@@ -136,15 +174,39 @@ export function MessageItem({
             ) : null}
           </div>
         )}
-        <MessageImages
-          attachmentIds={message.attachmentIds}
-          client={attachments}
-          t={t}
-          onOpenImagePreview={onOpenImagePreview}
-        />
-        {displayedText.length === 0 && message.status === 'streaming' ? null : (
-          <RestrictedMarkdown text={displayedText} />
-        )}
+        {answers.map((answer) => (
+          <div className="message-answer-segment" key={answer.replySegment?.id ?? 'original'}>
+            {answer.replySegment?.supplements.map((supplement) => (
+              <blockquote className="message-supplement-quote" key={supplement.id}>
+                <p>{supplement.text}</p>
+                <MessageImages
+                  attachmentIds={supplement.attachmentIds}
+                  client={attachments}
+                  t={t}
+                  onOpenImagePreview={onOpenImagePreview}
+                />
+              </blockquote>
+            ))}
+            <MessageImages
+              attachmentIds={answer.attachmentIds}
+              client={attachments}
+              t={t}
+              onOpenImagePreview={onOpenImagePreview}
+            />
+            <RestrictedMarkdown text={answer.id === message.id ? displayedText : answer.text} />
+          </div>
+        ))}
+        {trailingSupplements.map((supplement) => (
+          <blockquote className="message-supplement-quote" key={supplement.id}>
+            <p>{supplement.text}</p>
+            <MessageImages
+              attachmentIds={supplement.attachmentIds}
+              client={attachments}
+              t={t}
+              onOpenImagePreview={onOpenImagePreview}
+            />
+          </blockquote>
+        ))}
         {message.status === 'streaming' ? (
           <span className="streaming-label" role="status">
             <span className="typing-dots" aria-hidden="true">
@@ -153,11 +215,11 @@ export function MessageItem({
             {t('streaming')}
           </span>
         ) : null}
-        {message.status === 'interrupted' && !cancelledRun && !terminalRun ? (
+        {message.status === 'interrupted' && task === null && run === null ? (
           <p className="interrupted-label">{t('interrupted')}</p>
         ) : null}
-        {displayedText.length > 0 ||
-        message.attachmentIds.length > 0 ||
+        {copyText.length > 0 ||
+        answerAttachmentIds.length > 0 ||
         canClearTaskContext ||
         canReply ? (
           <div className="message-actions">
@@ -165,8 +227,8 @@ export function MessageItem({
               type="button"
               onClick={() => {
                 void copyMessageToClipboard({
-                  text: displayedText,
-                  attachmentIds: message.attachmentIds,
+                  text: copyText,
+                  attachmentIds: answerAttachmentIds,
                   client: attachments,
                 })
                   .then(() => {

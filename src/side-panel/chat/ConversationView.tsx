@@ -56,13 +56,18 @@ export function ConversationView({
     tasks.flatMap((item) => item.runs.map((run) => [taskRunKey(item.id, run.id), run] as const)),
   );
   const answerHostByRun = new Map<string, string>();
+  const answersByRun = new Map<string, Map<string, PanelMessage>>();
   for (const message of displayMessages) {
     const run =
       message.runId === undefined
         ? null
         : (runsById.get(taskRunKey(message.taskId, message.runId)) ?? null);
     if (canHostTaskDetails(message, tasksById.get(message.taskId) ?? null, run)) {
-      answerHostByRun.set(messageRunKey(message), message.id);
+      const key = messageRunKey(message);
+      answerHostByRun.set(key, message.id);
+      const segments = answersByRun.get(key) ?? new Map<string, PanelMessage>();
+      segments.set(message.replySegment?.id ?? 'original', message);
+      answersByRun.set(key, segments);
     }
   }
   const visibleAssistantMessageIds = new Set(answerHostByRun.values());
@@ -137,10 +142,12 @@ export function ConversationView({
               message.runId === undefined
                 ? null
                 : (runsById.get(taskRunKey(message.taskId, message.runId)) ?? null);
+            const answers = [...(answersByRun.get(messageRunKey(message))?.values() ?? [])];
             return (
               <MessageItem
-                key={message.id}
+                key={message.role === 'assistant' ? messageRunKey(message) : message.id}
                 message={message}
+                segments={message.role === 'assistant' ? answers : undefined}
                 task={messageTask}
                 run={messageRun}
                 taskInteractive={messageTask?.id === task?.id}

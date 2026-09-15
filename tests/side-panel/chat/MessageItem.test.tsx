@@ -46,6 +46,39 @@ function requireBlob(value: ClipboardItemData | undefined): Blob {
 }
 
 describe('MessageItem', () => {
+  it.each(['planning', 'queued', 'waiting_for_auth', 'paused', 'completed', 'failed'] as const)(
+    'does not tell the user to submit again when the owning run is %s',
+    (status) => {
+      render(
+        <MessageItem
+          message={{
+            id: 'assistant_continuing',
+            taskId: 'task_1',
+            runId: 'run_1',
+            role: 'assistant',
+            status: 'interrupted',
+            text: 'Preserved response',
+            attachmentIds: [],
+            createdAt: 1_000,
+            updatedAt: 1_100,
+          }}
+          run={{
+            id: 'run_1',
+            attempt: 1,
+            status,
+            startedAt: 1_000,
+            endedAt: null,
+            lastError: null,
+          }}
+          attachments={attachments}
+          t={t}
+        />,
+      );
+      expect(screen.getByText('Preserved response')).toBeVisible();
+      expect(screen.queryByText(t('interrupted'))).not.toBeInTheDocument();
+    },
+  );
+
   it('explains that the next submission continues an interrupted task', () => {
     render(
       <MessageItem

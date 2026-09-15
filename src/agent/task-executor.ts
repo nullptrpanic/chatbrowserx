@@ -10,6 +10,7 @@ import type { Clock } from '../shared/time';
 import type { Checkpoint } from '../tasks/checkpoint-types';
 import type { ContinuationItem, PendingToolCall } from '../tasks/continuation-types';
 import type { TaskSnapshot } from '../tasks/task-command-service';
+import type { MessageRecord } from '../tasks/message-types';
 import type { TaskError } from '../tasks/task-errors';
 import { TaskLeaseManager } from '../tasks/task-lease';
 import { transitionTask, type TaskTransitionType } from '../tasks/task-transition';
@@ -804,12 +805,50 @@ export class TaskExecutor {
     const supplements = selectPendingTaskSupplements(messages, snapshot.events, snapshot.task.id);
     if (supplements.length === 0) return snapshot;
 
+    // Freeze the visible answer into context before starting a supplement's new reply segment.
+    // A completion race or worker restart may leave it outside the last committed checkpoint.
+    const messagesById = new Map(messages.map((message) => [message.id, message]));
+    let previousReply: MessageRecord | undefined;
+    for (const event of snapshot.events) {
+      if (event.runId !== snapshot.run.id) continue;
+      if (event.type === 'supplement.applied' || event.type === 'context.compacted') {
+        previousReply = undefined;
+      } else if (event.type === 'message.recorded') {
+        const message = messagesById.get(event.messageId);
+        if (message?.role === 'assistant') previousReply = message;
+      }
+    }
+    const continuationItems = [...snapshot.checkpoint.continuationItems];
+    if (
+      previousReply !== undefined &&
+      previousReply.status !== 'error' &&
+      (previousReply.text.length > 0 || previousReply.attachmentIds.length > 0) &&
+      !continuationItems.some((item) =>
+        item.type === 'message_ref'
+          ? item.messageId === previousReply?.id
+          : item.type === 'function_call' &&
+            item.modelOutputItems?.some(
+              (output) =>
+                output.type === 'assistant_message_ref' && output.messageId === previousReply?.id,
+            ),
+      )
+    ) {
+      if (previousReply.status === 'streaming') {
+        await this.#dependencies.conversations.updateMessage({
+          ...previousReply,
+          status: 'interrupted',
+          updatedAt: Math.max(previousReply.updatedAt, this.#dependencies.clock.now()),
+        });
+      }
+      continuationItems.push({ type: 'message_ref', messageId: previousReply.id });
+    }
+
     return this.#saveBoundary(snapshot, ownerId, signal, {
       type: 'task.supplements-applied',
       reason: 'user_supplements_applied',
       supplementIds: supplements.map(({ id }) => id).slice(-100),
       continuationItems: [
-        ...snapshot.checkpoint.continuationItems,
+        ...continuationItems,
         ...supplements.map((message): ContinuationItem => ({
           type: 'message_ref',
           messageId: message.id,

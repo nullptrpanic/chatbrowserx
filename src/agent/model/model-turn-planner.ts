@@ -377,9 +377,19 @@ export class ModelTurnPlanner implements AgentPlanner {
       input.task.id,
       'conversation',
     ).filter((message) => message.kind === 'conversation' && message.role === 'assistant');
+    // A supplement starts a new visible answer segment. Recovery may replace only its own segment.
+    const supplementBoundary = input.events.reduce(
+      (sequence, event) =>
+        event.runId === input.checkpoint.runId && event.type === 'supplement.applied'
+          ? Math.max(sequence, event.sequence)
+          : sequence,
+      0,
+    );
     const currentRunMessageIds = new Set(
       input.events.flatMap((event) =>
-        event.runId === input.checkpoint.runId && event.type === 'message.recorded'
+        event.runId === input.checkpoint.runId &&
+        event.type === 'message.recorded' &&
+        event.sequence > supplementBoundary
           ? [event.messageId]
           : [],
       ),

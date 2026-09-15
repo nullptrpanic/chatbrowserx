@@ -249,6 +249,23 @@
   line-height: 1.62;
 }
 
+.message-answer-segment + .message-answer-segment {
+  margin-top: 20px;
+}
+
+.message-supplement-quote {
+  margin: 0 0 14px;
+  padding: 8px 12px;
+  border-left: 3px solid var(--cbx-divider);
+  color: var(--cbx-muted);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.message-supplement-quote p {
+  margin: 0;
+}
+
 .message-markdown p {
   margin: 0 0 8px;
 }
