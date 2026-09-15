@@ -103,7 +103,10 @@ export class ChromeScreenshotPagePort {
   }
 
   /** Hides or restores all extension-owned page overlays around viewport capture. */
-  async setOverlaysHidden(tabId: number, hidden: boolean): Promise<void> {
+  async setOverlaysHidden(
+    tabId: number,
+    hidden: boolean,
+  ): Promise<Pick<ScreenshotSelection, 'viewportWidth' | 'viewportHeight'>> {
     // Restoration must be immediate and must not inject into a replacement document.
     if (hidden) await this.#ensurePage(tabId);
     const requestId = this.#dependencies.ids.create('page_request');
@@ -117,7 +120,21 @@ export class ChromeScreenshotPagePort {
       },
       { frameId: 0 },
     );
-    readResponse(response, requestId);
+    const data = readResponse(response, requestId);
+    if (
+      typeof data !== 'object' ||
+      data === null ||
+      !('viewportWidth' in data) ||
+      typeof data.viewportWidth !== 'number' ||
+      !('viewportHeight' in data) ||
+      typeof data.viewportHeight !== 'number' ||
+      !Number.isFinite(data.viewportWidth) ||
+      data.viewportWidth <= 0 ||
+      !Number.isFinite(data.viewportHeight) ||
+      data.viewportHeight <= 0
+    )
+      throw new ScreenshotError('CAPTURE_GEOMETRY_CHANGED');
+    return { viewportWidth: data.viewportWidth, viewportHeight: data.viewportHeight };
   }
 
   /** Ensures the on-demand page bundle is available under an already granted origin permission. */

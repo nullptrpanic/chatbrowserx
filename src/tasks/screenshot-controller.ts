@@ -9,7 +9,10 @@ export interface ScreenshotAttachmentResult {
 export interface ScreenshotControllerDependencies {
   readonly page: {
     selectRegion(tabId: number): Promise<ScreenshotSelection | null>;
-    setOverlaysHidden(tabId: number, hidden: boolean): Promise<void>;
+    setOverlaysHidden(
+      tabId: number,
+      hidden: boolean,
+    ): Promise<Pick<ScreenshotSelection, 'viewportWidth' | 'viewportHeight'>>;
   };
   readonly capture: (tabId: number) => Promise<Blob>;
   readonly crop: (blob: Blob, selection: ScreenshotSelection) => Promise<Blob>;
@@ -41,7 +44,7 @@ export class ScreenshotController {
       throw ScreenshotError.from(cause, 'SELECTION_FAILED');
     });
     if (selection === null) return null;
-    const captured = await this.#captureWithoutOverlays(tabId);
+    const captured = await this.#captureWithoutOverlays(tabId, selection);
     try {
       const cropped = await this.#dependencies.crop(captured, selection);
       return await this.#dependencies.persist(cropped, 'region_capture');
@@ -51,14 +54,34 @@ export class ScreenshotController {
   }
 
   /** Hides all owned overlays around the privileged browser capture call. */
-  async #captureWithoutOverlays(tabId: number): Promise<Blob> {
-    await this.#dependencies.page.setOverlaysHidden(tabId, true).catch(() => undefined);
+  async #captureWithoutOverlays(tabId: number, selection?: ScreenshotSelection): Promise<Blob> {
+    const validate = (
+      viewport: Pick<ScreenshotSelection, 'viewportWidth' | 'viewportHeight'> | undefined,
+    ) => {
+      if (
+        selection &&
+        (viewport?.viewportWidth !== selection.viewportWidth ||
+          viewport.viewportHeight !== selection.viewportHeight)
+      )
+        throw new ScreenshotError('CAPTURE_GEOMETRY_CHANGED');
+    };
+    let captured = false;
     try {
-      return await this.#dependencies.capture(tabId);
+      const before = await this.#dependencies.page
+        .setOverlaysHidden(tabId, true)
+        .catch(() => undefined);
+      validate(before);
+      const blob = await this.#dependencies.capture(tabId);
+      captured = true;
+      return blob;
     } catch (cause) {
       throw ScreenshotError.from(cause, 'CAPTURE_FAILED');
     } finally {
-      await this.#dependencies.page.setOverlaysHidden(tabId, false).catch(() => undefined);
+      const after = await this.#dependencies.page
+        .setOverlaysHidden(tabId, false)
+        .catch(() => undefined);
+      // Do not persist a stale crop, or mask the original failure if capture already failed.
+      if (captured) validate(after);
     }
   }
 }

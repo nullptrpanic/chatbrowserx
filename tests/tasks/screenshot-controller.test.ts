@@ -16,7 +16,10 @@ function fixture() {
   const cropped = new Blob(['crop'], { type: 'image/png' });
   const page = {
     selectRegion: vi.fn(async (): Promise<ScreenshotSelection | null> => selection),
-    setOverlaysHidden: vi.fn(async () => undefined),
+    setOverlaysHidden: vi.fn(async () => ({
+      viewportWidth: selection.viewportWidth,
+      viewportHeight: selection.viewportHeight,
+    })),
   };
   const capture = vi.fn(async () => captured);
   const crop = vi.fn(async () => cropped);
@@ -25,6 +28,26 @@ function fixture() {
 }
 
 describe('ScreenshotController', () => {
+  it.each(['before', 'after'] as const)(
+    'rejects changed viewport %s capture without storing a wrong crop',
+    async (phase) => {
+      const deps = fixture();
+      if (phase === 'after')
+        deps.page.setOverlaysHidden.mockResolvedValueOnce({
+          viewportWidth: 500,
+          viewportHeight: 400,
+        });
+      deps.page.setOverlaysHidden.mockResolvedValueOnce({
+        viewportWidth: 700,
+        viewportHeight: 400,
+      });
+      await expect(new ScreenshotController(deps).captureRegion(7)).rejects.toMatchObject({
+        code: 'CAPTURE_GEOMETRY_CHANGED',
+      });
+      expect(deps.crop).not.toHaveBeenCalled();
+      expect(deps.persist).not.toHaveBeenCalled();
+    },
+  );
   it.each([
     ['selectRegion', 'SELECTION_FAILED'],
     ['crop', 'IMAGE_PROCESSING_FAILED'],
@@ -48,6 +71,10 @@ describe('ScreenshotController', () => {
     });
     expect(deps.crop).not.toHaveBeenCalled();
     expect(deps.persist).not.toHaveBeenCalled();
+    expect(deps.page.setOverlaysHidden.mock.calls).toEqual([
+      [7, true],
+      [7, false],
+    ]);
   });
 
   it('still captures and restores when optional overlay hiding is unavailable', async () => {
@@ -62,6 +89,24 @@ describe('ScreenshotController', () => {
     ]);
     expect(deps.persist).toHaveBeenCalledWith(deps.captured, 'viewport_capture');
   });
+
+  it.each([true, false])(
+    'does not save a region if the hidden=%s acknowledgement is lost',
+    async (hidden) => {
+      const deps = fixture();
+      if (!hidden) deps.page.setOverlaysHidden.mockResolvedValueOnce(selection);
+      deps.page.setOverlaysHidden.mockRejectedValueOnce(new Error('Page receiver disappeared'));
+      await expect(new ScreenshotController(deps).captureRegion(7)).rejects.toMatchObject({
+        code: 'CAPTURE_GEOMETRY_CHANGED',
+      });
+      expect(deps.persist).not.toHaveBeenCalled();
+      expect(deps.crop).not.toHaveBeenCalled();
+      expect(deps.page.setOverlaysHidden.mock.calls).toEqual([
+        [7, true],
+        [7, false],
+      ]);
+    },
+  );
 
   it('captures and persists the current viewport while restoring overlays', async () => {
     const deps = fixture();

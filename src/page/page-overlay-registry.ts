@@ -9,9 +9,9 @@ export function registerPageOverlayHost(host: HTMLElement): () => void {
 /** Hides or reveals all extension-owned overlays without affecting host-page elements. */
 export async function setPageOverlaysHidden(hidden: boolean, view: Window = window): Promise<void> {
   for (const host of overlayHosts) host.style.visibility = hidden ? 'hidden' : 'visible';
-  if (!hidden || !overlayHosts.size) return;
-  // A style mutation (or a single RAF) can precede painting. Capturing that frame would include
-  // our own lens and translations, feeding them back into OCR and pixel-change detection.
+  if (!hidden) return;
+  // Even an unmounted selector can remain in the last painted frame. Wait for that frame to
+  // leave the compositor before acknowledging capture, including when no overlay hosts remain.
   await new Promise<void>((resolve, reject) => {
     let frame = view.requestAnimationFrame(() => {
       frame = view.requestAnimationFrame(() => {

@@ -5,6 +5,19 @@ import { registerPageOverlayHost } from '../../src/page/page-overlay-registry';
 afterEach(() => vi.useRealTimers());
 
 describe('handlePageCommand', () => {
+  it('acknowledges the current viewport with overlay restoration', async () => {
+    expect(
+      await handlePageCommand({
+        version: 1,
+        requestId: 'viewport',
+        type: 'page.overlays.setHidden',
+        payload: { hidden: false },
+      }),
+    ).toMatchObject({
+      ok: true,
+      data: { hidden: false, viewportWidth: window.innerWidth, viewportHeight: window.innerHeight },
+    });
+  });
   it('reports suspended rendering through the protocol instead of starting a stale capture', async () => {
     vi.useFakeTimers();
     const raf = vi.spyOn(window, 'requestAnimationFrame').mockReturnValue(42);

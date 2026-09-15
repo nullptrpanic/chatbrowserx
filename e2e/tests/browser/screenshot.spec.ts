@@ -4,10 +4,10 @@ import { closeHttpFixtureServer } from './helpers/http-server';
 
 const selector = '[data-chatbrowserx-overlay="screenshot"]';
 
-for (const mode of ['viewport', 'region', 'cancel'] as const) {
+for (const mode of ['viewport', 'region', 'cancel', 'resize'] as const) {
   extensionTest(
     `captures ${mode} on the current page after switching tabs, without broadcasting`,
-    async ({ extensionSession }) => {
+    async ({ extensionSession }, testInfo) => {
       const server = createServer((request, response) => {
         const current = request.url !== '/old';
         response.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
@@ -25,6 +25,44 @@ for (const mode of ['viewport', 'region', 'cancel'] as const) {
         await old.goto(`${origin}/old`);
         const current = await context.newPage();
         await current.goto(origin);
+        await current.evaluate(() => {
+          const events: unknown[] = [];
+          Object.assign(window, { screenshotEvents: events });
+          for (const type of ['pointerdown', 'pointermove', 'pointerup', 'resize']) {
+            window.addEventListener(
+              type,
+              (event) => {
+                const pointer = event as PointerEvent;
+                events.push({
+                  type,
+                  x: pointer.clientX,
+                  y: pointer.clientY,
+                  width: innerWidth,
+                  height: innerHeight,
+                  dpr: devicePixelRatio,
+                });
+              },
+              true,
+            );
+          }
+        });
+        await extensionSession.serviceWorker.evaluate((pauseSelection) => {
+          const selections: unknown[] = [];
+          Object.assign(globalThis, { screenshotSelections: selections });
+          const original = chrome.tabs.sendMessage.bind(chrome.tabs);
+          chrome.tabs.sendMessage = (async (...args: Parameters<typeof original>) => {
+            const result = await original(...args);
+            if ((args[1] as { type?: string }).type === 'page.screenshot.select') {
+              selections.push(result);
+              // Hold only the transport acknowledgement, keeping the real user selection intact.
+              if (pauseSelection)
+                await new Promise<void>((resolve) => {
+                  Object.assign(globalThis, { releaseScreenshotSelection: resolve });
+                });
+            }
+            return result;
+          }) as typeof chrome.tabs.sendMessage;
+        }, mode === 'resize');
         await old.bringToFront();
         await expect(panel.locator('.page-title')).toHaveText('Old capture page');
         await old.close();
@@ -55,6 +93,28 @@ for (const mode of ['viewport', 'region', 'cancel'] as const) {
           await expect(current.locator(selector)).toHaveCount(0);
         }
 
+        if (mode === 'resize') {
+          await expect
+            .poll(() =>
+              extensionSession.serviceWorker.evaluate(
+                () =>
+                  typeof (globalThis as unknown as { releaseScreenshotSelection?: () => void })
+                    .releaseScreenshotSelection,
+              ),
+            )
+            .toBe('function');
+          await current.setViewportSize({ width: 1400, height: 800 });
+          await extensionSession.serviceWorker.evaluate(() =>
+            (
+              globalThis as unknown as { releaseScreenshotSelection: () => void }
+            ).releaseScreenshotSelection(),
+          );
+          await expect(panel.locator('.screenshot-control > button')).toBeEnabled();
+          await expect(panel.locator('.composer-error')).toBeVisible();
+          await expect(panel.locator('.attachment-thumbnail')).toHaveCount(0);
+          return;
+        }
+
         await expect(panel.locator('.screenshot-control > button')).toBeEnabled();
         await expect(panel.locator('.composer-error')).toHaveCount(0);
         await expect(panel.locator('.attachment-thumbnail')).toHaveCount(mode === 'cancel' ? 0 : 1);
@@ -76,6 +136,25 @@ for (const mode of ['viewport', 'region', 'cancel'] as const) {
             height: innerHeight,
           }));
           const img = panel.locator('.attachment-thumbnail img');
+          await testInfo.attach('screenshot-geometry', {
+            contentType: 'application/json',
+            body: JSON.stringify({
+              reference,
+              size,
+              events: await current.evaluate(
+                () => (window as unknown as { screenshotEvents: unknown[] }).screenshotEvents,
+              ),
+              selections: await extensionSession.serviceWorker.evaluate(
+                () =>
+                  (globalThis as unknown as { screenshotSelections: unknown[] })
+                    .screenshotSelections,
+              ),
+              actual: await img.evaluate((el: HTMLImageElement) => ({
+                width: el.naturalWidth,
+                height: el.naturalHeight,
+              })),
+            }),
+          });
           await expect(img).toHaveJSProperty(
             'naturalWidth',
             mode === 'region'

@@ -9,6 +9,21 @@ afterEach(() => {
   vi.restoreAllMocks();
 });
 
+it('waits for the removed selection overlay to be painted out even with no registered hosts', async () => {
+  vi.useFakeTimers();
+  const unregister = registerPageOverlayHost(document.createElement('div'));
+  unregister();
+  let acknowledged = false;
+  const pending = setPageOverlaysHidden(true).then(() => {
+    acknowledged = true;
+  });
+  await vi.advanceTimersByTimeAsync(1);
+  expect(acknowledged).toBe(false);
+  await vi.advanceTimersByTimeAsync(40);
+  await pending;
+  expect(acknowledged).toBe(true);
+});
+
 it('acknowledges hiding only after a rendering opportunity, and restores without waiting', async () => {
   vi.useFakeTimers();
   const host = document.createElement('div');

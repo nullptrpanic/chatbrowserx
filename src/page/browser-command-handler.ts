@@ -134,7 +134,11 @@ export async function handlePageCommand(
       version: PROTOCOL_VERSION,
       requestId: command.requestId,
       ok: true,
-      data: { hidden: command.payload.hidden },
+      data: {
+        hidden: command.payload.hidden,
+        viewportWidth: environment.window.innerWidth,
+        viewportHeight: environment.window.innerHeight,
+      },
     };
   }
 
