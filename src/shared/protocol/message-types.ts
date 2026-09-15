@@ -2,6 +2,7 @@ import type {
   TranslationSelection,
   TranslationTexts,
   TranslationLensOptions,
+  TranslationImageSource,
 } from '../../translation/region-translation';
 
 export const PROTOCOL_VERSION = 1 as const;
@@ -58,7 +59,7 @@ export type ExtensionMessage =
   | Message<'translation.toggle', { tabId: number }>
   | Message<'translation.getState', { tabId: number } | { sessionId: string }>
   | Message<'translation.read', TranslationSelection | TranslationTexts>
-  | Message<'translation.inspect', TranslationSelection>
+  | Message<'translation.image', TranslationImageSource>
   | Message<
       'translation.cancel',
       { sessionId: string; close: boolean; kind?: 'text' | 'pixels' | undefined }

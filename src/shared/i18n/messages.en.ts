@@ -28,7 +28,9 @@ export const en = {
   regionTranslation: 'Translate region',
   stopRegionTranslation: 'Stop region translation',
   translationLoading: 'Translating…',
-  translationFailed: 'Translation failed. Move to retry, or press Esc to exit.',
+  translationFailed: 'Some content failed to translate. Press Esc to exit.',
+  translationUnsupported: 'Some content cannot be translated and is left unchanged',
+  translationRetry: 'Retry',
   translationError:
     'Cannot start translation. Use a regular web page with extension access. After an update, reload the extension and refresh the page.',
   translationReloadRequired:

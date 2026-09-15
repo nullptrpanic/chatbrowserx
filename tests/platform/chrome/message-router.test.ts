@@ -21,7 +21,9 @@ it.each([
   { failure: new ProviderError('AUTH'), code: 'MODEL_AUTH' },
   { failure: new ProviderError('RATE_LIMIT'), code: 'MODEL_RATE_LIMIT' },
   {
-    failure: new ProviderError('INVALID_RESPONSE', { invalidResponseStage: 'sse_protocol' }),
+    failure: new ProviderError('INVALID_RESPONSE', {
+      invalidResponseStage: 'sse_protocol',
+    }),
     code: 'MODEL_INVALID_RESPONSE_SSE_PROTOCOL',
   },
   {
@@ -30,20 +32,26 @@ it.each([
   },
   { output: 'not JSON: private output', code: 'TRANSLATION_RESPONSE_INVALID' },
   { output: '{"blocks":[]}', code: 'TRANSLATION_RESPONSE_INVALID' },
-  { output: '{"blocks":"private malformed output"}', code: 'TRANSLATION_RESPONSE_INVALID' },
+  {
+    output: '{"blocks":"private malformed output"}',
+    code: 'TRANSLATION_RESPONSE_INVALID',
+  },
   { failure: new Error('private unexpected error'), code: 'COMMAND_FAILED' },
 ])('preserves a safe translation failure reason: $code', async ({ failure, output, code }) => {
   const translation = new TranslationController({
     getSession: async () => 's',
     toggle: async () => true,
-    capture: vi.fn(),
     settings: { get: async () => DEFAULT_APP_SETTINGS },
     provider: {
       async *stream() {
         if (failure) throw failure;
         if (output === undefined) throw new Error('Missing fixture output');
         yield { type: 'text.delta' as const, delta: output };
-        yield { type: 'response.completed' as const, responseId: 'r', usage: null };
+        yield {
+          type: 'response.completed' as const,
+          responseId: 'r',
+          usage: null,
+        };
       },
     },
   });
@@ -77,7 +85,12 @@ it.each([
       get: async () => ({ active: true }),
       sendMessage: async (_tab, message) => {
         if (unavailable) throw new Error('private page details');
-        return { version: 1, requestId: message.requestId, ok: true, data: { sessionId: null } };
+        return {
+          version: 1,
+          requestId: message.requestId,
+          ok: true,
+          data: { sessionId: null },
+        };
       },
     },
   });
@@ -85,7 +98,6 @@ it.each([
   const translation = new TranslationController({
     getSession: (id) => page.getSession(id),
     toggle: async () => false,
-    capture: vi.fn(),
     settings: { get: async () => DEFAULT_APP_SETTINGS },
     provider: { stream },
   });
@@ -250,8 +262,12 @@ describe('createMessageRouter', () => {
     const translation = {
       toggle: vi.fn(async () => ({ active: true })),
       getState: vi.fn(async () => ({ active: false })),
-      read: vi.fn(async () => ({ blocks: [], colors: [], cacheKey: 'configured' })),
-      inspect: vi.fn(async () => ({ tiles: [] })),
+      image: vi.fn(async () => ({ mimeType: 'image/png', data: 'YWJj' })),
+      read: vi.fn(async () => ({
+        blocks: [],
+        colors: [],
+        cacheKey: 'configured',
+      })),
       cancel: vi.fn(),
     };
     const router = createMessageRouter({
@@ -260,13 +276,34 @@ describe('createMessageRouter', () => {
       screenshots: buildScreenshots(),
       translation,
     });
+    const image = {
+      version: 1,
+      requestId: 'image',
+      type: 'translation.image',
+      payload: { sessionId: 'enabled', url: 'https://cdn.test/i.png' },
+    };
+    expect(await router(image)).toMatchObject({
+      ok: false,
+      error: { code: 'INVALID_CONTEXT' },
+    });
+    expect(await router(image, { senderTabId: 7, senderFrameId: 1 })).toMatchObject({
+      ok: false,
+      error: { code: 'INVALID_CONTEXT' },
+    });
+    expect(await router(image, { senderTabId: 7, senderFrameId: 0 })).toMatchObject({
+      ok: true,
+      data: { mimeType: 'image/png' },
+    });
+    expect(translation.image).toHaveBeenCalledExactlyOnceWith(7, image.payload);
     const toggle = {
       version: 1,
       requestId: 'enable',
       type: 'translation.toggle',
       payload: { tabId: 7 },
     };
-    expect(await router(toggle, { senderTabId: 8 })).toMatchObject({ ok: false });
+    expect(await router(toggle, { senderTabId: 8 })).toMatchObject({
+      ok: false,
+    });
     expect(translation.toggle).not.toHaveBeenCalled();
     expect(await router(toggle)).toMatchObject({ ok: true });
     expect(translation.toggle).toHaveBeenCalledWith(7);
@@ -276,12 +313,18 @@ describe('createMessageRouter', () => {
     });
     const payload = {
       sessionId: 'enabled',
+      imageUrl: 'data:image/png;base64,cG5n',
       devicePixelRatio: 1,
       viewportWidth: 800,
       viewportHeight: 600,
       rect: { x: 10, y: 10, width: 100, height: 100 },
     };
-    const read = { version: 1, requestId: 'read', type: 'translation.read', payload };
+    const read = {
+      version: 1,
+      requestId: 'read',
+      type: 'translation.read',
+      payload,
+    };
     expect(await router(read)).toMatchObject({ ok: false });
     expect(translation.read).not.toHaveBeenCalled();
     expect(await router(read, { senderTabId: 7, senderFrameId: 3 })).toMatchObject({ ok: false });
@@ -307,14 +350,9 @@ describe('createMessageRouter', () => {
       { senderTabId: 7, senderFrameId: 0 },
     );
     expect(translation.cancel).toHaveBeenLastCalledWith(7, 'enabled', false, 'pixels');
-    const inspect = { ...read, type: 'translation.inspect' };
-    expect(await router(inspect)).toMatchObject({ ok: false });
-    expect(await router(inspect, { senderTabId: 7, senderFrameId: 3 })).toMatchObject({
-      ok: false,
-    });
-    expect(translation.inspect).not.toHaveBeenCalled();
-    expect(await router(inspect, { senderTabId: 7, senderFrameId: 0 })).toMatchObject({ ok: true });
-    expect(translation.inspect).toHaveBeenCalledWith(7, payload);
+    expect(
+      await router({ ...read, type: 'translation.inspect' }, { senderTabId: 7, senderFrameId: 0 }),
+    ).toMatchObject({ ok: false });
   });
 
   it('returns a redacted INVALID_MESSAGE envelope for malformed input', async () => {

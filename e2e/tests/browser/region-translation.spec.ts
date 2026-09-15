@@ -1,5 +1,6 @@
 import { extensionTest, expect } from './fixtures/extension-test';
 import { sendExtensionMessage } from './helpers/extension-runtime';
+extensionTest.use({ extensionHeadless: true });
 
 extensionTest(
   'keeps the formal toolbar state in sync across translation, Escape, tab changes and reload',
@@ -99,12 +100,16 @@ extensionTest(
             if (!frame || !notice) throw new Error('Translation controls missing.');
             return {
               frameLeft: frame.style.left,
-              text: [...root.querySelectorAll<HTMLElement>('.text')].map((span) => ({
-                text: span.textContent,
-                left: span.style.left,
-                top: span.style.top,
-                font: span.style.fontSize,
-              })),
+              text: [...root.querySelectorAll<HTMLElement>('.text')].map((span) => {
+                const range = document.createRange();
+                range.selectNodeContents(span);
+                return {
+                  text: span.textContent,
+                  left: span.style.left,
+                  top: `${range.getBoundingClientRect().top}px`,
+                  font: span.style.fontSize,
+                };
+              }),
               noticeHidden: notice.hidden,
             };
           },
@@ -135,8 +140,8 @@ extensionTest(
         const box = r.getBoundingClientRect();
         return { x: box.x, y: box.y };
       });
-      expect(Number.parseFloat(firstText.left)).toBeCloseTo(source.x - 1, 1);
-      expect(Number.parseFloat(firstText.top)).toBeCloseTo(source.y - 1, 1);
+      expect(Number.parseFloat(firstText.left)).toBeCloseTo(source.x, 1);
+      expect(Number.parseFloat(firstText.top)).toBeCloseTo(source.y, 1);
       for (const x of [650, 610, 570, 620]) {
         await page.mouse.move(x, 400, { steps: 12 });
         await expect(lens).toHaveAttribute('data-status', 'ready');
@@ -269,7 +274,7 @@ extensionTest(
 );
 
 extensionTest(
-  'translates one real viewport crop without tasks and closes on Escape / toggle',
+  'translates native text without tasks and closes on Escape / toggle',
   async ({ extensionSession }) => {
     const { context, sidePanelPage: panel } = extensionSession;
     const tokenPayload = Buffer.from(
@@ -299,18 +304,15 @@ extensionTest(
     const requests: Record<string, unknown>[] = [];
     await context.route('https://chatgpt.com/backend-api/codex/responses', async (route) => {
       requests.push(route.request().postDataJSON() as Record<string, unknown>);
+      const texts = JSON.parse(route.request().postDataJSON().input[0].content[0].text).texts as {
+        id: string;
+      }[];
       const events = [
         { type: 'response.created', response: { id: 'translation_demo' } },
         {
           type: 'response.output_text.delta',
           delta: JSON.stringify({
-            blocks: [
-              {
-                text: 'Start a new project',
-                translation: '开始一个新项目',
-                box: [100, 100, 600, 100],
-              },
-            ],
+            blocks: texts.map(({ id }) => ({ id, translation: '开始一个新项目' })),
           }),
         },
         { type: 'response.completed', response: { id: 'translation_demo' } },
@@ -320,17 +322,17 @@ extensionTest(
         body: events.map((e) => `event: ${e.type}\ndata: ${JSON.stringify(e)}\n\n`).join(''),
       });
     });
-    await context.route('http://translation.test/', (route) =>
+    await context.route('https://translation.test/', (route) =>
       route.fulfill({
         contentType: 'text/html',
-        body: '<!doctype html><html><body><main>Start a new project</main></body></html>',
+        body: '<!doctype html><html><body><main style="position:absolute;left:400px;top:300px;width:400px;height:100px">Start a new project</main></body></html>',
       }),
     );
     const page = await context.newPage();
-    await page.goto('http://translation.test/');
+    await page.goto('https://translation.test/');
     await page.bringToFront();
     const tabId = await panel.evaluate(
-      async () => (await chrome.tabs.query({ url: 'http://translation.test/' }))[0]?.id,
+      async () => (await chrome.tabs.query({ url: 'https://translation.test/' }))[0]?.id,
     );
     if (tabId === undefined) throw new Error('Target tab missing.');
     const toggle = () =>
@@ -355,7 +357,7 @@ extensionTest(
     }[];
     expect(input).toHaveLength(1);
     expect(input[0]?.content[0]?.text).toContain('zh-CN');
-    expect(input[0]?.content[1]?.image_url).toMatch(/^data:image\/png;base64,/);
+    expect(input[0]?.content.some((item) => item.type === 'input_image')).toBe(false);
     await expect(page.locator('main')).toHaveText('Start a new project');
     const snapshot = await sendExtensionMessage<{ tasks: unknown[]; messages: unknown[] }>(panel, {
       version: 1,

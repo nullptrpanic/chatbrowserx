@@ -29,7 +29,7 @@ extensionTest(
     await context.route('http://translation-dom.test/', (route) =>
       route.fulfill({
         contentType: 'text/html',
-        body: `<!doctype html><style>body{margin:0;background:white;font:20px/32px Georgia}article{position:absolute;left:320px;top:260px;width:820px}p{margin:20px 0}footer{height:1800px}input{position:absolute;top:300px;left:1100px}</style>
+        body: `<!doctype html><style>body{margin:0;background:rgb(240,240,240);font:20px/32px Georgia}article{position:absolute;left:320px;top:260px;width:820px;background:rgba(255,255,255,.5)}h2{background:rgba(18,18,18,.04)}p{margin:20px 0;background:oklab(0.606 0.096545 -0.230606 / .1)}footer{height:1800px}input{position:absolute;top:300px;left:1100px}</style>
     <article><h2>Minify!</h2><p>${paragraph.replace('Both sides', '<a href="#details">Both sides</a>')}</p><p hidden>PRIVATE HIDDEN TEXT</p></article><input value="PRIVATE EDITOR TEXT"><footer></footer>`,
       }),
     );
@@ -44,7 +44,7 @@ extensionTest(
       const blocks = texts.map((t) => ({
         id: t.id,
         translation: t.text.startsWith('The practical')
-          ? '实际的要点是，安全调优不应只按拒绝率评估。拒绝更多请求的模型并不自动意味着更加安全。必须评估预期边界的两侧，这些数字才有意义。'
+          ? '实际的要点是，安全调优不应只按拒绝率评估。拒绝更多请求的模型并不自动意味着更加安全。必须评估<m0>预期边界的两侧</m0>，这些数字才有意义。'
           : t.text === 'Changed paragraph.'
             ? '已更新的段落。'
             : '压缩代码!',
@@ -98,9 +98,12 @@ extensionTest(
             const root = host && chrome.dom.openOrClosedShadowRoot(host);
             return [...(root?.querySelectorAll<HTMLElement>('.text') ?? [])].map((t) => ({
               text: t.textContent,
-              top: t.style.top,
-              left: t.style.left,
+              // Measure the rendered position, including the source layer's scroll transform.
+              top: t.getBoundingClientRect().top,
+              left: t.getBoundingClientRect().left,
               fontSize: t.style.fontSize,
+              background:
+                t.parentElement?.querySelector<HTMLElement>('.source-mask')?.style.backgroundColor,
             }));
           },
         });
@@ -119,13 +122,35 @@ extensionTest(
       requests[0]?.input.flatMap((i) => i.content ?? []).some((c) => c.type === 'input_image'),
     ).toBe(false);
     const sent = JSON.stringify(requests[0]);
-    expect(sent).toContain(paragraph);
+    expect(sent.replace(/<\/?m\d+>/g, '')).toContain(paragraph);
     expect(sent).not.toContain('PRIVATE');
     const before = await readText();
     const titleFont = await page.locator('h2').evaluate((h) => getComputedStyle(h).fontSize);
     expect(before?.find((line) => line.text === '压缩代码!')?.fontSize).toBe(titleFont);
     expect(before?.every((line) => line.text?.trim())).toBe(true);
     expect(before?.map((t) => t.text).join('')).toContain('必须评估预期边界的两侧');
+    const expectedBackgrounds = await page.evaluate(() =>
+      ['h2', 'article p'].map((selector) => {
+        const canvas = document.createElement('canvas');
+        canvas.width = canvas.height = 1;
+        const ctx = canvas.getContext('2d');
+        const article = document.querySelector('article');
+        const source = document.querySelector(selector);
+        if (!ctx || !article || !source) throw new Error('Background fixture missing');
+        ctx.fillStyle = 'white';
+        ctx.fillRect(0, 0, 1, 1);
+        for (const el of [document.body, article, source]) {
+          ctx.fillStyle = getComputedStyle(el).backgroundColor;
+          ctx.fillRect(0, 0, 1, 1);
+        }
+        const [r, g, b] = ctx.getImageData(0, 0, 1, 1).data;
+        return `rgb(${r}, ${g}, ${b})`;
+      }),
+    );
+    expect(before?.map((line) => line.background)).toEqual([
+      expectedBackgrounds[0],
+      ...Array((before?.length ?? 1) - 1).fill(expectedBackgrounds[1]),
+    ]);
     expect(await page.locator('article p').first().textContent()).toBe(paragraph);
     for (const x of [620, 580, 650]) {
       await page.mouse.move(x, 400);
@@ -146,11 +171,7 @@ extensionTest(
       .poll(async () => {
         const after = await readText();
         if (!after || !before || after.length !== before.length) return Infinity;
-        return Math.max(
-          ...after.map((t, i) =>
-            Math.abs(Number.parseFloat(t.top) - Number.parseFloat(before[i]?.top ?? 'NaN') + 40),
-          ),
-        );
+        return Math.max(...after.map((t, i) => Math.abs(t.top - (before[i]?.top ?? NaN) + 40)));
       })
       .toBeLessThan(0.05);
     expect(requests).toHaveLength(1);

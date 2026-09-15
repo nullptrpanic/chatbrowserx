@@ -12,7 +12,7 @@ import {
   type TranslationPatch,
 } from './translation-paint';
 
-export function imageBackgrounds(image: HTMLImageElement): string[] {
+export function imageBackgrounds(image: Element): string[] {
   const colors: string[] = [];
   for (let element: Element | null = image; element; element = element.parentElement)
     colors.unshift(getComputedStyle(element).backgroundColor);
@@ -51,6 +51,64 @@ function imageKey(image: HTMLImageElement) {
   ]);
 }
 
+export function supportsImageLayout(style: CSSStyleDeclaration) {
+  return (
+    !style.objectFit ||
+    style.objectFit === 'fill' ||
+    (['cover', 'contain'].includes(style.objectFit) &&
+      /^(?:-?\d+(?:\.\d+)?(?:%|px)) (?:-?\d+(?:\.\d+)?(?:%|px))$/.test(
+        style.objectPosition || '50% 50%',
+      ))
+  );
+}
+
+/** Raster placement and content-box clipping are separate; cached patches stay intrinsic. */
+function imageGeometry(image: HTMLImageElement) {
+  const r = image.getBoundingClientRect(),
+    s = getComputedStyle(image);
+  const px = (v: string) => Number.parseFloat(v) || 0;
+  const border = (style: string, width: string) => (!style || style === 'none' ? 0 : px(width));
+  const left = border(s.borderLeftStyle, s.borderLeftWidth) + px(s.paddingLeft),
+    right = border(s.borderRightStyle, s.borderRightWidth) + px(s.paddingRight);
+  const top = border(s.borderTopStyle, s.borderTopWidth) + px(s.paddingTop),
+    bottom = border(s.borderBottomStyle, s.borderBottomWidth) + px(s.paddingBottom);
+  const clip = {
+    x: r.x + left,
+    y: r.y + top,
+    width: Math.max(0, r.width - left - right),
+    height: Math.max(0, r.height - top - bottom),
+  };
+  const box = { ...clip };
+  if (s.objectFit === 'cover' || s.objectFit === 'contain') {
+    const scale = (s.objectFit === 'cover' ? Math.max : Math.min)(
+      clip.width / image.naturalWidth,
+      clip.height / image.naturalHeight,
+    );
+    box.width = image.naturalWidth * scale;
+    box.height = image.naturalHeight * scale;
+    const [x = '50%', y = '50%'] = (s.objectPosition || '50% 50%').split(' ');
+    const offset = (v: string, free: number) => (v.endsWith('%') ? (px(v) * free) / 100 : px(v));
+    box.x += offset(x, clip.width - box.width);
+    box.y += offset(y, clip.height - box.height);
+  }
+  const radius = (value: string, dx: number, dy: number) => {
+    const [x = '0', y = x] = value.split(' ');
+    const length = (v: string, extent: number) =>
+      v.endsWith('%') ? (px(v) * extent) / 100 : px(v);
+    return `${(Math.max(0, length(x, r.width) - dx) * image.naturalWidth) / Math.max(1, box.width)}px ${(Math.max(0, length(y, r.height) - dy) * image.naturalHeight) / Math.max(1, box.height)}px`;
+  };
+  return {
+    box,
+    clip,
+    corners: {
+      borderTopLeftRadius: radius(s.borderTopLeftRadius, left, top),
+      borderTopRightRadius: radius(s.borderTopRightRadius, right, top),
+      borderBottomRightRadius: radius(s.borderBottomRightRadius, right, bottom),
+      borderBottomLeftRadius: radius(s.borderBottomLeftRadius, left, bottom),
+    },
+  };
+}
+
 function localRect(
   rect: TranslationRect,
   box: TranslationRect,
@@ -83,8 +141,10 @@ export class TranslationImages {
   readonly cache = new Map<HTMLImageElement, ImageEntry>();
   readonly abort = new AbortController();
   private fingerprinting: Promise<string | null> = Promise.resolve(null);
-
-  constructor(readonly retained = new Map<HTMLImageElement, RetainedImage>()) {}
+  constructor(
+    readonly retained = new Map<HTMLImageElement, RetainedImage>(),
+    private readonly readResource?: (url: string, signal: AbortSignal) => Promise<Response | null>,
+  ) {}
 
   invalidate(image: HTMLImageElement) {
     this.cache.get(image)?.layer.remove();
@@ -111,14 +171,27 @@ export class TranslationImages {
       entry.layer.hidden = !images.includes(image);
       if (entry.layer.hidden) continue;
       if (!entry.layer.isConnected) parent.append(entry.layer);
-      const box = image.getBoundingClientRect();
+      const { box, clip, corners } = imageGeometry(image);
+      if (!box.width || !box.height) {
+        entry.layer.hidden = true;
+        continue;
+      }
+      const clipped = localRect(clip, box, image);
+      const radii = Object.values(corners).map((r) => r.split(' '));
+      // inset() also permits negative margins for contain's letterboxing. The intrinsic
+      // layer still clips to the raster; the content-box radius must not round the raster itself.
+      entry.layer.style.clipPath = `inset(${clipped.y}px ${image.naturalWidth - clipped.x - clipped.width}px ${image.naturalHeight - clipped.y - clipped.height}px ${clipped.x}px round ${radii.map((r) => r[0]).join(' ')} / ${radii.map((r) => r[1]).join(' ')})`;
+      for (const property of Object.keys(corners) as (keyof typeof corners)[])
+        entry.layer.style[property] =
+          getComputedStyle(image).objectFit === 'contain' ? '' : corners[property];
       entry.layer.style.transform = `translate(${box.x}px, ${box.y}px) scale(${box.width / image.naturalWidth}, ${box.height / image.naturalHeight})`;
     }
   }
 
   missing(image: HTMLImageElement, area: TranslationRect) {
-    const box = image.getBoundingClientRect(),
-      visible = intersectRegions(box, area);
+    const { box, clip } = imageGeometry(image);
+    const raster = intersectRegions(box, clip);
+    const visible = raster && intersectRegions(raster, area);
     if (!visible) return [];
     return subtractRegions(
       localRect(visible, box, image),
@@ -158,7 +231,8 @@ export class TranslationImages {
           image.naturalWidth * image.naturalHeight > 16_000_000 ||
           (!['data:', 'blob:'].includes(url.protocol) &&
             url.origin !== new URL(image.baseURI).origin &&
-            image.crossOrigin === null)
+            image.crossOrigin === null &&
+            !this.readResource)
         ) {
           this.invalidate(image);
           return;
@@ -186,8 +260,20 @@ export class TranslationImages {
             patches: [],
           };
           const current = entry;
-          current.ready = this.load(src).then(async (blob) => {
-            const fingerprint = blob ? await this.fingerprint(image) : null;
+          current.ready = this.load(
+            src,
+            url.origin !== new URL(image.baseURI).origin && /^https?:$/.test(url.protocol),
+          ).then(async (blob) => {
+            const fingerprint = blob
+              ? await this.fingerprint(
+                  image,
+                  this.readResource &&
+                    url.origin !== new URL(image.baseURI).origin &&
+                    /^https?:$/.test(url.protocol)
+                    ? blob
+                    : undefined,
+                )
+              : null;
             if (
               this.abort.signal.aborted ||
               this.cache.get(image) !== current ||
@@ -230,8 +316,7 @@ export class TranslationImages {
     if (!this.ready(images)) return null;
     const sources = images.flatMap((image) => {
       const entry = this.cache.get(image);
-      const r = image.getBoundingClientRect();
-      const box = { x: r.x, y: r.y, width: r.width, height: r.height };
+      const box = imageGeometry(image).box;
       const regions = this.missing(image, area);
       return regions.length && entry?.blob
         ? [{ image, box, entry, regions, blob: entry.blob }]
@@ -253,7 +338,10 @@ export class TranslationImages {
       missing,
     );
     const croppedSources = sources
-      .map((source) => ({ ...source, regions: this.missing(source.image, rect) }))
+      .map((source) => ({
+        ...source,
+        regions: this.missing(source.image, rect),
+      }))
       .filter((source) => source.regions.length);
     const canvas = doc.createElement('canvas');
     canvas.width = rect.width * 2;
@@ -331,7 +419,12 @@ export class TranslationImages {
       result.blocks.forEach((block, index) => {
         const r = localRect(
           pageRect(
-            { x: block.box[0], y: block.box[1], width: block.box[2], height: block.box[3] },
+            {
+              x: block.box[0],
+              y: block.box[1],
+              width: block.box[2],
+              height: block.box[3],
+            },
             capture.rect,
           ),
           box,
@@ -347,7 +440,12 @@ export class TranslationImages {
             (r.height / image.naturalHeight) * 1000,
           ],
         });
-        colors.push(result.colors[index] ?? { background: 'rgb(255,255,255)', color: '#172642' });
+        colors.push(
+          result.colors[index] ?? {
+            background: 'rgb(255,255,255)',
+            color: '#172642',
+          },
+        );
       });
       const hidden = entry.layer.hidden;
       entry.layer.hidden = false;
@@ -356,6 +454,7 @@ export class TranslationImages {
         { ...result, blocks, colors },
         { x: 0, y: 0, width: image.naturalWidth, height: image.naturalHeight },
         regions,
+        { x: box.width / image.naturalWidth, y: box.height / image.naturalHeight },
       );
       source.preview?.element.remove();
       delete source.preview;
@@ -394,22 +493,26 @@ export class TranslationImages {
     this.cache.clear();
   }
 
-  private fingerprint(image: HTMLImageElement): Promise<string | null> {
-    // A large image can require a large pixel buffer. Never allocate eight of them concurrently.
+  private fingerprint(image: HTMLImageElement, loadedResource?: Blob): Promise<string | null> {
+    // CDN bytes came from the browser's loaded resource. Same-origin fetches may differ from
+    // the already displayed image, so retain the decoded-pixel check for those sources.
     const pending = this.fingerprinting.then(async () => {
       if (this.abort.signal.aborted) return null;
       const canvas = image.ownerDocument.createElement('canvas');
       try {
-        canvas.width = image.naturalWidth;
-        canvas.height = image.naturalHeight;
-        const context = canvas.getContext('2d');
-        if (!context) return null;
-        context.drawImage(image, 0, 0);
-        const pixels = context.getImageData(0, 0, canvas.width, canvas.height);
-        const digest = await crypto.subtle.digest('SHA-256', pixels.data);
+        let bytes: ArrayBuffer | Uint8ClampedArray<ArrayBuffer>;
+        if (loadedResource) bytes = await loadedResource.arrayBuffer();
+        else {
+          canvas.width = image.naturalWidth;
+          canvas.height = image.naturalHeight;
+          const context = canvas.getContext('2d');
+          if (!context) return null;
+          context.drawImage(image, 0, 0);
+          bytes = context.getImageData(0, 0, canvas.width, canvas.height).data;
+        }
+        const digest = await crypto.subtle.digest('SHA-256', bytes);
         return Array.from(new Uint8Array(digest), (b) => b.toString(16).padStart(2, '0')).join('');
       } catch {
-        // Tainted or unreadable pixels cannot prove that an old translation still matches.
         return null;
       } finally {
         canvas.width = canvas.height = 0;
@@ -419,10 +522,14 @@ export class TranslationImages {
     return pending;
   }
 
-  private async load(src: string): Promise<Blob | null> {
-    const signal = AbortSignal.any([this.abort.signal, AbortSignal.timeout(5000)]);
+  private async load(src: string, crossOrigin: boolean): Promise<Blob | null> {
+    const signal = AbortSignal.any([this.abort.signal, AbortSignal.timeout(10000)]);
     try {
-      const response = await fetch(src, { signal, credentials: 'same-origin' });
+      const response =
+        crossOrigin && this.readResource
+          ? await this.readResource(src, signal)
+          : await fetch(src, { signal, credentials: 'same-origin' });
+      if (!response) return null;
       const type = response.headers.get('Content-Type')?.split(';')[0] ?? '';
       if (
         !response.ok ||
@@ -453,7 +560,11 @@ export class TranslationImages {
         bytes.set(chunk, offset);
         offset += chunk.length;
       }
-      const decoder = new ImageDecoder({ data: bytes, type, preferAnimation: true });
+      const decoder = new ImageDecoder({
+        data: bytes,
+        type,
+        preferAnimation: true,
+      });
       try {
         await decoder.tracks.ready;
         signal.throwIfAborted();

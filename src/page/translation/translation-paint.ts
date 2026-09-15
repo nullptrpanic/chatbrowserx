@@ -9,23 +9,24 @@ export interface TranslationPatch {
   element: HTMLElement;
 }
 
-/** Both source-image and screenshot layers use the same layout, in their own coordinates. */
+/** Image-local patches. Unsafe labels stay native; a handled region need not be overpainted. */
 export function paintTranslation(
   parent: HTMLElement,
   result: TranslationPaint,
   rect: TranslationRect,
   regions: TranslationRect[],
+  scale = { x: 1, y: 1 },
 ): TranslationPatch {
   const doc = parent.ownerDocument;
   const layer = doc.createElement('div');
   layer.className = 'patch';
   parent.append(layer);
   const painted: TranslationPatch['painted'] = [];
+  const handled: TranslationRect[] = [];
   result.blocks.forEach((block, index) => {
     const [x, y, w, h] = block.box;
     const width = (w * rect.width) / 1000,
-      height = (h * rect.height) / 1000,
-      padding = height / 6;
+      height = (h * rect.height) / 1000;
     const source = {
       x: rect.x + (x * rect.width) / 1000,
       y: rect.y + (y * rect.height) / 1000,
@@ -33,35 +34,70 @@ export function paintTranslation(
       height,
     };
     if (subtractRegions(source, regions).length) return;
+    // Recognized but deliberately retained labels are handled even in a partial response.
+    handled.push(source);
+    if (
+      block.kind === 'notation' ||
+      !block.translation.trim() ||
+      block.translation.trim() === block.text.trim() ||
+      !/\p{L}/u.test(block.text) ||
+      /^[\p{L}\p{N}]+(?:_[\p{L}\p{N}]+)+$/u.test(block.text.trim())
+    )
+      return;
+    if (height * scale.y > width * scale.x * 1.2 || height * scale.y < 10) return;
+    // At most one CSS pixel around the OCR box, independent of intrinsic image size.
+    const paddingX = Math.min(width / 20, 1 / scale.x),
+      paddingY = Math.min(height / 20, 1 / scale.y);
     const span = doc.createElement('span');
     span.className = 'text';
     span.textContent = block.translation;
     const colors = result.colors[index];
     Object.assign(span.style, {
-      left: `${source.x - padding}px`,
-      top: `${source.y - padding}px`,
+      position: 'absolute',
+      whiteSpace: 'nowrap',
+      fontFamily: 'Arial, sans-serif',
+      lineHeight: `${height}px`,
+      boxSizing: 'content-box',
+      left: `${source.x - paddingX}px`,
+      top: `${source.y - paddingY}px`,
       width: `${width}px`,
       height: `${height}px`,
-      padding: `${padding}px`,
+      padding: `${paddingY}px ${paddingX}px`,
       fontSize: `${height}px`,
       color: colors?.color ?? '#172642',
       background: colors?.background ?? '#ffffff',
     });
     layer.append(span);
+    const range = doc.createRange();
+    range.selectNodeContents(span);
+    // Range geometry retains fractions and excludes padding. Convert viewport width back
+    // to intrinsic image pixels before fitting; scrollWidth/clientWidth would round it.
+    const textWidth = () => range.getBoundingClientRect().width / scale.x;
+    const measured = textWidth();
+    if (measured > width) {
+      const size = (height * width) / measured;
+      if (size < Math.max(height * 0.65, 10 / scale.y)) {
+        span.remove();
+        return;
+      }
+      span.style.fontSize = `${size}px`;
+      if (textWidth() > width) {
+        span.remove();
+        return;
+      }
+    }
     painted.push({
       element: span,
       rect: {
-        x: source.x - padding,
-        y: source.y - padding,
-        width: width + padding * 2,
-        height: height + padding * 2,
+        x: source.x - paddingX,
+        y: source.y - paddingY,
+        width: width + paddingX * 2,
+        height: height + paddingY * 2,
       },
     });
-    if (span.scrollWidth > span.clientWidth)
-      span.style.fontSize = `${(height * width) / (span.scrollWidth - padding * 2)}px`;
   });
   return {
-    regions: result.incomplete ? painted.map((p) => p.rect) : regions,
+    regions: result.incomplete ? handled : regions,
     painted,
     element: layer,
   };

@@ -48,7 +48,7 @@ export interface MessageRouterDependencies {
   readonly sandboxConsole?: SandboxConsoleClientPort;
   readonly translation?: Pick<
     TranslationController,
-    'toggle' | 'getState' | 'read' | 'inspect' | 'cancel'
+    'toggle' | 'getState' | 'read' | 'image' | 'cancel'
   >;
   readonly pageFeatures?: {
     ensure(tabId: number): Promise<unknown>;
@@ -141,7 +141,7 @@ async function routeMessage(
         await dependencies.translation.toggle(message.payload.tabId),
       );
     case 'translation.read':
-    case 'translation.inspect':
+    case 'translation.image':
     case 'translation.cancel':
       if (context.senderTabId === null || context.senderFrameId !== 0)
         return errorResponse(
@@ -150,16 +150,19 @@ async function routeMessage(
           'Translation requires the enabled page.',
         );
       if (!dependencies.translation) throw new Error('Translation unavailable.');
-      if (message.type === 'translation.read' || message.type === 'translation.inspect')
+      if (message.type === 'translation.image')
         return successResponse(
           message.requestId,
-          message.type === 'translation.read'
-            ? await dependencies.translation.read(
-                context.senderTabId,
-                message.payload,
-                message.requestId,
-              )
-            : await dependencies.translation.inspect(context.senderTabId, message.payload),
+          await dependencies.translation.image(context.senderTabId, message.payload),
+        );
+      if (message.type === 'translation.read')
+        return successResponse(
+          message.requestId,
+          await dependencies.translation.read(
+            context.senderTabId,
+            message.payload,
+            message.requestId,
+          ),
         );
       dependencies.translation.cancel(
         context.senderTabId,
@@ -303,7 +306,7 @@ export function createMessageRouter(dependencies: MessageRouterDependencies): Me
       ) {
         return errorResponse(message.requestId, error.code, error.message);
       }
-      if (message.type === 'translation.read' || message.type === 'translation.inspect') {
+      if (message.type === 'translation.read') {
         if (isProviderError(error)) {
           const stage = error.invalidResponseStage?.toUpperCase();
           return errorResponse(

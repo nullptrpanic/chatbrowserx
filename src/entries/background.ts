@@ -8,6 +8,7 @@ import { ChromeDebuggerTransport } from '../browser/debugger/debugger-transport'
 import { TargetSessionRegistry } from '../browser/debugger/target-session-registry';
 import { ElementRefStore } from '../browser/observation/element-ref-store';
 import { PageObserver } from '../browser/observation/page-observer';
+import { readImageResource } from '../browser/observation/image-resource';
 import { NetworkCaptureRegistry } from '../browser/network/network-capture-registry';
 import { TabService } from '../browser/tab-service';
 import { IndexedDbAttachmentRepository } from '../persistence/attachment-repository';
@@ -97,6 +98,8 @@ async function createBackgroundServices(
     },
   });
   const tavily = new TavilyClient(credentials);
+  const debuggerTransport = new ChromeDebuggerTransport();
+  const browserSessions = new TargetSessionRegistry(debuggerTransport);
   const translationPage = new ChromeTranslationPagePort({
     installer,
     tabs: chrome.tabs,
@@ -107,24 +110,19 @@ async function createBackgroundServices(
     settings,
     toggle: (tabId, options) => translationPage.toggle(tabId, options),
     getSession: (tabId) => translationPage.getSession(tabId),
+    readImage: (tabId, url, signal) =>
+      readImageResource(
+        { sessions: browserSessions, transport: debuggerTransport },
+        tabId,
+        url,
+        signal,
+      ),
     progress: async (tabId, value) => {
       await chrome.tabs.sendMessage(tabId, value, { frameId: 0 });
-    },
-    async capture(tabId, selection, signal) {
-      signal.throwIfAborted();
-      const blob = await captureVisibleTab(tabId, {
-        signal,
-        beforeCapture: () => screenshotPage.setOverlaysHidden(tabId, true),
-        afterCapture: () => screenshotPage.setOverlaysHidden(tabId, false).catch(() => undefined),
-      });
-      signal.throwIfAborted();
-      return cropCapturedImage(blob, selection);
     },
   });
   const sandboxClient = new SandboxClient(settings, credentials);
   const sandbox = new SandboxToolExecutor(sandboxClient);
-  const debuggerTransport = new ChromeDebuggerTransport();
-  const browserSessions = new TargetSessionRegistry(debuggerTransport);
   const browserRefs = new ElementRefStore(cryptoIds);
   const browserPage = new ChromePageObservationPort({
     installer,

@@ -18,6 +18,7 @@ export interface LoadedExtensionSessionOptions {
   readonly headless: boolean;
   readonly extensionPath?: string;
   readonly viewport?: { readonly width: number; readonly height: number };
+  readonly browserArgs?: readonly string[];
 }
 
 interface BuiltManifest {
@@ -70,6 +71,7 @@ export async function createLoadedExtensionSession(
         `--load-extension=${extensionPath}`,
         '--no-first-run',
         '--no-default-browser-check',
+        ...(options.browserArgs ?? []),
       ],
     });
     const serviceWorker = await waitForExtensionWorker(context);

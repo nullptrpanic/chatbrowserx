@@ -6,6 +6,7 @@ import {
   translateRegion,
   translationSelectionSchema,
   translationResultSchema,
+  translationTextsSchema,
 } from '../../src/translation/region-translation';
 
 const block = { text: 'Save', translation: '保存', box: [100, 200, 300, 40] };
@@ -20,7 +21,59 @@ function provider(events: ModelStreamEvent[], requests: ModelRequest[] = []): Mo
 }
 
 describe('region translation', () => {
-  it('allows full-viewport pixel inspection but keeps model image requests bounded', () => {
+  it('preserves an explicit incomplete image response even when every returned block is valid', async () => {
+    const result = await translateRegion(
+      provider([
+        { type: 'text.delta', delta: JSON.stringify({ blocks: [block], incomplete: true }) },
+        { type: 'response.completed', responseId: 'r', usage: null },
+      ]),
+      'data:image/png;base64,cG5n',
+      'm',
+      'medium',
+      'zh-CN',
+      new AbortController().signal,
+    );
+    expect(result).toEqual({ blocks: [block], incomplete: true });
+  });
+
+  it.each(['text', 'image'] as const)('accepts optional bounded context on %s requests', (kind) => {
+    const schema = kind === 'text' ? translationTextsSchema : translationSelectionSchema;
+    const input =
+      kind === 'text'
+        ? { sessionId: 's', texts: [{ id: 'p', text: 'Save' }] }
+        : {
+            sessionId: 's',
+            devicePixelRatio: 1,
+            imageUrl: 'data:image/png;base64,cG5n',
+            viewportWidth: 800,
+            viewportHeight: 600,
+            rect: { x: 0, y: 0, width: 300, height: 200 },
+          };
+    expect(schema.safeParse(input).success).toBe(true);
+    expect(schema.safeParse({ ...input, context: '' }).success).toBe(true);
+    expect(schema.safeParse({ ...input, context: 'a'.repeat(6000) }).success).toBe(true);
+    expect(schema.safeParse({ ...input, context: 'a'.repeat(6001) }).success).toBe(false);
+  });
+
+  it('retains notation classification across streamed and final image results', async () => {
+    const notation = { kind: 'notation', text: 'Pol', translation: 'Pol', box: [100, 200, 60, 40] };
+    const updates: unknown[] = [];
+    const result = await translateRegion(
+      provider([
+        { type: 'text.delta', delta: JSON.stringify({ blocks: [notation, block] }) },
+        { type: 'response.completed', responseId: 'r', usage: null },
+      ]),
+      'data:image/png;base64,cG5n',
+      'm',
+      'medium',
+      'zh-CN',
+      new AbortController().signal,
+      (result) => updates.push(result),
+    );
+    expect(result.blocks).toEqual([notation, block]);
+    expect(updates).toEqual([{ blocks: [notation, block], incomplete: true }]);
+  });
+  it('rejects removed inspection IPC and keeps model image requests bounded', () => {
     const message = {
       version: 1,
       requestId: 'viewport',
@@ -28,12 +81,13 @@ describe('region translation', () => {
       payload: {
         sessionId: 's',
         devicePixelRatio: 2,
+        imageUrl: 'data:image/png;base64,cG5n',
         viewportWidth: 3840,
         viewportHeight: 2160,
         rect: { x: 0, y: 0, width: 3840, height: 2160 },
       },
     };
-    expect(extensionMessageSchema.safeParse(message).success).toBe(true);
+    expect(extensionMessageSchema.safeParse(message).success).toBe(false);
     expect(extensionMessageSchema.safeParse({ ...message, type: 'translation.read' }).success).toBe(
       false,
     );
@@ -253,6 +307,7 @@ describe('region translation', () => {
       translationSelectionSchema.safeParse({
         sessionId: 's',
         devicePixelRatio: 2,
+        imageUrl: 'data:image/png;base64,cG5n',
         viewportWidth: 800,
         viewportHeight: 600,
         rect: { x: 700, y: 0, width: 200, height: 100 },

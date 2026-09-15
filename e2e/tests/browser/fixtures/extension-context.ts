@@ -9,12 +9,16 @@ import {
 export type { ExtensionSession } from '../../../runner/extension-session';
 
 /** Launches one fresh system-Chrome profile with only the production extension loaded. */
-export async function createExtensionSession(headless = false): Promise<ExtensionSession> {
+export async function createExtensionSession(
+  headless = false,
+  browserArgs: readonly string[] = [],
+): Promise<ExtensionSession> {
   const profilePath = await mkdtemp(join(tmpdir(), 'chatbrowserx-e2e-'));
   return createLoadedExtensionSession({
     profilePath,
     removeProfileOnClose: true,
     channel: process.env.PLAYWRIGHT_CHANNEL ?? 'chromium',
     headless,
+    browserArgs,
   });
 }

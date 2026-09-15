@@ -1,6 +1,7 @@
 import { afterEach, expect, it, vi } from 'vitest';
 import { TranslationImages } from '../../src/page/translation/translation-images';
 import { translationSelectionSchema } from '../../src/translation/region-translation';
+import { mockImageTextRanges } from './image-fixture';
 
 afterEach(() => {
   document.body.replaceChildren();
@@ -9,6 +10,7 @@ afterEach(() => {
 });
 
 function fixture(animated = false) {
+  mockImageTextRanges();
   vi.spyOn(HTMLCanvasElement.prototype, 'getContext').mockReturnValue({
     drawImage() {},
     getImageData: () => ({ data: new Uint8ClampedArray([0, 0, 0, 255]) }),
@@ -27,7 +29,9 @@ function fixture(animated = false) {
   );
   const fetcher = vi.fn(
     async () =>
-      new Response(new Uint8Array([1, 2, 3]), { headers: { 'Content-Type': 'image/png' } }),
+      new Response(new Uint8Array([1, 2, 3]), {
+        headers: { 'Content-Type': 'image/png' },
+      }),
   );
   vi.stubGlobal('fetch', fetcher);
   const image = document.createElement('img');
@@ -52,10 +56,51 @@ it('reuses verified single-frame bytes until the image source changes', async ()
   images.close();
 });
 
+it('uses loaded CDN bytes to fingerprint a source without reading tainted page pixels', async () => {
+  const { image } = fixture();
+  image.src = 'https://cdn.test/image.png';
+  const load = vi.fn(
+    async () =>
+      new Response(new Uint8Array([1, 2, 3]), {
+        headers: { 'Content-Type': 'image/png' },
+      }),
+  );
+  const images = new TranslationImages(undefined, load);
+  vi.spyOn(HTMLCanvasElement.prototype, 'getContext').mockImplementation(() => {
+    throw new Error('Tainted canvas must not be read');
+  });
+  expect(await images.prepare([image])).toBe(true);
+  expect(images.cache.get(image)?.fingerprint).toMatch(/^[a-f0-9]{64}$/);
+  expect(load).toHaveBeenCalledOnce();
+  images.close();
+});
+
+it('maps image-local coordinates inside borders and clips rounded content at the inner radius', async () => {
+  const { images, image } = fixture();
+  image.style.cssText = 'border:1px solid black;border-radius:8px;width:400px;height:200px';
+  image.style.borderTopLeftRadius = '8px'; // jsdom does not expand the radius shorthand.
+  image.getBoundingClientRect = () => new DOMRect(99, 199, 402, 202);
+  const layer = document.createElement('div');
+  document.body.append(image, layer);
+  expect(await images.prepare([image])).toBe(true);
+  images.update([image], layer);
+  expect((layer.firstChild as HTMLElement).style.transform).toBe(
+    'translate(100px, 200px) scale(0.5, 0.5)',
+  );
+  expect((layer.firstChild as HTMLElement).style.borderTopLeftRadius).toBe('14px 14px');
+  expect(images.missing(image, { x: 100, y: 200, width: 200, height: 100 })).toEqual([
+    { x: 0, y: 0, width: 400, height: 200 },
+  ]);
+  images.close();
+});
+
 it('fills a viewport-sized static image in bounded crops and retains all visible coverage', async () => {
   const { images, image } = fixture();
   const area = { x: 0, y: 0, width: 3840, height: 2160 };
-  Object.defineProperties(image, { naturalWidth: { value: 3840 }, naturalHeight: { value: 2160 } });
+  Object.defineProperties(image, {
+    naturalWidth: { value: 3840 },
+    naturalHeight: { value: 2160 },
+  });
   image.getBoundingClientRect = () => new DOMRect(0, 0, 3840, 2160);
   document.body.append(image);
   vi.spyOn(HTMLCanvasElement.prototype, 'getContext').mockReturnValue({
@@ -76,7 +121,11 @@ it('fills a viewport-sized static image in bounded crops and retains all visible
     expect(this.height).toBeLessThanOrEqual(1600);
     return 'data:image/png;base64,YQ==';
   });
-  vi.stubGlobal('createImageBitmap', async () => ({ width: 3840, height: 2160, close() {} }));
+  vi.stubGlobal('createImageBitmap', async () => ({
+    width: 3840,
+    height: 2160,
+    close() {},
+  }));
   expect(await images.prepare([image])).toBe(true);
   for (let i = 0; i < 12; i++) {
     const capture = await images.render([image], area, document);
@@ -99,6 +148,47 @@ it('fills a viewport-sized static image in bounded crops and retains all visible
   expect(await images.render([image], area, document)).toBeNull();
   images.close();
 });
+
+it.each([
+  [
+    'cover',
+    '50% 50%',
+    'translate(0px, 200px) scale(0.5, 0.5)',
+    { x: 200, y: 0, width: 400, height: 400 },
+  ],
+  [
+    'cover',
+    '100% 0%',
+    'translate(-100px, 200px) scale(0.5, 0.5)',
+    { x: 400, y: 0, width: 400, height: 400 },
+  ],
+  [
+    'contain',
+    '50% 50%',
+    'translate(100px, 250px) scale(0.25, 0.25)',
+    { x: 0, y: 0, width: 800, height: 400 },
+  ],
+] as const)(
+  'maps %s %s to visible original pixels, excluding cropped or letterbox regions',
+  async (fit, position, transform, missing) => {
+    const { images, image, fetcher } = fixture();
+    image.style.cssText = `object-fit:${fit};object-position:${position}`;
+    image.getBoundingClientRect = () => new DOMRect(100, 200, 200, 200);
+    const layer = document.createElement('div');
+    document.body.append(image, layer);
+    await images.prepare([image]);
+    images.update([image], layer);
+    expect(images.missing(image, { x: 0, y: 0, width: 1000, height: 800 })).toEqual([missing]);
+    expect((layer.firstChild as HTMLElement).style.transform).toBe(transform);
+    if (fit === 'contain')
+      expect(images.missing(image, { x: 100, y: 200, width: 200, height: 30 })).toEqual([]);
+    else expect((layer.firstChild as HTMLElement).style.clipPath).not.toBe('');
+    image.style.objectPosition = '0% 0%';
+    await images.prepare([image]);
+    expect(fetcher).toHaveBeenCalledOnce();
+    images.close();
+  },
+);
 
 async function translatedFixture() {
   const f = fixture();
@@ -230,7 +320,10 @@ it('invalidates same-URL reloads locally without forgetting another image', asyn
 
 it('does not leave a subpixel gap after two crops of a fractionally sized image', async () => {
   const { images, image, parent } = await translatedFixture();
-  Object.defineProperties(image, { naturalWidth: { value: 1024 }, naturalHeight: { value: 971 } });
+  Object.defineProperties(image, {
+    naturalWidth: { value: 1024 },
+    naturalHeight: { value: 971 },
+  });
   const box = { x: 440, y: 248.609375, width: 560, height: 531.015625 };
   image.getBoundingClientRect = () => new DOMRect(box.x, box.y, box.width, box.height);
   await images.prepare([image]);
@@ -244,7 +337,11 @@ it('does not leave a subpixel gap after two crops of a fractionally sized image'
     { x: 0, y: firstHeight, width: 1024, height: 971 - firstHeight },
   ])
     images.accept(
-      { rect: box, imageUrl: '', sources: [{ image, entry, box, regions: [region] }] },
+      {
+        rect: box,
+        imageUrl: '',
+        sources: [{ image, entry, box, regions: [region] }],
+      },
       { blocks: [], colors: [] },
     );
   expect(images.covered([image], { x: 440, y: 380, width: 1000, height: 520 })).toBe(true);
@@ -261,9 +358,15 @@ it('does not mistake a PNG-named animation for a static image', async () => {
 it('does not reuse bytes after a source becomes too large or cross-origin', async () => {
   const { images, image } = fixture();
   expect(await images.prepare([image])).toBe(true);
-  Object.defineProperty(image, 'naturalWidth', { value: 100000, configurable: true });
+  Object.defineProperty(image, 'naturalWidth', {
+    value: 100000,
+    configurable: true,
+  });
   expect(await images.prepare([image])).toBe(false);
-  Object.defineProperty(image, 'naturalWidth', { value: 800, configurable: true });
+  Object.defineProperty(image, 'naturalWidth', {
+    value: 800,
+    configurable: true,
+  });
   image.src = 'https://other-origin.test/private.png';
   expect(await images.prepare([image])).toBe(false);
   images.close();
@@ -285,7 +388,10 @@ it('bounds the source count and cancels oversized responses', async () => {
   fetcher.mockImplementation(
     async () =>
       new Response(new ReadableStream({ cancel }), {
-        headers: { 'Content-Type': 'image/png', 'Content-Length': String(5 * 1024 * 1024) },
+        headers: {
+          'Content-Type': 'image/png',
+          'Content-Length': String(5 * 1024 * 1024),
+        },
       }),
   );
   expect(await images.prepare([image])).toBe(false);
@@ -317,7 +423,11 @@ it('bounds retained sources while a newly visited image is still loading', async
   try {
     expect(images.cache.size).toBe(8);
   } finally {
-    finish(new Response(new Uint8Array([1]), { headers: { 'Content-Type': 'image/png' } }));
+    finish(
+      new Response(new Uint8Array([1]), {
+        headers: { 'Content-Type': 'image/png' },
+      }),
+    );
     await pending;
     images.close();
   }
@@ -334,7 +444,9 @@ it('aborts in-flight fetches on close without producing a usable cache entry', a
       new Promise((_resolve, reject) => {
         const signal = (args[1] as RequestInit).signal;
         if (!signal) throw new Error('Source fetch must be cancellable');
-        signal.addEventListener('abort', () => reject(signal.reason), { once: true });
+        signal.addEventListener('abort', () => reject(signal.reason), {
+          once: true,
+        });
         started();
       }),
   );
@@ -384,7 +496,10 @@ it('does not restore a source whose unchanged first frame can no longer be prove
     'ImageDecoder',
     class {
       static isTypeSupported = async () => true;
-      tracks = { ready: Promise.resolve(), selectedTrack: { animated: true, frameCount: 2 } };
+      tracks = {
+        ready: Promise.resolve(),
+        selectedTrack: { animated: true, frameCount: 2 },
+      };
       close() {}
     },
   );
@@ -425,7 +540,9 @@ it('keeps previously completed image translations when reopening is cancelled du
     (...args: unknown[]) =>
       new Promise((_resolve, reject) => {
         const signal = (args[1] as RequestInit).signal;
-        signal?.addEventListener('abort', () => reject(signal.reason), { once: true });
+        signal?.addEventListener('abort', () => reject(signal.reason), {
+          once: true,
+        });
       }),
   );
   const cancelled = new TranslationImages(images.retained);
@@ -434,7 +551,9 @@ it('keeps previously completed image translations when reopening is cancelled du
   expect(await pending).toBe(false);
   fetcher.mockImplementation(
     async () =>
-      new Response(new Uint8Array([1, 2, 3]), { headers: { 'Content-Type': 'image/png' } }),
+      new Response(new Uint8Array([1, 2, 3]), {
+        headers: { 'Content-Type': 'image/png' },
+      }),
   );
   const reopened = new TranslationImages(images.retained);
   await reopened.prepare([image]);

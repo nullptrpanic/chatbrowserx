@@ -2,7 +2,13 @@ import { describe, expect, it, vi } from 'vitest';
 import { ChromeTranslationPagePort } from '../../../src/platform/chrome/translation-page-port';
 import type { PageCommand } from '../../../src/shared/protocol/message-types';
 
-const options = { sessionId: 'enabled', loadingText: '翻译中…', errorText: '翻译失败' };
+const options = {
+  sessionId: 'enabled',
+  loadingText: '翻译中…',
+  errorText: '翻译失败',
+  unsupportedText: 'Share this tab',
+  retryText: 'Retry',
+};
 const reply = (m: PageCommand, data: unknown) => ({
   version: 1,
   requestId: m.requestId,

@@ -1,10 +1,11 @@
 import { extensionTest, expect } from './fixtures/extension-test';
 import { sendExtensionMessage } from './helpers/extension-runtime';
+import { clickTranslationAction } from './helpers/translation-action';
 
 extensionTest.use({ extensionHeadless: true });
 
 extensionTest(
-  'keeps a failed lens visible without passive captures and retries only on movement',
+  'keeps a failed lens visible and retries only on explicit action, never on movement',
   async ({ extensionSession }, testInfo) => {
     const { context, sidePanelPage: panel } = extensionSession;
     const token = Buffer.from(
@@ -24,13 +25,13 @@ extensionTest(
         codexAccessToken: `e30.${token}.`,
       },
     });
-    await context.route('http://translation-error.test/', (route) =>
+    await context.route('https://translation-error.test/', (route) =>
       route.fulfill({
         contentType: 'text/html',
         body: `<!doctype html>
-    <style>body{margin:0;background:white;font:22px Arial}main{position:absolute;left:340px;top:300px}canvas{position:absolute;left:620px;top:250px}</style>
-    <main>Static title</main><canvas width="200" height="200"></canvas>
-    <script>const ctx=document.querySelector('canvas').getContext('2d');ctx.fillStyle='#ddd';ctx.fillRect(0,0,200,200);ctx.fillStyle='black';ctx.font='20px Arial';ctx.fillText('Image text',20,60);</script>`,
+    <style>body{margin:0;background:white;font:22px Arial}main{position:absolute;left:340px;top:300px}img{position:absolute;left:620px;top:250px}</style>
+    <main>Static title</main><img width="200" height="200">
+    <script>const canvas=document.createElement('canvas');canvas.width=canvas.height=200;const ctx=canvas.getContext('2d');ctx.fillStyle='#ddd';ctx.fillRect(0,0,200,200);ctx.fillStyle='black';ctx.font='20px Arial';ctx.fillText('Image text',20,60);document.querySelector('img').src=canvas.toDataURL();</script>`,
       }),
     );
     let textRequests = 0,
@@ -48,7 +49,9 @@ extensionTest(
           imageRequests === 1
             ? 'not JSON: private provider output'
             : JSON.stringify({
-                blocks: [{ text: 'Image text', translation: '图片文字', box: [570, 230, 200, 50] }],
+                blocks: [
+                  { text: 'Image text', translation: '图片文字', box: [100, 200, 600, 100] },
+                ],
               });
       } else {
         textRequests++;
@@ -69,10 +72,10 @@ extensionTest(
     });
     const page = await context.newPage();
     await page.setViewportSize({ width: 1200, height: 800 });
-    await page.goto('http://translation-error.test/');
+    await page.goto('https://translation-error.test/');
     await page.bringToFront();
     const tabId = await panel.evaluate(
-      async () => (await chrome.tabs.query({ url: 'http://translation-error.test/' }))[0]?.id,
+      async () => (await chrome.tabs.query({ url: 'https://translation-error.test/' }))[0]?.id,
     );
     if (tabId === undefined) throw new Error('Fixture tab missing');
     await sendExtensionMessage(panel, {
@@ -135,6 +138,10 @@ extensionTest(
     });
     await page.screenshot({ path: testInfo.outputPath('failed-lens.png') });
     await page.mouse.move(610, 400);
+    await page.waitForTimeout(1500);
+    await expect(lens).toHaveAttribute('data-status', 'error');
+    expect(imageRequests).toBe(1);
+    await clickTranslationAction(page, panel, tabId);
     await expect(lens).toHaveAttribute('data-status', 'ready');
     expect(imageRequests).toBe(2);
     expect(textRequests).toBe(1);

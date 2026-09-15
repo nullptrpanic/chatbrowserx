@@ -1,10 +1,10 @@
 import { z } from 'zod';
 import { PROTOCOL_VERSION, type ExtensionMessage, type PageCommand } from './message-types';
 import {
-  translationSelectionSchema,
   translationImageSelectionSchema,
   translationTextsSchema,
   translationLensOptionsSchema,
+  translationImageSourceSchema,
 } from '../../translation/region-translation';
 
 const requestIdSchema = z.string().trim().min(1).max(128);
@@ -244,6 +244,14 @@ export const extensionMessageSchema: z.ZodType<ExtensionMessage> = z.discriminat
   taskRetrySchema,
   taskCancelSchema,
   taskClearContextSchema,
+  z
+    .object({
+      version: z.literal(PROTOCOL_VERSION),
+      requestId: requestIdSchema,
+      type: z.literal('translation.image'),
+      payload: translationImageSourceSchema,
+    })
+    .strict(),
   screenshotCaptureSchema,
   imagePreviewOpenSchema,
   pageFeaturesEnsureSchema,
@@ -264,14 +272,6 @@ export const extensionMessageSchema: z.ZodType<ExtensionMessage> = z.discriminat
         z.object({ tabId: z.number().int().nonnegative() }).strict(),
         z.object({ sessionId: requestIdSchema }).strict(),
       ]),
-    })
-    .strict(),
-  z
-    .object({
-      version: z.literal(PROTOCOL_VERSION),
-      requestId: requestIdSchema,
-      type: z.literal('translation.inspect'),
-      payload: translationSelectionSchema,
     })
     .strict(),
   z

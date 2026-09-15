@@ -4,10 +4,12 @@ import { createExtensionSession, type ExtensionSession } from './extension-conte
 export const extensionTest = base.extend<{
   readonly extensionSession: ExtensionSession;
   readonly extensionHeadless: boolean;
+  readonly extensionBrowserArgs: readonly string[];
 }>({
   extensionHeadless: [false, { option: true }],
-  extensionSession: async ({ extensionHeadless }, use) => {
-    const session = await createExtensionSession(extensionHeadless);
+  extensionBrowserArgs: [[], { option: true }],
+  extensionSession: async ({ extensionHeadless, extensionBrowserArgs }, use) => {
+    const session = await createExtensionSession(extensionHeadless, extensionBrowserArgs);
     try {
       await use(session);
     } finally {

@@ -21,14 +21,17 @@ function setup() {
   vi.spyOn(document, 'createRange').mockImplementation(() => {
     const range = create();
     return Object.assign(range, {
-      getClientRects: () => [
-        range.startContainer.parentElement?.getBoundingClientRect() ?? new DOMRect(),
-      ],
+      getClientRects: () =>
+        range.startContainer.nodeType !== Node.TEXT_NODE
+          ? []
+          : [range.startContainer.parentElement?.getBoundingClientRect() ?? new DOMRect()],
     });
   });
   vi.spyOn(HTMLCanvasElement.prototype, 'getContext').mockReturnValue({
+    fillRect() {},
+    getImageData: () => ({ data: new Uint8ClampedArray([255, 255, 255, 255]) }),
     measureText: (text: string) => ({ width: text.length * 8 }),
-  } as CanvasRenderingContext2D);
+  } as unknown as CanvasRenderingContext2D);
   const attach = Element.prototype.attachShadow;
   let shadow: ShadowRoot | undefined;
   vi.spyOn(Element.prototype, 'attachShadow').mockImplementation(function (this: Element, init) {
@@ -52,7 +55,13 @@ function setup() {
     return { version: 1, requestId: m.requestId, ok: true, data: { active: true } };
   });
   toggleTranslationLens(
-    { sessionId: 'text-scheduling', loadingText: 'Loading', errorText: 'Failed' },
+    {
+      sessionId: 'text-scheduling',
+      loadingText: 'Loading',
+      errorText: 'Failed',
+      unsupportedText: 'Share this tab',
+      retryText: 'Retry',
+    },
     document,
     window,
     {
@@ -78,6 +87,8 @@ function setup() {
           sessionId: `reopened-${reads.length}`,
           loadingText: 'Loading',
           errorText: 'Failed',
+          unsupportedText: 'Share this tab',
+          retryText: 'Retry',
           cacheKey,
         },
         document,
@@ -145,6 +156,44 @@ function move(y: number) {
   window.dispatchEvent(new MouseEvent('pointermove', { clientX: 600, clientY: y }));
 }
 
+it('uses the requested paragraph neighborhood, not the page prefix, only for an uncached request', async () => {
+  const lens = setup();
+  const readContext = vi.fn(() => 'Unrelated page prefix. '.repeat(400));
+  Object.defineProperty(document.body, 'innerText', { configurable: true, get: readContext });
+  try {
+    expect(readContext).not.toHaveBeenCalled();
+    await vi.advanceTimersByTimeAsync(200);
+    const context = lens.reads[0]?.message.payload?.context;
+    expect(context).toContain('Upper paragraph.');
+    expect(context).toContain('Lower paragraph.');
+    expect(context).not.toContain('Unrelated page prefix');
+    expect(readContext).not.toHaveBeenCalled();
+    lens.finish(0, '已翻译');
+    await vi.advanceTimersByTimeAsync(100);
+    for (let i = 0; i < 10; i++) {
+      move(260 + (i % 2));
+      await vi.advanceTimersByTimeAsync(50);
+    }
+    expect(lens.reads).toHaveLength(1);
+    expect(readContext).not.toHaveBeenCalled();
+  } finally {
+    Reflect.deleteProperty(document.body, 'innerText');
+  }
+});
+
+it('starts a coalesced text request while the lens keeps moving over the same paragraph', async () => {
+  const lens = setup();
+  for (let i = 0; i < 12; i++) {
+    move(260 + (i % 2));
+    await vi.advanceTimersByTimeAsync(40);
+  }
+  expect(lens.reads).toHaveLength(1);
+  expect(lens.host.dataset.status).toBe('loading');
+  lens.finish(0, '持续移动时显示译文');
+  await vi.advanceTimersByTimeAsync(20);
+  expect(lens.shadow.textContent).toContain('持续移动时显示译文');
+});
+
 afterEach(() => {
   closeTranslationLens();
   vi.useRealTimers();
@@ -170,7 +219,7 @@ it('reuses completed text after Escape, but recomputes layout and stops all clos
   const reopened = lens.reopen();
   await vi.advanceTimersByTimeAsync(400);
   expect(reopened.shadow?.textContent).toContain('已完成译文');
-  expect(reopened.shadow?.querySelector<HTMLElement>('.text')?.style.top).toBe('249px');
+  expect(reopened.shadow?.querySelector<HTMLElement>('.text')?.style.top).toBe('250px');
   expect(lens.reads).toHaveLength(1);
 });
 

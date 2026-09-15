@@ -6,7 +6,7 @@ import {
 import type { RuntimePort } from '../../src/platform/chrome/runtime-port';
 import type { ExtensionMessage, ExtensionResponse } from '../../src/shared/protocol/message-types';
 import { translationSelectionSchema } from '../../src/translation/region-translation';
-import { inspectionFixture } from './inspection-fixture';
+import { staticImageFixture } from './image-fixture';
 import { extensionMessageSchema } from '../../src/shared/protocol/message-schema';
 
 const translated = {
@@ -24,6 +24,7 @@ function setup() {
   vi.stubGlobal('innerWidth', 1200);
   vi.stubGlobal('innerHeight', 800);
   document.body.innerHTML = '<main>Original text</main>';
+  const { image } = staticImageFixture(new DOMRect(0, 0, 5000, 2200));
   const attach = Element.prototype.attachShadow;
   let shadow!: ShadowRoot;
   vi.spyOn(Element.prototype, 'attachShadow').mockImplementation(function (this: Element, init) {
@@ -36,14 +37,18 @@ function setup() {
     notify = undefined;
   });
   const send = vi.fn<RuntimePort['send']>(async (m) =>
-    m.type === 'translation.inspect'
-      ? inspectionFixture(m, document.querySelector('main')?.innerHTML)
-      : m.type === 'translation.read'
-        ? new Promise((resolve) => reads.push({ message: m, finish: resolve }))
-        : { version: 1, requestId: m.requestId, ok: true, data: { active: true } },
+    m.type === 'translation.read'
+      ? new Promise((resolve) => reads.push({ message: m, finish: resolve }))
+      : { version: 1, requestId: m.requestId, ok: true, data: { active: true } },
   );
   toggleTranslationLens(
-    { sessionId: 'motion', loadingText: '翻译中…', errorText: '翻译失败' },
+    {
+      sessionId: 'motion',
+      loadingText: '翻译中…',
+      errorText: '翻译失败',
+      unsupportedText: 'Unsupported content',
+      retryText: 'Retry',
+    },
     document,
     window,
     {
@@ -55,6 +60,7 @@ function setup() {
     },
   );
   return {
+    image,
     reads,
     unsubscribe,
     progress(index: number, result: unknown = translated, overrides = {}) {
@@ -82,6 +88,17 @@ function setup() {
 function move(x: number, y = 400) {
   window.dispatchEvent(new MouseEvent('pointermove', { clientX: x, clientY: y }));
 }
+
+it('starts one pixel request while the lens keeps moving within the same source region', async () => {
+  const lens = setup();
+  for (let i = 0; i < 30; i++) {
+    move(600 + (i % 2));
+    await vi.advanceTimersByTimeAsync(40);
+  }
+  expect(lens.reads).toHaveLength(1);
+  expect(lens.host.dataset.status).toBe('loading');
+  expect(lens.cancellations()).toHaveLength(0);
+});
 
 afterEach(() => {
   closeTranslationLens();
@@ -123,7 +140,8 @@ it('rejects unrelated, malformed and stale progress notifications', async () => 
   expect(lens.shadow.querySelectorAll('.text')).toHaveLength(0);
   lens.progress(0);
   expect(lens.shadow.querySelectorAll('.text')).toHaveLength(1);
-  window.dispatchEvent(new Event('scroll'));
+  lens.image.src = new URL('/changed.png', document.baseURI).href;
+  lens.image.dispatchEvent(new Event('load'));
   lens.progress(0);
   expect(lens.shadow.querySelectorAll('.text')).toHaveLength(0);
   lens.finish(0);
@@ -131,7 +149,7 @@ it('rejects unrelated, malformed and stale progress notifications', async () => 
   expect(lens.shadow.querySelectorAll('.text')).toHaveLength(0);
 });
 
-it('discards preview coverage on failure and does not retry until movement', async () => {
+it('discards preview coverage on failure and requires explicit retry even after movement', async () => {
   const lens = setup();
   await vi.advanceTimersByTimeAsync(900);
   lens.progress(0);
@@ -148,6 +166,9 @@ it('discards preview coverage on failure and does not retry until movement', asy
   expect(lens.host.dataset.status).toBe('error');
   expect(lens.reads).toHaveLength(1);
   move(620);
+  await vi.advanceTimersByTimeAsync(2000);
+  expect(lens.reads).toHaveLength(1);
+  lens.shadow.querySelector('button')?.click();
   await vi.advanceTimersByTimeAsync(2000);
   expect(lens.reads).toHaveLength(2);
 });
@@ -273,8 +294,8 @@ it('does not let blank pixels in an older capture hide newly translated text', a
   await vi.advanceTimersByTimeAsync(20);
   const layers = [...lens.shadow.querySelectorAll<HTMLElement>('.patch')];
   const clip = required(layers[1]).style.clipPath;
-  // Independently read the renderer's rectangle paths. (700,365) is inside the new text,
-  // within the old capture, but outside the old text (x=534..600).
+  // The first crop covers x=270..930. The next missing crop is x=930..1200;
+  // its 10%-30% text box covers x=957..1011, y=358..374.8 in source coordinates.
   const rectangles = [...clip.matchAll(/M\s*([\d.]+)\s+([\d.]+)\s*h\s*([\d.]+)\s*v\s*([\d.]+)/g)];
   expect(
     rectangles.some((m) => {
@@ -282,33 +303,34 @@ it('does not let blank pixels in an older capture hide newly translated text', a
         y = Number(m[2]),
         w = Number(m[3]),
         h = Number(m[4]);
-      return 700 >= x && 700 < x + w && 365 >= y && 365 < y + h;
+      return 970 >= x && 970 < x + w && 365 >= y && 365 < y + h;
     }),
   ).toBe(true);
 });
 
-it('does not reuse cached translations after scrolling changes the underlying pixels', async () => {
+it('does not reuse cached translations after the image source changes', async () => {
   const lens = setup();
   await vi.advanceTimersByTimeAsync(900);
   lens.finish(0);
   await vi.advanceTimersByTimeAsync(20);
-  window.dispatchEvent(new Event('scroll'));
+  lens.image.src = new URL('/changed.png', document.baseURI).href;
+  lens.image.dispatchEvent(new Event('load'));
   expect(lens.shadow.querySelectorAll('.text')).toHaveLength(0);
   await vi.advanceTimersByTimeAsync(900);
   expect(lens.reads).toHaveLength(2);
 });
 
-it('invalidates cached pixels even when a layout change occurs outside the current lens', async () => {
+it('invalidates cached pixels and pending results when the original image is replaced', async () => {
   const lens = setup();
   await vi.advanceTimersByTimeAsync(900);
   lens.finish(0);
   await vi.advanceTimersByTimeAsync(20);
   move(950);
   await vi.advanceTimersByTimeAsync(900);
-  // Insertion above the captures can shift all following content, even if the inserted node
-  // itself is outside the lens. No old response may restore the previous layout's pixels.
+  // Source replacement invalidates intrinsic-coordinate patches, including those outside the lens.
   const first = required(lens.shadow.querySelector<HTMLElement>('.text'));
-  required(document.querySelector('main')).prepend(document.createElement('header'));
+  lens.image.src = new URL('/replacement.png', document.baseURI).href;
+  lens.image.dispatchEvent(new Event('load'));
   await vi.advanceTimersByTimeAsync(1000);
   expect(first.isConnected).toBe(false);
   expect(lens.cancellations()).toHaveLength(1);
@@ -344,16 +366,16 @@ it('preserves good cached results when another region fails, without an automati
   expect(lens.reads).toHaveLength(2);
 });
 
-it('cancels a completely unrelated capture and never paints its late response', async () => {
+it('finishes an in-flight original-image crop when the lens moves to another region of that image', async () => {
   const lens = setup();
   vi.stubGlobal('innerWidth', 2400);
   await vi.advanceTimersByTimeAsync(900);
   move(2000);
   await vi.advanceTimersByTimeAsync(20);
-  expect(lens.cancellations()).toHaveLength(1);
+  expect(lens.cancellations()).toHaveLength(0);
   lens.finish(0);
   await vi.advanceTimersByTimeAsync(900);
-  expect(lens.shadow.querySelectorAll('.text')).toHaveLength(0);
+  expect(lens.shadow.querySelectorAll('.text')).toHaveLength(1);
   expect(lens.reads).toHaveLength(2);
   expect(
     translationSelectionSchema.parse(required(lens.reads[1]).message.payload).rect.x,
@@ -433,7 +455,12 @@ it('finishes every part of a full 4K viewport in bounded image requests without 
     const { rect } = translationSelectionSchema.parse(message.payload);
     expect(rect.width).toBeLessThanOrEqual(1200);
     expect(rect.height).toBeLessThanOrEqual(800);
-    lens.finish(i);
+    // Keep the fake OCR line horizontal even in the narrow final tile. This test
+    // covers tiling/retention, not the intentional rejection of tall OCR boxes.
+    lens.finish(i, {
+      ...translated,
+      blocks: [{ ...translated.blocks[0], box: [100, 100, 500, 40] }],
+    });
   }
   await vi.advanceTimersByTimeAsync(3000);
   expect(lens.host.dataset.status).toBe('ready');

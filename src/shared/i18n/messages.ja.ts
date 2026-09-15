@@ -29,7 +29,9 @@ export const ja = {
   regionTranslation: '範囲翻訳',
   stopRegionTranslation: '範囲翻訳を終了',
   translationLoading: '翻訳中…',
-  translationFailed: '翻訳できませんでした。移動して再試行、Esc キーで終了します。',
+  translationFailed: '一部を翻訳できませんでした。Esc キーで終了します。',
+  translationUnsupported: '一部のコンテンツは翻訳に未対応のため、原文のまま表示しています',
+  translationRetry: '再試行',
   translationError:
     '翻訳を開始できません。拡張機能がアクセスできる通常のウェブページを開いてください。更新後は拡張機能とページを再読み込みしてください。',
   translationReloadRequired:

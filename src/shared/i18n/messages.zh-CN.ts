@@ -25,7 +25,9 @@ export const zhCN = {
   regionTranslation: '区域翻译',
   stopRegionTranslation: '关闭区域翻译',
   translationLoading: '翻译中…',
-  translationFailed: '翻译失败，移动镜框可重试，按 Esc 退出',
+  translationFailed: '部分内容翻译失败，按 Esc 退出',
+  translationUnsupported: '部分内容暂不支持翻译，已保留原样',
+  translationRetry: '重试',
   translationError:
     '无法开启翻译，请确认当前是允许插件访问的普通网页；若刚更新插件，请重新加载插件并刷新网页。',
   translationReloadRequired:
