@@ -1,12 +1,22 @@
 import { expect, it } from 'vitest';
 import { parseExtensionMessage, parsePageCommand } from '../../src/shared/protocol/parse-message';
 
-it('accepts a session-bound image source but rejects caller-selected tabs and non-web URLs', () => {
+it('rejects the removed image translation resource endpoint', () => {
   const message = {
     version: 1,
     requestId: 'i',
     type: 'translation.image',
     payload: { sessionId: 's', url: 'https://cdn.test/image.png' },
+  };
+  expect(() => parseExtensionMessage(message)).toThrow();
+});
+
+it('accepts only bounded authorized HTTP(S) DOM background resource messages', () => {
+  const message = {
+    version: 1,
+    requestId: 'background',
+    type: 'translation.background',
+    payload: { sessionId: 's', url: 'https://cdn.test/photo.png' },
   };
   expect(parseExtensionMessage(message)).toEqual(message);
   for (const url of ['file:///private/test', 'javascript:alert(1)', 'data:image/png;base64,YQ=='])
@@ -49,7 +59,7 @@ it('accepts bounded source text but never text payloads for pixel inspection', (
     ).toThrow();
 });
 
-it('accepts a bounded region from an enabled page without a caller-supplied tab ID', () => {
+it('rejects image payloads at the text translation boundary', () => {
   const message = {
     version: 1,
     requestId: 'r',
@@ -63,13 +73,30 @@ it('accepts a bounded region from an enabled page without a caller-supplied tab 
       rect: { x: 100, y: 100, width: 400, height: 200 },
     },
   };
-  expect(parseExtensionMessage(message)).toEqual(message);
+  expect(() => parseExtensionMessage(message)).toThrow();
   expect(() =>
     parseExtensionMessage({
       ...message,
       payload: { ...message.payload, tabId: 9 },
     }),
   ).toThrow();
+});
+
+it('cancels the text-only session without obsolete image cleanup flags', () => {
+  const message = {
+    version: 1,
+    requestId: 'cancel',
+    type: 'translation.cancel',
+    payload: { sessionId: 's' },
+  };
+  expect(parseExtensionMessage(message)).toEqual(message);
+  for (const obsolete of [{ close: true }, { kind: 'pixels' }])
+    expect(() =>
+      parseExtensionMessage({
+        ...message,
+        payload: { ...message.payload, ...obsolete },
+      }),
+    ).toThrow();
 });
 
 it('accepts the UI toggle and credential-free page toggle', () => {

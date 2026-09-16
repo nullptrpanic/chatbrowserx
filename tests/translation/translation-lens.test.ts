@@ -6,13 +6,28 @@ import {
 } from '../../src/page/translation/mount-translation-lens';
 import type { RuntimePort } from '../../src/platform/chrome/runtime-port';
 import type { ExtensionMessage, ExtensionResponse } from '../../src/shared/protocol/message-types';
-import { staticImageFixture } from './image-fixture';
-import { TranslationImages } from '../../src/page/translation/translation-images';
 beforeEach(() => {
   document.body.replaceChildren();
   vi.stubGlobal('innerWidth', 1200);
   vi.stubGlobal('innerHeight', 800);
-  staticImageFixture();
+  document.body.innerHTML = '<p style="font:20px/24px Arial">Original text</p>';
+  vi.spyOn(Element.prototype, 'getBoundingClientRect').mockImplementation(function (this: Element) {
+    return this.matches('p') ? new DOMRect(400, 350, 300, 24) : new DOMRect(0, 0, 1200, 800);
+  });
+  const create = document.createRange.bind(document);
+  vi.spyOn(document, 'createRange').mockImplementation(() => {
+    const range = create();
+    range.getClientRects = () =>
+      range.startContainer.nodeType === Node.TEXT_NODE
+        ? ([new DOMRect(400, 350, 150, 24)] as unknown as DOMRectList)
+        : ([] as unknown as DOMRectList);
+    return range;
+  });
+  vi.spyOn(HTMLCanvasElement.prototype, 'getContext').mockReturnValue({
+    fillRect() {},
+    getImageData: () => ({ data: new Uint8ClampedArray([255, 255, 255, 255]) }),
+    measureText: (text: string) => ({ width: text.length * 8 }),
+  } as unknown as CanvasRenderingContext2D);
 });
 
 const options = (sessionId: string) => ({
@@ -23,80 +38,11 @@ const options = (sessionId: string) => ({
   retryText: 'Retry',
 });
 
-it('anchors an original-image request to its caption and neighboring paragraphs', async () => {
-  vi.useFakeTimers();
-  const image = document.images[0];
-  if (!image) throw new Error('Missing source image');
-  image.alt = 'The boundary of political prompts';
-  const figure = document.createElement('figure');
-  image.replaceWith(figure);
-  figure.append(image);
-  figure.insertAdjacentHTML('beforeend', '<figcaption>PB means benign boundary data.</figcaption>');
-  figure.insertAdjacentHTML('beforebegin', '<p>How the boundary is defined.</p>');
-  figure.insertAdjacentHTML('afterend', '<p>Refusal should be limited to harmful prompts.</p>');
-  const reads: ExtensionMessage[] = [];
-  const send: RuntimePort['send'] = async (m) => {
-    if (m.type === 'translation.read') reads.push(m);
-    return {
-      version: 1,
-      requestId: m.requestId,
-      ok: true,
-      data: m.type === 'translation.getState' ? { active: true } : { blocks: [], colors: [] },
-    };
-  };
-  toggleTranslationLens(options('image-context'), document, window, { send });
-  await vi.advanceTimersByTimeAsync(1500);
-  const request = reads.find((m) => m.type === 'translation.read' && 'imageUrl' in m.payload);
-  if (request?.type !== 'translation.read') throw new Error('Missing image request');
-  expect(request.payload.context).toContain('The boundary of political prompts');
-  expect(request.payload.context).toContain('PB means benign boundary data.');
-  expect(request.payload.context).toContain('How the boundary is defined.');
-  expect(request.payload.context).toContain('Refusal should be limited to harmful prompts.');
-});
-
-it('reschedules source inspection when scrolling invalidates a pending original-image read', async () => {
-  vi.useFakeTimers();
-  document.body.innerHTML =
-    '<img style="object-fit:fill;transform:none;filter:none;opacity:1;clip-path:none" />';
-  const image = document.images[0];
-  if (!image) throw new Error('Image missing');
-  vi.spyOn(image, 'getBoundingClientRect').mockReturnValue(new DOMRect(400, 350, 80, 40));
-  image.getAnimations = () => [];
-  let finish!: (ready: boolean) => void;
-  const prepare = vi
-    .spyOn(TranslationImages.prototype, 'prepare')
-    .mockImplementationOnce(
-      () =>
-        new Promise((resolve) => {
-          finish = resolve;
-        }),
-    )
-    .mockResolvedValue(false);
-  const send: RuntimePort['send'] = async (m) => ({
-    version: 1,
-    requestId: m.requestId,
-    ok: true,
-    data: { active: true },
-  });
-  toggleTranslationLens(options('source-race'), document, window, { send });
-  await vi.advanceTimersByTimeAsync(50);
-  expect(prepare).toHaveBeenCalledTimes(1);
-  window.dispatchEvent(new Event('scroll'));
-  await vi.advanceTimersByTimeAsync(50);
-  finish(false);
-  await vi.advanceTimersByTimeAsync(50);
-  expect(prepare).toHaveBeenCalledTimes(2);
-  await vi.advanceTimersByTimeAsync(3000);
-  expect(
-    prepare,
-    'an unavailable unchanged source must not trigger a retry loop',
-  ).toHaveBeenCalledTimes(2);
-});
-
 it('acknowledges opening before scanning a potentially expensive page layout', () => {
   vi.useFakeTimers();
   document.body.innerHTML = '<p>A large page</p>';
-  const layout = vi.spyOn(Element.prototype, 'getBoundingClientRect');
+  const layout = vi.mocked(Element.prototype.getBoundingClientRect);
+  layout.mockClear();
   const send = vi.fn<RuntimePort['send']>(async (m) => ({
     version: 1,
     requestId: m.requestId,
@@ -113,52 +59,16 @@ it('acknowledges opening before scanning a potentially expensive page layout', (
   }
 });
 
-it('keeps valid image lines and reports incomplete output without an automatic request loop', async () => {
-  vi.useFakeTimers();
-  document.body.innerHTML = '';
-  staticImageFixture();
-  const attach = Element.prototype.attachShadow;
-  let shadow!: ShadowRoot;
-  vi.spyOn(Element.prototype, 'attachShadow').mockImplementation(function (this: Element, init) {
-    shadow = attach.call(this, init);
-    return shadow;
-  });
-  const send = vi.fn<RuntimePort['send']>(async (m) => ({
-    version: 1,
-    requestId: m.requestId,
-    ok: true,
-    data:
-      m.type === 'translation.getState'
-        ? { active: true }
-        : {
-            incomplete: true,
-            blocks: [
-              {
-                text: 'A valid line',
-                translation: '有效译文',
-                box: [100, 100, 200, 40],
-              },
-            ],
-            colors: [],
-          },
-  }));
-  toggleTranslationLens(options('partial'), document, window, { send });
-  await vi.advanceTimersByTimeAsync(6000);
-  expect(shadow.querySelector('.text')?.textContent).toBe('有效译文');
-  expect(
-    document.querySelector<HTMLElement>('[data-chatbrowserx-overlay="translation"]')?.dataset
-      .status,
-  ).toBe('error');
-  expect(send.mock.calls.filter(([m]) => m.type === 'translation.read')).toHaveLength(1);
-});
-
 it('closes against native tab state even when focus emulation hides the visibility change', async () => {
   vi.useFakeTimers();
   const send: RuntimePort['send'] = async (m) => ({
     version: 1,
     requestId: m.requestId,
     ok: true,
-    data: m.type === 'translation.getState' ? { active: false } : { blocks: [], colors: [] },
+    data:
+      m.type === 'translation.getState'
+        ? { active: false }
+        : { blocks: [{ id: 'text-1', translation: '原始文字' }] },
   });
   toggleTranslationLens(options('native'), document, window, { send });
   await vi.advanceTimersByTimeAsync(900);
@@ -177,7 +87,7 @@ afterEach(() => {
 });
 
 it.each(['pagehide', 'hidden', 'dispose'])(
-  'fully closes on %s, with no later captures',
+  'fully closes on %s, with no later translation requests',
   async (reason) => {
     vi.useFakeTimers();
     const send = vi.fn<RuntimePort['send']>(async (m) => ({
@@ -202,65 +112,6 @@ it.each(['pagehide', 'hidden', 'dispose'])(
   },
 );
 
-it('reuses a still-valid original image after the page scrolls during a model request', async () => {
-  vi.useFakeTimers();
-  const reads: {
-    message: ExtensionMessage;
-    finish: (r: ExtensionResponse) => void;
-  }[] = [];
-  const runtime: RuntimePort = {
-    send: async (m) =>
-      m.type === 'translation.read'
-        ? new Promise((resolve) => reads.push({ message: m, finish: resolve }))
-        : {
-            version: 1,
-            requestId: m.requestId,
-            ok: true,
-            data: { active: true },
-          },
-  };
-  toggleTranslationLens(options('moving'), document, window, runtime);
-  await vi.advanceTimersByTimeAsync(900);
-  window.dispatchEvent(new Event('scroll'));
-  window.dispatchEvent(new MouseEvent('pointermove', { clientX: 130, clientY: 140 }));
-  const first = reads[0];
-  if (!first) throw new Error('Translation request missing.');
-  first.finish({
-    version: 1,
-    requestId: first.message.requestId,
-    ok: true,
-    data: {
-      blocks: [{ text: 'old', translation: '过期译文', box: [0, 0, 100, 100] }],
-      colors: [],
-    },
-  });
-  await vi.advanceTimersByTimeAsync(16);
-  expect(
-    document.querySelector<HTMLElement>('[data-chatbrowserx-overlay="translation"]')?.dataset
-      .status,
-  ).toBe('ready');
-  await vi.advanceTimersByTimeAsync(900);
-  expect(reads).toHaveLength(1);
-});
-
-it('refreshes pixels after an image finishes loading inside the frame', async () => {
-  vi.useFakeTimers();
-  document.body.replaceChildren();
-  const { image: img } = staticImageFixture(new DOMRect(400, 350, 80, 40));
-  const send = vi.fn<RuntimePort['send']>(async (m) => ({
-    version: 1,
-    requestId: m.requestId,
-    ok: true,
-    data: m.type === 'translation.getState' ? { active: true } : { blocks: [], colors: [] },
-  }));
-  toggleTranslationLens(options('image'), document, window, { send });
-  await vi.advanceTimersByTimeAsync(900);
-  img.dispatchEvent(new Event('load'));
-  img.setAttribute('src', 'loaded.png');
-  await vi.advanceTimersByTimeAsync(4000);
-  expect(send.mock.calls.filter(([m]) => m.type === 'translation.read')).toHaveLength(2);
-});
-
 it('works on HTTP pages where randomUUID is unavailable', async () => {
   vi.useFakeTimers();
   const uuid = vi.spyOn(crypto, 'randomUUID').mockImplementation(() => {
@@ -271,7 +122,7 @@ it('works on HTTP pages where randomUUID is unavailable', async () => {
       version: 1,
       requestId: m.requestId,
       ok: true,
-      data: { blocks: [], colors: [] },
+      data: { blocks: [{ id: 'text-1', translation: '原始文字' }] },
     }));
     toggleTranslationLens(options('session'), document, window, { send });
     await vi.advanceTimersByTimeAsync(900);
@@ -298,7 +149,7 @@ it('closes on a second toggle without changing original page content', () => {
   expect(sent).toEqual([
     expect.objectContaining({
       type: 'translation.cancel',
-      payload: { sessionId: 'one', close: true },
+      payload: { sessionId: 'one' },
     }),
   ]);
 });
@@ -327,7 +178,7 @@ it('ignores a response completing after Escape instead of reopening the overlay'
     version: 1,
     requestId: read.requestId,
     ok: true,
-    data: { blocks: [], colors: [] },
+    data: { blocks: [{ id: 'text-1', translation: '原始文字' }] },
   });
   await vi.advanceTimersByTimeAsync(900);
   expect(document.querySelector('[data-chatbrowserx-overlay="translation"]')).toBeNull();
@@ -367,7 +218,7 @@ it('shows a localized pending label outside the frame until the current translat
       version: 1,
       requestId: 'loading:1',
       ok: true,
-      data: { blocks: [], colors: [] },
+      data: { blocks: [{ id: 'text-1', translation: '原始文字' }] },
     });
     await vi.advanceTimersByTimeAsync(0);
     expect(status?.hidden).toBe(true);
@@ -386,7 +237,10 @@ it('leaves unsupported backgrounds native when their text changes without pointe
     version: 1,
     requestId: m.requestId,
     ok: true,
-    data: m.type === 'translation.getState' ? { active: true } : { blocks: [], colors: [] },
+    data:
+      m.type === 'translation.getState'
+        ? { active: true }
+        : { blocks: [{ id: 'text-1', translation: '原始文字' }] },
   }));
   toggleTranslationLens(options('dynamic'), document, window, { send });
   await vi.advanceTimersByTimeAsync(900);
@@ -394,4 +248,49 @@ it('leaves unsupported backgrounds native when their text changes without pointe
   main.firstChild.textContent = 'New text';
   await vi.advanceTimersByTimeAsync(4000);
   expect(send.mock.calls.filter(([m]) => m.type === 'translation.read')).toHaveLength(0);
+});
+
+it('expands to the viewport and shrinks immediately even after repeated zoom-in at the limit', async () => {
+  vi.useFakeTimers();
+  const attach = Element.prototype.attachShadow;
+  let shadow!: ShadowRoot;
+  vi.spyOn(Element.prototype, 'attachShadow').mockImplementation(function (this: Element, init) {
+    shadow = attach.call(this, init);
+    return shadow;
+  });
+  toggleTranslationLens(options('resize'), document, window, {
+    send: async (m) => ({
+      version: 1,
+      requestId: m.requestId,
+      ok: true,
+      data: { active: true },
+    }),
+  });
+  const frame = shadow.querySelector<HTMLElement>('.frame');
+  const notice = shadow.querySelector<HTMLElement>('[role=status]');
+  if (!frame || !notice) throw new Error('Missing lens UI');
+  const lens = { frame, notice };
+  vi.stubGlobal('innerWidth', 2000);
+  vi.stubGlobal('innerHeight', 1200);
+  for (let i = 0; i < 5; i++)
+    window.dispatchEvent(new WheelEvent('wheel', { ctrlKey: true, deltaY: -1000 }));
+  await vi.advanceTimersByTimeAsync(20);
+  expect(lens.frame.style.width).toBe('2000px');
+  expect(lens.frame.style.height).toBe('1200px');
+  expect(lens.frame.style.left).toBe('0px');
+  expect(lens.frame.style.top).toBe('0px');
+  expect(Number.parseFloat(lens.notice.style.top)).toBeGreaterThanOrEqual(0);
+  expect(Number.parseFloat(lens.notice.style.top) + 24).toBeLessThanOrEqual(1200);
+  window.dispatchEvent(new WheelEvent('wheel', { ctrlKey: true, deltaY: 10 }));
+  await vi.advanceTimersByTimeAsync(20);
+  expect(Number.parseFloat(lens.frame.style.height)).toBeLessThan(1200);
+  vi.stubGlobal('innerWidth', 900);
+  vi.stubGlobal('innerHeight', 600);
+  window.dispatchEvent(new Event('resize'));
+  await vi.advanceTimersByTimeAsync(20);
+  expect(lens.frame.style.width).toBe('900px');
+  expect(lens.frame.style.height).toBe('600px');
+  window.dispatchEvent(new WheelEvent('wheel', { ctrlKey: true, deltaY: 10 }));
+  await vi.advanceTimersByTimeAsync(20);
+  expect(Number.parseFloat(lens.frame.style.height)).toBeLessThan(600);
 });

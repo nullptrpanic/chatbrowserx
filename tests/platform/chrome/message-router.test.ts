@@ -262,10 +262,9 @@ describe('createMessageRouter', () => {
     const translation = {
       toggle: vi.fn(async () => ({ active: true })),
       getState: vi.fn(async () => ({ active: false })),
-      image: vi.fn(async () => ({ mimeType: 'image/png', data: 'YWJj' })),
+      background: vi.fn(async () => ({ mimeType: 'image/png', data: 'YWJj' })),
       read: vi.fn(async () => ({
         blocks: [],
-        colors: [],
         cacheKey: 'configured',
       })),
       cancel: vi.fn(),
@@ -279,7 +278,7 @@ describe('createMessageRouter', () => {
     const image = {
       version: 1,
       requestId: 'image',
-      type: 'translation.image',
+      type: 'translation.background',
       payload: { sessionId: 'enabled', url: 'https://cdn.test/i.png' },
     };
     expect(await router(image)).toMatchObject({
@@ -294,7 +293,7 @@ describe('createMessageRouter', () => {
       ok: true,
       data: { mimeType: 'image/png' },
     });
-    expect(translation.image).toHaveBeenCalledExactlyOnceWith(7, image.payload);
+    expect(translation.background).toHaveBeenCalledExactlyOnceWith(7, image.payload);
     const toggle = {
       version: 1,
       requestId: 'enable',
@@ -313,11 +312,7 @@ describe('createMessageRouter', () => {
     });
     const payload = {
       sessionId: 'enabled',
-      imageUrl: 'data:image/png;base64,cG5n',
-      devicePixelRatio: 1,
-      viewportWidth: 800,
-      viewportHeight: 600,
-      rect: { x: 10, y: 10, width: 100, height: 100 },
+      texts: [{ id: 'p', text: 'Paragraph' }],
     };
     const read = {
       version: 1,
@@ -336,11 +331,11 @@ describe('createMessageRouter', () => {
         version: 1,
         requestId: 'close',
         type: 'translation.cancel',
-        payload: { sessionId: 'enabled', close: true },
+        payload: { sessionId: 'enabled' },
       },
       { senderTabId: 7, senderFrameId: 0 },
     );
-    expect(translation.cancel).toHaveBeenCalledWith(7, 'enabled', true, undefined);
+    expect(translation.cancel).toHaveBeenCalledWith(7, 'enabled');
     await router(
       {
         ...read,
@@ -349,7 +344,7 @@ describe('createMessageRouter', () => {
       },
       { senderTabId: 7, senderFrameId: 0 },
     );
-    expect(translation.cancel).toHaveBeenLastCalledWith(7, 'enabled', false, 'pixels');
+    expect(translation.cancel).toHaveBeenCalledTimes(1);
     expect(
       await router({ ...read, type: 'translation.inspect' }, { senderTabId: 7, senderFrameId: 0 }),
     ).toMatchObject({ ok: false });

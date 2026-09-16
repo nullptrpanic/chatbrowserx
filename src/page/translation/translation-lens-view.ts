@@ -6,7 +6,6 @@ export class TranslationLensView {
   readonly host: HTMLElement;
   readonly sheet: HTMLElement;
   readonly domLayer: HTMLElement;
-  readonly imageLayer: HTMLElement;
   readonly action: HTMLButtonElement;
   private readonly frame: HTMLElement;
   private readonly notice: HTMLElement;
@@ -40,7 +39,6 @@ export class TranslationLensView {
     style.textContent = `
       .frame{position:absolute;box-sizing:border-box;border:1.5px solid #769dea;border-radius:16px;box-shadow:0 4px 24px #21386224}
       :host([data-status="error"]) .frame{border-color:#df5968}
-      .patch{position:absolute;inset:0}
       .notice{position:absolute;box-sizing:border-box;max-width:calc(100vw - 16px);height:28px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:#45618d;background:#fffffff2;padding:4px 9px;border-radius:7px;font:13px/20px Arial;box-shadow:0 2px 10px #21386215}
       :host([data-status="error"]) .notice{color:#b92738}
       button{pointer-events:auto;cursor:pointer;border:0;background:transparent;color:inherit;font:inherit;padding:0 6px;text-decoration:underline}
@@ -48,8 +46,7 @@ export class TranslationLensView {
     this.sheet = doc.createElement('div');
     Object.assign(this.sheet.style, { position: 'absolute', inset: '0' });
     this.domLayer = doc.createElement('div');
-    this.imageLayer = doc.createElement('div');
-    this.sheet.append(this.imageLayer, this.domLayer);
+    this.sheet.append(this.domLayer);
     this.frame = doc.createElement('div');
     this.frame.className = 'frame';
     this.notice = doc.createElement('div');

@@ -1,8 +1,7 @@
 import type {
-  TranslationSelection,
   TranslationTexts,
   TranslationLensOptions,
-  TranslationImageSource,
+  TranslationBackgroundSource,
 } from '../../translation/region-translation';
 
 export const PROTOCOL_VERSION = 1 as const;
@@ -58,12 +57,9 @@ export type ExtensionMessage =
   | Message<'page.features.ensure', { tabId: number }>
   | Message<'translation.toggle', { tabId: number }>
   | Message<'translation.getState', { tabId: number } | { sessionId: string }>
-  | Message<'translation.read', TranslationSelection | TranslationTexts>
-  | Message<'translation.image', TranslationImageSource>
-  | Message<
-      'translation.cancel',
-      { sessionId: string; close: boolean; kind?: 'text' | 'pixels' | undefined }
-    >;
+  | Message<'translation.read', TranslationTexts>
+  | Message<'translation.background', TranslationBackgroundSource>
+  | Message<'translation.cancel', { sessionId: string }>;
 
 export interface PanelStateChangedNotification {
   readonly version: typeof PROTOCOL_VERSION;

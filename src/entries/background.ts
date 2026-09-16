@@ -110,7 +110,7 @@ async function createBackgroundServices(
     settings,
     toggle: (tabId, options) => translationPage.toggle(tabId, options),
     getSession: (tabId) => translationPage.getSession(tabId),
-    readImage: (tabId, url, signal) =>
+    readBackground: (tabId, url, signal) =>
       readImageResource(
         { sessions: browserSessions, transport: debuggerTransport },
         tabId,

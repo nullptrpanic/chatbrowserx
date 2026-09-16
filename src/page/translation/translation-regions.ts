@@ -1,36 +1,8 @@
-import {
-  MAX_TRANSLATION_CAPTURE_WIDTH,
-  MAX_TRANSLATION_CAPTURE_HEIGHT,
-  type TranslationSelection,
-} from '../../translation/region-translation';
-
-export type TranslationRect = TranslationSelection['rect'];
-
-/** Preserve small buffered captures; fill larger areas in bounded, still-missing crops. */
-export function nextTranslationCapture(area: TranslationRect, missing: TranslationRect[]) {
-  if (area.width <= MAX_TRANSLATION_CAPTURE_WIDTH && area.height <= MAX_TRANSLATION_CAPTURE_HEIGHT)
-    return area;
-  const first = missing.reduce(
-    (a, b) => (b.y < a.y || (b.y === a.y && b.x < a.x) ? b : a),
-    missing[0] ?? area,
-  );
-  const x = Math.floor(first.x),
-    y = Math.floor(first.y);
-  return {
-    x,
-    y,
-    width: Math.min(MAX_TRANSLATION_CAPTURE_WIDTH, Math.ceil(area.x + area.width) - x),
-    height: Math.min(MAX_TRANSLATION_CAPTURE_HEIGHT, Math.ceil(area.y + area.height) - y),
-  };
-}
-
-/** One complete visible batch plus the existing three spare layers for overlapping movement. */
-export function translationPatchLimit(area: Pick<TranslationRect, 'width' | 'height'>) {
-  return (
-    Math.ceil(area.width / MAX_TRANSLATION_CAPTURE_WIDTH) *
-      Math.ceil(area.height / MAX_TRANSLATION_CAPTURE_HEIGHT) +
-    3
-  );
+export interface TranslationRect {
+  x: number;
+  y: number;
+  width: number;
+  height: number;
 }
 
 export function intersectRegions(a: TranslationRect, b: TranslationRect): TranslationRect | null {
@@ -41,7 +13,7 @@ export function intersectRegions(a: TranslationRect, b: TranslationRect): Transl
   return width > 0 && height > 0 ? { x, y, width, height } : null;
 }
 
-/** Pixels in a rectangle that are not covered by the supplied captures. */
+/** Parts of a rectangle outside the supplied regions. */
 export function subtractRegions(
   rect: TranslationRect,
   covered: readonly TranslationRect[],

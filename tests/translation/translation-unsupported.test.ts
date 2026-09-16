@@ -30,13 +30,7 @@ function setup() {
     version: 1,
     requestId: m.requestId,
     ok: true,
-    data:
-      m.type === 'translation.getState'
-        ? { active: true }
-        : {
-            blocks: [{ text: 'Image', translation: '图片', box: [100, 100, 200, 100] }],
-            colors: [],
-          },
+    data: m.type === 'translation.getState' ? { active: true } : { blocks: [] },
   }));
   const open = () =>
     toggleTranslationLens(
@@ -54,7 +48,7 @@ function setup() {
   return { open, send, getDisplayMedia, shadow: () => shadow };
 }
 
-it('leaves unsupported pixels native without a sharing action, capture or perpetual loading', async () => {
+it('leaves non-text media native without a warning, sharing action or perpetual loading', async () => {
   const lens = setup();
   const canvas = document.createElement('canvas');
   canvas.getBoundingClientRect = () => new DOMRect(350, 270, 500, 260);
@@ -62,7 +56,7 @@ it('leaves unsupported pixels native without a sharing action, capture or perpet
   lens.open();
   await vi.advanceTimersByTimeAsync(6000);
   const host = document.querySelector<HTMLElement>('[data-chatbrowserx-overlay=translation]');
-  expect(host?.dataset.status).toBe('unsupported');
+  expect(host?.dataset.status).toBe('ready');
   expect(lens.shadow().querySelector<HTMLButtonElement>('button')?.hidden).toBe(true);
   expect(lens.shadow().querySelectorAll('.text')).toHaveLength(0);
   expect(lens.send.mock.calls.filter(([m]) => m.type === 'translation.read')).toHaveLength(0);
@@ -70,22 +64,24 @@ it('leaves unsupported pixels native without a sharing action, capture or perpet
   expect(canvas.isConnected).toBe(true);
 });
 
-it('translates a readable image even beside unsupported pixels and an unreadable image', async () => {
+it('ignores ordinary and broken images without reading resources, translating pixels or blocking readiness', async () => {
   const lens = setup();
   const { image } = staticImageFixture();
   const broken = image.cloneNode() as HTMLImageElement;
   broken.getBoundingClientRect = () => new DOMRect(370, 280, 40, 40);
   broken.getAnimations = () => [];
-  const canvas = document.createElement('canvas');
-  canvas.getBoundingClientRect = () => new DOMRect(800, 280, 40, 40);
-  document.body.append(broken, canvas);
+  document.body.append(broken);
   lens.open();
   await vi.advanceTimersByTimeAsync(6000);
-  expect(lens.shadow().querySelector('.text')?.textContent).toBe('图片');
-  expect(lens.send.mock.calls.filter(([m]) => m.type === 'translation.read')).toHaveLength(1);
+  expect(lens.shadow().querySelectorAll('.text')).toHaveLength(0);
+  expect(
+    document.querySelector<HTMLElement>('[data-chatbrowserx-overlay=translation]')?.dataset.status,
+  ).toBe('ready');
+  expect(lens.send.mock.calls.filter(([m]) => m.type !== 'translation.getState')).toHaveLength(0);
+  expect(fetch).not.toHaveBeenCalled();
   expect(lens.getDisplayMedia).not.toHaveBeenCalled();
   await vi.advanceTimersByTimeAsync(6000);
-  expect(lens.send.mock.calls.filter(([m]) => m.type === 'translation.read')).toHaveLength(1);
+  expect(lens.send.mock.calls.filter(([m]) => m.type !== 'translation.getState')).toHaveLength(0);
 });
 
 it('treats an empty area as complete instead of asking for screen sharing', async () => {

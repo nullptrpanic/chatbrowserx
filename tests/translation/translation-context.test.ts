@@ -7,7 +7,6 @@ function context(...selectors: string[]) {
     selectors.map((selector) => {
       const element = document.querySelector(selector);
       if (!element) throw new Error(`Missing ${selector}`);
-      if (element.matches('img')) return element;
       if (!element.firstChild) throw new Error(`Empty ${selector}`);
       return element.firstChild;
     }),
@@ -18,6 +17,17 @@ afterEach(() => {
   document.body.replaceChildren();
   document.title = '';
   vi.restoreAllMocks();
+});
+
+it('uses read-only document context while excluding editable ancestors and nested drafts', () => {
+  document.body.innerHTML = `<article contenteditable="true"><p>secret-before</p>
+    <section contenteditable="false"><p>PB means benign boundary.</p>
+    <p id="target">Translate this.</p><p contenteditable="invalid">FH means factual healing.</p>
+    <p contenteditable="plaintext-only">secret-draft</p></section><p>secret-after</p></article>`;
+  const result = context('#target');
+  expect(result).toContain('PB means benign boundary.');
+  expect(result).toContain('FH means factual healing.');
+  expect(result).not.toContain('secret-');
 });
 
 it('locates repeated text by its DOM node and stays within the requested article', () => {
@@ -41,16 +51,15 @@ it('locates repeated text by its DOM node and stays within the requested article
   expect(result).not.toContain('Unrelated navigation');
 });
 
-it('reads figcaptions, alt and nearby prose through nested image wrappers', () => {
+it('reads figcaptions and nearby prose around a DOM text anchor', () => {
   document.body.innerHTML = `<article><h2>Refusal boundary</h2><p>Before the diagram.</p>
-    <figure><div><a><img id="image" alt="Political topic boundary"></a></div>
+    <figure><div><a><p id="image">Target.</p></a></div>
       <figcaption>Pol denotes political prompts, not polynomials.</figcaption></figure>
     <p>Compl denotes compliance.</p></article>`;
   const result = context('#image');
   for (const text of [
     'Refusal boundary',
     'Before the diagram.',
-    'Political topic boundary',
     'Pol denotes political prompts',
     'Compl denotes compliance.',
   ]) {
@@ -58,9 +67,9 @@ it('reads figcaptions, alt and nearby prose through nested image wrappers', () =
   }
 });
 
-it('keeps nearby plain paragraphs on both sides of an image without figure markup', () => {
+it('keeps nearby plain paragraphs on both sides of a nested text target', () => {
   document.body.innerHTML =
-    '<main><div><p>Before.</p></div><div><p><a><img id="image"></a></p></div><div><p><em>Plain caption after.</em></p></div></main>';
+    '<main><div><p>Before.</p></div><div><p><a><p id="image">Target.</p></a></p></div><div><p><em>Plain caption after.</em></p></div></main>';
   const result = context('#image');
   expect(result).toContain('Before.');
   expect(result).toContain('Plain caption after.');
@@ -86,7 +95,7 @@ it('shares the fixed character budget across multiple targets and preserves near
     .map(
       (id) => `<section>
     <p>${'Distant long prose. '.repeat(500)}</p>
-    <figure><img id="image${id}" alt="Image ${id}"><figcaption>Caption ${id} defines PB.</figcaption></figure>
+    <figure><p id="image${id}">Target.</p><figcaption>Caption ${id} defines PB.</figcaption></figure>
     <p>Local explanation ${id}. ${'Additional detail. '.repeat(500)}</p>
   </section>`,
     )
@@ -127,7 +136,7 @@ it('does not walk a whole long page looking for a heading and reads current near
 it('returns no context for disconnected or hidden request anchors', () => {
   document.body.innerHTML = '<p hidden id="hidden">Invisible.</p>';
   expect(context('#hidden')).toBe('');
-  expect(collectTranslationContext(document, [document.createElement('img')])).toBe('');
+  expect(collectTranslationContext(document, [document.createElement('p')])).toBe('');
 });
 
 it('keeps inline text within the nearest heading after two preceding paragraphs', () => {
@@ -147,7 +156,7 @@ it('preserves spaces and line breaks between inline terms in nearby context', ()
 it('uses a character window across paragraphs and adjacent sections, not two blocks per side', () => {
   document.body.innerHTML = `<article><section><p>Earlier definition of PB.</p>
     <p>Before 3.</p><p>Before 2.</p><p>Before 1.</p></section>
-    <section><img id="image"><p>After 1.</p><p>After 2.</p><p>After 3.</p></section>
+    <section><p id="image">Target.</p><p>After 1.</p><p>After 2.</p><p>After 3.</p></section>
     <section><p>Later explanation of FH.</p></section></article>`;
   const result = context('#image');
   for (const text of [
@@ -163,7 +172,7 @@ it('uses a character window across paragraphs and adjacent sections, not two blo
 
 it('keeps approximately 3000 characters nearest each side rather than capping a passage at 1200', () => {
   document.body.innerHTML = `<article><p>Far before.${'B'.repeat(5000)}</p>
-    <img id="image"><p>${'A'.repeat(5000)}Far after.</p></article>`;
+    <p id="image">Target.</p><p>${'A'.repeat(5000)}Far after.</p></article>`;
   const result = context('#image');
   expect(result.length).toBeLessThanOrEqual(6000);
   expect(result.length).toBeGreaterThan(5900);
@@ -175,7 +184,7 @@ it('keeps approximately 3000 characters nearest each side rather than capping a 
 
 it.each(['before', 'after'])('lets the %s side borrow unused character budget', (side) => {
   const prose = `<p>${'Context sentence. '.repeat(500)}</p>`;
-  document.body.innerHTML = `<article>${side === 'before' ? prose : ''}<img id="image">${side === 'after' ? prose : ''}</article>`;
+  document.body.innerHTML = `<article>${side === 'before' ? prose : ''}<p id="image">Target.</p>${side === 'after' ? prose : ''}</article>`;
   const result = context('#image');
   expect(result.length).toBeGreaterThan(5900);
   expect(result.length).toBeLessThanOrEqual(6000);

@@ -48,7 +48,7 @@ export interface MessageRouterDependencies {
   readonly sandboxConsole?: SandboxConsoleClientPort;
   readonly translation?: Pick<
     TranslationController,
-    'toggle' | 'getState' | 'read' | 'image' | 'cancel'
+    'toggle' | 'getState' | 'read' | 'background' | 'cancel'
   >;
   readonly pageFeatures?: {
     ensure(tabId: number): Promise<unknown>;
@@ -141,7 +141,7 @@ async function routeMessage(
         await dependencies.translation.toggle(message.payload.tabId),
       );
     case 'translation.read':
-    case 'translation.image':
+    case 'translation.background':
     case 'translation.cancel':
       if (context.senderTabId === null || context.senderFrameId !== 0)
         return errorResponse(
@@ -150,10 +150,10 @@ async function routeMessage(
           'Translation requires the enabled page.',
         );
       if (!dependencies.translation) throw new Error('Translation unavailable.');
-      if (message.type === 'translation.image')
+      if (message.type === 'translation.background')
         return successResponse(
           message.requestId,
-          await dependencies.translation.image(context.senderTabId, message.payload),
+          await dependencies.translation.background(context.senderTabId, message.payload),
         );
       if (message.type === 'translation.read')
         return successResponse(
@@ -164,12 +164,7 @@ async function routeMessage(
             message.requestId,
           ),
         );
-      dependencies.translation.cancel(
-        context.senderTabId,
-        message.payload.sessionId,
-        message.payload.close,
-        message.payload.kind,
-      );
+      dependencies.translation.cancel(context.senderTabId, message.payload.sessionId);
       return successResponse(message.requestId, {});
     case 'system.ping':
       await dependencies.agent.recover();

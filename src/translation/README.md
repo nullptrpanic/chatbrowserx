@@ -1,4 +1,4 @@
-# Region translation
+# Region translation — DOM text only
 
 Build with `npm run build`, reload the unpacked extension, and refresh existing pages once after
 updating. Click **区域翻译** beside Screenshot. It uses the configured model, reasoning effort,
@@ -8,76 +8,111 @@ token and resolved UI language, without an Agent loop, tools, chat tasks or hist
 
 - The lens is only an observation window. Translations stay anchored to source content; movement
   changes clipping, not the meaning or coordinates of a pending response.
-- Nearby HTML paragraphs are coalesced for 150 ms; visual crops use an 800 ms delay. Moving the
+- Nearby HTML paragraphs are coalesced for 150 ms, with an 80 CSS-pixel buffer. Moving the
   lens does not restart a queued timer. Work reads the current region when the timer fires.
-  Both include an 80 CSS-pixel buffer. Complete validated previews can appear before the response
-  finishes; **翻译中…** remains until the visible work finishes.
+  Complete validated previews can appear before the response finishes; **翻译中…** remains
+  until the visible text work finishes.
 - Ctrl+wheel / compatible trackpad pinch resizes the lens up to the whole viewport. Browser
   toolbar zoom and Cmd/Ctrl-plus retain their normal behavior.
 - Escape (with page focus), the toolbar toggle, navigation and tab deactivation close the lens.
-  Closing cancels work, but retains bounded completed text/static-image
+  Closing cancels work, but retains bounded completed text
   translations for this document and the same language/model/effort. Refresh starts fresh.
-- There is no screen-sharing action, stream or screenshot fallback. Only readable DOM text and
-  verified static images are translated. Unsupported regions remain native and show the neutral
-  **部分内容暂不支持翻译，已保留原样** notice after supported work finishes. An empty region is ready,
-  not waiting for authorization. Unsupported neighbors never veto independently readable images.
+- Only DOM text is translated. Images, chart labels, Canvas, video, SVG and embedded frames remain
+  unchanged; their presence does not trigger model requests, resource inspection, a warning or a
+  perpetual loading state. There is no image OCR, image-patch cache or image-translation fallback.
+- There is no screen-sharing action, stream or screenshot fallback. Unsupported **DOM text** (for
+  example text on an animated/complex backdrop or a translation that cannot fit readably) remains
+  native, with the neutral **部分内容暂不支持翻译，已保留原样** notice after other text finishes.
+  An empty or image-only region is ready. Unsupported text never blocks independent text.
 - Failed content waits for the explicit **重试** action. Movement never retries model failures.
-  Unrelated successful text/images remain visible. Errors are safe stage/code identifiers, not
+  Unrelated successful text remains visible. Errors are safe stage/code identifiers, not
   raw model responses, credentials or page content.
 
 ## Architecture
 
-| Owner                                        | Responsibility                                                                                             |
-| -------------------------------------------- | ---------------------------------------------------------------------------------------------------------- |
-| `TranslationLensView`                        | Frame, clipping, status, trusted action button and pointer/zoom/Escape input. No capture or model work.    |
-| `TranslationDom` + `TranslationTextLayout`   | Complete logical source paragraphs, style identities, bounded source caches and native inline layout.      |
-| `TranslationImages`                          | Verified single-frame source bytes, intrinsic-coordinate image patches and reopen cache validation.        |
-| Region/paint helpers                         | Bounded static-image crop coverage and patch placement.                                                    |
-| `mount-translation-lens`                     | Session scheduling, independent text/pixel work, late-response correlation and cancellation.               |
-| `TranslationController` + provider functions | Page-session authorization, bounded original-image reads, configured model requests and streamed previews. |
+| Owner                                      | Responsibility                                                                                                |
+| ------------------------------------------ | ------------------------------------------------------------------------------------------------------------- |
+| `TranslationLensView`                      | Frame, clipping, status and pointer/zoom/Escape input. No model or capture work.                              |
+| `TranslationDom`                           | Visible logical paragraphs, source identity, style markers, bounded completed caches and render invalidation. |
+| `TranslationTextLayout`                    | Source glyph masks and native inline layout within source-owned slots. Does not reflow the page.              |
+| `translation-context`                      | Bounded nearby DOM context, collected only before an uncached text request.                                   |
+| `mount-translation-lens`                   | Text scheduling, session lifecycle, previews, retry and late-response correlation.                            |
+| `TranslationController` + `translateTexts` | Page-session authorization, configured text-only model requests, response validation and cancellation.        |
+| Background helpers                         | Restore safe CSS gradients or a verified static photo under **DOM captions**, never translate image pixels.   |
 
-Data paths:
+There is one model path:
 
-1. Complete DOM paragraph → text request → validated source IDs/style markers → native inline
-   overlay at source coordinates.
-2. Verified static image → intrinsic-coordinate cache / missing crop → vision request → image patch.
-3. Unsupported painted content → leave unchanged. No frame sampling or model request.
+Complete DOM paragraph → bounded text/context request → validate source IDs/style markers →
+source-anchored DOM text overlay.
 
-The old `translation.inspect` IPC, translation screenshot backend, shared-tab capture, changed-cell
-sampling, CSS snapshot/static-surface guessing and manual source-line text redistribution have been removed. There is one production
-path per source type, not a compatibility switch between old and new renderers. Ordinary screenshots
-remain independent: they wait for overlay removal to paint, and reject a region if the viewport
-dimensions change between selection and capture. Agent browser tools retain their existing path.
+Removed: image selection/capture/crop, vision prompt/result types, image request scheduling,
+coordinate/coverage tracking, image patch painting, color sampling, image fingerprints and image
+translation reopen caches. The old `translation.image` and image-shaped `translation.read` messages
+are rejected, not retained behind a feature flag. The previous runnable image feasibility spike
+and image-only tests are retired; historical reports/screenshots are retained.
+
+Ordinary screenshots, attachment previews and Agent browser tools are independent and unchanged.
+Existing open tabs should be refreshed after reloading the extension because its internal translation
+protocol now accepts only text requests.
 
 ## Text layout and source identity
 
 Read complete logical paragraphs, including anonymous inline runs before/after block children.
 Do not concatenate unrelated paragraphs across headings or controls. Standalone navigation labels
 keep separate native bounds; mixed prose remains one paragraph.
-Flex/grid labels use the measured text slot, not the whole container: adjacent icons and their
-spacing remain native and are never used as translation space.
+Flex/grid labels use the owned text slot, not only the original Chinese glyph width. Transparent
+inline labels (including blockified row-flex children) can borrow empty space to their right, bounded by the next native sibling and ancestor
+clipping. Icons, badges and plain-text separators remain obstacles, including aria-hidden icons.
+The glyph mask never borrows this space. Each slot inspection has a 256-node bound.
 
 Source visibility includes ancestor clipping, not only display/visibility/opacity. Clipped CSS
 subtrees, content-visibility:hidden and closed disclosure bodies stay native; a disclosure's
 visible summary can still translate. Overflow-clipped text is retained when its full glyph bounds
-do not fit the ancestor's painted area. Opening a menu exposes its normal source blocks; closing it
+do not fit the ancestor's painted area. An explicitly nowrap/ellipsis-clipped title is an exception:
+translate its full source text, but mask only the visible horizontal slice. Other clipping remains
+excluded. Opening a menu exposes its normal source blocks; closing it
 removes all of their layers together (iterate a snapshot, not a live HTMLCollection).
+Editable state follows the nearest valid `contenteditable` declaration: `false` islands inside an
+editor are readable, while inherited editing and `plaintext-only` drafts remain excluded. This rule
+is shared with context collection. On HTTPS Feishu/Lark `/docx/` pages, recognized document editor
+zones inside `.page-block.root-block` are readable even though the document is contenteditable.
+Unrelated editors, nested drafts and form controls remain excluded. Translation never edits the
+document. Zero-width `data-enter` cursor placeholders are excluded from source text and context,
+so they cannot create meaningless style markers that the model would have to preserve.
+Docx editor runs with the same rendered typography as their paragraph are coalesced as plain
+text before assigning markers. Editor-only span splitting is not a formatting identity; real
+typography differences and links still retain markers and strict response validation.
+Known static Docx watermark patterns (both SSR and hydrated suite variants) are reproduced only over original glyph masks;
+the native watermarks are neither removed nor changed, and their tiled size/position is retained.
+Explicitly aria-hidden decorations are not translation failures; unknown watermarks or other
+unsupported painted content still retain the bounded unsupported status.
 
 Inline formatting uses locally assigned paired `<mN>` markers. Literal source angle brackets and
 ampersands are escaped. Validate balanced, non-duplicated marker identities in preview and final
 output. Render only text nodes and locally created spans/anchors; never parse model HTML or use
 model-provided URLs. Fonts, colors, link targets and decorations come from original elements.
 Normal link clicks dispatch the source link's handler; modified clicks retain native href behavior.
+Standalone translated links also retain a clickable hit area when English extends into safe spacing.
 Browser-protected private `:visited` colors cannot be read exactly.
 
 Mask original glyph rectangles, then let the browser lay out the translated paragraph at the source
 font, line height and content width. Snap mask edges outwards to device pixels and include one
 extra device pixel above/below for font rasterization beyond line boxes (e.g. a descending `p`).
 Do not expand horizontal masks into container/icon space. Do not distribute translated characters over source lines or
-force line breaks around inline links. Keep the source font when it fits. Actual overflow triggers
-whole-paragraph proportional fitting; an unfit result fails explicitly instead of covering the next
-paragraph or dropping text. Very long translations may still need smaller type: fixed geometry,
-arbitrary translation expansion and identical font size cannot all be guaranteed.
+force line breaks around inline links. Preserve native white-space rules when the result fits;
+English words are not broken at arbitrary characters. Keep the source font when it fits. Actual
+overflow may use compact leading when a native paragraph/row has enough vertical room, including
+word wrapping for nowrap labels. Preformatted `pre` layout keeps its whitespace/leading contract.
+Slots are bounded by native content, neighboring glyphs/icons and ancestor clipping.
+No source-page reflow is performed. Remaining
+overflow triggers whole-paragraph proportional fitting, with a floor of 85% of the original size
+and 12 CSS px (never enlarging a source already smaller than 12 px). Explicitly ellipsized source
+titles may retain that same truncation behavior, at the source font with full translated hover text.
+For other content, if the complete translation
+cannot fit readably, leave the original intact and report neutral unsupported, not a model failure.
+Keep that validated translation in the completed cache: a larger layout can display it without a
+new model call, including after Escape/reopen. Fixed geometry, arbitrary expansion and identical
+font size cannot all be guaranteed; this renderer does not reflow the underlying page.
 
 Source text and elements are not replaced. Late results apply only to still-connected, unchanged
 source text nodes. A page mutation updates geometry/style without discarding unchanged translations.
@@ -90,24 +125,29 @@ lag between an asynchronously scrolled page and a JavaScript-positioned overlay.
 Simple box-sized static linear gradients use the original CSS gradient, size and position in each
 glyph mask, with ancestor/descendant solid colors composed in native layer order. They do not use
 a screenshot or a flat sampled color. Textures, special background sizing/attachment/blending and
-other complex background effects remain unsupported.
+other complex background effects remain unsupported. For DOM captions over one independently
+verified static `<img>`, reuse its URL and native object-fit/object-position geometry beneath the
+caption's simple gradients/colors. Verify native paint order and full glyph coverage first; ambiguous
+stacking, pseudo-element effects, canvases and unverified/animated backgrounds retain original text
+instead of painting a flat white mask. This is DOM text rendering, not a screenshot or an extra
+vision-model request. There is no image-internal translation path.
 Own overlay mutations are ignored. Source caches keep at most 128 blocks; requests keep at most
 32 blocks / 16,000 source characters, with two text slots. Missing, unknown or duplicate output IDs
 fail validation. Previews do not enter completed caches. Invalid results cannot poison reopen caches.
 
 ## Page context
 
-Immediately before an uncached text or image request, collect context around the actual requested
-DOM nodes, not the current pointer or the start of `body.innerText`. Text uses its source paragraph;
-images use the captured source `<img>`. Walk the nearest text on each side up to a character budget,
-including nearby headings and image captions. There is no two-block or 1,200-character passage cap.
+Immediately before an uncached text request, collect context around the actual requested DOM nodes,
+not the current pointer or the start of `body.innerText`. Text uses its source paragraph. Walk the
+nearest text on each side up to a character budget, including nearby headings and figure captions. There is no two-block or 1,200-character passage cap.
 Sibling traversal crosses ordinary wrappers and adjacent sections but stays inside the nearest
 article/main (or body when neither exists).
 Hidden content, navigation/menus, forms/editable content and the extension overlay are excluded.
+Explicit read-only document islands are included under the same editability rule as translation.
 
 Multiple source neighborhoods share the same 6,000-character `context` budget, with duplicate
 passages removed. For a single target, split the available space approximately 3,000 before / 3,000
-after; unused space on either side is lent to the other. Page title, a compact current-text/image-alt
+after; unused space on either side is lent to the other. Page title, a compact current-text
 identifier and section labels use this same budget, not an extra allowance. Keep the end of preceding
 text and the start of following text, and present each side in reading order. Multiple targets split
 the budget equally, so 6,000 is per request, not per target or per side.
@@ -121,111 +161,61 @@ system instructions and never as additional translation targets.
 Existing source/model/effort/language cache rules are unchanged. Context-only changes do not
 invalidate previous translations; refresh the page to recompute them. Distant definitions/headings,
 deeply nested layouts and pages whose visual order differs from DOM order can still lack relevant
-context. Context does not repair OCR omissions or unsupported image-label layout. More input tokens
+context. Context does not resolve fixed-geometry layout limitations. More input tokens
 can add latency; no live quality/speed gain is assumed without evaluation.
 
-## Bounded image requests
+## Bounded requests and background restoration
 
-Only verified original-image PNG crops cross to the worker. A model crop remains within 1200×800 CSS pixels; a large
-lens fills multiple crops. There is one pixel request alongside up to two text requests. Requests
-from an obsolete session cannot cancel a current session's work. Partial valid vision blocks may
-display. Explicit model `incomplete: true` and rejected malformed blocks leave an incomplete state,
-not false completion; they do not cause automatic retry loops. Only recognized label regions are
-handled in such a response, including notation deliberately left native. Omitted text that the
-model does not report cannot be detected reliably by this single-call pipeline. No second OCR or
-verification-model request is added.
+Text has two concurrent slots, at most 32 blocks / 16,000 source characters per batch, a 6,000-character
+shared context limit, and a 60-second model deadline. A timeout retains its `TimeoutError` cause
+instead of being mislabeled as an intentional cancellation. Closing, tab navigation and cancellation
+abort pending work; no implicit model retries are added.
 
-The same image request distinguishes ordinary text from notation with an optional
-`kind: "text" | "notation"` field. Notation (including uncertain chart abbreviations) stays native,
-even if a model supplies a translation. Numeric-only text, underscore-separated metric keys and
-unchanged text are also protected locally. The classification is model-provided; this is not a
-guarantee of perfect OCR or semantic classification, and legacy responses without kind remain valid.
-The prompt explicitly includes horizontal axis captions and every legend entry. A natural-language
-label containing abbreviations is `text`: translate its words while keeping unresolved symbols inline.
-Only standalone notation is wholly retained. Ask for concise, faithful labels to reduce layout pressure.
+DOM text positioned over a photograph (for example a news-card headline) is still text. Only when
+its glyph rectangles overlap a supported photo does `TranslationBackgroundSources` verify that
+background. Ordinary images are not read. The verifier keeps only a bounded source key/static-status
+cache; no raster buffers, translations, fingerprints or paint layers are retained. Limits remain
+eight background sources, 4 MiB each, 16 million natural pixels and a 10-second read signal.
+Unavailable/animated backgrounds are remembered for the session, so they cannot cause a retry loop.
 
-Only horizontal, readable image labels are painted. Tall/rotated boxes remain native, and the
-background margin is at most one displayed CSS pixel per edge, not proportional to the box height.
-Fitting may reduce the estimated source size by at most 35%, with a ten-CSS-pixel floor; otherwise
-the original pixels remain untouched. This admits readable expansions such as a 60×20 box containing
-four CJK characters at about 15 px, which the previous 80% minimum incorrectly rejected. Width fitting
-uses fractional `Range.getBoundingClientRect()` glyph bounds converted from viewport coordinates back
-to intrinsic image pixels, not integer `scrollWidth/clientWidth` or half-pixel compensation. Keep the
-line vertically centered in the original box;
-neither the mask nor its coverage expands. These intentionally retained labels count as handled regions,
-so they cannot trigger a translation retry loop. Image geometry and intrinsic caches are unchanged.
-
-## Static image reuse
-
-Use source bytes for untransformed, unfiltered images with `object-fit: fill`, `cover` or `contain`.
-For cover/contain, support computed two-axis percentage or pixel `object-position` values. Separate
-the raster's scaled/offset rectangle from its clipping content box; only visible intrinsic pixels
-enter requests and coverage. Letterboxing is not image content. Padding and borders are excluded,
-and patches retain the inner rounded-corner clipping even when the raster extends outside the box.
-Geometry changes reuse intrinsic patches; newly revealed source pixels still need translation.
-Native `ImageDecoder` metadata must prove a single frame. Same-origin and data/blob sources follow
-normal page access rules. For cross-origin HTTP(S) images, the enabled top-frame session requests
-already-loaded root-frame Image resources through the existing debugger registry. The reader uses
-`Page.getResourceTree` and `Page.getResourceContent`; it never fetches arbitrary URLs or captures the
-lens. This uses the extension's existing debugger permission, without a screen-sharing picker.
-Bound loading to eight sources, 4 MiB each, 16 million natural pixels and a ten-second operation
-signal. Closed sessions cancel image reads; each read releases only its own debugger owner.
-Unsupported sources remain unchanged; there is no hidden screenshot or sharing fallback.
-
-Completed patches are stored in intrinsic image coordinates. Scrolling/resizing only reprojects
-them. Newly exposed source regions still require translation. Closing drops source blobs and pixel
-buffers; reopening checks metadata, composited background and SHA-256 before
-reusing bounded completed patches. Changed or unreadable sources never restore stale patches.
-For same-origin fetches, fingerprint actual displayed pixels; a refetch need not match a previously
-loaded image. For CDN resources, fingerprint the browser's loaded bytes without reading a tainted
-DOM canvas.
-
-If scrolling invalidates an in-flight original-image inspection, schedule a fresh inspection after
-that read settles. The source cache reuses valid loaded bytes; an unavailable unchanged source does
-not cause an automatic retry loop. Image load events are observed on Document, not Window, so
-late completion/replacement invalidates the affected image even without pointer movement.
+Same-origin/data/blob background validation follows normal page access rules. For cross-origin
+HTTP(S) photos, the authorized top-frame `translation.background` message can read an already-loaded
+root-frame Image resource via the existing debugger registry. It never fetches arbitrary URLs,
+captures the screen or sends the bytes to the model. Each read releases only its own debugger owner.
+This narrow helper remains solely to avoid regressing DOM captions onto white masks; the original
+image and its internal labels are never changed.
 
 ## Verification and remaining limits
 
-Deterministic unit/browser tests use isolated profiles and fixed provider responses, with no
-capture picker-selection flags. They exercise actual layout, compositor,
-extension messaging and cleanup. They are not live provider speed or translation-quality benchmarks.
+Deterministic unit/browser tests use isolated profiles and controlled provider responses. They exercise
+the built MV3 extension, request shape, source identity, browser layout, IPC and cleanup; they are
+not live provider quality or speed benchmarks.
 
-Regression coverage includes whole-paragraph fonts/wrapping at multiple widths, source links,
-literal/invalid style markers, delayed responses, streaming/error isolation, Esc reopen, static
-image movement, cover/contain crop pixels and clipping, gradient mask pixel comparisons, viewport
-changes, mixed supported/unsupported content, source replacement and resource release.
-Unsupported Canvas/video/CSS/iframe/fixed-gradient/scale-down-image cases must leave
-independent DOM and static-image work usable, never open a sharing dialog, and retain valid results
-on Escape/reopen. Reusable E2E tests and their helpers live under `e2e/`.
+Text-only regressions assert that a mixed text/image/Canvas page emits text input only, ordinary CDN
+images are loaded once and remain pixel-identical, no extension debugger commands are issued for them,
+and Escape/reopen reuses completed DOM translations. Streaming completion/failure/cancel, explicit
+retry, unrelated successful batches, photo-backed DOM text, source links, context and native screenshot
+tools have separate checks. All reusable E2E code remains under `e2e/`.
 
-Complex image backgrounds still use approximate local background sampling and model-supplied OCR
-boxes; exact image reconstruction is not promised. Static decoding requires the browser's native
-ImageDecoder. First-time model latency remains; engineering improvements reduce repeat
-work and visible instability, not the provider's time to first output.
+### Architecture review and deferred work
 
-### Explicit bad cases
+The request/lifecycle and source/renderer boundaries are reasonable for the current lens. Removing the
+parallel image pipeline reduces state and failure paths without adding a new framework, dependencies
+or a replacement architecture. The main remaining complexity is **text layout**, not translation calls.
+Source discovery now counts filtered/hidden nodes in its 10,000-node visit budget; previously those
+nodes escaped the outer walk counter and could cause excessive scans on large pages.
 
-The following are bounded product limits, not successful full translations. Do not remove their
-safety checks or add a lens-hiding fallback to make an acceptance test pass.
+| Remaining case                                                      | Cause and current behavior                                                                                                                                                            | Next step / scope                                                                                                                                             |
+| ------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Chinese → English expands a fixed navigation/card slot              | The overlay cannot reflow the source page. Per-block wrapping/fitting can differ between neighboring labels; unreadable overflow retains the original.                                | Address in the next Chinese-webpage layout task. Native DOM text replacement/reflow for ordinary pages is an architectural choice, not part of image removal. |
+| Feishu/Lark partially clipped tables or virtualized document blocks | Conservative clipping excludes non-ellipsis partial text, and only currently mounted DOM is available. Recognized read-only document text is supported, not the whole editor surface. | Verify the real table DOM, then choose a bounded document-specific approach. Do not mutate the collaborative editor to obtain a passing layout.               |
+| Complex/animated photo background or compositing                    | A source-anchored mask cannot faithfully reconstruct arbitrary layers. Affected DOM text stays native.                                                                                | Keep the explicit limit; no screenshot, sharing or pixel-translation fallback.                                                                                |
+| Context-only changes after a completed translation                  | Cache identity currently uses unchanged source text plus model/effort/language, not all surrounding prose.                                                                            | Refresh recomputes context. A future context-sensitive cache would need bounded invalidation and additional request-cost evaluation.                          |
+| Asynchronous scrolling and overlay positioning                      | Position-only changes reuse nodes, but browser compositor scrolling can precede JavaScript positioning.                                                                               | Remaining compositor lag is not claimed fixed by this removal.                                                                                                |
 
-| Scenario                                                                                                                     | Current behavior and cause                                                                                                                | Verification / why retained                                                                                                                                                      |
-| ---------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Textured/radial/specially sized or fixed backgrounds; transforms/filters; other image fit modes or complex `object-position` | Conservative classification leaves affected subtrees native. Ordinary static linear-gradient text and cover/contain images are supported. | Unit/browser cases distinguish supported geometry from fixed-gradient and scale-down limits. No general CSS compositor or screenshot fallback is added.                          |
-| Image inside a gradient-backed ancestor                                                                                      | Keep the image native while translating readable sibling text. Original-image compositing currently knows solid backgrounds only.         | A regression verifies independent text still works. Detecting opaque images or reconstructing transparent raster backgrounds is deferred, rather than inventing a flat backdrop. |
-| Video, Canvas, CSS animation or iframe                                                                                       | These pixel-only sources remain native, even after becoming still. Independent DOM text and verified images continue normally.            | Shared capture was explicitly removed; no sampling/settling loop, automatic screenshot fallback or per-frame model requests remain. Browser tests cover all four source types.   |
-| Complex texture behind text inside an image                                                                                  | Background masks approximate a local color; texture and OCR boxes can remain imperfect.                                                   | This is a rendering limitation, not an asserted image-quality pass. Exact inpainting would require another reconstruction pipeline; no such pipeline is included.                |
-| Rotated chart axes, tiny image labels, or image translations that cannot fit readably                                        | Keep original labels, ticks and symbols; do not expand masks or shrink text indefinitely.                                                 | Unit and browser pixel comparisons cover retained labels and bounded normal fitting. General rotated OCR/reconstruction is not added.                                            |
-| Very long translation in a short fixed source block                                                                          | Fit the whole paragraph if necessary; reject if it still cannot fit. Original geometry is not expanded to cover neighboring content.      | Fixed geometry, arbitrary language expansion and identical font size cannot all be guaranteed. Normal paragraphs/inline links have native-browser layout regression tests.       |
-| Protected media, inaccessible images, unsupported ImageDecoder                                                               | Leave the affected content unchanged. Other readable sources continue; no covert screenshot fallback.                                     | Mixed-source tests verify unavailable images cannot block readable ones. DRM-specific media has not been live-verified and is not counted as a tested success.                   |
+Images and image-internal text are now intentionally outside the feature scope, **not failed or
+partially translated content**. They remain native in every state.
 
-Before shared capture was removed, an exploratory root-capture/top-layer-lens alternative could preserve some gradients, but failed to
-produce a fresh frame for several solid/mixed-background or transformed-root fixtures. It is not a
-production fallback. Historical failed probes and follow-up measurements remain preserved under
-`e2e/.runtime/translation-native/`.
-
-The 2026-09-12 live Minify diagnostic also reproduced the image-background limit: the embedded
-Code Golf screenshot's green **Ask Question** button lost its green fill under the translated patch.
-The model's box includes neighboring white pixels, biasing the sampled mask color. This is an
-explicit visual bad case, not a translation-success claim. See the original and translated images
-in `e2e/.runtime/translation-minify-2026-09-12T08-51-49-321Z/`.
+Historical image-quality failures remain in local evidence under `e2e/.runtime/`; they are not used
+as current text-only success claims. This change deliberately does not claim to fix Baidu/QQ reflow
+or Feishu table coverage.

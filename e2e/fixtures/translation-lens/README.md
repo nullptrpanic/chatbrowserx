@@ -1,21 +1,9 @@
-# Region translation feasibility spike
+# Archived image-translation feasibility evidence
 
-This is the disposable, controlled fixture used before the extension demo. Its `?preview` route
-still replays recorded translations; it is not the live extension feature. The minimal extension
-entry is documented in `src/translation/README.md`. The original demo on port 4317 is untouched.
-
-## What this proves
-
-- A real `gpt-5.6-terra` request read and translated six English lines: two DOM lines and
-  four Canvas lines, including text on a gradient/patterned background.
-- `translation.json` contains the unedited model blocks from the second report below.
-  Viewport and Canvas geometry are separately measured fixture metadata.
-- The preview replays this saved response. Pointer movement does **not** send model requests.
-  It demonstrates cached overlay rendering, not live OCR or end-to-end latency while moving.
-- DOM coordinates/styles come from the original elements. Image coordinates come from the model,
-  mapped from the captured viewport into the current image box.
-- The original page is untouched; only translated text/background patches inside the lens are shown.
-  Mouse movement uses animation-frame updates. Ctrl+wheel resizes the frame; Escape removes it.
+Archived on 2026-09-16: image translation has been removed from the product at the user's request.
+The runnable image-translation spike, saved replay and obsolete automated cases have been removed.
+This document records historical experiments, not current product behavior or verification.
+For the supported DOM-text-only feature, see [translation architecture](../../../src/translation/README.md).
 
 ## Actual model runs — 2026-09-09
 
@@ -67,41 +55,5 @@ The core idea is feasible, but this fixture does not establish production readin
 - Only Ctrl+wheel dispatch was checked. This does not establish interception of browser-toolbar zoom,
   Cmd/Ctrl-plus, or every platform's native pinch gesture.
 
-Start with a dedicated region-only translation path, reuse screenshot/crop and isolated page-overlay
-capabilities, and do not add whole-page replacement/restoration, a generic agent task, or persistent
-page caches. Keep unknown regions in the original language until valid translations arrive.
-
-## Reproduce
-
-### Live extension demo follow-up
-
-The new `区域翻译 · Demo` entry was exercised through the production screenshot/crop/provider/page
-path in the existing authenticated Profile, with no Agent task and no recorded-response replay.
-At 1440 px and 818 px browser widths, fresh requests each returned translations for all four Canvas
-lines; the corresponding overlays were visually inspected, and Escape removed them. Observed times
-were about 9.0 s and 10.1 s, each with one Provider request. These are two manual smoke observations,
-not a repeatability or performance comparison claim. Target language was temporarily set to `zh-CN`
-and restored afterward. An earlier request with `system` resolving to English correctly returned no
-blocks for the English source (6.5 s). Screenshots are preserved under
-`e2e/.runtime/region-translation-live-{zh,narrow}-{original,translated}.png`.
-
-The production browser regression uses a mocked Provider with real screenshot/crop/rendering. Its
-first failures exposed runtime sender classification and HTTP-page UUID availability; failures are
-preserved under `e2e/.runtime/region-translation-{before,after-context,diagnostic}/`, followed by a
-passing check under `e2e/.runtime/region-translation-after-http/`.
-
-Use the repository's `e2e/AGENTS.md` and `e2e/RUNBOOK.md` environment sequence before any live run.
-The local sample is intentionally ignored, consistent with the real-sample storage policy.
-
-```sh
-./node_modules/.bin/vite e2e/fixtures/translation-lens --host 127.0.0.1 --port 4318 --strictPort
-./node_modules/.bin/vitest run e2e/tests/translation-lens.test.ts
-./node_modules/.bin/playwright test --config e2e/playwright.config.ts translation-lens.spec.ts
-npm run e2e:catalog:validate
-npm run e2e:live:verify -- translation-lens-visual
-npm run e2e:live:benchmark -- translation-lens-visual 1
-```
-
-Source fixture: `http://127.0.0.1:4318/`. Recorded-response preview:
-`http://127.0.0.1:4318/?preview`. Screenshots from this spike are under
-`e2e/.runtime/translation-lens-{original,preview,zoom}.png`.
+Current scope: translate DOM text only and leave all image content unchanged. Historical runtime
+screenshots and reports referenced above are retained as evidence, not active fallbacks.

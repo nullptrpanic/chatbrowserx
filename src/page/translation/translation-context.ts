@@ -1,7 +1,9 @@
 import { MAX_TRANSLATION_CONTEXT_CHARS } from '../../translation/region-translation';
+import { translationEditable } from './translation-editability';
+import { isTranslationDocumentPlaceholder } from './translation-document';
 
 const excluded =
-  'script,style,noscript,template,nav,footer,form,input,textarea,select,[contenteditable],svg,canvas,video,iframe,' +
+  'script,style,noscript,template,nav,footer,form,input,textarea,select,svg,canvas,video,iframe,' +
   '[hidden],[inert],[aria-hidden="true"],[role="navigation"],[role="menu"],[role="menubar"],[data-chatbrowserx-overlay]';
 const headings = 'h1,h2,h3,h4,h5,h6';
 const blocks = `p,li,dt,dd,td,th,pre,blockquote,figcaption,${headings}`;
@@ -29,6 +31,7 @@ export function collectTranslationContext(doc: Document, sources: readonly Node[
     const result =
       depth < 64 &&
       !el.matches(excluded) &&
+      !isTranslationDocumentPlaceholder(el) &&
       s.display !== 'none' &&
       s.visibility !== 'hidden' &&
       s.visibility !== 'collapse' &&
@@ -60,7 +63,13 @@ export function collectTranslationContext(doc: Document, sources: readonly Node[
         .filter((source) => {
           const el =
             source.nodeType === Node.ELEMENT_NODE ? (source as Element) : source.parentElement;
-          return source.isConnected && source.ownerDocument === doc && el && visible(el);
+          return (
+            source.isConnected &&
+            source.ownerDocument === doc &&
+            el &&
+            visible(el) &&
+            !translationEditable(el)
+          );
         })
         .map((source) => {
           if (source.nodeType !== Node.TEXT_NODE) return source;
@@ -88,6 +97,7 @@ export function collectTranslationContext(doc: Document, sources: readonly Node[
       if (depth >= 64) return;
       if (node.nodeType === Node.ELEMENT_NODE && !visible(node as Element)) return;
       if (node.nodeType === Node.TEXT_NODE || node.nodeName === 'BR') {
+        if (translationEditable(node.parentElement)) return;
         if (node.parentElement?.matches('details:not([open])')) return;
         const raw = node.nodeName === 'BR' ? '\n' : (node as Text).data;
         const remaining = charLimit - characters;
@@ -153,14 +163,11 @@ export function collectTranslationContext(doc: Document, sources: readonly Node[
     // The full translation target is already in the request. Keep its identification compact
     // so nearby prose, including captions, receives most of the shared character budget.
     const currentLimit = Math.min(200, Math.floor(perGroup / 4));
-    const image = anchor.nodeType === Node.ELEMENT_NODE && (anchor as Element).matches('img');
-    const current = image
-      ? normalize((anchor as HTMLImageElement).alt.slice(0, currentLimit))
-      : scan(anchor, 'current', currentLimit)
-          .map((p) => p.text)
-          .join('\n');
+    const current = scan(anchor, 'current', currentLimit)
+      .map((p) => p.text)
+      .join('\n');
     if (current && !seen.has(current)) {
-      result += `\n${image ? 'Image description' : 'Current text'}: ${current}`;
+      result += `\nCurrent text: ${current}`;
       seen.add(current);
     }
     const room = Math.max(0, perGroup - result.length - 17); // Before/after labels.

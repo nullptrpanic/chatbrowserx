@@ -1,10 +1,9 @@
 import { z } from 'zod';
 import { PROTOCOL_VERSION, type ExtensionMessage, type PageCommand } from './message-types';
 import {
-  translationImageSelectionSchema,
   translationTextsSchema,
   translationLensOptionsSchema,
-  translationImageSourceSchema,
+  translationBackgroundSourceSchema,
 } from '../../translation/region-translation';
 
 const requestIdSchema = z.string().trim().min(1).max(128);
@@ -248,8 +247,8 @@ export const extensionMessageSchema: z.ZodType<ExtensionMessage> = z.discriminat
     .object({
       version: z.literal(PROTOCOL_VERSION),
       requestId: requestIdSchema,
-      type: z.literal('translation.image'),
-      payload: translationImageSourceSchema,
+      type: z.literal('translation.background'),
+      payload: translationBackgroundSourceSchema,
     })
     .strict(),
   screenshotCaptureSchema,
@@ -279,7 +278,7 @@ export const extensionMessageSchema: z.ZodType<ExtensionMessage> = z.discriminat
       version: z.literal(PROTOCOL_VERSION),
       requestId: requestIdSchema,
       type: z.literal('translation.read'),
-      payload: z.union([translationImageSelectionSchema, translationTextsSchema]),
+      payload: translationTextsSchema,
     })
     .strict(),
   z
@@ -290,8 +289,6 @@ export const extensionMessageSchema: z.ZodType<ExtensionMessage> = z.discriminat
       payload: z
         .object({
           sessionId: requestIdSchema,
-          close: z.boolean(),
-          kind: z.enum(['text', 'pixels']).optional(),
         })
         .strict(),
     })

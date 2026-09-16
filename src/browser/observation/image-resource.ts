@@ -25,7 +25,7 @@ export async function readImageResource(
   signal: AbortSignal,
 ): Promise<{ mimeType: string; data: string } | null> {
   signal.throwIfAborted();
-  const owner = `translation-image:${crypto.randomUUID()}`;
+  const owner = `translation-background:${crypto.randomUUID()}`;
   await ports.sessions.retain(tabId, owner);
   try {
     const { root } = await ports.sessions.ensure(tabId, signal);

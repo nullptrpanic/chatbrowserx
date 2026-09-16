@@ -29,37 +29,33 @@ extensionTest(
       route.fulfill({
         contentType: 'text/html',
         body: `<!doctype html>
-    <style>body{margin:0;background:white;font:22px Arial}main{position:absolute;left:340px;top:300px}img{position:absolute;left:620px;top:250px}</style>
-    <main>Static title</main><img width="200" height="200">
-    <script>const canvas=document.createElement('canvas');canvas.width=canvas.height=200;const ctx=canvas.getContext('2d');ctx.fillStyle='#ddd';ctx.fillRect(0,0,200,200);ctx.fillStyle='black';ctx.font='20px Arial';ctx.fillText('Image text',20,60);document.querySelector('img').src=canvas.toDataURL();</script>`,
+    <style>body{margin:0;background:white;font:22px Arial}main{position:absolute;left:400px;top:320px}p{position:absolute;left:400px;top:400px}</style>
+    <main>Static title</main>`,
       }),
     );
     let textRequests = 0,
-      imageRequests = 0;
+      failedRequests = 0;
     await context.route('https://chatgpt.com/backend-api/codex/responses', async (route) => {
       const request = route.request().postDataJSON() as {
         input: { content?: { type: string; text?: string }[] }[];
       };
       const contents = request.input.flatMap((i) => i.content ?? []);
-      const pixels = contents.some((c) => c.type === 'input_image');
-      let output: string;
-      if (pixels) {
-        imageRequests++;
-        output =
-          imageRequests === 1
-            ? 'not JSON: private provider output'
-            : JSON.stringify({
-                blocks: [
-                  { text: 'Image text', translation: '图片文字', box: [100, 200, 600, 100] },
-                ],
-              });
-      } else {
-        textRequests++;
-        const payload = JSON.parse(contents[0]?.text ?? '{}') as { texts: { id: string }[] };
-        output = JSON.stringify({
-          blocks: payload.texts.map((t) => ({ id: t.id, translation: '静态标题' })),
-        });
-      }
+      expect(contents.every((c) => c.type === 'input_text')).toBe(true);
+      const payload = JSON.parse(contents[0]?.text ?? '{}') as {
+        texts: { id: string; text: string }[];
+      };
+      const failing = payload.texts.some((t) => t.text === 'Retry this');
+      if (failing) failedRequests++;
+      else textRequests++;
+      const output =
+        failing && failedRequests === 1
+          ? 'not JSON: private provider output'
+          : JSON.stringify({
+              blocks: payload.texts.map((t) => ({
+                id: t.id,
+                translation: t.text === 'Static title' ? '静态标题' : '重试成功',
+              })),
+            });
       const events = [
         { type: 'response.created', response: { id: 'translation' } },
         { type: 'response.output_text.delta', delta: output },
@@ -86,6 +82,12 @@ extensionTest(
     });
     await page.mouse.move(600, 400);
     const lens = page.locator('[data-chatbrowserx-overlay=translation]');
+    await expect(lens).toHaveAttribute('data-status', 'ready');
+    await page.evaluate(() => {
+      const p = document.createElement('p');
+      p.textContent = 'Retry this';
+      document.body.append(p);
+    });
     await expect(lens).toHaveAttribute('data-status', 'error');
     const readOverlay = () =>
       panel.evaluate(async (id) => {
@@ -106,9 +108,9 @@ extensionTest(
       }, tabId);
     await expect.poll(async () => (await readOverlay())?.texts).toContain('静态标题');
     const failure = await readOverlay();
-    expect(failure?.notice).toContain('pixels/TRANSLATION_RESPONSE_INVALID');
+    expect(failure?.notice).toContain('text/TRANSLATION_RESPONSE_INVALID');
     expect(failure?.notice).not.toContain('private');
-    // Allow the one capture already in flight to restore its overlays; no new loop may start.
+    // A failed text batch must not invalidate successful text or start a retry loop.
     await page.waitForTimeout(1200);
     const visibility = await page.evaluate(
       () =>
@@ -130,22 +132,22 @@ extensionTest(
         }),
     );
     expect(visibility).toEqual({ hiddenFrames: 0, states: ['error'] });
-    expect(imageRequests).toBe(1);
+    expect(failedRequests).toBe(1);
     expect(textRequests).toBe(1);
     await testInfo.attach('failed-lens-observation', {
-      body: JSON.stringify({ ...visibility, imageRequests, textRequests, error: failure?.notice }),
+      body: JSON.stringify({ ...visibility, failedRequests, textRequests, error: failure?.notice }),
       contentType: 'application/json',
     });
     await page.screenshot({ path: testInfo.outputPath('failed-lens.png') });
     await page.mouse.move(610, 400);
     await page.waitForTimeout(1500);
     await expect(lens).toHaveAttribute('data-status', 'error');
-    expect(imageRequests).toBe(1);
+    expect(failedRequests).toBe(1);
     await clickTranslationAction(page, panel, tabId);
     await expect(lens).toHaveAttribute('data-status', 'ready');
-    expect(imageRequests).toBe(2);
+    expect(failedRequests).toBe(2);
     expect(textRequests).toBe(1);
-    expect((await readOverlay())?.texts).toContain('图片文字');
+    expect((await readOverlay())?.texts).toContain('重试成功');
     await page.keyboard.press('Escape');
     await expect(lens).toHaveCount(0);
   },

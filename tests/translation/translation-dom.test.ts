@@ -37,6 +37,37 @@ afterEach(() => {
   vi.unstubAllGlobals();
 });
 
+it('collects read-only document islands without collecting surrounding editable drafts', () => {
+  const { dom, area } = setup();
+  document.body.innerHTML = `<article contenteditable="true"><p>Draft before.</p>
+    <section contenteditable="false"><p>Read-only document.</p><p contenteditable="invalid">Inherited read-only.</p>
+    <p contenteditable="plaintext-only">Private draft.</p></section><p>Draft after.</p></article>`;
+  dom.invalidate();
+  dom.update(area);
+  expect(dom.missing().map((t) => t.text)).toEqual(['Read-only document.', 'Inherited read-only.']);
+});
+
+it('counts rejected hidden nodes toward the source-discovery budget', () => {
+  const { dom, area } = setup();
+  document.body.innerHTML = '<div hidden></div>'.repeat(10020) + '<p>Past the discovery limit.</p>';
+  const computed = window.getComputedStyle(document.body);
+  const styles = vi.spyOn(window, 'getComputedStyle').mockReturnValue(computed);
+  dom.invalidate();
+  dom.update(area);
+  expect(styles.mock.calls.length).toBeLessThanOrEqual(10001);
+  expect(dom.missing()).toEqual([]);
+});
+
+it('ignores explicitly hidden decorative watermarks without flagging the readable page', () => {
+  const { dom, area } = setup();
+  document.body.innerHTML = `<p>Readable document.</p>
+    <div aria-hidden="true" style="transform:rotate(-20deg);opacity:.08">Watermark</div>`;
+  dom.invalidate();
+  dom.update(area);
+  expect(dom.missing().map((t) => t.text)).toEqual(['Readable document.']);
+  expect(dom.unsupported).toEqual([]);
+});
+
 it.each([
   'clip-path:inset(50%);overflow:hidden;width:1px;height:1px',
   'position:absolute;clip:rect(0px,0px,0px,0px)',
@@ -160,8 +191,10 @@ it('anchors a flex navigation label after its icon instead of at the container p
   if (!source) throw new Error('Source missing');
   dom.accept({ blocks: [{ id: source.id, translation: '模型' }] });
   expect((layer.querySelector('.text') as HTMLElement).style.left).toBe('130px');
-  expect((layer.querySelector('.text') as HTMLElement).style.width).toBe('54px');
+  // Use the remaining label slot, while the original glyph mask still excludes the icon.
+  expect((layer.querySelector('.text') as HTMLElement).style.width).toBe('62px');
   expect((layer.querySelector('.source-mask') as HTMLElement).style.left).toBe('130px');
+  expect((layer.querySelector('.source-mask') as HTMLElement).style.width).toBe('54px');
 });
 
 it.each([0.75, 1, 2])(
@@ -399,7 +432,7 @@ it('does not invent a flat backdrop for an image over a gradient, while allowing
   dom.update(area);
   expect(dom.missing().map((t) => t.text)).toEqual(['Readable card.']);
   expect(dom.images).toEqual([]);
-  expect(dom.unsupported).toHaveLength(1);
+  expect(dom.unsupported).toHaveLength(0);
 });
 
 it('does not merge anonymous prose across a block child into one translated paragraph', () => {

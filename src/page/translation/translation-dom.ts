@@ -1,12 +1,24 @@
 import type { TranslationTextResult, TranslationTexts } from '../../translation/region-translation';
 import { intersectRegions, subtractRegions, type TranslationRect } from './translation-regions';
-import { imageBackgrounds, supportsImageLayout } from './translation-images';
+import { imageBackgrounds, supportsImageLayout } from './translation-background-source';
 import { escapeTranslationText } from '../../translation/translation-markup';
-import { TranslationTextLayout, type TranslationTextSource } from './translation-text-layout';
-import { gradientBackground, isSimpleGradient } from './translation-background';
+import {
+  TranslationTextLayout,
+  translationTextSlot,
+  translationTypography,
+  type TranslationTextSource,
+} from './translation-text-layout';
+import { gradientBackground, isSimpleGradient, textBackground } from './translation-background';
+import { translationEditable } from './translation-editability';
+import {
+  isTranslationDocumentPlaceholder,
+  isTranslationDocumentText,
+  translationDocumentWatermark,
+  type TranslationWatermark,
+} from './translation-document';
 
 const ignored =
-  'script,style,noscript,template,input,textarea,select,[contenteditable],[data-chatbrowserx-overlay]';
+  'script,style,noscript,template,input,textarea,select,[hidden],[inert],[aria-hidden="true"],[data-chatbrowserx-overlay]';
 const normalize = (text: string) => text.replace(/\s+/g, ' ').trim();
 const inline = (style: CSSStyleDeclaration) => ['inline', 'contents'].includes(style.display);
 const rect = (r: DOMRect): TranslationRect => ({
@@ -31,12 +43,14 @@ function collect(doc: Document, view: Window, area: TranslationRect) {
   const owners = new Set<Element>(),
     visual: TranslationRect[] = [],
     unsupported: TranslationRect[] = [],
-    images: HTMLImageElement[] = [];
+    images: HTMLImageElement[] = [],
+    watermarks: TranslationWatermark[] = [];
   const visible = (el: Element) => {
     const style = view.getComputedStyle(el);
     const disclosure = el.parentElement?.matches('details:not([open])');
     return (
       !el.matches(ignored) &&
+      !isTranslationDocumentPlaceholder(el) &&
       (!disclosure || el === el.parentElement?.querySelector('summary')) &&
       style.display !== 'none' &&
       style.visibility !== 'hidden' &&
@@ -49,7 +63,13 @@ function collect(doc: Document, view: Window, area: TranslationRect) {
   };
   // An overlay cannot inherit source clipping. Preserve partially clipped text rather
   // than exposing it outside a hidden menu or a scroll container's painted area.
-  type Clip = { box: TranslationRect; x: boolean; y: boolean };
+  type Clip = {
+    box: TranslationRect;
+    x: boolean;
+    y: boolean;
+    ellipsis: boolean;
+    element: Element;
+  };
   const clips = new Map<Element, Clip[]>();
   const clippingParents = (el: Element | null): Clip[] => {
     if (!el) return [];
@@ -67,6 +87,8 @@ function collect(doc: Document, view: Window, area: TranslationRect) {
         {
           x,
           y,
+          element: el,
+          ellipsis: s.textOverflow === 'ellipsis' && s.whiteSpace === 'nowrap',
           box: {
             x: r.x + el.clientLeft,
             y: r.y + el.clientTop,
@@ -79,25 +101,39 @@ function collect(doc: Document, view: Window, area: TranslationRect) {
     clips.set(el, result);
     return result;
   };
-  if (!doc.body || !visible(doc.body)) return { blocks: [], visual, images, unsupported };
+  if (!doc.body || !visible(doc.body))
+    return { blocks: [], visual, images, unsupported, watermarks };
+  let visits = 0;
   const walker = doc.createTreeWalker(doc.body, NodeFilter.SHOW_ELEMENT | NodeFilter.SHOW_TEXT, {
     acceptNode(node) {
+      // FILTER_REJECT nodes never reach nextNode(). Count them here, then return once
+      // over budget so the outer loop can stop without inspecting the remaining subtree.
+      if (++visits > 10000) return NodeFilter.FILTER_ACCEPT;
       if (node.nodeType === Node.TEXT_NODE)
-        return node.textContent?.trim() && !node.parentElement?.matches('details:not([open])')
+        return node.textContent?.trim() &&
+          !translationEditable(node.parentElement) &&
+          !node.parentElement?.matches('details:not([open])')
           ? NodeFilter.FILTER_ACCEPT
           : NodeFilter.FILTER_SKIP;
       const el = node as Element;
       if (!visible(el)) return NodeFilter.FILTER_REJECT;
+      // Editable containers may contain explicit read-only document islands.
+      if (translationEditable(el)) return NodeFilter.FILTER_SKIP;
       const r = rect(el.getBoundingClientRect());
       if (r.width > 0 && r.height > 0 && !intersectRegions(r, area))
         return NodeFilter.FILTER_REJECT;
       const style = view.getComputedStyle(el);
+      const watermark = translationDocumentWatermark(el, view);
+      if (watermark) {
+        watermarks.push(watermark);
+        return NodeFilter.FILTER_REJECT;
+      }
       const icon = el.matches('svg')
         ? el
         : el.childElementCount === 1 && el.firstElementChild?.matches('svg')
           ? el.firstElementChild
           : null;
-      // Small SVG icons were already excluded from OCR; do not reclassify their wrapper or paths.
+      // Decorative icons are not translatable DOM text.
       if (
         icon &&
         r.width <= 48 &&
@@ -112,7 +148,7 @@ function collect(doc: Document, view: Window, area: TranslationRect) {
         (style.backgroundImage !== 'none' &&
           style.backgroundImage !== '' &&
           !isSimpleGradient(style)) ||
-        (style.transform !== 'none' && style.transform !== '') ||
+        !['none', '', 'matrix(1, 0, 0, 1, 0, 0)'].includes(style.transform) ||
         (style.filter && style.filter !== 'none') ||
         (style.opacity && style.opacity !== '1') ||
         (style.mixBlendMode && style.mixBlendMode !== 'normal') ||
@@ -132,21 +168,27 @@ function collect(doc: Document, view: Window, area: TranslationRect) {
             !el.getAnimations().length
           )
             images.push(el);
-          else unsupported.push(r);
+          // Media is intentionally left unchanged in text-only translation. Only DOM text
+          // behind unsupported compositing warrants a text-translation warning.
+          else if (
+            !el.matches('img,canvas,video,iframe,object,embed,svg') &&
+            el.textContent?.trim()
+          )
+            unsupported.push(r);
         }
         return NodeFilter.FILTER_REJECT;
       }
       return NodeFilter.FILTER_ACCEPT;
     },
   });
-  let node: Node | null,
-    visits = 0;
-  while ((node = walker.nextNode()) && visits++ < 10000) {
+  let node: Node | null;
+  while ((node = walker.nextNode()) && visits <= 10000) {
     if (node.nodeType !== Node.TEXT_NODE) continue;
     let owner = node.parentElement;
     while (
       owner?.parentElement &&
       inline(view.getComputedStyle(owner)) &&
+      !translationEditable(owner.parentElement) &&
       !owner.parentElement.matches('details:not([open])')
     )
       owner = owner.parentElement;
@@ -162,8 +204,12 @@ function collect(doc: Document, view: Window, area: TranslationRect) {
     );
     const texts = doc.createTreeWalker(owner, NodeFilter.SHOW_ELEMENT | NodeFilter.SHOW_TEXT, {
       acceptNode(n) {
-        if (n.nodeType === Node.TEXT_NODE) return NodeFilter.FILTER_ACCEPT;
+        if (n.nodeType === Node.TEXT_NODE)
+          return translationEditable(n.parentElement)
+            ? NodeFilter.FILTER_REJECT
+            : NodeFilter.FILTER_ACCEPT;
         const el = n as Element;
+        if (isTranslationDocumentPlaceholder(el)) return NodeFilter.FILTER_REJECT;
         if (el.tagName !== 'BR' && visible(el) && inline(view.getComputedStyle(el)))
           return NodeFilter.FILTER_SKIP;
         if (view.getComputedStyle(el).display === 'inline-block') tight = true;
@@ -193,8 +239,19 @@ function collect(doc: Document, view: Window, area: TranslationRect) {
         if (!plain) continue;
         const markers: Element[] = [];
         const segments: { element: Element; text: string }[] = [];
+        const documentStyle = isTranslationDocumentText(sourceOwner)
+          ? view.getComputedStyle(sourceOwner)
+          : null;
         for (const n of nodes) {
-          const element = n.parentElement ?? sourceOwner;
+          let element = n.parentElement ?? sourceOwner;
+          // Docx splits identical prose into editor runs (including after hydration).
+          // Those boundaries are not styles the model should preserve. Keep real formatting
+          // and every link identity, using exactly the properties the renderer copies.
+          if (documentStyle && !element.closest('a[href]')) {
+            const style = view.getComputedStyle(element);
+            if (translationTypography.every((p) => style[p] === documentStyle[p]))
+              element = sourceOwner;
+          }
           const last = segments[segments.length - 1];
           if (last?.element === element) last.text += n.data;
           else segments.push({ element, text: n.data });
@@ -221,16 +278,26 @@ function collect(doc: Document, view: Window, area: TranslationRect) {
         for (const n of nodes) {
           const range = doc.createRange();
           range.selectNodeContents(n);
-          for (const r of range.getClientRects()) {
+          for (const measured of range.getClientRects()) {
+            let r = measured;
             if (r.width < 1 || r.height < 1) continue;
-            if (
-              clippingParents(n.parentElement).some(
-                ({ box, x, y }) =>
-                  (x && (r.x < box.x - 0.5 || r.right > box.x + box.width + 0.5)) ||
-                  (y && (r.y < box.y - 0.5 || r.bottom > box.y + box.height + 0.5)),
-              )
-            )
-              clipped = true;
+            for (const { box, x, y, ellipsis, element } of clippingParents(n.parentElement)) {
+              if (x && (r.x < box.x - 0.5 || r.right > box.x + box.width + 0.5)) {
+                // A visible ellipsized title is not a hidden menu. Translate the full title,
+                // but mask only its painted horizontal slice (including the ellipsis).
+                if (ellipsis && (element === sourceOwner || sourceOwner.contains(element))) {
+                  const left = Math.max(r.x, box.x);
+                  r = new DOMRect(
+                    left,
+                    r.y,
+                    Math.max(0, Math.min(r.right, box.x + box.width) - left),
+                    r.height,
+                  );
+                } else clipped = true;
+              }
+              if (y && (r.y < box.y - 0.5 || r.bottom > box.y + box.height + 0.5)) clipped = true;
+            }
+            if (r.width < 1) continue;
             const line = lines.find(
               (l) =>
                 Math.abs(l.y - r.y) < 2 &&
@@ -258,23 +325,24 @@ function collect(doc: Document, view: Window, area: TranslationRect) {
             lines,
             tight: tight || sourceOwner !== owner || inline(view.getComputedStyle(sourceOwner)),
           });
-        if (blocks.length === 128) return { blocks, visual, images, unsupported };
+        if (blocks.length === 128) return { blocks, visual, images, unsupported, watermarks };
       }
     }
   }
-  return { blocks, visual, images, unsupported };
+  return { blocks, visual, images, unsupported, watermarks };
 }
 
 /** A small source-anchored cache. No screenshot, source DOM replacement, or durable state. */
 export class TranslationDom {
   readonly entries = new Map<Node, TextEntry>();
   readonly layoutErrors = new Set<string>();
+  readonly layoutUnsupported = new Set<string>();
   private readonly layout: TranslationTextLayout;
   visible: TextEntry[] = [];
   visual: TranslationRect[] = [];
   unsupported: TranslationRect[] = [];
   images: HTMLImageElement[] = [];
-  visualKey = '';
+  private watermarks: TranslationWatermark[] = [];
   area: TranslationRect | null = null;
   sequence = 0;
 
@@ -283,6 +351,7 @@ export class TranslationDom {
     readonly view: Window,
     readonly layer: HTMLElement,
     readonly cache = new Map<Node, { text: string; translation: string }>(),
+    private readonly imageReady: (image: HTMLImageElement) => boolean = () => false,
   ) {
     this.layout = new TranslationTextLayout(doc, view);
   }
@@ -305,20 +374,14 @@ export class TranslationDom {
     this.visual = source.visual;
     this.unsupported = source.unsupported;
     this.images = source.images;
-    this.visualKey = JSON.stringify([
-      source.visual,
-      source.images.map((i) => [
-        i.currentSrc || i.src,
-        i.complete,
-        i.naturalWidth,
-        i.naturalHeight,
-        imageBackgrounds(i),
-      ]),
-    ]);
+    this.watermarks = source.watermarks;
     this.visible = source.blocks.map((block) => {
       let entry = this.entries.get(block.key);
       if (entry?.text !== block.text) {
-        if (entry) this.layoutErrors.delete(entry.id);
+        if (entry) {
+          this.layoutErrors.delete(entry.id);
+          this.layoutUnsupported.delete(entry.id);
+        }
         entry?.layer.remove();
         entry = {
           ...block,
@@ -341,7 +404,10 @@ export class TranslationDom {
       if (!first) break;
       this.entries.get(first)?.layer.remove();
       const entry = this.entries.get(first);
-      if (entry) this.layoutErrors.delete(entry.id);
+      if (entry) {
+        this.layoutErrors.delete(entry.id);
+        this.layoutUnsupported.delete(entry.id);
+      }
       this.entries.delete(first);
     }
     for (const [owner, saved] of this.cache) {
@@ -358,6 +424,17 @@ export class TranslationDom {
       if (entry.layer.parentElement !== this.layer) this.layer.append(entry.layer);
     for (const entry of this.visible)
       if (entry.translation !== undefined || entry.preview !== undefined) this.paint(entry);
+  }
+
+  /** Only actual DOM text/photo overlaps need background verification, never ordinary images. */
+  backgroundSources() {
+    return this.images
+      .filter((image) =>
+        this.visible.some((entry) =>
+          entry.lines.some((line) => intersectRegions(image.getBoundingClientRect(), line)),
+        ),
+      )
+      .slice(0, 8);
   }
 
   missing(pending?: ReadonlySet<string>): TranslationTexts['texts'] {
@@ -430,16 +507,26 @@ export class TranslationDom {
       entry.layer.replaceChildren();
       delete entry.renderKey;
       this.layoutErrors.delete(entry.id);
+      this.layoutUnsupported.delete(entry.id);
       return true;
     }
     const style = this.view.getComputedStyle(entry.owner);
     const box = entry.owner.getBoundingClientRect();
-    const background = gradientBackground(entry.owner, this.view);
+    const background = textBackground(
+      entry.owner,
+      entry.lines,
+      this.view,
+      this.visual,
+      this.images,
+      this.imageReady,
+    );
+    const slot = translationTextSlot(entry, this.view);
     const key = JSON.stringify([
       translation,
       entry.lines.map((r) => ({ ...r, x: r.x - box.x, y: r.y - box.y })),
       box.width,
       entry.tight,
+      { ...slot, x: slot.x - box.x, y: slot.y - box.y },
       this.view.devicePixelRatio,
       [
         style.font,
@@ -458,7 +545,7 @@ export class TranslationDom {
         style.borderRightWidth,
       ],
       imageBackgrounds(entry.owner),
-      background.map((layer) => [
+      background?.map((layer) => [
         layer.image,
         layer.box && {
           ...layer.box,
@@ -466,6 +553,7 @@ export class TranslationDom {
           y: layer.box.y - box.y,
         },
       ]),
+      this.watermarks.map((w) => [w.style, { ...w.box, x: w.box.x - box.x, y: w.box.y - box.y }]),
       entry.markers.map((el) => {
         const s = this.view.getComputedStyle(el);
         return [s.font, s.color, s.textDecoration, el.closest('a')?.getAttribute('href')];
@@ -485,7 +573,15 @@ export class TranslationDom {
     });
     entry.renderOrigin = { x: box.x, y: box.y };
     try {
-      this.layout.paint(entry.layer, entry, translation, background);
+      if (
+        background !== null &&
+        this.layout.paint(entry.layer, entry, translation, background, slot, this.watermarks)
+      )
+        this.layoutUnsupported.delete(entry.id);
+      else {
+        entry.layer.replaceChildren();
+        this.layoutUnsupported.add(entry.id);
+      }
     } catch {
       entry.layer.replaceChildren();
       this.layoutErrors.add(entry.id);
