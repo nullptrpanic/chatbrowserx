@@ -1,15 +1,15 @@
 import { ChromeRuntimePort, type RuntimePort } from '../../platform/chrome/runtime-port';
 import {
   translationProgressSchema,
-  translationBackgroundResourceSchema,
   translationTextResultSchema,
+  TranslationResponseError,
   MAX_TRANSLATION_TEXT_REQUESTS,
   type TranslationLensOptions,
+  type TranslationTextResult,
 } from '../../translation/region-translation';
 import { TranslationLensView } from './translation-lens-view';
 import { intersectRegions, type TranslationRect } from './translation-regions';
 import { TranslationDom } from './translation-dom';
-import { TranslationBackgroundSources } from './translation-background-source';
 import { collectTranslationContext } from './translation-context';
 
 const active = new WeakMap<Document, { sessionId: string; close(): void }>();
@@ -38,7 +38,16 @@ export function toggleTranslationLens(
   }
   if (doc.hidden) return false;
   const { sessionId } = options;
-  const ui = new TranslationLensView(doc, view, options, () => scheduleRead(bounds()), close);
+  const ui = new TranslationLensView(
+    doc,
+    view,
+    options,
+    () => scheduleRead(bounds()),
+    close,
+    () => {
+      void refresh();
+    },
+  );
   const { host, domLayer } = ui;
   const bounds = () => ui.bounds();
   let cache = retained.get(doc);
@@ -48,38 +57,23 @@ export function toggleTranslationLens(
     if (cache) retained.set(doc, cache);
   }
   let textTimer = 0,
+    scrollTimer = 0,
     textRequests = 0,
     requestSequence = 0,
-    closed = false,
-    preparing = false;
+    generation = 0,
+    refreshing = false,
+    closed = false;
   const errors = new Map<string, string>();
   const textFailed = new Set<string>();
   const textPending = new Set<string>();
   const textPreviews = new Set<() => void>();
   const blockedTexts = () => new Set([...textPending, ...textFailed]);
-  const backgrounds = new TranslationBackgroundSources(async (url, signal) => {
-    const reply = await runtime.send({
-      version: 1,
-      requestId: `${sessionId}:${++requestSequence}`,
-      type: 'translation.background',
-      payload: { sessionId, url },
-    });
-    signal.throwIfAborted();
-    if (!reply.ok) return null;
-    const source = translationBackgroundResourceSchema.parse(reply.data);
-    if (!source) return null;
-    return new Response(
-      Uint8Array.from(atob(source.data), (c) => c.charCodeAt(0)),
-      {
-        headers: { 'Content-Type': source.mimeType },
-      },
-    );
-  });
-  const dom = new TranslationDom(doc, view, domLayer, cache?.texts, (image) =>
-    backgrounds.ready(image),
-  );
+  const dom = new TranslationDom(doc, view, domLayer, cache?.texts);
 
   function status(value: 'waiting' | 'loading' | 'ready' | 'error') {
+    const coverage = JSON.stringify(dom.report(textPending, textFailed));
+    if (domLayer.dataset.translationCoverage !== coverage)
+      domLayer.dataset.translationCoverage = coverage;
     const failure =
       errors.get('session') ??
       (dom.visible.some((e) => textFailed.has(e.id)) ? errors.get('text') : undefined) ??
@@ -95,6 +89,12 @@ export function toggleTranslationLens(
     ui.status(unsupported ? 'unsupported' : value === 'error' ? 'waiting' : value);
   }
   function fail(stage: 'text' | 'session', error: unknown) {
+    // An invalid/failed stream must not leave its preview visible behind an error state.
+    // Error cleanup takes precedence over deferring reflow during a gesture.
+    if (scrollTimer) {
+      settleScroll();
+      updateDom(bounds());
+    }
     const code =
       error &&
       typeof error === 'object' &&
@@ -107,47 +107,91 @@ export function toggleTranslationLens(
     status('error');
   }
   ui.action.onclick = () => {
-    if (closed) return;
-    errors.clear();
-    textFailed.clear();
-    dom.retryLayout();
-    scheduleRead(bounds());
+    void refresh(true);
   };
   function cancel() {
-    void runtime
-      .send({
-        version: 1,
-        requestId: `${sessionId}:${++requestSequence}`,
-        type: 'translation.cancel',
-        payload: { sessionId },
-      })
-      .catch(() => undefined);
+    return runtime.send({
+      version: 1,
+      requestId: `${sessionId}:${++requestSequence}`,
+      type: 'translation.cancel',
+      payload: { sessionId },
+    });
+  }
+  async function refresh(retryOnly = false) {
+    if (closed || refreshing) return;
+    refreshing = true;
+    const retryIds = retryOnly ? new Set([...textFailed, ...dom.layoutErrors]) : undefined;
+    ++generation;
+    view.clearTimeout(textTimer);
+    textTimer = 0;
+    for (const cleanup of textPreviews) cleanup();
+    textPending.clear();
+    textFailed.clear();
+    textRequests = 0;
+    errors.clear();
+    settleScroll();
+    updateDom(bounds());
+    dom.refresh(bounds(), retryIds);
+    status('loading');
+    try {
+      // Await cancellation before sending another batch with this session ID.
+      const reply = await cancel();
+      if (!reply.ok) throw reply.error;
+    } catch (error) {
+      if (!closed) fail('session', error);
+    } finally {
+      refreshing = false;
+      if (!closed) scheduleRead(bounds());
+    }
   }
   function validateCache(result: { cacheKey?: string | undefined }) {
     // Settings may change while a request is running. Never retain mixed-configuration results.
     if (cache && result.cacheKey !== cache.key) retained.delete(doc);
   }
   function scheduleRead(rect: TranslationRect) {
-    if (closed) return;
+    if (closed || scrollTimer || refreshing) return;
     updateDom(rect);
     if (errors.has('session')) return status('error');
     if (
       !textTimer &&
-      textRequests < MAX_TRANSLATION_TEXT_REQUESTS &&
-      dom.missing(blockedTexts()).length
+      (dom.needsReconcile ||
+        (textRequests < MAX_TRANSLATION_TEXT_REQUESTS && dom.missing(blockedTexts()).length))
     )
       textTimer = view.setTimeout(() => {
         textTimer = 0;
-        void readTexts();
+        if (dom.needsReconcile) scheduleRead(bounds());
+        else void readTexts();
       }, 150);
-    if (!dom.missing().length && !preparing) return status('ready');
-    status(textRequests || preparing ? 'loading' : 'waiting');
+    if (!dom.missing().length && !dom.needsReconcile) return status('ready');
+    status(textRequests ? 'loading' : 'waiting');
   }
   function redraw() {
     if (!closed) ui.redraw();
   }
-  function invalidate() {
+  function settleScroll() {
+    view.clearTimeout(scrollTimer);
+    scrollTimer = 0;
+    dom.settle();
+  }
+  function invalidate(event?: Event) {
     if (closed) return;
+    if (
+      event instanceof WheelEvent &&
+      (!event.isTrusted || event.ctrlKey || event.metaKey || (!event.deltaX && !event.deltaY))
+    )
+      return;
+    if (event?.type === 'scroll' || event?.type === 'wheel') {
+      // Synchronize before the browser paints, not after the next frame's source scan.
+      // Capture wheel intent before custom scrollers move their content via CSS. Those
+      // gestures need the same lifecycle even when no native scroll event is dispatched.
+      dom.scroll();
+      view.clearTimeout(scrollTimer);
+      scrollTimer = view.setTimeout(() => {
+        settleScroll();
+        scheduleRead(bounds());
+      }, 100);
+      return;
+    }
     dom.invalidate();
     redraw();
   }
@@ -163,22 +207,12 @@ export function toggleTranslationLens(
       },
       rect,
     );
-    // Restoring a photo under native DOM captions is not image translation. Plain images
-    // never enter this path and unavailable backgrounds cannot trigger a model/capture fallback.
-    const sources = dom.backgroundSources();
-    if (!preparing && sources.some((image) => backgrounds.needsPreparation(image))) {
-      preparing = true;
-      void backgrounds.prepare(sources).finally(() => {
-        preparing = false;
-        if (closed) return;
-        dom.invalidate();
-        scheduleRead(bounds());
-      });
-    }
   }
   async function readTexts() {
     if (
       closed ||
+      refreshing ||
+      scrollTimer ||
       errors.has('session') ||
       textRequests >= MAX_TRANSLATION_TEXT_REQUESTS ||
       doc.hidden
@@ -188,10 +222,30 @@ export function toggleTranslationLens(
     if (!texts.length) return;
     texts.forEach(({ id }) => textPending.add(id));
     textRequests++;
+    const requestGeneration = generation;
     const requestId = `${sessionId}:${++requestSequence}`;
     const ids = new Set(texts.map((text) => text.id));
     let active = true,
-      displayed = 0;
+      displayed = 0,
+      previewTimer = 0;
+    let preview: TranslationTextResult | undefined;
+    const paintPreview = () => {
+      if (closed || !active || !preview) return;
+      const result = preview;
+      preview = undefined;
+      updateDom(bounds());
+      const failed = dom.accept(result, true);
+      if (failed.length) {
+        failed.forEach((id) => textFailed.add(id));
+        fail('text', { code: 'LAYOUT_UNAVAILABLE' });
+      }
+      // A cumulative stream can deliver many rows before the page can answer messages.
+      // Keep the first preview immediate, then paint only the latest validated snapshot.
+      previewTimer = view.setTimeout(() => {
+        previewTimer = 0;
+        paintPreview();
+      }, 100);
+    };
     const unsubscribe = runtime.subscribe?.((value) => {
       if (closed || !active) return;
       const update = translationProgressSchema.safeParse(value);
@@ -209,15 +263,14 @@ export function toggleTranslationLens(
       )
         return;
       displayed = result.blocks.length;
-      updateDom(bounds());
-      const failed = dom.accept(result, true);
-      if (failed.length) {
-        failed.forEach((id) => textFailed.add(id));
-        fail('text', { code: 'LAYOUT_UNAVAILABLE' });
-      }
+      preview = result;
+      if (!previewTimer) paintPreview();
     });
     const cleanup = () => {
+      if (!active) return;
       active = false;
+      view.clearTimeout(previewTimer);
+      preview = undefined;
       unsubscribe?.();
       dom.clearPreview(ids);
       textPreviews.delete(cleanup);
@@ -240,46 +293,66 @@ export function toggleTranslationLens(
           ),
         },
       });
-      if (closed) return;
+      if (closed || requestGeneration !== generation) return;
       if (!response.ok) throw response.error;
       updateDom(bounds());
       const result = translationTextResultSchema.parse(response.data);
+      const returned = new Set(result.blocks.map((block) => block.id));
+      if (returned.size !== result.blocks.length || result.blocks.some((b) => !ids.has(b.id)))
+        throw new TranslationResponseError();
       validateCache(result);
       const failed = dom.accept(result);
       if (failed.length) {
         failed.forEach((id) => textFailed.add(id));
         fail('text', { code: 'LAYOUT_UNAVAILABLE' });
       }
+      const missing = [...ids].filter((id) => !returned.has(id));
+      if (missing.length) {
+        missing.forEach((id) => textFailed.add(id));
+        fail('text', { code: 'TRANSLATION_RESPONSE_INVALID' });
+      }
     } catch (error) {
-      if (!closed) {
+      if (!closed && requestGeneration === generation) {
         ids.forEach((id) => textFailed.add(id));
         fail('text', error);
       }
     } finally {
       cleanup();
-      texts.forEach(({ id }) => textPending.delete(id));
-      textRequests--;
-      if (!closed) scheduleRead(bounds());
+      if (requestGeneration === generation) {
+        texts.forEach(({ id }) => textPending.delete(id));
+        textRequests--;
+        if (!closed) scheduleRead(bounds());
+      }
     }
   }
   const visibility = () => {
     if (doc.hidden) close();
   };
   const changed = (event?: Event) => {
-    if (event?.type === 'load' && event.target instanceof HTMLImageElement) {
-      backgrounds.invalidate(event.target);
-    }
-    dom.invalidate();
+    dom.invalidate(event?.target instanceof Node ? [event.target] : undefined);
     redraw();
   };
+  const motion = (event: Event) => {
+    if (event.target instanceof Element && dom.motion(event.target)) redraw();
+  };
+  const animationEvents = [
+    'transitionrun',
+    'transitionend',
+    'transitioncancel',
+    'animationstart',
+    'animationend',
+    'animationcancel',
+  ] as const;
   const mutations = new MutationObserver((records) => {
-    if (records.some((r) => r.target !== host && !host.contains(r.target))) changed();
+    const source = records.filter((r) => r.target !== host && !host.contains(r.target));
+    if (source.length && dom.mutate(source)) redraw();
   });
   mutations.observe(doc.documentElement, {
     childList: true,
     subtree: true,
     characterData: true,
     attributes: true,
+    attributeOldValue: true,
   });
   const resize = typeof ResizeObserver === 'undefined' ? null : new ResizeObserver(() => changed());
   resize?.observe(doc.documentElement);
@@ -301,7 +374,10 @@ export function toggleTranslationLens(
         if (!response.ok) return fail('session', response.error);
         const data = response.data;
         if (!data || typeof data !== 'object' || !('active' in data) || data.active !== true)
-          close();
+          return close();
+        // The background has reverified this exact session, not merely a live tab.
+        // A transient lost reply must not permanently stop discovery or erase cached text.
+        if (errors.delete('session')) scheduleRead(bounds());
       })
       .catch((error) => {
         if (!closed) fail('session', error);
@@ -315,29 +391,29 @@ export function toggleTranslationLens(
     closed = true;
     for (const cleanup of textPreviews) cleanup();
     view.clearTimeout(textTimer);
+    view.clearTimeout(scrollTimer);
     view.clearInterval(visibilityTimer);
     view.removeEventListener('resize', invalidate);
     view.removeEventListener('scroll', invalidate, true);
+    view.removeEventListener('wheel', invalidate, true);
     view.removeEventListener('pagehide', close);
     doc.removeEventListener('load', changed, true);
-    view.removeEventListener('transitionrun', changed, true);
-    view.removeEventListener('animationstart', changed, true);
+    for (const event of animationEvents) view.removeEventListener(event, motion, true);
     doc.fonts?.removeEventListener('loadingdone', changed);
     mutations.disconnect();
     resize?.disconnect();
     doc.removeEventListener('visibilitychange', visibility);
     view.visualViewport?.removeEventListener('resize', invalidate);
-    backgrounds.close();
     ui.close();
     active.delete(doc);
-    cancel();
+    void cancel().catch(() => undefined);
   }
   view.addEventListener('resize', invalidate);
   view.addEventListener('scroll', invalidate, true);
+  view.addEventListener('wheel', invalidate, { capture: true, passive: true });
   view.addEventListener('pagehide', close);
   doc.addEventListener('load', changed, true);
-  view.addEventListener('transitionrun', changed, true);
-  view.addEventListener('animationstart', changed, true);
+  for (const event of animationEvents) view.addEventListener(event, motion, true);
   doc.fonts?.addEventListener('loadingdone', changed);
   doc.addEventListener('visibilitychange', visibility);
   view.visualViewport?.addEventListener('resize', invalidate);

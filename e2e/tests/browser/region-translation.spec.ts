@@ -105,7 +105,7 @@ extensionTest(
                 range.selectNodeContents(span);
                 return {
                   text: span.textContent,
-                  left: span.style.left,
+                  left: `${range.getBoundingClientRect().left}px`,
                   top: `${range.getBoundingClientRect().top}px`,
                   font: span.style.fontSize,
                 };
@@ -125,8 +125,8 @@ extensionTest(
       await expect(lens).toHaveAttribute('data-status', 'loading');
       await expect.poll(() => count).toBe(1);
       await page.screenshot({ path: testInfo.outputPath('translating.png') });
-      // The capture is still useful after this movement. Do not cancel it or project its
-      // response relative to the new cursor position instead of the original screenshot.
+      // Text remains source-anchored while the lens moves; a late response must not
+      // become positioned relative to the new cursor.
       await page.mouse.move(640, 400, { steps: 15 });
       release?.();
       await expect(lens).toHaveAttribute('data-status', 'ready');
@@ -135,9 +135,15 @@ extensionTest(
       const firstText = before?.text[0];
       if (!firstText) throw new Error('Translated text missing.');
       const source = await page.locator('main').evaluate((main) => {
+        // Match the browser's native layout of the target script. With line-height:normal,
+        // CJK fallback metrics need not have the same glyph top as the original Latin text.
+        const reference = main.cloneNode(false) as HTMLElement;
+        reference.textContent = '开始一个新项目';
+        main.parentElement?.append(reference);
         const r = document.createRange();
-        r.selectNodeContents(main);
+        r.selectNodeContents(reference);
         const box = r.getBoundingClientRect();
+        reference.remove();
         return { x: box.x, y: box.y };
       });
       expect(Number.parseFloat(firstText.left)).toBeCloseTo(source.x, 1);
@@ -147,10 +153,10 @@ extensionTest(
         await expect(lens).toHaveAttribute('data-status', 'ready');
         const after = await readOverlay();
         expect(after?.text).toEqual(before?.text);
-        expect(after?.noticeHidden).toBe(true);
+        expect(after?.noticeHidden).toBe(false);
       }
       expect((await readOverlay())?.frameLeft).not.toBe(before?.frameLeft);
-      // Observe longer than the capture debounce to catch a hidden redundant request.
+      // Observe longer than the text debounce to catch a hidden redundant request.
       const states = await page.evaluate(
         () =>
           new Promise<string[]>((resolve) => {
@@ -174,6 +180,10 @@ extensionTest(
       await page.locator('main').evaluate((main) => {
         main.textContent = 'Review your changes';
       });
+      await page.waitForTimeout(350);
+      expect(count).toBe(1);
+      expect((await readOverlay())?.text).toHaveLength(0);
+      await page.keyboard.press('Alt+KeyR');
       await expect.poll(() => count).toBe(2);
       await expect(lens).toHaveAttribute('data-status', 'ready');
       await page.keyboard.press('Escape');

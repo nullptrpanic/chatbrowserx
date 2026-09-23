@@ -6,7 +6,9 @@ import {
 } from '../../src/page/translation/mount-translation-lens';
 import type { RuntimePort } from '../../src/platform/chrome/runtime-port';
 import type { ExtensionMessage, ExtensionResponse } from '../../src/shared/protocol/message-types';
+import { mockAbsentPseudoStyles } from './dom-fixture';
 beforeEach(() => {
+  mockAbsentPseudoStyles();
   document.body.replaceChildren();
   vi.stubGlobal('innerWidth', 1200);
   vi.stubGlobal('innerHeight', 800);
@@ -36,6 +38,7 @@ const options = (sessionId: string) => ({
   errorText: '翻译失败，移动镜框可重试',
   unsupportedText: 'Unsupported content',
   retryText: 'Retry',
+  refreshText: 'Alt+R / Option+R 重新翻译框内文字',
 });
 
 it('acknowledges opening before scanning a potentially expensive page layout', () => {
@@ -211,7 +214,8 @@ it('shows a localized pending label outside the frame until the current translat
     const frame = shadow.querySelector<HTMLElement>('.frame');
     expect(status).not.toBeNull();
     if (!status || !frame) throw new Error('Translation UI missing.');
-    expect(status?.textContent).toBe('翻译中…');
+    expect(status?.textContent).toContain('翻译中…');
+    expect(status?.textContent).toContain('重新翻译框内文字');
     expect(status?.hidden).toBe(false);
     expect(Number.parseFloat(status.style.top)).toBeLessThan(Number.parseFloat(frame.style.top));
     finish({
@@ -221,13 +225,15 @@ it('shows a localized pending label outside the frame until the current translat
       data: { blocks: [{ id: 'text-1', translation: '原始文字' }] },
     });
     await vi.advanceTimersByTimeAsync(0);
-    expect(status?.hidden).toBe(true);
+    expect(status?.hidden).toBe(false);
+    expect(status?.textContent).toContain('Alt+R');
+    expect(status?.textContent).not.toContain('翻译中…');
   } finally {
     spy.mockRestore();
   }
 });
 
-it('leaves unsupported backgrounds native when their text changes without pointer movement', async () => {
+it('waits for manual refresh after source changes without changing the source background', async () => {
   vi.useFakeTimers();
   document.body.innerHTML = '<main style="background-image:url(image.png)">Old text</main>';
   const main = document.querySelector('main');
@@ -240,14 +246,24 @@ it('leaves unsupported backgrounds native when their text changes without pointe
     data:
       m.type === 'translation.getState'
         ? { active: true }
-        : { blocks: [{ id: 'text-1', translation: '原始文字' }] },
+        : {
+            blocks:
+              m.type === 'translation.read'
+                ? m.payload.texts.map((t) => ({ id: t.id, translation: '原始文字' }))
+                : [],
+          },
   }));
   toggleTranslationLens(options('dynamic'), document, window, { send });
   await vi.advanceTimersByTimeAsync(900);
-  expect(send.mock.calls.filter(([m]) => m.type === 'translation.read')).toHaveLength(0);
+  expect(send.mock.calls.filter(([m]) => m.type === 'translation.read')).toHaveLength(1);
   main.firstChild.textContent = 'New text';
   await vi.advanceTimersByTimeAsync(4000);
-  expect(send.mock.calls.filter(([m]) => m.type === 'translation.read')).toHaveLength(0);
+  expect(send.mock.calls.filter(([m]) => m.type === 'translation.read')).toHaveLength(1);
+  window.dispatchEvent(new KeyboardEvent('keydown', { code: 'KeyR', altKey: true }));
+  await vi.advanceTimersByTimeAsync(500);
+  expect(send.mock.calls.filter(([m]) => m.type === 'translation.read')).toHaveLength(2);
+  expect(main.style.backgroundImage).toBe('url("image.png")');
+  expect(main.textContent).toBe('New text');
 });
 
 it('expands to the viewport and shrinks immediately even after repeated zoom-in at the limit', async () => {

@@ -1,6 +1,10 @@
-import { MAX_TRANSLATION_CONTEXT_CHARS } from '../../translation/region-translation';
+import {
+  MAX_TRANSLATION_CONTEXT_CHARS,
+  MAX_TRANSLATION_TEXT_BLOCKS,
+} from '../../translation/region-translation';
 import { translationEditable } from './translation-editability';
 import { isTranslationDocumentPlaceholder } from './translation-document';
+import { createTranslationGeometry } from './translation-geometry';
 
 const excluded =
   'script,style,noscript,template,nav,footer,form,input,textarea,select,svg,canvas,video,iframe,' +
@@ -16,29 +20,19 @@ type Passage = { owner: Element; text: string };
 export function collectTranslationContext(doc: Document, sources: readonly Node[]): string {
   const view = doc.defaultView;
   if (!doc.body || !view) return '';
-  const styles = new Map<Element, CSSStyleDeclaration>();
+  const geometry = createTranslationGeometry(view);
   const visibility = new Map<Element, boolean>();
-  const style = (el: Element) => {
-    let value = styles.get(el);
-    if (!value) styles.set(el, (value = view.getComputedStyle(el)));
-    return value;
-  };
   const visible = (el: Element, depth = 0): boolean => {
     const cached = visibility.get(el);
     if (cached !== undefined) return cached;
-    const s = style(el);
+    const facts = geometry.facts(el);
     const parent = el.parentElement;
     const result =
       depth < 64 &&
       !el.matches(excluded) &&
       !isTranslationDocumentPlaceholder(el) &&
-      s.display !== 'none' &&
-      s.visibility !== 'hidden' &&
-      s.visibility !== 'collapse' &&
-      s.opacity !== '0' &&
-      s.contentVisibility !== 'hidden' &&
-      (!s.clipPath || s.clipPath === 'none') &&
-      (!s.clip || s.clip === 'auto') &&
+      !facts.hidden &&
+      (!facts.clip || facts.clip.kind === 'visible') &&
       (!parent ||
         (visible(parent, depth + 1) &&
           (!parent.matches('details:not([open])') || el.matches('summary'))));
@@ -50,7 +44,7 @@ export function collectTranslationContext(doc: Document, sources: readonly Node[
     for (let depth = 0; depth < 64 && el?.parentElement; depth++) {
       if (
         el.matches(blocks) ||
-        !['', 'inline', 'inline-block', 'contents'].includes(style(el).display)
+        !['', 'inline', 'inline-block', 'contents'].includes(geometry.facts(el).display)
       )
         break;
       el = el.parentElement;
@@ -77,7 +71,7 @@ export function collectTranslationContext(doc: Document, sources: readonly Node[
           return owner === null || owner === doc.body ? source : owner;
         }),
     ),
-  ].slice(0, 32);
+  ].slice(0, MAX_TRANSLATION_TEXT_BLOCKS);
   if (!anchors.length) return '';
 
   // Bound visits including empty/hidden nodes, not just accepted text. Each direction has

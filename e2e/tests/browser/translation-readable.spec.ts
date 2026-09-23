@@ -1,119 +1,11 @@
 import { extensionTest, expect } from './fixtures/extension-test';
-import type { ExtensionSession } from './fixtures/extension-context';
-import { sendExtensionMessage } from './helpers/extension-runtime';
+import { setupTranslationFixture as setup } from './helpers/translation-fixture';
 
 extensionTest.use({ extensionHeadless: true });
 
-async function setup(
-  session: ExtensionSession,
-  html: string,
-  translations: Record<string, string>,
-  url = 'https://translation-readable.test/',
-) {
-  const { context, sidePanelPage: panel } = session;
-  const token = Buffer.from(
-    JSON.stringify({
-      'https://api.openai.com/auth': { chatgpt_account_id: 'acct_readability' },
-    }),
-  ).toString('base64url');
-  await sendExtensionMessage(panel, {
-    version: 1,
-    requestId: 'settings',
-    type: 'settings.save',
-    payload: {
-      model: 'gpt-5.6-terra',
-      reasoningEffort: 'medium',
-      language: 'en',
-      systemPrompt: '',
-      codexAccessToken: `e30.${token}.`,
-    },
-  });
-  await context.route(url, (r) =>
-    r.fulfill({
-      contentType: 'text/html',
-      body: `<!doctype html><meta charset="utf-8"><style>body{margin:0;background:white;font:20px/28px Arial}main{margin:120px 60px;width:900px}p{margin:0}</style>${html}`,
-    }),
-  );
-  const requests: { texts: string[]; context?: string }[] = [];
-  await context.route('https://chatgpt.com/backend-api/codex/responses', (r) => {
-    const input = r.request().postDataJSON().input[0].content;
-    const image = input.some((c: { type: string }) => c.type === 'input_image');
-    expect(image, 'DOM translations must never send image input').toBe(false);
-    const request = JSON.parse(input[0].text);
-    requests.push({
-      texts: request.texts.map((t: { text: string }) => t.text),
-      context: request.context,
-    });
-    const blocks = request.texts.map((t: { id: string; text: string }) => {
-      if (!(t.text in translations)) throw new Error(`Unexpected source: ${t.text}`);
-      return { id: t.id, translation: translations[t.text] };
-    });
-    const events = [
-      { type: 'response.created', response: { id: 'readability' } },
-      {
-        type: 'response.output_text.delta',
-        delta: JSON.stringify({ blocks }),
-      },
-      { type: 'response.completed', response: { id: 'readability' } },
-    ];
-    return r.fulfill({
-      contentType: 'text/event-stream',
-      body: events.map((e) => `event: ${e.type}\ndata: ${JSON.stringify(e)}\n\n`).join(''),
-    });
-  });
-  const page = await context.newPage();
-  await page.setViewportSize({ width: 1100, height: 900 });
-  await page.goto(url);
-  await page.bringToFront();
-  const tabId = await panel.evaluate(async (url) => (await chrome.tabs.query({ url }))[0]?.id, url);
-  if (tabId === undefined) throw new Error('Target missing');
-  const toggle = async () => {
-    await sendExtensionMessage(panel, {
-      version: 1,
-      requestId: crypto.randomUUID(),
-      type: 'translation.toggle',
-      payload: { tabId },
-    });
-    await page.keyboard.down('Control');
-    await page.mouse.wheel(0, -2000);
-    await page.keyboard.up('Control');
-  };
-  const read = () =>
-    panel.evaluate(async (id) => {
-      const [result] = await chrome.scripting.executeScript({
-        target: { tabId: id },
-        func: () => {
-          const host = document.querySelector<HTMLElement>(
-            '[data-chatbrowserx-overlay=translation]',
-          );
-          const root = host && chrome.dom.openOrClosedShadowRoot(host);
-          return [...(root?.querySelectorAll<HTMLElement>('.text') ?? [])].map((flow) => {
-            const range = document.createRange();
-            range.selectNodeContents(flow);
-            return {
-              text: flow.textContent,
-              font: parseFloat(getComputedStyle(flow).fontSize),
-              box: range.getBoundingClientRect().toJSON(),
-              rects: [...range.getClientRects()].map((r) => r.toJSON()),
-            };
-          });
-        },
-      });
-      return result?.result ?? [];
-    }, tabId);
-  return {
-    page,
-    panel,
-    tabId,
-    toggle,
-    read,
-    requests,
-    lens: page.locator('[data-chatbrowserx-overlay=translation]'),
-  };
-}
-
 extensionTest(
   'translates a read-only document island with context but never sends editable drafts',
+  { tag: '@smoke' },
   async ({ extensionSession }) => {
     const f = await setup(
       extensionSession,
@@ -142,76 +34,77 @@ extensionTest(
   },
 );
 
-extensionTest(
-  'translates Feishu Docx body without sending unrelated drafts or removing watermarks',
-  async ({ extensionSession }, info) => {
-    const watermark = `url("data:image/svg+xml;base64,${Buffer.from('<svg xmlns="http://www.w3.org/2000/svg" width="80" height="50"><path d="M0 30L70 0" stroke="#dde6ed" stroke-width="3"/></svg>').toString('base64')}")`;
-    const f = await setup(
-      extensionSession,
-      `<main class="page-block root-block" contenteditable="true"><p class="zone-container text-editor">PB means paired boundary samples.<span contenteditable="plaintext-only">Private nested draft</span></p>
+for (const route of ['docx', 'wiki'])
+  extensionTest(
+    `translates Feishu ${route} body without sending unrelated drafts or removing watermarks`,
+    async ({ extensionSession }, info) => {
+      const watermark = `url("data:image/svg+xml;base64,${Buffer.from('<svg xmlns="http://www.w3.org/2000/svg" width="80" height="50"><path d="M0 30L70 0" stroke="#dde6ed" stroke-width="3"/></svg>').toString('base64')}")`;
+      const f = await setup(
+        extensionSession,
+        `<main class="page-block root-block" contenteditable="true"><p class="zone-container text-editor">PB means paired boundary samples.<span contenteditable="plaintext-only">Private nested draft</span></p>
       <p class="zone-container text-editor">这些样本降低了过度拒绝率。</p><p class="zone-container text-editor">FH means factual healing.</p></main>
       <div contenteditable="true">Private comment draft</div><textarea>Private search</textarea>
       <div class="ssrWaterMark" style='position:fixed;inset:0;pointer-events:none;z-index:100;background-image:${watermark};background-position:7px 11px'></div>`,
-      {
-        'PB means paired boundary samples.': 'PB means paired boundary samples.',
-        '这些样本降低了过度拒绝率。': 'These samples reduce over-refusal.',
-        'FH means factual healing.': 'FH means factual healing.',
-      },
-      'https://fixture.larkoffice.com/docx/readable',
-    );
-    const native = await f.page.locator('.ssrWaterMark').getAttribute('style');
-    await f.toggle();
-    await expect(f.lens).toHaveAttribute('data-status', 'ready');
-    expect((await f.read()).map((r) => r.text)).toContain('These samples reduce over-refusal.');
-    expect(f.requests.some((r) => r.context?.includes('PB means paired boundary samples.'))).toBe(
-      true,
-    );
-    expect(JSON.stringify(f.requests)).not.toContain('Private');
-    expect(await f.page.locator('.ssrWaterMark').getAttribute('style')).toBe(native);
-    const preserved = await f.panel.evaluate(async (id) => {
-      const [r] = await chrome.scripting.executeScript({
-        target: { tabId: id },
-        func: () => {
-          const host = document.querySelector<HTMLElement>(
-            '[data-chatbrowserx-overlay=translation]',
-          );
-          const root = host && chrome.dom.openOrClosedShadowRoot(host);
-          return [...(root?.querySelectorAll<HTMLElement>('.translation-watermark') ?? [])].map(
-            (el) => ({
-              image: el.style.backgroundImage,
-              position: el.style.backgroundPosition,
-            }),
-          );
+        {
+          'PB means paired boundary samples.': 'PB means paired boundary samples.',
+          '这些样本降低了过度拒绝率。': 'These samples reduce over-refusal.',
+          'FH means factual healing.': 'FH means factual healing.',
         },
+        `https://fixture.larkoffice.com/${route}/readable`,
+      );
+      const native = await f.page.locator('.ssrWaterMark').getAttribute('style');
+      await f.toggle();
+      await expect(f.lens).toHaveAttribute('data-status', 'ready');
+      expect((await f.read()).map((r) => r.text)).toContain('These samples reduce over-refusal.');
+      expect(f.requests.some((r) => r.context?.includes('PB means paired boundary samples.'))).toBe(
+        true,
+      );
+      expect(JSON.stringify(f.requests)).not.toContain('Private');
+      expect(await f.page.locator('.ssrWaterMark').getAttribute('style')).toBe(native);
+      const preserved = await f.panel.evaluate(async (id) => {
+        const [r] = await chrome.scripting.executeScript({
+          target: { tabId: id },
+          func: () => {
+            const host = document.querySelector<HTMLElement>(
+              '[data-chatbrowserx-overlay=translation]',
+            );
+            const root = host && chrome.dom.openOrClosedShadowRoot(host);
+            return [...(root?.querySelectorAll<HTMLElement>('.translation-watermark') ?? [])].map(
+              (el) => ({
+                image: el.style.backgroundImage,
+                position: el.style.backgroundPosition,
+              }),
+            );
+          },
+        });
+        return r?.result ?? [];
+      }, f.tabId);
+      expect(preserved.length).toBeGreaterThan(0);
+      expect(
+        preserved.every(
+          (r) => r.image.includes('data:image/svg+xml;base64,') && r.position === '7px 11px',
+        ),
+      ).toBe(true);
+      // Feishu replaces SSR watermarks during hydration; the translated layer must survive it.
+      const count = f.requests.length;
+      await f.page.locator('.ssrWaterMark').evaluate((el) => {
+        el.setAttribute('class', 'generated-id_clear suite-clear');
       });
-      return r?.result ?? [];
-    }, f.tabId);
-    expect(preserved.length).toBeGreaterThan(0);
-    expect(
-      preserved.every(
-        (r) => r.image.includes('data:image/svg+xml;base64,') && r.position === '7px 11px',
-      ),
-    ).toBe(true);
-    // Feishu replaces SSR watermarks during hydration; the translated layer must survive it.
-    const count = f.requests.length;
-    await f.page.locator('.ssrWaterMark').evaluate((el) => {
-      el.setAttribute('class', 'generated-id_clear suite-clear');
-    });
-    await expect
-      .poll(async () => {
-        const rows = await f.read();
-        return (
-          rows.some((r) => r.text === 'These samples reduce over-refusal.') &&
-          (await f.lens.getAttribute('data-status')) === 'ready'
-        );
-      })
-      .toBe(true);
-    expect(f.requests.length).toBe(count);
-    await f.page.screenshot({
-      path: info.outputPath('document-watermark.png'),
-    });
-  },
-);
+      await expect
+        .poll(async () => {
+          const rows = await f.read();
+          return (
+            rows.some((r) => r.text === 'These samples reduce over-refusal.') &&
+            (await f.lens.getAttribute('data-status')) === 'ready'
+          );
+        })
+        .toBe(true);
+      expect(f.requests.length).toBe(count);
+      await f.page.screenshot({
+        path: info.outputPath('document-watermark.png'),
+      });
+    },
+  );
 
 extensionTest(
   'omits invisible Docx editor placeholders from translation and context without modifying them',
@@ -275,9 +168,9 @@ extensionTest(
       return result?.result;
     }, f.tabId);
     expect(styles).toEqual([
-      { tag: 'SPAN', weight: '700', style: 'normal', href: null },
+      { tag: 'STRONG', weight: '700', style: 'normal', href: null },
       { tag: 'A', weight: '400', style: 'normal', href: '#source' },
-      { tag: 'SPAN', weight: '400', style: 'italic', href: null },
+      { tag: 'EM', weight: '400', style: 'italic', href: null },
     ]);
     expect(await f.page.locator('.text-editor').first().textContent()).toBe(
       '这些样本降低了过度拒绝率。',
@@ -342,12 +235,9 @@ extensionTest(
       expect(row.font).toBeGreaterThanOrEqual(13.6 - 0.01);
       expect(row.box.height).toBeLessThan(25);
       if (i + 1 < english.length) {
-        const next = await f.page
-          .locator('nav a')
-          .nth(i + 1)
-          .boundingBox();
+        const next = rows.find((r) => r.text === english[i + 1])?.box;
         if (!next) throw new Error('Missing next navigation label');
-        expect(row.box.right).toBeLessThanOrEqual(next.x - 2);
+        expect(row.paintedBox.right).toBeLessThanOrEqual(next.left - 2);
       }
     }
     const headlineRow = rows.find((r) => r.text === headline);
@@ -408,8 +298,8 @@ extensionTest(
       if (!row) throw new Error(`Translation missing: ${text}`);
       expect(row.font).toBeGreaterThanOrEqual(12);
       expect(row.box.bottom).toBeLessThanOrEqual(nav.y + nav.height);
-      const next = original[i + 1]?.box;
-      if (next) expect(row.box.right).toBeLessThanOrEqual(next.x - 2);
+      const next = rows.find((r) => r.text === ['News', 'Maps', 'Cloud Drive', 'More'][i + 1])?.box;
+      if (next) expect(row.paintedBox.right).toBeLessThanOrEqual(next.left - 2);
     }
     expect(
       await f.page.locator('nav a').evaluateAll((nodes) =>
@@ -423,7 +313,7 @@ extensionTest(
 );
 
 extensionTest(
-  'wraps expanded headlines inside their native row without covering ranks or badges',
+  'retains single-line headline ellipsis and badge reservation without shrinking',
   async ({ extensionSession }, info) => {
     const title = 'The number of newborns remains at around 8 million';
     const f = await setup(
@@ -451,12 +341,13 @@ extensionTest(
       f.page.locator('.badge').boundingBox(),
     ]);
     if (!row || !rank || !badge) throw new Error('Source geometry missing');
-    expect(translated.font).toBeGreaterThanOrEqual(12);
-    expect(translated.box.height).toBeGreaterThan(17);
+    expect(translated.font).toBe(14);
+    expect(translated.box.height).toBe(17);
     expect(translated.box.top).toBeGreaterThanOrEqual(row.y);
     expect(translated.box.bottom).toBeLessThanOrEqual(row.y + row.height + 0.5);
     expect(translated.box.left).toBeGreaterThanOrEqual(rank.x + rank.width);
-    expect(translated.box.right).toBeLessThanOrEqual(badge.x - 2);
+    expect(translated.paintedBox.right).toBeLessThanOrEqual(row.x + 340);
+    expect(translated.ownerBox?.width).toBeLessThanOrEqual(340);
     await f.page.screenshot({ path: info.outputPath('headlines.png') });
   },
 );
@@ -507,21 +398,23 @@ extensionTest(
             title: flow.title,
             font: parseFloat(getComputedStyle(flow).fontSize),
             height: flow.getBoundingClientRect().height,
-            overflow: getComputedStyle(flow).overflow,
+            overflow: flow.parentElement && getComputedStyle(flow.parentElement).overflow,
+            nowrap: flow.parentElement && getComputedStyle(flow.parentElement).whiteSpace,
           };
         },
       });
       return result?.result;
     }, f.tabId);
     expect(clipped?.title).toBe(translation);
-    expect(clipped?.font).toBeGreaterThanOrEqual(13.6);
+    expect(clipped?.font).toBe(16);
     expect(clipped?.height).toBeLessThanOrEqual(36);
     expect(clipped?.overflow).toBe('hidden');
+    expect(clipped?.nowrap).toBe('nowrap');
   },
 );
 
 extensionTest(
-  'uses compact leading before shrinking a Chinese paragraph that expands in English',
+  'lets a Chinese paragraph grow in English without compressing font or leading',
   async ({ extensionSession }) => {
     const source = '遵循约定的协议分流。'.repeat(14);
     const english =
@@ -538,12 +431,14 @@ extensionTest(
     expect(flow?.font).toBe(16);
     const sourceBox = await f.page.locator('main p').boundingBox();
     if (!sourceBox) throw new Error('Source paragraph missing');
-    expect(flow?.box.bottom).toBeLessThanOrEqual(sourceBox.y + sourceBox.height + 1);
+    expect(flow?.box.bottom).toBeGreaterThan(sourceBox.y + sourceBox.height);
+    expect(flow?.leading).toBe('26px');
+    expect(await f.page.locator('main p').textContent()).toBe(source);
   },
 );
 
 extensionTest(
-  'retains an impossible short label without tiny text, repeated requests or a model error',
+  'keeps a tight button original and reuses its translation when the source gains enough width',
   async ({ extensionSession }) => {
     const translation =
       'A deliberately very long complete English translation which cannot fit into this tiny button';
@@ -567,7 +462,7 @@ extensionTest(
       el.style.width = '800px';
     });
     await expect(f.lens).toHaveAttribute('data-status', 'ready');
-    expect((await f.read()).map((r) => r.text)).toEqual([translation]);
+    expect((await f.read()).map((r) => [r.text, r.font])).toEqual([[translation, 16]]);
     expect(f.requests.length).toBe(count);
   },
 );

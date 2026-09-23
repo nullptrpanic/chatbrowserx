@@ -3,7 +3,6 @@ import { PROTOCOL_VERSION, type ExtensionMessage, type PageCommand } from './mes
 import {
   translationTextsSchema,
   translationLensOptionsSchema,
-  translationBackgroundSourceSchema,
 } from '../../translation/region-translation';
 
 const requestIdSchema = z.string().trim().min(1).max(128);
@@ -243,14 +242,6 @@ export const extensionMessageSchema: z.ZodType<ExtensionMessage> = z.discriminat
   taskRetrySchema,
   taskCancelSchema,
   taskClearContextSchema,
-  z
-    .object({
-      version: z.literal(PROTOCOL_VERSION),
-      requestId: requestIdSchema,
-      type: z.literal('translation.background'),
-      payload: translationBackgroundSourceSchema,
-    })
-    .strict(),
   screenshotCaptureSchema,
   imagePreviewOpenSchema,
   pageFeaturesEnsureSchema,

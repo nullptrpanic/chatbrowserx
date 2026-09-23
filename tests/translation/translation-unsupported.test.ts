@@ -92,6 +92,7 @@ it('treats an empty area as complete instead of asking for screen sharing', asyn
   expect(
     document.querySelector<HTMLElement>('[data-chatbrowserx-overlay=translation]')?.dataset.status,
   ).toBe('ready');
-  expect(lens.shadow().querySelector<HTMLElement>('[role=status]')?.hidden).toBe(true);
+  expect(lens.shadow().querySelector<HTMLElement>('[role=status]')?.hidden).toBe(false);
+  expect(lens.shadow().querySelector<HTMLElement>('[role=status]')?.textContent).toContain('Alt+R');
   expect(lens.getDisplayMedia).not.toHaveBeenCalled();
 });

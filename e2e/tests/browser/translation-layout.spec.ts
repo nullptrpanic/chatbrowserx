@@ -4,7 +4,8 @@ import { sendExtensionMessage } from './helpers/extension-runtime';
 extensionTest.use({ extensionHeadless: true });
 
 extensionTest(
-  'keeps navigation glyphs beside icons and fully masks padded inline button text',
+  'keeps navigation glyphs beside icons in a complete opaque structural copy',
+  { tag: '@smoke' },
   async ({ extensionSession }, info) => {
     const { context, sidePanelPage: panel } = extensionSession;
     const token = Buffer.from(
@@ -127,13 +128,15 @@ extensionTest(
                 glyphs.push(...range.getClientRects());
               }
               range.selectNodeContents(flow);
+              const group = flow.closest('.translation-group'),
+                link = flow.closest('a');
+              if (!group || !link) throw new Error('Missing structural navigation');
               return {
                 original: glyphs.map((r) => r.toJSON()),
                 translated: [...range.getClientRects()].map((r) => r.toJSON()),
-                masks: [...flow.parentElement.querySelectorAll('.source-mask')].map((m) =>
-                  m.getBoundingClientRect().toJSON(),
-                ),
-                icon: a.querySelector('svg')?.getBoundingClientRect().toJSON(),
+                group: group.getBoundingClientRect().toJSON(),
+                link: link.getBoundingClientRect().toJSON(),
+                icon: flow.closest('a')?.querySelector('svg')?.getBoundingClientRect().toJSON(),
               };
             });
           },
@@ -145,18 +148,13 @@ extensionTest(
       for (const row of rows) {
         for (const glyph of row.original)
           expect(
-            row.masks.some(
-              (m) =>
-                m.left <= glyph.left + 0.5 &&
-                m.right >= glyph.right - 0.5 &&
-                m.top <= glyph.top + 0.5 &&
-                m.bottom >= glyph.bottom - 0.5,
-            ),
+            row.group.left <= glyph.left + 0.5 &&
+              row.group.right >= glyph.right - 0.5 &&
+              row.group.top <= glyph.top + 0.5 &&
+              row.group.bottom >= glyph.bottom - 0.5,
           ).toBe(true);
-        expect(row.translated[0].left).toBeCloseTo(row.original[0].left, 0);
         if (row.icon)
-          for (const r of [...row.translated, ...row.masks])
-            expect(r.left).toBeGreaterThanOrEqual(row.icon.right + 5);
+          for (const r of row.translated) expect(r.left).toBeGreaterThanOrEqual(row.icon.right + 5);
       }
       const screenshot = await page.screenshot({
         path: info.outputPath(`navigation-${width}-dpr${dpr}.png`),
@@ -164,7 +162,7 @@ extensionTest(
       const signup = rows[2];
       if (!signup) throw new Error('Sign Up geometry missing');
       const residue = await panel.evaluate(
-        async ({ png, source, translated, width }) => {
+        async ({ png, source, link, width }) => {
           const bitmap = await createImageBitmap(await (await fetch(png)).blob());
           const scale = bitmap.width / width;
           const canvas = new OffscreenCanvas(bitmap.width, bitmap.height);
@@ -172,17 +170,24 @@ extensionTest(
           if (!ctx) throw new Error('Canvas missing');
           ctx.drawImage(bitmap, 0, 0);
           bitmap.close();
-          // The shorter translation leaves this part of the dark button empty. Include the
-          // original baseline decoration: Range rectangles alone do not bound all painted ink.
-          const left = Math.ceil(Math.max(...translated.map((r) => r.right)) * scale) + 2;
+          // Native reflow can move/shrink the button. Its former location must be a clean
+          // page backdrop, with neither the dark source button nor its English ink leaking.
+          const left = Math.floor(Math.min(...source.map((r) => r.left)) * scale);
           const right = Math.ceil(Math.max(...source.map((r) => r.right)) * scale);
           const top = Math.floor(Math.min(...source.map((r) => r.top)) * scale);
           const bottom = Math.ceil(Math.max(...source.map((r) => r.bottom)) * scale) + 1;
           const ink: number[][] = [];
           for (let y = top; y < bottom; y++)
             for (let x = left; x < right; x++) {
+              if (
+                x / scale >= link.left - 1 &&
+                x / scale <= link.right + 1 &&
+                y / scale >= link.top - 1 &&
+                y / scale <= link.bottom + 1
+              )
+                continue;
               const [r = 0, g = 0, b = 0] = ctx.getImageData(x, y, 1, 1).data;
-              if (Math.min(r, g, b) > 30) ink.push([x, y, r, g, b]);
+              if (Math.min(r, g, b) < 245) ink.push([x, y, r, g, b]);
             }
           return { ink, source };
         },
@@ -190,7 +195,7 @@ extensionTest(
           png: `data:image/png;base64,${screenshot.toString('base64')}`,
           width,
           source: signup.original,
-          translated: signup.translated,
+          link: signup.link,
         },
       );
       expect(

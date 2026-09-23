@@ -14,6 +14,7 @@ for (const mode of [
 ])
   extensionTest(
     `leaves ${mode} native without image translation or sharing while translating independent DOM text`,
+    { tag: mode === 'video' ? ['@smoke'] : [] },
     async ({ extensionSession }, testInfo) => {
       const { context, sidePanelPage: panel } = extensionSession;
       const token = Buffer.from(
@@ -123,9 +124,7 @@ for (const mode of [
           type: 'translation.toggle',
           payload: { tabId },
         });
-      const expectedStatus = ['animation', 'fixed-gradient'].includes(mode)
-        ? 'unsupported'
-        : 'ready';
+      const expectedStatus = mode === 'animation' ? 'unsupported' : 'ready';
       await toggle();
       const lens = page.locator('[data-chatbrowserx-overlay=translation]');
       await expect(lens).toHaveAttribute('data-status', expectedStatus);
@@ -151,7 +150,8 @@ for (const mode of [
           return result?.result;
         }, tabId);
       const result = await read();
-      expect(result?.texts).toEqual(['网页文字']);
+      const expectedTexts = mode === 'fixed-gradient' ? ['网页文字', '网页文字'] : ['网页文字'];
+      expect(result?.texts).toEqual(expectedTexts);
       expect(result?.actionHidden).toBe(true);
       if (expectedStatus === 'unsupported') expect(result?.notice).toContain('暂不支持');
       expect(result?.captureCalls).toBe(0);
@@ -159,6 +159,9 @@ for (const mode of [
       expect(imageRequests).toBe(0);
       expect(textRequests).toBe(1);
       await page.locator('p').evaluate((p) => (p.textContent = 'Changed native text'));
+      await page.waitForTimeout(350);
+      expect(textRequests).toBe(1);
+      await page.keyboard.press('Alt+KeyR');
       await expect.poll(() => textRequests).toBe(2);
       await expect(lens).toHaveAttribute('data-status', expectedStatus);
       expect(imageRequests).toBe(0);
@@ -167,7 +170,7 @@ for (const mode of [
       await expect(lens).toHaveCount(0);
       await toggle();
       await expect(lens).toHaveAttribute('data-status', expectedStatus);
-      expect((await read())?.texts).toEqual(['网页文字']);
+      expect((await read())?.texts).toEqual(expectedTexts);
       await page.waitForTimeout(1200);
       expect(imageRequests).toBe(0);
       expect(textRequests).toBe(2);

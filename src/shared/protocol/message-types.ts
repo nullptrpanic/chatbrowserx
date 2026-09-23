@@ -1,7 +1,6 @@
 import type {
   TranslationTexts,
   TranslationLensOptions,
-  TranslationBackgroundSource,
 } from '../../translation/region-translation';
 
 export const PROTOCOL_VERSION = 1 as const;
@@ -58,7 +57,6 @@ export type ExtensionMessage =
   | Message<'translation.toggle', { tabId: number }>
   | Message<'translation.getState', { tabId: number } | { sessionId: string }>
   | Message<'translation.read', TranslationTexts>
-  | Message<'translation.background', TranslationBackgroundSource>
   | Message<'translation.cancel', { sessionId: string }>;
 
 export interface PanelStateChangedNotification {

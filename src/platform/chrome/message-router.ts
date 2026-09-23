@@ -46,10 +46,7 @@ export interface MessageRouterDependencies {
     captureRegion(tabId: number): Promise<{ readonly id: string } | null>;
   };
   readonly sandboxConsole?: SandboxConsoleClientPort;
-  readonly translation?: Pick<
-    TranslationController,
-    'toggle' | 'getState' | 'read' | 'background' | 'cancel'
-  >;
+  readonly translation?: Pick<TranslationController, 'toggle' | 'getState' | 'read' | 'cancel'>;
   readonly pageFeatures?: {
     ensure(tabId: number): Promise<unknown>;
   };
@@ -141,7 +138,6 @@ async function routeMessage(
         await dependencies.translation.toggle(message.payload.tabId),
       );
     case 'translation.read':
-    case 'translation.background':
     case 'translation.cancel':
       if (context.senderTabId === null || context.senderFrameId !== 0)
         return errorResponse(
@@ -150,11 +146,6 @@ async function routeMessage(
           'Translation requires the enabled page.',
         );
       if (!dependencies.translation) throw new Error('Translation unavailable.');
-      if (message.type === 'translation.background')
-        return successResponse(
-          message.requestId,
-          await dependencies.translation.background(context.senderTabId, message.payload),
-        );
       if (message.type === 'translation.read')
         return successResponse(
           message.requestId,

@@ -94,7 +94,7 @@ extensionTest(
                 decoration: style.textDecorationLine,
                 x,
                 y,
-                href: document.elementFromPoint(x, y)?.closest('a')?.getAttribute('href'),
+                href: t.closest('a')?.getAttribute('href'),
               };
             });
           },
@@ -116,8 +116,8 @@ extensionTest(
       await page.mouse.click(link.x, link.y);
     }
     expect(await page.evaluate('window.clicks')).toEqual([
-      { trusted: true, href: '#home' },
-      { trusted: true, href: '#blog' },
+      { trusted: false, href: '#home' },
+      { trusted: false, href: '#blog' },
     ]);
     await page.screenshot({ path: testInfo.outputPath('translated-links.png') });
     for (const scroll of [20, 40, 0]) {

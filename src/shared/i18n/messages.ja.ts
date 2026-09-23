@@ -32,6 +32,7 @@ export const ja = {
   translationFailed: '一部を翻訳できませんでした。Esc キーで終了します。',
   translationUnsupported: '一部のコンテンツは翻訳に未対応のため、原文のまま表示しています',
   translationRetry: '再試行',
+  translationRefreshHint: 'Alt+R / Option+R：枠内のテキストを再翻訳',
   translationError:
     '翻訳を開始できません。拡張機能がアクセスできる通常のウェブページを開いてください。更新後は拡張機能とページを再読み込みしてください。',
   translationReloadRequired:

@@ -262,7 +262,6 @@ describe('createMessageRouter', () => {
     const translation = {
       toggle: vi.fn(async () => ({ active: true })),
       getState: vi.fn(async () => ({ active: false })),
-      background: vi.fn(async () => ({ mimeType: 'image/png', data: 'YWJj' })),
       read: vi.fn(async () => ({
         blocks: [],
         cacheKey: 'configured',
@@ -275,25 +274,6 @@ describe('createMessageRouter', () => {
       screenshots: buildScreenshots(),
       translation,
     });
-    const image = {
-      version: 1,
-      requestId: 'image',
-      type: 'translation.background',
-      payload: { sessionId: 'enabled', url: 'https://cdn.test/i.png' },
-    };
-    expect(await router(image)).toMatchObject({
-      ok: false,
-      error: { code: 'INVALID_CONTEXT' },
-    });
-    expect(await router(image, { senderTabId: 7, senderFrameId: 1 })).toMatchObject({
-      ok: false,
-      error: { code: 'INVALID_CONTEXT' },
-    });
-    expect(await router(image, { senderTabId: 7, senderFrameId: 0 })).toMatchObject({
-      ok: true,
-      data: { mimeType: 'image/png' },
-    });
-    expect(translation.background).toHaveBeenCalledExactlyOnceWith(7, image.payload);
     const toggle = {
       version: 1,
       requestId: 'enable',

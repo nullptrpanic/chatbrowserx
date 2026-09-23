@@ -75,56 +75,6 @@ describe('translation authorization', () => {
     });
   });
 
-  it('authorizes DOM photo backgrounds before and after reading and cancels them when the lens closes', async () => {
-    let session: string | null = 's';
-    let capturedSignal: AbortSignal | undefined;
-    let finish!: () => void;
-    const controller = new TranslationController({
-      getSession: async () => session,
-      toggle: async () => false,
-      settings: { get: async () => DEFAULT_APP_SETTINGS },
-      provider: {
-        stream() {
-          throw new Error('Images must not invoke the model');
-        },
-      },
-      readBackground: async (_tab, _url, signal) => {
-        capturedSignal = signal;
-        await new Promise<void>((r) => {
-          finish = r;
-        });
-        return { mimeType: 'image/png', data: 'YWJj' };
-      },
-    });
-    await expect(
-      controller.background(7, {
-        sessionId: 'wrong',
-        url: 'https://cdn.test/i.png',
-      }),
-    ).rejects.toMatchObject({ code: 'TRANSLATION_SESSION_CLOSED' });
-    expect(capturedSignal).toBeUndefined();
-    const pending = controller.background(7, {
-      sessionId: 's',
-      url: 'https://cdn.test/i.png',
-    });
-    await vi.waitFor(() => expect(capturedSignal).toBeDefined());
-    session = null;
-    finish();
-    await expect(pending).rejects.toMatchObject({
-      code: 'TRANSLATION_SESSION_CLOSED',
-    });
-    session = 's';
-    capturedSignal = undefined;
-    const cancelled = controller.background(7, {
-      sessionId: 's',
-      url: 'https://cdn.test/i.png',
-    });
-    await vi.waitFor(() => expect(capturedSignal).toBeDefined());
-    controller.cancel(7, 's');
-    expect((capturedSignal as AbortSignal | undefined)?.aborted).toBe(true);
-    finish();
-    await expect(cancelled).rejects.toMatchObject({ name: 'AbortError' });
-  });
   it('delivers text previews to their originating request without waiting on page delivery', async () => {
     const updates: unknown[] = [];
     let calls = 0;

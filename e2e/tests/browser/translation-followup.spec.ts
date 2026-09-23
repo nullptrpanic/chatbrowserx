@@ -126,7 +126,8 @@ extensionTest(
 );
 
 extensionTest(
-  'reuses text and mask nodes during window/nested scroll, including sticky labels',
+  'reuses structural text nodes during window/nested scroll, including sticky labels',
+  { tag: '@smoke' },
   async ({ extensionSession }, info) => {
     const { page, panel, tabId, toggle, requests } = await fixture(
       extensionSession,
@@ -156,18 +157,19 @@ extensionTest(
                 (t) => t.textContent === ['移动段落。', '固定段落。', '嵌套段落。'][index],
               );
               if (!source || !text?.parentElement) throw new Error('Missing paragraph');
-              const masks = [...text.parentElement.querySelectorAll('.source-mask')];
+              const group = text.closest('.translation-group');
+              if (!group) throw new Error('Missing layout group');
               const saved = state.followupNodes?.get(id);
-              state.followupNodes?.set(id, [text, ...masks]);
+              state.followupNodes?.set(id, [text, group]);
               const range = document.createRange();
               range.selectNodeContents(source);
               const original = range.getBoundingClientRect().toJSON();
               range.selectNodeContents(text);
               return {
-                same: !saved || saved.every((n, i) => n === [text, ...masks][i]),
+                same: !saved || saved.every((n, i) => n === [text, group][i]),
                 original,
                 translated: range.getBoundingClientRect().toJSON(),
-                masks: masks.map((m) => m.getBoundingClientRect().toJSON()),
+                group: group.getBoundingClientRect().toJSON(),
               };
             });
           },
@@ -196,11 +198,11 @@ extensionTest(
       const rows = await read();
       expect(rows).toHaveLength(3);
       for (const row of rows) {
-        expect(row.same, 'pure scroll must not replace fitted paragraphs or masks').toBe(true);
+        expect(row.same, 'pure scroll must not replace structural groups or text').toBe(true);
         expect(row.translated.top).toBeCloseTo(row.original.top, 0);
         expect(row.translated.left).toBeCloseTo(row.original.left, 0);
-        expect(row.masks[0].top).toBeLessThanOrEqual(row.original.top);
-        expect(row.masks[0].bottom).toBeGreaterThanOrEqual(row.original.bottom);
+        expect(row.group.top).toBeLessThanOrEqual(row.original.top);
+        expect(row.group.bottom).toBeGreaterThanOrEqual(row.original.bottom);
       }
     }
     expect(requests.text).toBe(1);
@@ -229,7 +231,7 @@ extensionTest(
             '[data-chatbrowserx-overlay=translation]',
           );
           const mask =
-            host && chrome.dom.openOrClosedShadowRoot(host)?.querySelector('.source-mask');
+            host && chrome.dom.openOrClosedShadowRoot(host)?.querySelector('.translation-group');
           return mask?.getBoundingClientRect().toJSON();
         },
       });

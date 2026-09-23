@@ -1,18 +1,22 @@
 import { afterEach, expect, it, vi } from 'vitest';
 import { TranslationDom } from '../../src/page/translation/translation-dom';
+import { TranslationStructureLayout } from '../../src/page/translation/translation-structure-layout';
+import * as textConstraints from '../../src/page/translation/translation-text-constraints';
 import {
   closeTranslationLens,
   toggleTranslationLens,
 } from '../../src/page/translation/mount-translation-lens';
 import type { RuntimePort } from '../../src/platform/chrome/runtime-port';
 import type { ExtensionResponse } from '../../src/shared/protocol/message-types';
+import { mockAbsentPseudoStyles, mockTranslationGroupBox } from './dom-fixture';
 
 function setup() {
+  mockAbsentPseudoStyles();
   document.body.innerHTML =
     '<p>Full <a href="#">linked</a> paragraph.</p><p hidden>Private</p><textarea>Secret</textarea>';
-  vi.spyOn(Element.prototype, 'getBoundingClientRect').mockReturnValue(
-    new DOMRect(100, 100, 900, 40),
-  );
+  vi.spyOn(Element.prototype, 'getBoundingClientRect').mockImplementation(function (this: Element) {
+    return mockTranslationGroupBox(this, 40) ?? new DOMRect(100, 100, 900, 40);
+  });
   const create = document.createRange.bind(document);
   vi.spyOn(document, 'createRange').mockImplementation(() =>
     Object.assign(create(), {
@@ -37,6 +41,102 @@ afterEach(() => {
   vi.unstubAllGlobals();
 });
 
+it('contains a constraint read failure within one island and renders its independent sibling', () => {
+  const { dom, layer, area } = setup();
+  document.body.innerHTML = '<p>First paragraph.</p><p>Second paragraph.</p>';
+  dom.invalidate();
+  dom.update(area);
+  const [first, second] = dom.missing();
+  if (!first || !second) throw new Error('Missing independent source paragraphs');
+  vi.spyOn(textConstraints, 'readTranslationTextConstraints').mockImplementationOnce(() => {
+    throw new Error('Constraint read failed');
+  });
+  expect(
+    dom.accept({
+      blocks: [
+        { id: first.id, translation: '第一段。' },
+        { id: second.id, translation: '第二段。' },
+      ],
+    }),
+  ).toEqual([first.id]);
+  expect(layer.textContent).toContain('第二段。');
+  expect(layer.textContent).not.toContain('第一段。');
+  expect(document.body.textContent).toBe('First paragraph.Second paragraph.');
+  dom.invalidate();
+  dom.update(area);
+  expect(dom.layoutErrors.size).toBe(0);
+  expect(layer.textContent).toContain('第一段。');
+  expect(layer.textContent).toContain('第二段。');
+});
+
+it('keeps preformatted code out of translation while collecting its explanation', () => {
+  const { dom, area, layer } = setup();
+  document.body.innerHTML =
+    '<article><p>示例说明</p><pre><code>const user = {\n  name: "原文",\n};</code></pre></article>';
+  const source = document.querySelector('pre')?.textContent;
+  dom.invalidate();
+  dom.update(area);
+  expect(dom.missing().map((t) => t.text)).toEqual(['示例说明']);
+  dom.accept({
+    blocks: dom.missing().map((t) => ({ id: t.id, translation: 'Example explanation' })),
+  });
+  expect(layer.querySelector('pre')?.textContent).toBe(source);
+});
+
+it('does not let cached offscreen owners consume the discovery budget for later paragraphs', () => {
+  const { dom } = setup();
+  document.body.innerHTML = Array.from(
+    { length: 160 },
+    (_, i) => `<p data-row="${i}">Section ${i}</p>`,
+  ).join('');
+  vi.spyOn(Element.prototype, 'getBoundingClientRect').mockImplementation(function (this: Element) {
+    return this.hasAttribute('data-row')
+      ? new DOMRect(0, Number(this.getAttribute('data-row')) * 20, 900, 20)
+      : new DOMRect(0, 0, 900, 3200);
+  });
+  const create = Document.prototype.createRange.bind(document);
+  vi.spyOn(document, 'createRange').mockImplementation(() => {
+    const range = create();
+    return Object.assign(range, {
+      getClientRects: () => {
+        const el =
+          range.startContainer instanceof Element
+            ? range.startContainer
+            : range.startContainer.parentElement;
+        return [el?.getBoundingClientRect() ?? new DOMRect()];
+      },
+    });
+  });
+  dom.invalidate();
+  dom.update({ x: 0, y: 0, width: 900, height: 2560 });
+  expect(dom.visible).toHaveLength(128);
+  dom.invalidate(false);
+  dom.update({ x: 0, y: 2800, width: 900, height: 180 });
+  expect(dom.missing().map((t) => t.text)).toContain('Section 145');
+});
+
+it.each([
+  'javascript:alert(1)',
+  ' \njavascript:alert(1)',
+  'java\tscript:alert(1)',
+  'data:text/html,test',
+])('does not create an executable mirror link from a source URL: %s', (href) => {
+  const { dom, area, layer } = setup();
+  document.body.innerHTML = '<p><a>Unsafe</a> <a href="/safe">Safe</a></p>';
+  document.querySelector('a')?.setAttribute('href', href);
+  dom.invalidate();
+  dom.update(area);
+  dom.accept({
+    blocks: dom.missing().map((text) => ({
+      id: text.id,
+      translation: `Translated ${text.text}`,
+    })),
+  });
+  expect([...layer.querySelectorAll('a[href]')].map((link) => link.getAttribute('href'))).toEqual([
+    '/safe',
+  ]);
+});
+
 it('collects read-only document islands without collecting surrounding editable drafts', () => {
   const { dom, area } = setup();
   document.body.innerHTML = `<article contenteditable="true"><p>Draft before.</p>
@@ -52,9 +152,69 @@ it('counts rejected hidden nodes toward the source-discovery budget', () => {
   document.body.innerHTML = '<div hidden></div>'.repeat(10020) + '<p>Past the discovery limit.</p>';
   const computed = window.getComputedStyle(document.body);
   const styles = vi.spyOn(window, 'getComputedStyle').mockReturnValue(computed);
+  styles.mockClear();
   dom.invalidate();
   dom.update(area);
   expect(styles.mock.calls.length).toBeLessThanOrEqual(10001);
+  expect(dom.missing()).toEqual([]);
+  expect(dom.report().boundaries['node-budget']).toBe(1);
+});
+
+it('retains complete admitted text when later discovery exhausts the node budget', () => {
+  const { dom, area } = setup();
+  document.body.innerHTML =
+    '<p>Visible <a href="#">linked</a> paragraph.</p>' +
+    '<div hidden></div>'.repeat(10020) +
+    '<p>Past the discovery limit.</p>';
+  dom.invalidate();
+  dom.update(area);
+  expect(dom.missing().map((block) => block.text)).toEqual(['Visible <m0>linked</m0> paragraph.']);
+  expect(dom.report().boundaries['node-budget']).toBe(1);
+});
+
+it('does not send a truncated block when the source-discovery budget ends inside it', () => {
+  const { dom, area } = setup();
+  document.body.innerHTML =
+    '<p><span>Beginning </span>' + '<i></i>'.repeat(10020) + '<span>ending.</span></p>';
+  dom.invalidate();
+  dom.update(area);
+  expect(dom.missing()).toEqual([]);
+  expect(dom.report().boundaries['node-budget']).toBe(1);
+});
+
+it('distinguishes pending, failed, unchanged and painted results without calling all of them translated', () => {
+  const { dom } = setup();
+  const source = dom.missing()[0];
+  if (!source) throw new Error('Missing source entry');
+  expect(dom.report().targets).toEqual([{ id: source.id, state: 'untranslated' }]);
+  expect(dom.report(new Set([source.id])).targets).toEqual([{ id: source.id, state: 'pending' }]);
+  expect(dom.report(new Set(), new Set([source.id])).targets).toEqual([
+    { id: source.id, state: 'model-failed' },
+  ]);
+  dom.accept({ blocks: [{ id: source.id, translation: source.text }] });
+  expect(dom.report().targets).toEqual([{ id: source.id, state: 'unchanged-result' }]);
+  dom.accept({ blocks: [{ id: source.id, translation: '完整的<m0>链接</m0>段落。' }] });
+  expect(dom.report().targets).toEqual([{ id: source.id, state: 'rendered' }]);
+});
+
+it('bounds the visible-text check inside an unsupported transformed subtree', () => {
+  const { dom, area } = setup();
+  document.body.innerHTML =
+    '<div style="transform:rotate(1deg)">' +
+    '<span></span>'.repeat(10020) +
+    '<span>Past the limit</span></div>';
+  const ordinary = window.getComputedStyle(document.body);
+  const transformed = window.getComputedStyle(document.body.firstElementChild as Element);
+  const styles = vi
+    .spyOn(window, 'getComputedStyle')
+    .mockImplementation((el) => (el.tagName === 'DIV' ? transformed : ordinary));
+  styles.mockClear();
+  dom.invalidate();
+  dom.update(area);
+  // One root visit leaves at most 9,999 descendants; repeated root-style reads are not visits.
+  expect(styles.mock.calls.filter(([el]) => el.tagName === 'SPAN').length).toBeLessThanOrEqual(
+    9999,
+  );
   expect(dom.missing()).toEqual([]);
 });
 
@@ -78,8 +238,24 @@ it.each([
   dom.invalidate();
   dom.update(area);
   expect(dom.missing().map((t) => t.text)).toEqual(['Visible paragraph.']);
-  dom.accept({ blocks: dom.missing().map((t) => ({ id: t.id, translation: '可见段落。' })) });
+  dom.accept({
+    blocks: dom.missing().map((t) => ({ id: t.id, translation: '可见段落。' })),
+  });
   expect(layer.querySelectorAll('.text')).toHaveLength(1);
+});
+
+it('keeps an unsupported body clipping shape native', () => {
+  const { dom, area } = setup();
+  const previous = document.body.style.clipPath;
+  try {
+    document.body.innerHTML = '<p>Do not translate outside this shape.</p>';
+    document.body.style.clipPath = 'circle(30%)';
+    dom.invalidate();
+    dom.update(area);
+    expect(dom.missing()).toEqual([]);
+  } finally {
+    document.body.style.clipPath = previous;
+  }
 });
 
 it('keeps a closed disclosure body hidden while translating its visible summary', () => {
@@ -101,9 +277,10 @@ it('removes every translated label when a previously open menu becomes clipped',
   dom.invalidate();
   dom.update(area);
   dom.accept({
-    blocks: dom
-      .missing()
-      .map((t, i) => ({ id: t.id, translation: ['网站', '社区', '解决方案'][i] ?? '' })),
+    blocks: dom.missing().map((t, i) => ({
+      id: t.id,
+      translation: ['网站', '社区', '解决方案'][i] ?? '',
+    })),
   });
   expect(layer.querySelectorAll('.text')).toHaveLength(3);
   document.querySelector('nav')?.setAttribute('style', 'clip-path:inset(50%)');
@@ -145,26 +322,27 @@ it('moves existing paragraph layers independently on scroll, but relayouts after
   dom.invalidate();
   dom.update(area);
   dom.accept({
-    blocks: dom
-      .missing()
-      .map((t, i) => ({ id: t.id, translation: i ? '固定段落。' : '滚动段落。' })),
+    blocks: dom.missing().map((t, i) => ({
+      id: t.id,
+      translation: i ? '固定段落。' : '滚动段落。',
+    })),
   });
   const before = [...layer.querySelectorAll<HTMLElement>('.text')];
-  const masks = [...layer.querySelectorAll('.source-mask')];
+  const groups = [...layer.querySelectorAll<HTMLElement>('.translation-group')];
   y = 120;
-  dom.invalidate();
+  dom.invalidate(false);
   dom.update(area);
   expect(layer.querySelectorAll('.text')[0]).toBe(before[0]);
   expect(layer.querySelectorAll('.text')[1]).toBe(before[1]);
-  expect(layer.querySelectorAll('.source-mask')[0]).toBe(masks[0]);
-  expect(before[0]?.parentElement?.style.transform).toBe('translate(0px, -60px)');
-  expect(before[1]?.parentElement?.style.transform).toBe('translate(0px, 0px)');
+  expect(layer.querySelectorAll('.translation-group')[0]).toBe(groups[0]);
+  expect(groups[0]?.style.top).toBe('120px');
+  expect(groups[1]?.style.top).toBe('100px');
   expect(dom.missing()).toEqual([]);
   width = 200;
   dom.invalidate();
   dom.update(area);
   expect(layer.querySelectorAll('.text')[0]).not.toBe(before[0]);
-  expect((layer.querySelector('.text') as HTMLElement).style.width).toBe('200px');
+  expect((layer.querySelector('.translation-group') as HTMLElement).style.width).toBe('200px');
   expect(dom.missing()).toEqual([]);
 });
 
@@ -190,18 +368,22 @@ it('anchors a flex navigation label after its icon instead of at the container p
   const source = dom.missing()[0];
   if (!source) throw new Error('Source missing');
   dom.accept({ blocks: [{ id: source.id, translation: '模型' }] });
-  expect((layer.querySelector('.text') as HTMLElement).style.left).toBe('130px');
-  // Use the remaining label slot, while the original glyph mask still excludes the icon.
-  expect((layer.querySelector('.text') as HTMLElement).style.width).toBe('62px');
-  expect((layer.querySelector('.source-mask') as HTMLElement).style.left).toBe('130px');
-  expect((layer.querySelector('.source-mask') as HTMLElement).style.width).toBe('54px');
+  const mirror = layer.querySelector('a');
+  expect(mirror?.style.display).toBe('flex');
+  expect(mirror?.firstElementChild?.tagName).toBe('svg');
+  expect(mirror?.lastElementChild?.textContent).toBe('模型');
+  expect(layer.querySelector('.source-mask')).toBeNull();
+  expect(link.textContent).toBe('Models');
 });
 
 it.each([0.75, 1, 2])(
-  'covers fractional source edges with complete device pixels at DPR %s',
+  'preserves fractional layout coordinates without fitting or rounding at DPR %s',
   (dpr) => {
     const { dom, layer, area } = setup();
     vi.stubGlobal('devicePixelRatio', dpr);
+    vi.mocked(Element.prototype.getBoundingClientRect).mockReturnValue(
+      new DOMRect(100.6, 100.6, 900.6, 40.6),
+    );
     vi.spyOn(document, 'createRange').mockImplementation(
       () =>
         ({
@@ -213,17 +395,14 @@ it.each([0.75, 1, 2])(
     dom.update(area);
     const source = dom.missing()[0];
     if (!source) throw new Error('Source missing');
-    dom.accept({ blocks: [{ id: source.id, translation: '完整 <m0>链接</m0> 段落。' }] });
-    const mask = layer.querySelector<HTMLElement>('.source-mask');
-    if (!mask) throw new Error('Mask missing');
-    expect(Number.parseFloat(mask.style.left)).toBe(Math.floor(100.6 * dpr) / dpr);
-    expect(Number.parseFloat(mask.style.top)).toBe((Math.floor(100.6 * dpr) - 1) / dpr);
-    expect(Number.parseFloat(mask.style.width)).toBe(
-      (Math.ceil(1001.2 * dpr) - Math.floor(100.6 * dpr)) / dpr,
-    );
-    expect(Number.parseFloat(mask.style.height)).toBe(
-      (Math.ceil(121.2 * dpr) - Math.floor(100.6 * dpr) + 2) / dpr,
-    );
+    dom.accept({
+      blocks: [{ id: source.id, translation: '完整 <m0>链接</m0> 段落。' }],
+    });
+    const group = layer.querySelector<HTMLElement>('.translation-group');
+    expect(group?.style.left).toBe('100.6px');
+    expect(group?.style.top).toBe('100.6px');
+    expect(group?.style.width).toBe('900.6px');
+    expect(group?.style.minHeight).toBe('40.6px');
   },
 );
 
@@ -264,13 +443,16 @@ it('keeps small text-free SVG icons native even when their wrapper animates or t
   document.body.append(icon);
   dom.invalidate();
   dom.update(area);
-  expect(dom.visual).toHaveLength(0);
+  expect(dom.unsupported).toEqual([]);
+  expect(dom.missing().map((t) => t.text)).toEqual(['Full <m0>linked</m0> paragraph.']);
   const svg = icon.querySelector('svg');
   if (!svg) throw new Error('SVG fixture missing');
   svg.innerHTML = '<text>Readable</text>';
   dom.invalidate();
   dom.update(area);
-  expect(dom.visual).toHaveLength(1);
+  expect(dom.unsupported).toEqual([{ x: 200, y: 100, width: 32, height: 32 }]);
+  expect(dom.missing().map((t) => t.text)).toEqual(['Full <m0>linked</m0> paragraph.']);
+  expect(svg.textContent).toBe('Readable');
 });
 
 it('does not cancel a pending HTML translation when neighbouring visual pixels are inspected', async () => {
@@ -372,11 +554,11 @@ it('stops passive screenshots after a text failure without blocking the visible 
 it('reads the complete inline paragraph crossing the lens, excluding hidden and editable content', () => {
   const { dom } = setup();
   expect(dom.missing().map((t) => t.text)).toEqual(['Full <m0>linked</m0> paragraph.']);
-  expect(dom.visual).toEqual([]);
+  expect(dom.unsupported).toEqual([]);
 });
 
 it.each(['fill', 'cover', 'contain'])(
-  'collects a static image with %s layout for source translation',
+  'leaves an image with %s layout outside translation requests',
   (fit) => {
     const { dom, area } = setup();
     const image = document.createElement('img');
@@ -385,7 +567,7 @@ it.each(['fill', 'cover', 'contain'])(
     document.body.append(image);
     dom.invalidate();
     dom.update(area);
-    expect(dom.images).toEqual([image]);
+    expect(dom.missing().map((entry) => entry.text)).toEqual(['Full <m0>linked</m0> paragraph.']);
     expect(dom.unsupported).toEqual([]);
   },
 );
@@ -400,11 +582,12 @@ it('translates text on a simple gradient using the original background coordinat
   const text = dom.missing()[0];
   if (!text) throw new Error('Gradient text missing');
   dom.accept({ blocks: [{ id: text.id, translation: '渐变卡片。' }] });
-  const mask = layer.querySelector<HTMLElement>('.source-mask');
-  expect(mask?.style.backgroundImage).toContain('linear-gradient(to right, red, blue)');
-  // Source is (100,100), mask starts at y=99 because it covers glyph antialiasing too.
-  expect(mask?.style.backgroundPosition).toContain('0px 1px');
-  expect(mask?.style.backgroundSize).toContain('900px 40px');
+  const group = layer.querySelector<HTMLElement>('.translation-group');
+  expect(group?.querySelector('p')?.parentElement?.style.backgroundImage).toBe(
+    'linear-gradient(to right, red, blue)',
+  );
+  expect(group?.style.left).toBe('100px');
+  expect(group?.style.width).toBe('900px');
 });
 
 it.each([
@@ -412,13 +595,22 @@ it.each([
   'background-image:linear-gradient(red,blue),url("/texture.png")',
   'background-image:linear-gradient(red,blue);background-attachment:fixed',
   'background-image:linear-gradient(red,blue);background-size:50% 50%',
-])('keeps unsupported background compositing native: %s', (css) => {
-  const { dom, area } = setup();
+])('preserves native static background composition in the structural copy: %s', (css) => {
+  const { dom, area, layer } = setup();
   document.body.innerHTML = `<div style='${css}'><p>Complex card.</p></div>`;
   dom.invalidate();
   dom.update(area);
-  expect(dom.missing()).toEqual([]);
-  expect(dom.unsupported).toHaveLength(1);
+  const source = dom.missing()[0];
+  expect(source?.text).toBe('Complex card.');
+  if (!source) throw new Error('Missing source');
+  dom.accept({ blocks: [{ id: source.id, translation: '复杂背景卡片。' }] });
+  const native = document.body.firstElementChild as HTMLElement;
+  const style = window.getComputedStyle(native);
+  const mirror = layer.querySelector('.translation-group p')?.parentElement as HTMLElement;
+  expect(mirror.style.backgroundImage).toBe(style.backgroundImage);
+  expect(mirror.style.backgroundAttachment).toBe(style.backgroundAttachment);
+  expect(mirror.style.backgroundSize).toBe(style.backgroundSize);
+  expect(dom.layoutUnsupported.size).toBe(0);
 });
 
 it('does not invent a flat backdrop for an image over a gradient, while allowing its sibling text', () => {
@@ -431,7 +623,6 @@ it('does not invent a flat backdrop for an image over a gradient, while allowing
   dom.invalidate();
   dom.update(area);
   expect(dom.missing().map((t) => t.text)).toEqual(['Readable card.']);
-  expect(dom.images).toEqual([]);
   expect(dom.unsupported).toHaveLength(0);
 });
 
@@ -565,7 +756,7 @@ it('does not cache a late translation when its source text node was replaced', (
   expect(dom.missing()[0]?.id).not.toBe(original.id);
 });
 
-it('bounds independent link collection so admitted source IDs remain available for completion', () => {
+it('keeps every visible link available across bounded batches, beyond the offscreen cache size', () => {
   const { dom, area } = setup();
   document.body.innerHTML =
     '<nav>' +
@@ -573,13 +764,47 @@ it('bounds independent link collection so admitted source IDs remain available f
     '</nav>';
   dom.invalidate();
   dom.update(area);
-  expect(dom.visible.length).toBeLessThanOrEqual(128);
-  const batch = dom.missing();
-  dom.accept({ blocks: batch.map(({ id }) => ({ id, translation: '链接' })) });
-  expect(dom.missing().every((t) => !batch.some((b) => b.id === t.id))).toBe(true);
+  expect(dom.visible).toHaveLength(160);
+  for (const entry of dom.visible) expect(dom.entries.get(entry.key)).toBe(entry);
+  dom.scroll();
+  for (let i = 0; i < 5; i++) {
+    const batch = dom.missing();
+    expect(batch).toHaveLength(32);
+    dom.accept({ blocks: batch.map(({ id }) => ({ id, translation: '链接' })) });
+    expect(dom.missing().every((t) => !batch.some((b) => b.id === t.id))).toBe(true);
+  }
+  expect(dom.missing()).toEqual([]);
+  expect(dom.cache.size).toBe(160);
+  const navigation = document.querySelector('nav');
+  if (!navigation) throw new Error('Missing fixture navigation');
+  navigation.hidden = true;
+  const next = document.createElement('section');
+  next.innerHTML = Array.from({ length: 200 }, (_, i) => `<p>Section ${i}</p>`).join('');
+  document.body.append(next);
+  dom.settle();
+  dom.invalidate();
+  dom.update(area);
+  expect(dom.visible).toHaveLength(200);
+  expect(dom.entries.size).toBe(200 + 128);
+  expect(dom.cache.size).toBe(128);
+  dom.scroll();
+  for (let i = 0; i < 7; i++)
+    dom.accept({ blocks: dom.missing().map(({ id }) => ({ id, translation: '章节' })) });
+  expect(dom.missing()).toEqual([]);
+  expect(dom.cache.size).toBe(200 + 128);
 });
 
-it('retains source IDs while layout changes and classifies images for the visual path', () => {
+it('does not silently stop a dense visible grid at the old owner-cache limit', () => {
+  const { dom, area } = setup();
+  document.body.innerHTML = Array.from({ length: 200 }, (_, i) => `<p>栏目 ${i}</p>`).join('');
+  dom.invalidate();
+  dom.update(area);
+  expect(dom.visible).toHaveLength(200);
+  expect(dom.visible.at(-1)?.plain).toBe('栏目 199');
+  expect(dom.missing()).toHaveLength(32);
+});
+
+it('retains text source IDs when an untranslated image is added beside them', () => {
   const { dom, area } = setup();
   const original = dom.missing();
   const image = document.createElement('img');
@@ -588,8 +813,20 @@ it('retains source IDs while layout changes and classifies images for the visual
   dom.invalidate();
   dom.update(area);
   expect(dom.missing()).toEqual(original);
-  expect(dom.visual).toEqual([{ x: 100, y: 100, width: 900, height: 40 }]);
-  expect(dom.images).toEqual([image]);
+  expect(dom.unsupported).toEqual([]);
+  expect(image.isConnected).toBe(true);
+});
+
+it('bounds collected source size and batches without losing later short text', () => {
+  const { dom, area } = setup();
+  document.body.innerHTML = [8000, 8000, 8001, 1].map((n) => `<p>${'x'.repeat(n)}</p>`).join('');
+  dom.invalidate();
+  dom.update(area);
+  const batch = dom.missing();
+  expect(batch.map((t) => t.text.length)).toEqual([8000, 8000]);
+  expect(dom.visible.map((t) => t.text.length)).toEqual([8000, 8000, 1]);
+  expect(dom.unsupported).toEqual([{ x: 100, y: 100, width: 900, height: 40 }]);
+  expect(dom.missing(new Set(batch.map((t) => t.id))).map((t) => t.text)).toEqual(['x']);
 });
 
 it('does not rescan layout when the observation window moves within the collected buffer', () => {
@@ -602,6 +839,31 @@ it('does not rescan layout when the observation window moves within the collecte
   expect(Element.prototype.getBoundingClientRect).toHaveBeenCalled();
 });
 
+it('defers source collection and arriving translations until scrolling settles', () => {
+  const { dom, layer, area } = setup();
+  const source = dom.missing()[0];
+  if (!source) throw new Error('Source missing');
+  dom.accept({ blocks: [{ id: source.id, translation: '<m0>临时译文</m0>' }] }, true);
+  const group = layer.firstElementChild;
+  const paragraph = document.querySelector('p');
+  if (!paragraph) throw new Error('Paragraph missing');
+  dom.scroll();
+  const walk = vi.spyOn(document, 'createTreeWalker');
+  dom.invalidate([paragraph]);
+  dom.update(area);
+  dom.accept({ blocks: [{ id: source.id, translation: '<m0>最终译文</m0>' }] });
+  dom.clearPreview(new Set([source.id]));
+  expect(walk).not.toHaveBeenCalled();
+  expect(layer.firstElementChild).toBe(group);
+  expect(layer.textContent).toBe('临时译文');
+  expect(dom.cache.size).toBe(1);
+  dom.settle();
+  dom.update(area);
+  expect(walk).toHaveBeenCalled();
+  expect(layer.textContent).toBe('最终译文');
+  expect(dom.missing()).toEqual([]);
+});
+
 it('paints text previews without caching completion and clears only their source IDs', () => {
   const { dom, layer, area } = setup();
   const source = dom.missing()[0];
@@ -612,11 +874,16 @@ it('paints text previews without caching completion and clears only their source
   dom.invalidate();
   dom.update(area);
   expect(layer.textContent).toBe('临时译文');
+  const render = vi.spyOn(TranslationStructureLayout.prototype, 'render');
   dom.clearPreview(new Set(['another-request']));
   expect(layer.textContent).toBe('临时译文');
+  expect(render).not.toHaveBeenCalled();
   dom.clearPreview(new Set([source.id]));
   expect(layer.textContent).toBe('');
   expect(dom.missing()).toEqual([source]);
+  expect(render).toHaveBeenCalledTimes(1);
+  dom.clearPreview(new Set([source.id]));
+  expect(render).toHaveBeenCalledTimes(1);
 });
 
 it('removes a preview on source changes and ignores late updates for the old source ID', () => {

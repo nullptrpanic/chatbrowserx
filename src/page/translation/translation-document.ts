@@ -1,13 +1,13 @@
 import type { TranslationRect } from './translation-regions';
 
-/** Docx uses contenteditable for the document itself, not just for unsubmitted drafts. */
+/** Docx uses contenteditable for published text, including when opened through Wiki. */
 export function isTranslationDocument(doc: Document): boolean {
   const url = doc.location;
   return (
     !!url &&
     url.protocol === 'https:' &&
     /(^|\.)(larkoffice\.com|feishu\.cn|larksuite\.com)$/.test(url.hostname) &&
-    url.pathname.startsWith('/docx/')
+    /^\/(?:docx|wiki)\//.test(url.pathname)
   );
 }
 

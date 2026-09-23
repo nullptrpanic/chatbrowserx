@@ -8,8 +8,6 @@ import {
   type TranslationTexts,
   type TranslationLensOptions,
   type TranslationProgress,
-  type TranslationBackgroundSource,
-  type TranslationBackgroundResource,
 } from './region-translation';
 
 interface TranslationPorts {
@@ -18,11 +16,6 @@ interface TranslationPorts {
   readonly provider: ModelProviderPort;
   readonly settings: Pick<SettingsStore, 'get'>;
   progress?(tabId: number, value: TranslationProgress): Promise<void>;
-  readBackground?(
-    tabId: number,
-    url: string,
-    signal: AbortSignal,
-  ): Promise<TranslationBackgroundResource>;
 }
 
 type TranslationRequest = { id: string; abort: AbortController };
@@ -36,10 +29,7 @@ const cacheKey = (settings: AppSettings) =>
 
 /** The page owns lens state; the worker owns only cancellable, bounded translation requests. */
 export class TranslationController {
-  readonly #requests = {
-    text: new Map<number, Set<TranslationRequest>>(),
-    background: new Map<number, Set<TranslationRequest>>(),
-  };
+  readonly #requests = new Map<number, Set<TranslationRequest>>();
   readonly #toggles = new Map<number, Promise<{ active: boolean }>>();
   constructor(readonly ports: TranslationPorts) {}
 
@@ -58,6 +48,7 @@ export class TranslationController {
             errorText: t('translationFailed'),
             unsupportedText: t('translationUnsupported'),
             retryText: t('translationRetry'),
+            refreshText: t('translationRefreshHint'),
             cacheKey: cacheKey(settings),
           }),
         };
@@ -76,22 +67,18 @@ export class TranslationController {
   }
 
   cancel(tabId: number, sessionId: string): void {
-    for (const requests of Object.values(this.#requests)) {
-      const pending = requests.get(tabId);
-      for (const request of pending ?? []) {
-        if (request.id !== sessionId) continue;
-        request.abort.abort();
-        pending?.delete(request);
-      }
-      if (!pending?.size) requests.delete(tabId);
+    const pending = this.#requests.get(tabId);
+    for (const request of pending ?? []) {
+      if (request.id !== sessionId) continue;
+      request.abort.abort();
+      pending?.delete(request);
     }
+    if (!pending?.size) this.#requests.delete(tabId);
   }
 
   cancelTab(tabId: number): void {
-    for (const requests of Object.values(this.#requests)) {
-      for (const request of requests.get(tabId) ?? []) request.abort.abort();
-      requests.delete(tabId);
-    }
+    for (const request of this.#requests.get(tabId) ?? []) request.abort.abort();
+    this.#requests.delete(tabId);
   }
 
   async #authorize(tabId: number, expected: string, signal: AbortSignal) {
@@ -101,30 +88,8 @@ export class TranslationController {
       throw new TranslationStateError('TRANSLATION_SESSION_CLOSED');
   }
 
-  async background(
-    tabId: number,
-    source: TranslationBackgroundSource,
-  ): Promise<TranslationBackgroundResource> {
-    const requests = this.#requests.background;
-    const pending = requests.get(tabId) ?? new Set<TranslationRequest>();
-    if (pending.size >= 8) throw new TranslationStateError('TRANSLATION_BUSY');
-    const request = { id: source.sessionId, abort: new AbortController() };
-    pending.add(request);
-    requests.set(tabId, pending);
-    const signal = AbortSignal.any([request.abort.signal, AbortSignal.timeout(10000)]);
-    try {
-      await this.#authorize(tabId, source.sessionId, signal);
-      const result = (await this.ports.readBackground?.(tabId, source.url, signal)) ?? null;
-      await this.#authorize(tabId, source.sessionId, signal);
-      return result;
-    } finally {
-      pending.delete(request);
-      if (requests.get(tabId) === pending && !pending.size) requests.delete(tabId);
-    }
-  }
-
   async read(tabId: number, selection: TranslationTexts, requestId?: string) {
-    const requests = this.#requests.text;
+    const requests = this.#requests;
     const pending = requests.get(tabId) ?? new Set<TranslationRequest>();
     if (pending.size >= MAX_TRANSLATION_TEXT_REQUESTS)
       throw new TranslationStateError('TRANSLATION_BUSY');
@@ -132,7 +97,7 @@ export class TranslationController {
     const request = { id: selection.sessionId, abort };
     pending.add(request);
     requests.set(tabId, pending);
-    const signal = AbortSignal.any([abort.signal, AbortSignal.timeout(60_000)]);
+    const signal = AbortSignal.any([abort.signal, AbortSignal.timeout(120_000)]);
     const report =
       requestId && this.ports.progress
         ? (result: TranslationProgress['result']) => {

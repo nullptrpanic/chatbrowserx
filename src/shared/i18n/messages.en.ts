@@ -31,6 +31,7 @@ export const en = {
   translationFailed: 'Some content failed to translate. Press Esc to exit.',
   translationUnsupported: 'Some content cannot be translated and is left unchanged',
   translationRetry: 'Retry',
+  translationRefreshHint: 'Alt+R / Option+R: retranslate this region',
   translationError:
     'Cannot start translation. Use a regular web page with extension access. After an update, reload the extension and refresh the page.',
   translationReloadRequired:

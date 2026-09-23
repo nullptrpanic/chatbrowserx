@@ -19,6 +19,17 @@ afterEach(() => {
   vi.restoreAllMocks();
 });
 
+it('keeps mounted prose outside the viewport as context without including hidden UI or drafts', () => {
+  document.body.innerHTML = `<article><p id="target">Target.</p><p id="after">Nearby definition below the viewport.</p>
+    <nav>secret-menu</nav><p contenteditable>secret-draft</p><p style="clip-path:inset(50%)">secret-clip</p></article>`;
+  const after = document.querySelector('#after');
+  if (!after) throw new Error('Missing following paragraph');
+  vi.spyOn(after, 'getBoundingClientRect').mockReturnValue(new DOMRect(50, 4000, 500, 40));
+  const result = context('#target');
+  expect(result).toContain('Nearby definition below the viewport.');
+  expect(result).not.toContain('secret-');
+});
+
 it('uses read-only document context while excluding editable ancestors and nested drafts', () => {
   document.body.innerHTML = `<article contenteditable="true"><p>secret-before</p>
     <section contenteditable="false"><p>PB means benign boundary.</p>

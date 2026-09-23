@@ -102,8 +102,9 @@ extensionTest(
               top: t.getBoundingClientRect().top,
               left: t.getBoundingClientRect().left,
               fontSize: t.style.fontSize,
-              background:
-                t.parentElement?.querySelector<HTMLElement>('.source-mask')?.style.backgroundColor,
+              background: t.parentElement && getComputedStyle(t.parentElement).backgroundColor,
+              articleBackground: getComputedStyle(t.closest('article') ?? t).backgroundColor,
+              backdrop: t.closest<HTMLElement>('.translation-group')?.style.background,
             }));
           },
         });
@@ -130,27 +131,21 @@ extensionTest(
     expect(before?.every((line) => line.text?.trim())).toBe(true);
     expect(before?.map((t) => t.text).join('')).toContain('必须评估预期边界的两侧');
     const expectedBackgrounds = await page.evaluate(() =>
-      ['h2', 'article p'].map((selector) => {
-        const canvas = document.createElement('canvas');
-        canvas.width = canvas.height = 1;
-        const ctx = canvas.getContext('2d');
-        const article = document.querySelector('article');
-        const source = document.querySelector(selector);
-        if (!ctx || !article || !source) throw new Error('Background fixture missing');
-        ctx.fillStyle = 'white';
-        ctx.fillRect(0, 0, 1, 1);
-        for (const el of [document.body, article, source]) {
-          ctx.fillStyle = getComputedStyle(el).backgroundColor;
-          ctx.fillRect(0, 0, 1, 1);
-        }
-        const [r, g, b] = ctx.getImageData(0, 0, 1, 1).data;
-        return `rgb(${r}, ${g}, ${b})`;
-      }),
+      ['h2', 'article p', 'article', 'body'].map(
+        (selector) =>
+          getComputedStyle(document.querySelector(selector) ?? document.body).backgroundColor,
+      ),
     );
     expect(before?.map((line) => line.background)).toEqual([
       expectedBackgrounds[0],
       ...Array((before?.length ?? 1) - 1).fill(expectedBackgrounds[1]),
     ]);
+    expect(before?.every((line) => line.articleBackground === expectedBackgrounds[2])).toBe(true);
+    expect(
+      before?.every((line) =>
+        line.backdrop?.includes(expectedBackgrounds[3] ?? 'missing-background'),
+      ),
+    ).toBe(true);
     expect(await page.locator('article p').first().textContent()).toBe(paragraph);
     for (const x of [620, 580, 650]) {
       await page.mouse.move(x, 400);
@@ -181,6 +176,9 @@ extensionTest(
       .evaluate((p) => {
         p.textContent = 'Changed paragraph.';
       });
+    await page.waitForTimeout(350);
+    expect(requests).toHaveLength(1);
+    await page.keyboard.press('Alt+KeyR');
     await expect
       .poll(async () => (await readText())?.map((t) => t.text).join(''))
       .toContain('已更新的段落。');

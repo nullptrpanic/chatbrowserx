@@ -22,6 +22,7 @@ export class TranslationLensView {
     private readonly options: TranslationLensOptions,
     private readonly changed: () => void,
     private readonly exit: () => void,
+    private readonly refresh: () => void,
   ) {
     const host = (this.host = doc.createElement('div'));
     host.dataset.chatbrowserxOverlay = 'translation';
@@ -55,8 +56,10 @@ export class TranslationLensView {
     this.action = doc.createElement('button');
     this.action.type = 'button';
     this.action.hidden = true;
+    const hint = doc.createElement('span');
+    hint.textContent = options.refreshText ?? 'Alt+R / Option+R: retranslate';
     this.noticeText = doc.createTextNode('');
-    this.notice.append(this.noticeText, this.action);
+    this.notice.append(hint, this.noticeText, this.action);
     shadow.append(style, this.sheet, this.frame, this.notice);
     doc.documentElement.append(host);
     this.unregister = registerPageOverlayHost(host);
@@ -85,6 +88,8 @@ export class TranslationLensView {
       this.animation = 0;
       this.scale = Math.min(this.scale, this.maximumScale());
       const r = this.bounds();
+      // The lens uses viewport CSS pixels even when the page zooms its <html> element.
+      this.host.style.zoom = String(1 / (this.doc.documentElement.currentCSSZoom || 1));
       Object.assign(this.frame.style, {
         left: `${r.x}px`,
         top: `${r.y}px`,
@@ -94,7 +99,10 @@ export class TranslationLensView {
       this.sheet.style.clipPath = `inset(${r.y}px ${this.view.innerWidth - r.x - r.width}px ${this.view.innerHeight - r.y - r.height}px ${r.x}px round 16px)`;
       Object.assign(this.notice.style, {
         left: `${r.x}px`,
-        top: `${r.y >= 34 ? r.y - 34 : r.y + r.height + 34 <= this.view.innerHeight ? r.y + r.height + 6 : Math.max(0, Math.min(r.y + 6, this.view.innerHeight - 28))}px`,
+        // Prefer immediately outside the upper-left corner. At the viewport edge
+        // keep the hint visible without reducing the lens's translatable area.
+        top: `${Math.max(0, r.y - 34)}px`,
+        maxWidth: `${this.view.innerWidth - r.x}px`,
       });
       this.changed();
     });
@@ -104,13 +112,16 @@ export class TranslationLensView {
     if (this.statusKey === key) return;
     this.statusKey = key;
     this.host.dataset.status = value;
-    this.notice.hidden = value === 'ready';
     this.noticeText.textContent =
-      value === 'error'
-        ? `${this.options.errorText} (${failure}) `
-        : value === 'unsupported'
-          ? this.options.unsupportedText
-          : this.options.loadingText;
+      value === 'ready'
+        ? ''
+        : ` · ${
+            value === 'error'
+              ? `${this.options.errorText} (${failure}) `
+              : value === 'unsupported'
+                ? this.options.unsupportedText
+                : this.options.loadingText
+          }`;
     this.action.hidden = value !== 'error';
     this.action.textContent = value === 'error' ? this.options.retryText : '';
   }
@@ -134,6 +145,23 @@ export class TranslationLensView {
   };
   private key = (event: KeyboardEvent) => {
     if (event.key === 'Escape') this.exit();
+    if (
+      event.code !== 'KeyR' ||
+      !event.altKey ||
+      event.ctrlKey ||
+      event.metaKey ||
+      event.shiftKey ||
+      event.repeat ||
+      event.isComposing ||
+      event.defaultPrevented ||
+      event.getModifierState('AltGraph')
+    )
+      return;
+    // Pages often autofocus a search input. This explicit lens shortcut still
+    // works there; prevent insertion without reading or modifying the draft.
+    event.preventDefault();
+    event.stopPropagation();
+    this.refresh();
   };
   close() {
     this.view.cancelAnimationFrame(this.animation);

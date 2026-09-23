@@ -61,14 +61,14 @@ async function start(duration: number) {
 }
 
 it('lets text finish within its deadline without retrying the model', async () => {
-  const run = await start(45_000);
-  await vi.advanceTimersByTimeAsync(45_000);
+  const run = await start(90_000);
+  await vi.advanceTimersByTimeAsync(90_000);
   expect((await run.result).value?.blocks[0]?.translation).toBe('保存');
   expect(run.requests()).toBe(1);
 });
 
 it('reports the text deadline as a timeout, not MODEL_ABORTED', async () => {
-  const deadline = 60_000;
+  const deadline = 120_000;
   const run = await start(deadline + 5000);
   let settled = false;
   void run.result.then(() => {

@@ -8,7 +8,6 @@ import { ChromeDebuggerTransport } from '../browser/debugger/debugger-transport'
 import { TargetSessionRegistry } from '../browser/debugger/target-session-registry';
 import { ElementRefStore } from '../browser/observation/element-ref-store';
 import { PageObserver } from '../browser/observation/page-observer';
-import { readImageResource } from '../browser/observation/image-resource';
 import { NetworkCaptureRegistry } from '../browser/network/network-capture-registry';
 import { TabService } from '../browser/tab-service';
 import { IndexedDbAttachmentRepository } from '../persistence/attachment-repository';
@@ -110,13 +109,6 @@ async function createBackgroundServices(
     settings,
     toggle: (tabId, options) => translationPage.toggle(tabId, options),
     getSession: (tabId) => translationPage.getSession(tabId),
-    readBackground: (tabId, url, signal) =>
-      readImageResource(
-        { sessions: browserSessions, transport: debuggerTransport },
-        tabId,
-        url,
-        signal,
-      ),
     progress: async (tabId, value) => {
       await chrome.tabs.sendMessage(tabId, value, { frameId: 0 });
     },

@@ -55,6 +55,54 @@ function translate(
   );
 }
 
+it.each(['Read the guide.', 'Read the guide</m0>.', '', null])(
+  'isolates an invalid known block and continues the stream: %j',
+  async (translation) => {
+    const updates: TranslationTextResult[] = [];
+    const before = { id: 'p', translation: 'First translated paragraph.' };
+    const after = { id: 'r', translation: 'Last translated paragraph.' };
+    let completed = false;
+    const result = await translateTexts(
+      {
+        async *stream() {
+          yield { type: 'text.delta', delta: '{"blocks":[' + JSON.stringify(before) };
+          yield { type: 'text.delta', delta: ',' + JSON.stringify({ id: 'q', translation }) };
+          yield { type: 'text.delta', delta: ',' + JSON.stringify(after) + ']}' };
+          completed = true;
+          yield { type: 'response.completed', responseId: 'r', usage: null };
+        },
+      },
+      [
+        { id: 'p', text: 'First paragraph.' },
+        { id: 'q', text: 'Read <m0>the guide</m0>.' },
+        { id: 'r', text: 'Last paragraph.' },
+      ],
+      'm',
+      'medium',
+      'en',
+      new AbortController().signal,
+      (update) => updates.push(update),
+    );
+    expect(completed).toBe(true);
+    expect(result).toEqual({ blocks: [before, after] });
+    expect(updates).toEqual([{ blocks: [before] }, { blocks: [before, after] }]);
+  },
+);
+
+it('returns validated blocks when a completed response omits another requested ID', async () => {
+  expect(
+    await translate(
+      {
+        async *stream() {
+          yield { type: 'text.delta', delta: JSON.stringify({ blocks: [first] }) };
+          yield { type: 'response.completed', responseId: 'r', usage: null };
+        },
+      },
+      [],
+    ),
+  ).toEqual({ blocks: [first] });
+});
+
 it('sends exactly the same model request and returns the same final text with previews enabled', async () => {
   const requests: ModelRequest[] = [];
   const provider: ModelProviderPort = {
@@ -100,9 +148,8 @@ it('exposes only complete text blocks before the remaining paragraph and respons
 it.each([
   { id: 'unknown', translation: '错误来源' },
   { id: 'p', translation: '重复来源' },
-  { id: 'q', translation: '' },
   { translation: '缺少来源' },
-])('never previews an invalid text block or accepts its batch: %j', async (invalid) => {
+])('rejects ambiguous source identities before accepting their batch: %j', async (invalid) => {
   const updates: TranslationTextResult[] = [];
   await expect(
     translate(
@@ -119,7 +166,7 @@ it.each([
   expect(updates).toEqual([{ blocks: [first] }]);
 });
 
-it.each(['missing-id', 'interrupted', 'cancelled'] as const)(
+it.each(['interrupted', 'cancelled'] as const)(
   'does not turn a valid text preview into success after %s',
   async (outcome) => {
     const updates: TranslationTextResult[] = [];

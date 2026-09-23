@@ -1,5 +1,22 @@
 import { expect, it } from 'vitest';
-import { subtractRegions } from '../../src/page/translation/translation-regions';
+import { intersectRegions, subtractRegions } from '../../src/page/translation/translation-regions';
+
+it('does not rediscover floating-point edge residue as overlap after a native cutout', () => {
+  for (let i = 1; i <= 100; i++) {
+    const region = { x: -i / 3, y: i / 7, width: 783.5, height: 5471.7 };
+    const cover = { x: i / 11 + 200, y: i / 13 + 250, width: 121.19, height: 40.706 };
+    for (const part of subtractRegions(region, [cover]))
+      expect(intersectRegions(part, cover), `fractional cutout ${i}`).toBeNull();
+  }
+});
+
+it('retains real subpixel overlaps without rounding dimensions to pixels', () => {
+  const result = intersectRegions(
+    { x: 10, y: 20, width: 50, height: 20 },
+    { x: 59.999999, y: 20, width: 20, height: 20 },
+  );
+  expect(result?.width).toBeCloseTo(0.000001, 10);
+});
 
 it('subtracts only actual overlaps, leaving the surrounding pixels uncovered', () => {
   expect(

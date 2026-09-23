@@ -28,6 +28,7 @@ export const zhCN = {
   translationFailed: '部分内容翻译失败，按 Esc 退出',
   translationUnsupported: '部分内容暂不支持翻译，已保留原样',
   translationRetry: '重试',
+  translationRefreshHint: 'Alt+R / Option+R 重新翻译框内文字',
   translationError:
     '无法开启翻译，请确认当前是允许插件访问的普通网页；若刚更新插件，请重新加载插件并刷新网页。',
   translationReloadRequired:

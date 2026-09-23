@@ -4,29 +4,9 @@ import { validateTranslationMarkup } from './translation-markup';
 
 export const MAX_TRANSLATION_TEXT_REQUESTS = 2;
 export const MAX_TRANSLATION_CONTEXT_CHARS = 6000;
-
-/** Read a loaded photo only to restore the background behind DOM text; no model input. */
-export const translationBackgroundSourceSchema = z
-  .object({
-    sessionId: z.string().min(1).max(128),
-    url: z
-      .string()
-      .max(8192)
-      .url()
-      .refine((url) => /^https?:$/.test(new URL(url).protocol)),
-  })
-  .strict();
-export type TranslationBackgroundSource = z.infer<typeof translationBackgroundSourceSchema>;
-export const translationBackgroundResourceSchema = z
-  .object({
-    mimeType: z.string().regex(/^image\/[\w.+-]+$/),
-    data: z
-      .string()
-      .max(Math.ceil((4 * 1024 * 1024) / 3) * 4)
-      .regex(/^[A-Za-z0-9+/]+={0,2}$/),
-  })
-  .nullable();
-export type TranslationBackgroundResource = z.infer<typeof translationBackgroundResourceSchema>;
+export const MAX_TRANSLATION_TEXT_CHARS = 8000;
+export const MAX_TRANSLATION_TEXT_BLOCKS = 32;
+export const MAX_TRANSLATION_BATCH_CHARS = 16000;
 
 /** A safe, identifiable response-format failure; never includes the model's raw output. */
 export class TranslationResponseError extends Error {
@@ -44,6 +24,7 @@ export const translationLensOptionsSchema = z
     errorText: z.string().min(1).max(300),
     unsupportedText: z.string().min(1).max(200),
     retryText: z.string().min(1).max(100),
+    refreshText: z.string().min(1).max(100).optional(),
     cacheKey: z.string().min(1).max(2048).optional(),
   })
   .strict();
@@ -58,16 +39,16 @@ export const translationTextsSchema = z
         z
           .object({
             id: z.string().min(1).max(128),
-            text: z.string().min(1).max(8000),
+            text: z.string().min(1).max(MAX_TRANSLATION_TEXT_CHARS),
           })
           .strict(),
       )
       .min(1)
-      .max(32)
+      .max(MAX_TRANSLATION_TEXT_BLOCKS)
       .refine(
         (texts) =>
           new Set(texts.map((t) => t.id)).size === texts.length &&
-          texts.reduce((size, t) => size + t.text.length, 0) <= 16000,
+          texts.reduce((size, t) => size + t.text.length, 0) <= MAX_TRANSLATION_BATCH_CHARS,
       ),
   })
   .strict();
@@ -81,9 +62,16 @@ export const translationTextResultSchema = z.object({
         translation: z.string().min(1).max(16000),
       }),
     )
-    .max(32),
+    .max(MAX_TRANSLATION_TEXT_BLOCKS),
 });
 export type TranslationTextResult = z.infer<typeof translationTextResultSchema>;
+// Identity/envelope ambiguity invalidates the batch. A known block with invalid content can
+// be isolated without discarding its independently validated neighbors.
+const translationModelResultSchema = translationTextResultSchema.extend({
+  blocks: z
+    .array(translationTextResultSchema.shape.blocks.element.extend({ translation: z.unknown() }))
+    .max(MAX_TRANSLATION_TEXT_BLOCKS),
+});
 export const translationProgressSchema = z.object({
   version: z.literal(1),
   type: z.literal('translation.progress'),
@@ -105,25 +93,30 @@ export async function translateTexts(
   context = '',
 ): Promise<TranslationTextResult> {
   const parse = (value: unknown, complete: boolean) => {
-    const parsed = translationTextResultSchema.safeParse(value);
+    const parsed = translationModelResultSchema.safeParse(value);
     if (!parsed.success) throw new TranslationResponseError();
     const result = parsed.data;
     if (
-      (complete && result.blocks.length !== texts.length) ||
       new Set(result.blocks.map((b) => b.id)).size !== result.blocks.length ||
       result.blocks.some((b) => !texts.some((t) => t.id === b.id))
     )
       throw new TranslationResponseError();
-    try {
-      for (const block of result.blocks) {
-        const source = texts.find((t) => t.id === block.id);
+    const blocks: TranslationTextResult['blocks'] = [];
+    for (const candidate of result.blocks) {
+      const block = translationTextResultSchema.shape.blocks.element.safeParse(candidate);
+      if (!block.success) continue;
+      try {
+        const source = texts.find((t) => t.id === block.data.id);
         if (!source) throw new TranslationResponseError();
-        validateTranslationMarkup(source.text, block.translation);
+        validateTranslationMarkup(source.text, block.data.translation);
+        blocks.push(block.data);
+      } catch {
+        // Never repair markers or display this block. The page attributes the missing ID
+        // to a failure and offers an explicit retry after this stream actually completes.
       }
-    } catch {
-      throw new TranslationResponseError();
     }
-    return result;
+    if (complete && !blocks.length) throw new TranslationResponseError();
+    return { ...result, blocks };
   };
   let delivered = 0;
   return parse(

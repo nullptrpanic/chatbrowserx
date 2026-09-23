@@ -11,14 +11,14 @@ it('rejects the removed image translation resource endpoint', () => {
   expect(() => parseExtensionMessage(message)).toThrow();
 });
 
-it('accepts only bounded authorized HTTP(S) DOM background resource messages', () => {
+it('rejects the obsolete DOM background resource endpoint', () => {
   const message = {
     version: 1,
     requestId: 'background',
     type: 'translation.background',
     payload: { sessionId: 's', url: 'https://cdn.test/photo.png' },
   };
-  expect(parseExtensionMessage(message)).toEqual(message);
+  expect(() => parseExtensionMessage(message)).toThrow();
   for (const url of ['file:///private/test', 'javascript:alert(1)', 'data:image/png;base64,YQ=='])
     expect(() =>
       parseExtensionMessage({
@@ -80,6 +80,26 @@ it('rejects image payloads at the text translation boundary', () => {
       payload: { ...message.payload, tabId: 9 },
     }),
   ).toThrow();
+});
+
+it.each([
+  { lengths: [8000, 8000], valid: true },
+  { lengths: [8001], valid: false },
+  { lengths: [8000, 8000, 1], valid: false },
+  { lengths: Array<number>(32).fill(1), valid: true },
+  { lengths: Array<number>(33).fill(1), valid: false },
+])('enforces source and batch limits for $lengths', ({ lengths, valid }) => {
+  const message = {
+    version: 1,
+    requestId: 'limits',
+    type: 'translation.read',
+    payload: {
+      sessionId: 's',
+      texts: lengths.map((length, i) => ({ id: `p${i}`, text: 'x'.repeat(length) })),
+    },
+  };
+  if (valid) expect(parseExtensionMessage(message)).toEqual(message);
+  else expect(() => parseExtensionMessage(message)).toThrow();
 });
 
 it('cancels the text-only session without obsolete image cleanup flags', () => {
