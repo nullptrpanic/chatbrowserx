@@ -118,7 +118,10 @@ const failedSchema = objectSchema.extend({
     error: z.object({ code: z.string().nullish() }).passthrough().nullish(),
   }),
 });
-const errorSchema = objectSchema.extend({ code: z.string().nullish() });
+const errorSchema = objectSchema.extend({
+  code: z.string().nullish(),
+  error: z.object({ code: z.string().nullish() }).passthrough().nullish(),
+});
 
 const ACTIVE_RESPONSE_EVENT_TYPES = new Set([
   'response.output_text.delta',
@@ -717,6 +720,8 @@ export class CodexEventTranslator {
     if (this.#responseCompleted) {
       throw providerErrorFromCode('INVALID_RESPONSE');
     }
-    throwUpstreamError(error.code);
+    // Connection-level failures may wrap their code in an error envelope before
+    // response.created. Preserve the safe taxonomy without exposing upstream text.
+    throwUpstreamError(error.code ?? error.error?.code);
   }
 }

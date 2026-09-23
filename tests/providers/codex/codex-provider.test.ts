@@ -1713,4 +1713,26 @@ describe('CodexProvider', () => {
     expect(thrown).toMatchObject({ code: 'TRANSIENT', retryable: true });
     expect(String(thrown)).not.toContain('secret upstream detail');
   });
+
+  it.each([
+    ['server_is_overloaded', 'TRANSIENT'],
+    ['rate_limit_exceeded', 'RATE_LIMIT'],
+  ])('classifies a nested upstream %s error before response creation as %s', async (code, want) => {
+    const provider = new CodexProvider(credentialStore(ACCESS_TOKEN), async () =>
+      sseResponse([
+        {
+          event: 'error',
+          data: { type: 'error', error: { code, message: 'private upstream detail' } },
+        },
+      ]),
+    );
+    let thrown: unknown;
+    try {
+      await collect(provider.stream(REQUEST, new AbortController().signal));
+    } catch (error) {
+      thrown = error;
+    }
+    expect(thrown).toMatchObject({ code: want, retryable: true });
+    expect(String(thrown)).not.toContain('private upstream detail');
+  });
 });
