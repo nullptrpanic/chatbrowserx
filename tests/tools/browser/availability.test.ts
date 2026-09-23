@@ -92,6 +92,41 @@ function names(value: BrowserToolState): readonly string[] {
 }
 
 describe('browserToolDefinitionsForCheckpoint', () => {
+  it('keeps the full network workflow discoverable from the first turn through reload', () => {
+    const started = pair(
+      'start-stable',
+      'browser_network_start',
+      { tabId: 0 },
+      { ok: true, tabId: 19, data: { generation: 4, alreadyActive: false } },
+    );
+    const reloaded = pair(
+      'reload-stable',
+      'browser_reload',
+      { tabId: 19 },
+      { ok: true, tabId: 19, data: { reloaded: true } },
+    );
+    for (const state of [
+      checkpoint(),
+      checkpoint(started),
+      checkpoint([...started, ...reloaded]),
+    ]) {
+      const available = names(state);
+      expect(available).toEqual(
+        expect.arrayContaining([
+          'browser_network_start',
+          'browser_network_stop',
+          'browser_network_list',
+          'browser_network_get',
+        ]),
+      );
+      expect(new Set(available).size).toBe(available.length);
+    }
+    const stop = browserToolDefinitionsForCheckpoint(checkpoint([...started, ...reloaded])).find(
+      ({ name }) => name === 'browser_network_stop',
+    );
+    expect(stop?.parameters).toMatchObject({ properties: { tabId: { enum: [19] } } });
+  });
+
   it('parses each stored browser result only once while building one contract', () => {
     const output = JSON.stringify({
       ok: true,
@@ -458,7 +493,7 @@ describe('browserToolDefinitionsForCheckpoint', () => {
     );
   });
 
-  it('exposes network tools in start, stop, list, then get order', () => {
+  it('retains network definitions throughout the capture lifecycle', () => {
     const started = pair(
       'start',
       'browser_network_start',
@@ -467,7 +502,7 @@ describe('browserToolDefinitionsForCheckpoint', () => {
     );
     const capturing = names(checkpoint(started));
     expect(capturing).toContain('browser_network_stop');
-    expect(capturing).not.toEqual(
+    expect(capturing).toEqual(
       expect.arrayContaining(['browser_network_list', 'browser_network_get']),
     );
 
@@ -485,7 +520,7 @@ describe('browserToolDefinitionsForCheckpoint', () => {
         'browser_network_list',
       ]),
     );
-    expect(frozen).not.toContain('browser_network_get');
+    expect(frozen).toContain('browser_network_get');
 
     const listed = pair(
       'list',
@@ -544,7 +579,7 @@ describe('browserToolDefinitionsForCheckpoint', () => {
     expect(list?.parameters).toMatchObject({ properties: { tabId: { enum: [19] } } });
   });
 
-  it('resets network availability when a paused task starts a new run', () => {
+  it('does not bind network tools to a previous run capture when resuming', () => {
     const previousRunStarted = pair(
       'previous-start',
       'browser_network_start',
@@ -552,21 +587,20 @@ describe('browserToolDefinitionsForCheckpoint', () => {
       { ok: true, tabId: 7, data: { generation: 3, alreadyActive: false } },
     );
 
-    const resumed = names(
+    const resumed = browserToolDefinitionsForCheckpoint(
       checkpoint(previousRunStarted, [], {
         checkpoint: 'run_2',
         generatedResults: 'run_1',
       }),
     );
 
-    expect(resumed).toContain('browser_network_start');
-    expect(resumed).not.toEqual(
-      expect.arrayContaining([
-        'browser_network_stop',
-        'browser_network_list',
-        'browser_network_get',
-      ]),
-    );
+    for (const name of ['browser_network_stop', 'browser_network_list', 'browser_network_get']) {
+      const definition = resumed.find((tool) => tool.name === name);
+      expect(definition).toBeDefined();
+      expect(definition?.parameters).not.toMatchObject({
+        properties: { tabId: { enum: [7] } },
+      });
+    }
   });
 
   it('retains previously used network definitions when replaying their results in a new run', () => {
@@ -639,10 +673,10 @@ describe('browserToolDefinitionsForCheckpoint', () => {
     );
   });
 
-  it('exposes network readers only after a successful capture start', () => {
+  it('keeps network readers discoverable after a failed capture start', () => {
     const initial = names(checkpoint());
     expect(initial).toContain('browser_network_start');
-    expect(initial).not.toEqual(
+    expect(initial).toEqual(
       expect.arrayContaining([
         'browser_network_list',
         'browser_network_get',
@@ -656,7 +690,7 @@ describe('browserToolDefinitionsForCheckpoint', () => {
       {},
       { ok: false, code: 'NETWORK_CAPTURE_LOST' },
     );
-    expect(names(checkpoint(failed))).not.toEqual(
+    expect(names(checkpoint(failed))).toEqual(
       expect.arrayContaining([
         'browser_network_list',
         'browser_network_get',

@@ -392,6 +392,9 @@ const FIRST_TURN_BROWSER_TOOL_NAMES = [
   'browser_drag',
   'browser_wait',
   'browser_network_start',
+  'browser_network_list',
+  'browser_network_get',
+  'browser_network_stop',
 ] as const;
 
 const CONFIGURED_TAVILY = { isConfigured: async () => true } as const;

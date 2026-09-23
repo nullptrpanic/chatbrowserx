@@ -20,6 +20,9 @@ const DISCOVERY_TOOL_NAMES = new Set<BrowserToolName>([
   'browser_capture_screenshot',
   'browser_wait',
   'browser_network_start',
+  'browser_network_stop',
+  'browser_network_list',
+  'browser_network_get',
 ]);
 
 const INTERACTIVE_TOOL_NAMES = new Set<BrowserToolName>([
@@ -783,8 +786,8 @@ function availableBrowserToolDefinitions(
     }
   }
 
-  // Keep semantic action definitions stable across model turns. Their ref preconditions remain
-  // executor-enforced; dynamically introducing them after inspection can leave the model anchored
+  // Keep semantic and network definitions discoverable from the first model turn. Their
+  // preconditions remain executor-enforced; introducing them later can leave the model anchored
   // to the smaller first-turn tool set and make it incorrectly report that a declared tool is absent.
   const enabled = new Set<BrowserToolName>([
     ...DISCOVERY_TOOL_NAMES,
@@ -797,14 +800,6 @@ function availableBrowserToolDefinitions(
   if (state.visualSnapshotCurrent) {
     enabled.add('browser_click_point');
     enabled.add('browser_drag_point');
-  }
-  if (state.network.phase === 'capturing') {
-    enabled.add('browser_network_stop');
-  } else if (state.network.phase === 'frozen') {
-    enabled.add('browser_network_list');
-  } else if (state.network.phase === 'listed') {
-    enabled.add('browser_network_list');
-    enabled.add('browser_network_get');
   }
   if (state.selectableRefs.size >= 2) enabled.add('browser_set_checked_many');
 

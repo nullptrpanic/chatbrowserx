@@ -458,7 +458,7 @@ export const BROWSER_TOOL_SPECS = [
   taskBrowserToolSpec(
     'browser_network_start',
     browserNetworkStartSchema,
-    'Start future-traffic capture, replacing any frozen snapshot. Call first for network evidence. Complete and verify the user-visible workflow, wait for final network quiet, then freeze it with browser_network_stop. Request readers are introduced only after stop. Reload after starting when initial page traffic is required.',
+    'Start future-traffic capture, replacing any frozen snapshot. Call first for network evidence. Complete and verify the user-visible workflow, wait for final network quiet, then freeze it with browser_network_stop. Request readers require a frozen capture. Reload after starting when initial page traffic is required.',
     {},
   ),
   taskBrowserToolSpec(
@@ -497,7 +497,7 @@ export const BROWSER_TOOL_SPECS = [
   taskBrowserToolSpec(
     'browser_network_stop',
     browserNetworkStopSchema,
-    'After verifying business completion and final network quiet, stop accepting events and freeze the capture. The next model turn introduces browser_network_list. Frozen request IDs and bodies remain readable until the next browser_network_start, task-run release, or debugger loss. Stop itself never waits for business completion.',
+    'After verifying business completion and final network quiet, stop accepting events and freeze the capture, then call browser_network_list. Frozen request IDs and bodies remain readable until the next browser_network_start, task-run release, or debugger loss. Stop itself never waits for business completion.',
     {},
   ),
 ] as const;

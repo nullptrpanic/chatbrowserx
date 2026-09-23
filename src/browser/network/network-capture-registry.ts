@@ -26,9 +26,9 @@ const NETWORK_ENABLE_PARAMETERS = {
   maxPostDataSize: 0,
 } as const;
 const CAPTURE_STARTED_MESSAGE =
-  'Capture started. Earlier traffic is unavailable, and any prior frozen snapshot was replaced. browser_network_stop is available now. Complete and verify the requested user-visible workflow; network_idle alone does not prove asynchronous business completion. Reload now if initial page traffic is required. After business completion and final network quiet, call browser_network_stop to freeze the capture. browser_network_list and browser_network_get are intentionally unavailable until the capture is frozen; do not report them missing.';
+  'Capture started. Earlier traffic is unavailable, and any prior frozen snapshot was replaced. Complete and verify the requested user-visible workflow; network_idle alone does not prove asynchronous business completion. Reload now if initial page traffic is required. After business completion and final network quiet, call browser_network_stop to freeze the capture, browser_network_list to discover request IDs, and browser_network_get to read selected listed IDs. Readers reject an active capture.';
 const CAPTURE_STOPPED_MESSAGE =
-  'Capture frozen. browser_network_list is available now; call it with an empty cursor. browser_network_get is intentionally unavailable until the first successful list; do not report it missing.';
+  'Capture frozen. Call browser_network_list with an empty cursor, then browser_network_get with selected request IDs returned by the list.';
 const CAPTURE_UNAVAILABLE_MESSAGE =
   'No active or frozen capture was available. Call browser_network_start to create a new capture.';
 const REQUESTS_LISTED_MESSAGE =
@@ -220,6 +220,7 @@ interface CaptureState {
   readonly inFlightByCdpId: Set<string>;
   readonly sessions: Map<string, DebuggerSession>;
   readonly listCursors: Map<string, NetworkListCursor>;
+  readonly listedRequestIds: Set<string>;
   stoppedAt: number | null;
   lastActivityAt: number | null;
   totalCaptured: number;
@@ -626,7 +627,7 @@ export class NetworkCaptureRegistry implements NetworkCapturePort {
       if (seen.has(input.requestId)) continue;
       seen.add(input.requestId);
       const record = state.byOpaqueId.get(input.requestId);
-      if (!record) {
+      if (!record || !state.listedRequestIds.has(input.requestId)) {
         results.push({
           ok: false,
           requestId: input.requestId,
@@ -709,6 +710,7 @@ export class NetworkCaptureRegistry implements NetworkCapturePort {
       inFlightByCdpId: new Set(),
       sessions,
       listCursors: new Map(),
+      listedRequestIds: new Set(),
       stoppedAt: null,
       lastActivityAt: null,
       totalCaptured: 0,
@@ -767,6 +769,7 @@ export class NetworkCaptureRegistry implements NetworkCapturePort {
         state.listCursors.delete(oldest);
       }
     }
+    for (const request of requests) state.listedRequestIds.add(request.requestId);
     return {
       message: REQUESTS_LISTED_MESSAGE,
       requests,

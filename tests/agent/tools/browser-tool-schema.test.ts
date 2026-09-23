@@ -260,8 +260,8 @@ describe('BROWSER_TOOL_DEFINITIONS', () => {
     const list = BROWSER_TOOL_DEFINITIONS.find(({ name }) => name === 'browser_network_list');
 
     expect(start?.description).toContain('browser_network_stop');
-    expect(start?.description).toContain('introduced only after stop');
-    expect(stop?.description).toContain('introduces browser_network_list');
+    expect(start?.description).toContain('require a frozen capture');
+    expect(stop?.description).toContain('then call browser_network_list');
     expect(list?.description).toContain('After the first successful list');
     expect(list?.description).toContain('browser_network_get');
     expect(start?.description.length).toBeLessThanOrEqual(400);

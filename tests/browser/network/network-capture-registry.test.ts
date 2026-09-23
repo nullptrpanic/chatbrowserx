@@ -150,6 +150,29 @@ function finish(debuggerTransport: ReturnType<typeof transport>, requestId: stri
 }
 
 describe('NetworkCaptureRegistry', () => {
+  it('reads only IDs disclosed by a list from the current frozen capture', async () => {
+    const debuggerTransport = transport();
+    const capture = registry(debuggerTransport);
+    await capture.start(7, new AbortController().signal);
+    request(debuggerTransport, 'cdp_1', 'https://api.test/one');
+    await capture.stop(7);
+    const input = {
+      requestId: 'networkRequest_1',
+      includeRequestBody: false,
+      includeResponseBody: false,
+    };
+
+    await expect(capture.get(7, [input])).resolves.toEqual([
+      expect.objectContaining({ ok: false, code: 'NETWORK_REQUEST_NOT_FOUND' }),
+    ]);
+    const listed = await capture.list(7, '', 10, 'recent', '');
+    expect(listed.requests[0]?.requestId).toBe('networkRequest_1');
+    await expect(capture.get(7, [input])).resolves.toEqual([
+      expect.objectContaining({ ok: true, requestId: 'networkRequest_1' }),
+    ]);
+    await expect(capture.get(8, [input])).rejects.toMatchObject({ code: 'NETWORK_CAPTURE_LOST' });
+  });
+
   it('does not advertise frozen readers when no capture is available to stop', async () => {
     const capture = registry(transport());
 
@@ -205,10 +228,8 @@ describe('NetworkCaptureRegistry', () => {
       generation: 3,
     });
     expect(first.message).toContain('Earlier traffic is unavailable');
-    expect(first.message).toContain('browser_network_stop is available now');
-    expect(first.message).toContain(
-      'browser_network_list and browser_network_get are intentionally unavailable',
-    );
+    expect(first.message).toContain('browser_network_stop');
+    expect(first.message).toContain('browser_network_list to discover request IDs');
     expect(second).toMatchObject({ alreadyActive: true });
     expect(debuggerTransport.send).toHaveBeenCalledWith({ tabId: 7 }, 'Network.enable', {
       maxTotalBufferSize: 10_485_760,
@@ -827,7 +848,7 @@ describe('NetworkCaptureRegistry', () => {
       droppedCount: 0,
       bufferLossless: true,
     });
-    expect(stopped.message).toContain('browser_network_list is available now');
+    expect(stopped.message).toContain('browser_network_list');
     expect(debuggerTransport.send).not.toHaveBeenCalledWith({ tabId: 7 }, 'Network.disable');
 
     request(debuggerTransport, 'cdp_2', 'https://api.test/after-stop');
