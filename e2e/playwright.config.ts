@@ -1,9 +1,21 @@
 import { defineConfig } from '@playwright/test';
 
-export default defineConfig({
+const translationSpecs = ['**/translation-*.spec.ts', '**/region-translation.spec.ts'];
+
+export default defineConfig<{ extensionHeadless: boolean }>({
   testDir: './tests/browser',
   fullyParallel: false,
-  workers: 1,
+  workers: 2,
+  projects: [
+    // Headed tests share the desktop's foreground window; never overlap them.
+    { name: 'foreground', testIgnore: translationSpecs, workers: 1 },
+    {
+      name: 'translation',
+      testMatch: translationSpecs,
+      dependencies: ['foreground'],
+      use: { extensionHeadless: true },
+    },
+  ],
   timeout: 45_000,
   expect: { timeout: 8_000 },
   retries: process.env.CI ? 1 : 0,

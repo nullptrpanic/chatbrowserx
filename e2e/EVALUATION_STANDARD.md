@@ -120,7 +120,12 @@ claim.
 
 ## Repository Gates
 
-Run narrow checks first. Before completing a harness or production change, run:
+Run narrow checks first. During translation development, use the affected regression plus the
+representative `npm run test:e2e:quick` lane from RUNBOOK.md. Do not repeatedly run all browser
+cases or the real-site matrix after each local edit. Preserve full regression coverage: the quick
+lane is early feedback, never evidence that all repository checks or all websites passed.
+
+Before completing a harness or production change, freeze the candidate and run:
 
 ```bash
 npm run format:check
@@ -135,3 +140,9 @@ npm run e2e:catalog:validate
 `test:e2e` includes typecheck, build, and Playwright browser tests. Run `check:codex` only when the
 shell already has its token; never extract credentials from the Profile. The environment doctor is
 part of reconstruction, not a code-quality gate.
+
+For the same already-built frozen candidate, `npm run test:e2e:built` can supply the complete
+Playwright gate without rebuilding. Record the build identity and do not use a filtered/project-only
+run as that gate. Foreground tests remain serial; independently isolated headless translation
+tests may run with the configured two workers. Keep comparable duration measurements free of
+other browser jobs or CPU-heavy checks.

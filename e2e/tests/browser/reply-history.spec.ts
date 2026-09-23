@@ -2,6 +2,14 @@ import { extensionTest, expect } from './fixtures/extension-test';
 import { sendExtensionMessage } from './helpers/extension-runtime';
 import type { PanelSnapshot } from '../../../src/shared/protocol/panel-types';
 
+extensionTest.beforeEach(async ({ extensionSession }) => {
+  // These history tests need an ordinary tab, not a response from the public Internet.
+  await extensionSession.context.route(
+    /^https:\/\/example\.com\/(?:reply-history|failed-run-history|cancelled-run-history)$/,
+    (route) => route.fulfill({ contentType: 'text/html', body: '<title>History fixture</title>' }),
+  );
+});
+
 function syntheticAccessToken(): string {
   const encode = (value: unknown): string =>
     Buffer.from(JSON.stringify(value)).toString('base64url');

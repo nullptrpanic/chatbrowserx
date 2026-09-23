@@ -169,6 +169,51 @@ Run the same frozen contract and count for the candidate, then compare the label
 
 ## Framework Checks
 
+### Fast translation feedback
+
+During implementation, run the changed unit tests and the smallest affected browser regression
+first. Use the representative translation lane before expanding to the full suite:
+
+```bash
+npm run test:e2e:quick
+```
+
+This builds once and runs eight existing `@smoke` cases: navigation/icons, read-only tables,
+window/nested scrolling, explicit refresh, dynamic/static neighbors, native video preservation,
+partial model responses/cache, and context without editable drafts. It stops on the first failure.
+The fast lane is not the final gate and does not replace the affected bug's specific regression.
+
+For a build already frozen for this source revision, reuse it without a second build:
+
+```bash
+npm run test:e2e:built -- --project=translation --no-deps --grep @smoke --max-failures=1
+# Or select the exact affected file/test; do not rerun the entire suite after every edit.
+npm run test:e2e:built -- --project=translation --no-deps translation-motion.spec.ts
+```
+
+`test:e2e:built` deliberately does not build or verify source freshness. Rebuild after changing
+product source, assets, dependencies or build configuration. The normal `test:e2e:quick` and
+`test:e2e` commands still build by default. Never rebuild a candidate while another test uses it.
+
+### Final browser gate and parallelism
+
+`npm run test:e2e` still runs **every** browser case, exactly once by default. The `foreground`
+project uses one worker. After it completes, the `translation` project uses up to two headless
+workers. Every test keeps its fresh browser process/Profile/extension storage and separate
+Playwright artifact path; no test shares an authenticated Profile. Files remain sequential within
+a worker, and ordinary foreground tests never overlap the translation project.
+
+Use `--project=translation --no-deps` only for targeted work; omitting dependencies is not a full
+gate. To diagnose a concurrency-only failure, rerun the same cases with `--workers=1`, retaining
+both outcomes. Do not increase retries or drop a case to hide concurrency failures.
+
+After focused checks and any required real-page replay pass, freeze the final candidate and run
+one complete repository gate. A later test-only selection/docs change does not justify repeating
+the real-site matrix. A later product change requires the affected regressions and final gates
+again. Format/lint and independent deterministic checks may run concurrently, but isolate timed
+comparisons from CPU-heavy checks. Authenticated live evaluations retain the stricter Profile and
+resource isolation rules above; the two-worker setting does not authorize sharing a live Profile.
+
 For a narrow harness change:
 
 ```bash

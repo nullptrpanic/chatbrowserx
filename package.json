@@ -16,6 +16,8 @@
     "test": "vitest",
     "test:run": "vitest run",
     "test:e2e": "npm run build && playwright test --config e2e/playwright.config.ts",
+    "test:e2e:built": "playwright test --config e2e/playwright.config.ts",
+    "test:e2e:quick": "npm run build && playwright test --config e2e/playwright.config.ts --project=translation --no-deps --grep @smoke --max-failures=1",
     "e2e:catalog:validate": "tsx e2e/runner/validate.ts",
     "e2e:env:doctor": "npm run build && tsx e2e/runner/doctor.ts",
     "e2e:benchmark:compare": "tsx e2e/runner/compare.ts",
