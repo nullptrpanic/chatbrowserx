@@ -58,7 +58,7 @@ export class CodexProvider implements ModelProviderPort {
       if (signal.aborted || isAbortFailure(error)) {
         throw providerErrorFromCode('ABORTED');
       }
-      throw providerErrorFromCode('TRANSIENT');
+      throw providerErrorFromCode('TRANSIENT', { transientStage: 'request_transport' });
     }
 
     if (!response.ok) {
@@ -103,7 +103,7 @@ export class CodexProvider implements ModelProviderPort {
         }
         throw error;
       }
-      throw providerErrorFromCode('TRANSIENT');
+      throw providerErrorFromCode('TRANSIENT', { transientStage: 'stream_interrupted' });
     } finally {
       await response.body.cancel().catch(() => undefined);
     }

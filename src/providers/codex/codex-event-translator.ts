@@ -208,7 +208,7 @@ function throwUpstreamError(code: string | null | undefined): never {
     normalized.includes('timeout') ||
     normalized.includes('model_error')
   ) {
-    throw providerErrorFromCode('TRANSIENT');
+    throw providerErrorFromCode('TRANSIENT', { transientStage: 'upstream_error' });
   }
   throw providerErrorFromCode('INVALID_RESPONSE');
 }
@@ -332,7 +332,7 @@ export class CodexEventTranslator {
   /** Treats a clean transport EOF without a terminal response event as retryable interruption. */
   finish(): void {
     if (!this.#responseCompleted) {
-      throw providerErrorFromCode('TRANSIENT');
+      throw providerErrorFromCode('TRANSIENT', { transientStage: 'stream_interrupted' });
     }
   }
 
@@ -702,7 +702,7 @@ export class CodexEventTranslator {
     this.#assertTerminalResponse(incomplete.response.id);
     this.#responseCompleted = true;
     this.#terminalKind = 'incomplete';
-    throw providerErrorFromCode('TRANSIENT');
+    throw providerErrorFromCode('TRANSIENT', { transientStage: 'response_incomplete' });
   }
 
   /** Validates the failed response envelope before mapping its safe upstream code. */

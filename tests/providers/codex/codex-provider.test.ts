@@ -690,7 +690,11 @@ describe('CodexProvider', () => {
     await expect(collect(provider.stream(REQUEST, new AbortController().signal))).resolves.toEqual([
       { type: 'response.started', responseId: 'resp_identityless_text' },
       { type: 'text.delta', delta: text },
-      { type: 'response.completed', responseId: 'resp_identityless_text', usage: null },
+      {
+        type: 'response.completed',
+        responseId: 'resp_identityless_text',
+        usage: null,
+      },
     ]);
   });
 
@@ -1507,7 +1511,16 @@ describe('CodexProvider', () => {
 
     await expect(
       collect(provider.stream(REQUEST, new AbortController().signal)),
-    ).rejects.toMatchObject({ code, retryable: true });
+    ).rejects.toMatchObject({
+      code,
+      retryable: true,
+      transientStage:
+        code !== 'TRANSIENT'
+          ? null
+          : terminal.type === 'response.incomplete'
+            ? 'response_incomplete'
+            : 'upstream_error',
+    });
   });
 
   it.each(['response.completed', 'response.incomplete'] as const)(
@@ -1640,7 +1653,11 @@ describe('CodexProvider', () => {
 
     await expect(
       collect(provider.stream(REQUEST, new AbortController().signal)),
-    ).rejects.toMatchObject({ code: 'TRANSIENT', retryable: true });
+    ).rejects.toMatchObject({
+      code: 'TRANSIENT',
+      retryable: true,
+      transientStage: 'request_transport',
+    });
 
     const controller = new AbortController();
     controller.abort();
@@ -1681,7 +1698,11 @@ describe('CodexProvider', () => {
           new AbortController().signal,
         ),
       ),
-    ).rejects.toMatchObject({ code: 'TRANSIENT', retryable: true });
+    ).rejects.toMatchObject({
+      code: 'TRANSIENT',
+      retryable: true,
+      transientStage: 'stream_interrupted',
+    });
   });
 
   it('normalizes explicit upstream error events without echoing their message', async () => {
@@ -1722,7 +1743,10 @@ describe('CodexProvider', () => {
       sseResponse([
         {
           event: 'error',
-          data: { type: 'error', error: { code, message: 'private upstream detail' } },
+          data: {
+            type: 'error',
+            error: { code, message: 'private upstream detail' },
+          },
         },
       ]),
     );

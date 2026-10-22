@@ -135,6 +135,7 @@ describe('decodeSseStream', () => {
       name: 'ProviderError',
       code: 'TRANSIENT',
       retryable: true,
+      transientStage: 'stream_idle_timeout',
     } satisfies Partial<ProviderError>);
     expect(cancelled).toBe(true);
   });

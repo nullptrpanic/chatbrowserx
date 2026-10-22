@@ -14,14 +14,27 @@ export interface ProviderErrorOptions {
   readonly status?: number | null;
   readonly retryAfterMs?: number | null;
   readonly invalidResponseStage?: ProviderInvalidResponseStage | null;
+  readonly transientStage?:
+    | 'request_transport'
+    | 'stream_idle_timeout'
+    | 'stream_interrupted'
+    | 'response_incomplete'
+    | 'upstream_error'
+    | null;
 }
 
 const ERROR_METADATA: Readonly<
   Record<ProviderErrorCode, { readonly message: string; readonly retryable: boolean }>
 > = Object.freeze({
   AUTH: { message: 'Provider authentication failed.', retryable: false },
-  RATE_LIMIT: { message: 'The model provider rate limit was reached.', retryable: true },
-  TRANSIENT: { message: 'The model provider is temporarily unavailable.', retryable: true },
+  RATE_LIMIT: {
+    message: 'The model provider rate limit was reached.',
+    retryable: true,
+  },
+  TRANSIENT: {
+    message: 'The model provider is temporarily unavailable.',
+    retryable: true,
+  },
   INVALID_RESPONSE: {
     message: 'The model provider returned an invalid response.',
     retryable: false,
@@ -35,6 +48,7 @@ export class ProviderError extends Error {
   readonly status: number | null;
   readonly retryAfterMs: number | null;
   readonly invalidResponseStage: ProviderInvalidResponseStage | null;
+  readonly transientStage: ProviderErrorOptions['transientStage'];
 
   /** Creates a provider-safe error whose public text cannot include upstream credentials. */
   constructor(code: ProviderErrorCode, options: ProviderErrorOptions = {}) {
@@ -47,6 +61,7 @@ export class ProviderError extends Error {
     this.retryAfterMs = options.retryAfterMs ?? null;
     this.invalidResponseStage =
       code === 'INVALID_RESPONSE' ? (options.invalidResponseStage ?? null) : null;
+    this.transientStage = code === 'TRANSIENT' ? (options.transientStage ?? null) : null;
   }
 }
 

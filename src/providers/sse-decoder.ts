@@ -128,7 +128,9 @@ function readWithIdleTimeout(
       void reader
         .cancel()
         .catch(() => undefined)
-        .then(() => reject(providerErrorFromCode('TRANSIENT')));
+        .then(() =>
+          reject(providerErrorFromCode('TRANSIENT', { transientStage: 'stream_idle_timeout' })),
+        );
     }, idleTimeoutMs);
 
     void reader.read().then(
