@@ -49,7 +49,7 @@ export const sandboxReadDefinition = strictFunctionTool(
 
 export const sandboxExecDefinition = strictFunctionTool(
   'sandbox_exec',
-  'Run one necessary Bash command on the configured Sandbox. Prefer built-in ChatBrowserX tools for overlapping capabilities. Resolve Skill-relative commands from the SKILL.md directory. Redirect large output to a file and paginate it with sandbox_read.',
+  'Run one necessary Bash command on the configured Sandbox. Honor an explicit user choice of CLI/Skill or browser; otherwise prefer built-in tools for overlapping capabilities. Resolve Skill-relative commands from the SKILL.md directory. Prefer direct bounded stdout for ordinary reads (output is capped at 64 KiB). Use a file and sandbox_read only for expected oversized or actually truncated output. Reuse successful results; do not refetch or pretty-print through another process merely to read them. Empty stdout may be normal for writes or redirection: check exit code, stderr and intended effects before retrying.',
   {
     command: { type: 'string', minLength: 1, maxLength: MAX_COMMAND_CHARACTERS },
     cwd: { type: ['string', 'null'], minLength: 1, maxLength: MAX_PATH_CHARACTERS },
