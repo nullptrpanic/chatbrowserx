@@ -183,18 +183,21 @@ const FIND_ACTIONABLE_POINT_FUNCTION = `function(points) {
   ) {
     return null;
   }
-  const composedRelated = (left, right) => {
-    const reaches = (start, expected) => {
-      let current = start;
-      for (let depth = 0; current && depth < 32; depth += 1) {
-        if (current === expected) return true;
-        const root = current.getRootNode?.();
-        current = current.parentElement ||
-          (window_.ShadowRoot && root instanceof window_.ShadowRoot ? root.host : null);
-      }
-      return false;
-    };
-    return reaches(right, left) || reaches(left, right);
+  const isIndependentControl = (candidate) => candidate.matches(
+    'button,a[href],input,select,textarea,summary,[contenteditable="true"],[onclick],[role="button"],[role="link"],[role="checkbox"],[role="radio"],[role="switch"],[role="tab"],[role="menuitem"],[role="option"]'
+  ) || candidate.tabIndex >= 0;
+  const composedRelated = (target, hit) => {
+    if (window_.HTMLLabelElement && hit instanceof window_.HTMLLabelElement && hit.control === target) return true;
+    const labelControl = window_.HTMLLabelElement && target instanceof window_.HTMLLabelElement ? target.control : null;
+    let current = hit;
+    for (let depth = 0; current && depth < 32; depth += 1) {
+      if (current === target) return true;
+      if (current !== labelControl && isIndependentControl(current)) return false;
+      const root = current.getRootNode?.();
+      current = current.parentElement ||
+        (window_.ShadowRoot && root instanceof window_.ShadowRoot ? root.host : null);
+    }
+    return false;
   };
   for (let index = 0; index < points.length; index += 1) {
     const point = points[index];

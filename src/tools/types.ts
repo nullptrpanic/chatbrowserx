@@ -2,7 +2,7 @@ import type { z } from 'zod';
 import type { Checkpoint } from '../tasks/checkpoint-types';
 import type { ContinuationItem, PendingToolCall } from '../tasks/continuation-types';
 import type { MaterializedToolResult } from '../tasks/tool-result-types';
-import type { Task } from '../tasks/task-types';
+import type { Task, TaskEvent } from '../tasks/task-types';
 import type { ModelToolChoice, ModelToolDefinition } from './model-tool';
 import type { ModelToolCallSource } from './tool-call-envelope';
 import type { ToolServiceResolver } from './service-resolver';
@@ -21,6 +21,7 @@ export interface ToolRuntimeContext {
   readonly task?: Task;
   readonly checkpoint?: Checkpoint;
   readonly toolResults?: readonly MaterializedToolResult[];
+  readonly events?: readonly TaskEvent[];
   readonly conversationTasks?: readonly Task[];
   readonly executionState?: PendingToolCall['executionState'];
   readonly resultId?: string;
@@ -39,6 +40,14 @@ export interface ToolModelExposure {
   readonly definition: ModelToolDefinition;
   readonly force?: boolean;
 }
+
+export type ToolCompletionReview =
+  | {
+      readonly type: 'continue';
+      readonly toolName: string;
+      readonly feedback: string;
+    }
+  | { readonly type: 'blocked'; readonly reason: string };
 
 export interface ToolExecutionResult {
   readonly output: string;
@@ -98,6 +107,7 @@ export interface ToolDeclaration<TArguments = unknown> {
   available?(context: ToolRuntimeContext): boolean | Promise<boolean>;
   model?(context: ToolRuntimeContext): ToolModelExposure | null | Promise<ToolModelExposure | null>;
   blocksCompletion?(context: ToolRuntimeContext): boolean | Promise<boolean>;
+  reviewCompletion?(context: ToolRuntimeContext): ToolCompletionReview | null;
   callsUsed?(context: ToolRuntimeContext): number;
   createCall?(call: ValidatedToolCall<TArguments>): ValidatedToolCall<TArguments>;
   execute(
@@ -165,6 +175,7 @@ export interface ModelToolContract {
 export interface ToolRuntimePort {
   contract(context: ToolRuntimeContext, signal?: AbortSignal): Promise<ModelToolContract>;
   blocksCompletion(context: ToolRuntimeContext): Promise<boolean>;
+  reviewCompletion?(context: ToolRuntimeContext): Promise<ToolCompletionReview | null>;
   preflight(
     call: ValidatedToolCall,
     context: ToolRuntimeContext,

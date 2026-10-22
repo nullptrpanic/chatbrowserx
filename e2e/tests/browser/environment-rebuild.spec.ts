@@ -32,7 +32,9 @@ extensionTest(
   async ({ extensionSession }) => {
     const server = createServer((_request, response) => {
       response.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
-      response.end('<!doctype html><main><h1>Evaluation Workspace</h1><p>Ready to run</p></main>');
+      response.end(
+        '<!doctype html><main data-id="document" data-parent="destination"><h1>Evaluation Workspace</h1><p>Ready to run</p><i data-duplicate></i><i data-duplicate></i></main>',
+      );
     });
     try {
       const port = await listen(server);
@@ -89,6 +91,20 @@ extensionTest(
 
       expect(verification.passed).toBe(true);
       expect(verification.checks.every(({ passed }) => passed)).toBe(true);
+      expect(
+        await runtime.readPageState?.({
+          url: `${origin}/workspace`,
+          selector: '[data-id="document"]',
+          attributes: { 'data-parent': 'destination' },
+        }),
+      ).toEqual({ count: 1, attributes: { 'data-parent': 'destination' } });
+      expect(
+        await runtime.readPageState?.({
+          url: `${origin}/workspace`,
+          selector: '[data-duplicate]',
+          attributes: { 'data-parent': 'destination' },
+        }),
+      ).toEqual({ count: 2, attributes: {} });
     } finally {
       await closeHttpFixtureServer(server);
     }

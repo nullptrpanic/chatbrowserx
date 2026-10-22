@@ -144,6 +144,323 @@ function axNode(
   };
 }
 
+describe('logical hierarchy and scoped structural evidence', () => {
+  it('keeps owner and logical level when passive label text merges into its actionable row', () => {
+    const result = buildSemanticPageSnapshot({
+      frame: 'main',
+      axNodes: [
+        axNode('tree', 1, 'tree', 'Library'),
+        axNode('row', 2, 'treeitem', 'Project', { parentId: 'tree' }),
+        axNode('label', 3, 'StaticText', 'Details', { parentId: 'row' }),
+      ],
+      domSnapshot: domSnapshot([
+        {
+          backendNodeId: 1,
+          nodeName: 'DIV',
+          parentIndex: -1,
+          attributes: { role: 'tree', 'aria-label': 'Library' },
+          bounds: [0, 0, 300, 200],
+        },
+        {
+          backendNodeId: 2,
+          nodeName: 'DIV',
+          parentIndex: 0,
+          attributes: { role: 'treeitem', 'aria-level': '2' },
+          clickable: true,
+          bounds: [0, 0, 200, 40],
+        },
+        {
+          backendNodeId: 3,
+          nodeName: 'SPAN',
+          parentIndex: 1,
+          text: 'Details',
+          bounds: [0, 0, 100, 40],
+        },
+      ]),
+    });
+    expect(result.entries.find((entry) => entry.targetIndex !== undefined)).toMatchObject({
+      context: [['tree', 'Library']],
+      hierarchy: { level: 2 },
+    });
+  });
+
+  it('uses an icon action hint before borrowing the neighboring document title', () => {
+    const result = buildSemanticPageSnapshot({
+      frame: 'main',
+      axNodes: [],
+      domSnapshot: domSnapshot([
+        {
+          backendNodeId: 1,
+          nodeName: 'DIV',
+          parentIndex: -1,
+          text: 'Report',
+          bounds: [0, 0, 200, 40],
+        },
+        {
+          backendNodeId: 2,
+          nodeName: 'BUTTON',
+          parentIndex: 0,
+          attributes: { class: 'more-button' },
+          bounds: [160, 0, 40, 40],
+        },
+      ]),
+    });
+    expect(result.targets.find((target) => target.backendNodeId === 2)?.name).toBe('More');
+  });
+
+  it.each(['expand', 'collapse'])(
+    'keeps an unnamed ARIA %s button separate from its row',
+    (action) => {
+      const result = buildSemanticPageSnapshot({
+        frame: 'main',
+        axNodes: [
+          axNode('row', 1, 'generic', 'Archive'),
+          axNode('arrow', 3, 'button', '', { parentId: 'row' }),
+          axNode('title', 4, 'button', 'Archive', { parentId: 'row' }),
+        ],
+        domSnapshot: domSnapshot([
+          {
+            backendNodeId: 1,
+            nodeName: 'DIV',
+            parentIndex: -1,
+            clickable: true,
+            bounds: [0, 0, 280, 35],
+          },
+          {
+            backendNodeId: 2,
+            nodeName: 'SPAN',
+            parentIndex: 0,
+            attributes: { class: `branch-${action}-arrow` },
+            bounds: [4, 7, 20, 20],
+          },
+          {
+            backendNodeId: 3,
+            nodeName: 'SPAN',
+            parentIndex: 1,
+            attributes: { role: 'button', class: 'icon' },
+            bounds: [9, 12, 10, 10],
+          },
+          {
+            backendNodeId: 4,
+            nodeName: 'DIV',
+            parentIndex: 0,
+            attributes: { role: 'button' },
+            text: 'Archive',
+            bounds: [40, 0, 240, 35],
+          },
+        ]),
+      });
+      expect(result.targets.find((target) => target.backendNodeId === 3)).toMatchObject({
+        role: 'button',
+        name: `Branch ${action} arrow`,
+        actions: ['click'],
+      });
+      expect(result.targets.find((target) => target.backendNodeId === 4)).toMatchObject({
+        role: 'button',
+        name: 'Archive',
+        actions: ['click'],
+      });
+    },
+  );
+
+  const flatTree = () =>
+    domSnapshot([
+      { backendNodeId: 1, nodeName: '#document', parentIndex: -1 },
+      {
+        backendNodeId: 2,
+        nodeName: 'DIV',
+        parentIndex: 0,
+        attributes: { role: 'list', 'aria-label': 'Documents' },
+        bounds: [0, 0, 300, 400],
+      },
+      {
+        backendNodeId: 3,
+        nodeName: 'DIV',
+        parentIndex: 1,
+        attributes: { role: 'item', 'data-depth': '1' },
+        bounds: [0, 0, 300, 40],
+      },
+      {
+        backendNodeId: 4,
+        nodeName: 'BUTTON',
+        parentIndex: 2,
+        attributes: { 'aria-label': 'Excluded' },
+        bounds: [20, 0, 200, 40],
+      },
+      {
+        backendNodeId: 5,
+        nodeName: 'DIV',
+        parentIndex: 1,
+        attributes: {
+          role: 'item',
+          'data-depth': '2',
+          'data-secret': 'never expose',
+          onclick: 'privateCode()',
+        },
+        bounds: [0, 40, 300, 40],
+      },
+      {
+        backendNodeId: 6,
+        nodeName: 'BUTTON',
+        parentIndex: 4,
+        attributes: { 'aria-label': 'Report' },
+        bounds: [40, 40, 200, 40],
+      },
+      {
+        backendNodeId: 7,
+        nodeName: 'DIV',
+        parentIndex: 1,
+        attributes: { role: 'item', 'data-depth': '1' },
+        bounds: [0, 80, 300, 40],
+      },
+      {
+        backendNodeId: 8,
+        nodeName: 'BUTTON',
+        parentIndex: 6,
+        attributes: { 'aria-label': 'Report' },
+        bounds: [20, 80, 200, 40],
+      },
+      {
+        backendNodeId: 9,
+        nodeName: 'BUTTON',
+        parentIndex: 0,
+        attributes: { 'aria-label': 'Unrelated' },
+        bounds: [500, 0, 100, 40],
+      },
+    ]);
+
+  it('retains explicit logical levels and collection positions independently of DOM depth', () => {
+    const result = buildSemanticPageSnapshot({
+      frame: 'main',
+      domSnapshot: domSnapshot([
+        { backendNodeId: 1, nodeName: '#document', parentIndex: -1 },
+        {
+          backendNodeId: 2,
+          nodeName: 'DIV',
+          parentIndex: 0,
+          attributes: {
+            role: 'treeitem',
+            'aria-level': '2',
+            'aria-posinset': '3',
+            'aria-setsize': '9',
+          },
+          bounds: [0, 0, 100, 30],
+        },
+      ]),
+      axNodes: [
+        axNode('row', 2, 'treeitem', 'Report', {
+          properties: [{ name: 'level', value: { type: 'integer', value: 2 } }],
+        }),
+      ],
+    });
+    expect(result.entries[0]).toMatchObject({
+      depth: 0,
+      hierarchy: { level: 2, posInSet: 3, setSize: 9 },
+    });
+  });
+
+  it('returns bounded local DOM evidence for nonstandard flat rows without guessing hierarchy', () => {
+    const result = buildSemanticPageSnapshot({
+      frame: 'main',
+      axNodes: [],
+      domSnapshot: flatTree(),
+      scopeBackendNodeId: 6,
+    });
+    expect(result.entries.filter((entry) => entry.name === 'Report')).toHaveLength(2);
+    expect(result.entries.some((entry) => entry.name === 'Unrelated')).toBe(false);
+    expect(result.entries.every((entry) => entry.hierarchy === undefined)).toBe(true);
+    expect(result.scope?.nodes).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          tag: 'div',
+          attributes: expect.objectContaining({ 'data-depth': '2' }),
+        }),
+        expect.objectContaining({
+          tag: 'div',
+          attributes: expect.objectContaining({ 'data-depth': '1' }),
+        }),
+      ]),
+    );
+    expect(JSON.stringify(result.scope)).not.toMatch(/never expose|privateCode/);
+  });
+
+  it('exposes raw row evidence in ordinary snapshots without asserting custom logical hierarchy', () => {
+    const result = buildSemanticPageSnapshot({
+      frame: 'main',
+      axNodes: [],
+      domSnapshot: flatTree(),
+    });
+    const reports = result.entries.filter((entry) => entry.name === 'Report');
+    expect(reports).toHaveLength(2);
+    expect(reports.map((entry) => entry.domContext)).toEqual([
+      [1, { 'data-depth': '2' }],
+      [1, { 'data-depth': '1' }],
+    ]);
+    expect(reports.every((entry) => entry.hierarchy === undefined)).toBe(true);
+    expect(JSON.stringify(reports)).not.toMatch(/never expose|privateCode/);
+  });
+
+  it('does not return a whole-page result when the scoped node disappeared', () => {
+    expect(() =>
+      buildSemanticPageSnapshot({
+        frame: 'main',
+        axNodes: [],
+        domSnapshot: flatTree(),
+        scopeBackendNodeId: 999,
+      }),
+    ).toThrow(/stale/i);
+  });
+
+  it('keeps scoped input identity without exposing its value', () => {
+    const result = buildSemanticPageSnapshot({
+      frame: 'main',
+      scopeBackendNodeId: 2,
+      axNodes: [axNode('input', 2, 'textbox', 'Filter')],
+      domSnapshot: domSnapshot([
+        { backendNodeId: 1, nodeName: '#document', parentIndex: -1 },
+        {
+          backendNodeId: 2,
+          nodeName: 'INPUT',
+          parentIndex: 0,
+          attributes: { 'aria-label': 'Filter', value: 'private draft' },
+          bounds: [0, 0, 200, 40],
+        },
+      ]),
+    });
+    expect(result.entries).toEqual([expect.objectContaining({ name: 'Filter' })]);
+    expect(JSON.stringify(result.scope)).not.toContain('private draft');
+  });
+
+  it('bounds scoped evidence and reports truncation instead of claiming completeness', () => {
+    const result = buildSemanticPageSnapshot({
+      frame: 'main',
+      scopeBackendNodeId: 2,
+      axNodes: [],
+      domSnapshot: domSnapshot([
+        { backendNodeId: 1, nodeName: '#document', parentIndex: -1 },
+        {
+          backendNodeId: 2,
+          nodeName: 'DIV',
+          parentIndex: 0,
+          attributes: { role: 'list', 'aria-label': 'Files' },
+          bounds: [0, 0, 300, 9000],
+        },
+        ...Array.from({ length: 150 }, (_, index) => ({
+          backendNodeId: index + 3,
+          nodeName: 'BUTTON',
+          parentIndex: 1,
+          attributes: { 'aria-label': `Document ${index}` },
+          bounds: [0, index * 40, 200, 40] as const,
+        })),
+      ]),
+    });
+    expect(result.scope?.truncated).toBe(true);
+    if (result.scope === undefined) throw new Error('Scoped evidence is required.');
+    expect(result.scope.nodes.length).toBeLessThanOrEqual(120);
+    expect(JSON.stringify(result.scope).length).toBeLessThan(8300);
+  });
+});
+
 function labeledCheckboxSnapshot(checked: boolean) {
   const strings = [
     '',
@@ -204,6 +521,99 @@ function labeledCheckboxSnapshot(checked: boolean) {
 }
 
 describe('buildSemanticPageSnapshot', () => {
+  it('distinguishes same-name actions by semantic owner without merging their refs', () => {
+    const result = buildSemanticPageSnapshot({
+      frame: 'main',
+      axNodes: [
+        axNode('root', 1, 'RootWebArea', 'Workspace'),
+        axNode('nav', 2, 'navigation', 'Library', { parentId: 'root' }),
+        axNode('row', 3, 'treeitem', 'Project', { parentId: 'nav' }),
+        axNode('open', 4, 'button', 'Open', { parentId: 'row' }),
+        axNode('dialog', 5, 'dialog', 'Move to', { parentId: 'root' }),
+        axNode('confirm', 6, 'button', 'Open', { parentId: 'dialog' }),
+      ],
+      domSnapshot: domSnapshot([
+        { backendNodeId: 1, nodeName: 'BODY', parentIndex: -1 },
+        {
+          backendNodeId: 2,
+          nodeName: 'NAV',
+          parentIndex: 0,
+          bounds: [0, 0, 150, 300],
+        },
+        {
+          backendNodeId: 3,
+          nodeName: 'DIV',
+          parentIndex: 1,
+          bounds: [0, 0, 150, 40],
+        },
+        {
+          backendNodeId: 4,
+          nodeName: 'BUTTON',
+          parentIndex: 2,
+          bounds: [5, 5, 40, 20],
+        },
+        {
+          backendNodeId: 5,
+          nodeName: 'DIALOG',
+          parentIndex: 0,
+          bounds: [200, 0, 400, 300],
+        },
+        {
+          backendNodeId: 6,
+          nodeName: 'BUTTON',
+          parentIndex: 4,
+          bounds: [220, 5, 40, 20],
+        },
+      ]),
+    });
+    const entries = result.entries.filter((entry) => entry.name === 'Open');
+    expect(entries).toHaveLength(2);
+    expect(entries[0]).toMatchObject({
+      context: [
+        ['navigation', 'Library'],
+        ['treeitem', 'Project'],
+      ],
+    });
+    expect(entries[1]).toMatchObject({ context: [['dialog', 'Move to']] });
+    expect(entries[0]?.targetIndex).not.toEqual(entries[1]?.targetIndex);
+  });
+
+  it('retains structural ownership for DOM-only controls with no AX label', () => {
+    const result = buildSemanticPageSnapshot({
+      frame: 'main',
+      axNodes: [],
+      domSnapshot: domSnapshot([
+        {
+          backendNodeId: 1,
+          nodeName: 'MAIN',
+          parentIndex: -1,
+          bounds: [0, 0, 500, 300],
+        },
+        {
+          backendNodeId: 2,
+          nodeName: 'DIV',
+          parentIndex: 0,
+          attributes: { role: 'toolbar', 'aria-label': 'Editor' },
+          bounds: [0, 0, 300, 40],
+        },
+        {
+          backendNodeId: 3,
+          nodeName: 'BUTTON',
+          parentIndex: 1,
+          attributes: { 'aria-label': 'More' },
+          clickable: true,
+          bounds: [5, 5, 40, 20],
+        },
+      ]),
+    });
+    expect(result.entries.find((entry) => entry.name === 'More')).toMatchObject({
+      context: [
+        ['main', ''],
+        ['toolbar', 'Editor'],
+      ],
+    });
+  });
+
   it('does not split a surrogate pair when bounding semantic text', () => {
     const result = buildSemanticPageSnapshot({
       axNodes: [

@@ -58,6 +58,14 @@ export function bindToolRuntime(
   };
 
   return {
+    async reviewCompletion(context) {
+      for (const declaration of declarations) {
+        const review = declaration.reviewCompletion?.(context);
+        if (review) return review;
+      }
+      return null;
+    },
+
     async blocksCompletion(context) {
       for (const runtime of runtimes) {
         if ((await runtime.blocksCompletion?.(context, services)) === true) return true;

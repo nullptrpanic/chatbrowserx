@@ -14,6 +14,8 @@ import { evaluateLiveRun, sanitizeToolPayload } from './live-policy';
 import { ResponsesTraceCollector } from './provider-trace';
 import type {
   LiveModelMetrics,
+  LivePageStateRequirement,
+  LivePageStateReadback,
   LiveProviderTrace,
   LiveRunReport,
   LiveScenario,
@@ -80,6 +82,7 @@ export interface LiveRuntime {
   send(message: ExtensionMessage): Promise<unknown>;
   startProviderTrace?(activeUserText: string): void;
   finishProviderTrace?(): Promise<LiveProviderTrace>;
+  readPageState?(requirement: LivePageStateRequirement): Promise<LivePageStateReadback>;
 }
 
 export interface LiveRunDependencies {
@@ -744,6 +747,28 @@ function expandScenario(scenario: LiveScenario, runId: string): LiveScenario {
             includes: expandAll(requirement.includes),
           })),
         }),
+    ...(scenario.finalJsonItems === undefined
+      ? {}
+      : {
+          finalJsonItems: {
+            key: scenario.finalJsonItems.key,
+            equals: expandAll(scenario.finalJsonItems.equals),
+          },
+        }),
+    ...(scenario.finalPageStates === undefined
+      ? {}
+      : {
+          finalPageStates: scenario.finalPageStates.map((state) => ({
+            url: expandRunMarker(state.url, runId),
+            selector: expandRunMarker(state.selector, runId),
+            attributes: Object.fromEntries(
+              Object.entries(state.attributes).map(([key, value]) => [
+                key,
+                expandRunMarker(value, runId),
+              ]),
+            ),
+          })),
+        }),
   };
 }
 
@@ -988,12 +1013,32 @@ export async function runLiveScenario(
   }
 
   const endedAtMs = dependencies.now();
+  const finalPageReadbacks: LivePageStateReadback[] = [];
+  if (taskId.length > 0 && FINISHED_TASK_STATUSES.has(terminalStatus)) {
+    for (const requirement of expandedScenario.finalPageStates ?? []) {
+      try {
+        if (runtime.readPageState === undefined)
+          throw new Error('Independent page readback is unavailable.');
+        finalPageReadbacks.push(
+          await withRequestTimeout(
+            runtime.readPageState(requirement),
+            25_000,
+            'Independent page readback',
+          ),
+        );
+      } catch (error) {
+        finalPageReadbacks.push({ count: 0, attributes: {} });
+        harnessError = addError(harnessError, error);
+      }
+    }
+  }
   const retryReasons = providerRetryReasons(latestSnapshot?.events ?? []);
   const acceptance = evaluateLiveRun(expandedScenario, {
     terminalStatus,
     finalText,
     toolResults,
     providerRetryReasons: retryReasons,
+    finalPageReadbacks,
     ...(runtime.finishProviderTrace === undefined ? {} : { providerTrace }),
   });
   const reportToolResults = reportedToolResults(toolResults);
@@ -1077,6 +1122,34 @@ export function createPlaywrightLiveRuntime(session: ExtensionSession): LiveRunt
             pageText: (document.body?.innerText ?? '').slice(0, 1_000_000),
           })),
       });
+    },
+    async readPageState(requirement) {
+      const page = await session.context.newPage();
+      try {
+        await page.goto(requirement.url, {
+          waitUntil: 'domcontentloaded',
+          timeout: 15_000,
+        });
+        if (new URL(page.url()).origin !== new URL(requirement.url).origin) {
+          throw new Error('Independent page readback redirected outside the expected origin.');
+        }
+        const target = page.locator(requirement.selector);
+        await target
+          .first()
+          .waitFor({ state: 'attached', timeout: 8_000 })
+          .catch(() => undefined);
+        const count = await target.count();
+        const attributes: Record<string, string | null> = {};
+        if (count === 1) {
+          for (const name of Object.keys(requirement.attributes)) {
+            attributes[name] =
+              (await target.getAttribute(name, { timeout: 1000 }))?.slice(0, 2000) ?? null;
+          }
+        }
+        return { count, attributes };
+      } finally {
+        await page.close();
+      }
     },
     async send(message) {
       const response: unknown = await session.sidePanelPage.evaluate(

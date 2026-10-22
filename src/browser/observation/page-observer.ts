@@ -7,7 +7,11 @@ import {
 } from '../debugger/debugger-transport';
 import type { TargetSessionRegistry } from '../debugger/target-session-registry';
 import type { ReadablePageContent } from './content-extractor';
-import type { ElementRefStore, ObservedElementTarget } from './element-ref-store';
+import {
+  ElementRefStoreError,
+  type ElementRefStore,
+  type ObservedElementTarget,
+} from './element-ref-store';
 import { mapConcurrentOrdered } from './bounded-map';
 import { prepareModelScreenshot } from './model-screenshot';
 import {
@@ -33,7 +37,7 @@ const MAX_SESSION_OBSERVATION_CONCURRENCY = 3;
 const MAX_RESERVED_EDITABLE_TARGETS = 4;
 const MAX_RESERVED_SCROLL_TARGETS = 4;
 const INTERACTIVE_ENTRY_KEYS =
-  'd=depth,r=role(default generic),n=name,s=state,a=extra actions(ref defaults click),f=frame';
+  'd=DOM depth(not directory level),r=role(default generic),n=name,s=state,a=extra actions(ref defaults click),f=frame,c=owner path [role,name],h=explicit logical hierarchy(level,posInSet,setSize),x=raw DOM evidence [ancestor distance,scalar attributes]; not declared hierarchy';
 const MAX_CONTENT_CHARACTERS = 40_000;
 const MAX_SCREENSHOT_BYTES = 10 * 1024 * 1024;
 const PNG_SIGNATURE = [137, 80, 78, 71, 13, 10, 26, 10] as const;
@@ -81,10 +85,14 @@ interface CompactSemanticPageEntry {
   readonly a?: readonly SemanticAction[];
   readonly f?: string;
   readonly ref?: string;
+  readonly c?: SemanticPageEntry['context'];
+  readonly h?: SemanticPageEntry['hierarchy'];
+  readonly x?: SemanticPageEntry['domContext'];
 }
 
 export interface PageInspectionOptions {
   readonly since?: string;
+  readonly ref?: string;
 }
 
 interface InteractiveSnapshot {
@@ -226,6 +234,9 @@ function compactSemanticEntry(entry: SemanticPageEntry, ref?: string): CompactSe
     ...(extraActions === undefined || extraActions.length === 0 ? {} : { a: extraActions }),
     ...(entry.frame === undefined ? {} : { f: entry.frame }),
     ...(ref === undefined ? {} : { ref }),
+    ...(entry.context === undefined ? {} : { c: entry.context }),
+    ...(entry.hierarchy === undefined ? {} : { h: entry.hierarchy }),
+    ...(entry.domContext === undefined ? {} : { x: entry.domContext }),
   };
 }
 
@@ -725,6 +736,9 @@ export class PageObserver {
     options: PageInspectionOptions = {},
   ): Promise<PageObservationResult> {
     throwIfAborted(signal);
+    if (options.ref && (mode !== 'interactive_deep' || options.since)) {
+      throw new Error('Scoped inspection requires interactive_deep without a delta base.');
+    }
     if (mode === 'content') return this.#inspectContent(tabId, signal);
     if (mode === 'interactive' || mode === 'interactive_deep') {
       return this.#inspectInteractive(tabId, mode === 'interactive_deep', signal, options);
@@ -776,8 +790,14 @@ export class PageObserver {
       ]);
       throwIfAborted(signal);
       const blob = screenshotPng(captured.data);
-      const viewportWidth = Math.max(1, Math.round(metrics.visualViewport.clientWidth));
-      const viewportHeight = Math.max(1, Math.round(metrics.visualViewport.clientHeight));
+      // Input.dispatchMouseEvent consumes CSS pixels, not the deprecated device-pixel metrics.
+      const viewport =
+        metrics.cssVisualViewport ?? metrics.cssLayoutViewport ?? metrics.visualViewport;
+      const viewportWidth = viewport.clientWidth;
+      const viewportHeight = viewport.clientHeight;
+      if (![viewportWidth, viewportHeight].every((value) => Number.isFinite(value) && value > 0)) {
+        throw new Error('Screenshot viewport dimensions are unavailable.');
+      }
       const prepared = await prepareModelScreenshot(blob);
       const attachment = await persist(prepared.blob, source);
       if (attachment.id.trim().length === 0 || attachment.id.length > 256) {
@@ -834,6 +854,7 @@ export class PageObserver {
     signal: AbortSignal,
     options: PageInspectionOptions,
   ): Promise<PageObservationResult> {
+    const scopedRef = options.ref ? this.#dependencies.refs.resolve(options.ref, tabId) : undefined;
     const transport = withDebuggerSignal(this.#dependencies.transport, signal);
     const browserSession = await this.#dependencies.sessions.ensure(tabId, signal);
     throwIfAborted(signal);
@@ -872,7 +893,9 @@ export class PageObserver {
     ];
 
     const rawSessionObservations = await mapConcurrentOrdered(
-      sessionTargets,
+      scopedRef
+        ? sessionTargets.filter((target) => target.frameTargetId === scopedRef.frameTargetId)
+        : sessionTargets,
       MAX_SESSION_OBSERVATION_CONCURRENCY,
       async (sessionTarget) => {
         throwIfAborted(signal);
@@ -963,6 +986,15 @@ export class PageObserver {
       },
     );
 
+    if (
+      scopedRef &&
+      !rawSessionObservations.some(
+        (item) => item.loaders.get(scopedRef.documentFrameId) === scopedRef.loaderId,
+      )
+    ) {
+      throw new ElementRefStoreError('STALE_REF', 'The scoped element document is stale.');
+    }
+
     const ownerBackendNodeIdsByFrame = new Map<string | null, number[]>();
     for (const { frameOwners } of rawSessionObservations) {
       for (const frameOwner of frameOwners) {
@@ -980,8 +1012,28 @@ export class PageObserver {
         ...(observation.viewport === undefined ? {} : { viewport: observation.viewport }),
         scrollOwnerBackendNodeIds:
           ownerBackendNodeIdsByFrame.get(observation.sessionTarget.frameTargetId) ?? [],
+        ...(scopedRef === undefined ? {} : { scopeBackendNodeId: scopedRef.backendNodeId }),
       }),
     }));
+    if (scopedRef) {
+      const currentTarget = sessionObservations[0]?.semantic.targets.find(
+        (target) =>
+          target.backendNodeId === scopedRef.backendNodeId &&
+          target.documentFrameId === scopedRef.documentFrameId,
+      );
+      if (
+        !currentTarget ||
+        currentTarget.name !== scopedRef.name ||
+        currentTarget.role !== scopedRef.role ||
+        (scopedRef.semanticLocator !== undefined &&
+          currentTarget.semanticLocator !== scopedRef.semanticLocator)
+      ) {
+        throw new ElementRefStoreError(
+          'STALE_REF',
+          'The scoped element identity changed. Inspect the current page again.',
+        );
+      }
+    }
     const observationByFrame = new Map(
       sessionObservations.map((observation) => [
         observation.sessionTarget.frameTargetId,
@@ -1111,10 +1163,13 @@ export class PageObserver {
     const budget = deep ? DEEP_INTERACTIVE_BUDGET : INTERACTIVE_BUDGET;
     const selectedEntryIndexes: number[] = [];
     const usedTargetIndexes = new Set<number>();
-    let serializedCharacters = JSON.stringify({
-      mode: 'interactive',
-      elements: [],
-    }).length;
+    const structuralScope = sessionObservations.find((item) => item.semantic.scope)?.semantic.scope;
+    let serializedCharacters =
+      JSON.stringify(structuralScope ?? {}).length +
+      JSON.stringify({
+        mode: 'interactive',
+        elements: [],
+      }).length;
     for (const entryIndex of interactiveCandidateIndexes(entries, deep, targets)) {
       if (selectedEntryIndexes.length >= budget.elements) break;
       const entry = entries[entryIndex];
@@ -1147,6 +1202,9 @@ export class PageObserver {
     const refByTargetIndex = new Map(
       selectedTargetIndexes.map((targetIndex, index) => [targetIndex, refs[index] ?? '']),
     );
+    const scopedRefByNode = new Map(
+      selectedTargets.map((target, index) => [target.backendNodeId, refs[index]]),
+    );
     const elements = boundedEntries.map((entry) => {
       const ref =
         entry.targetIndex === undefined ? undefined : refByTargetIndex.get(entry.targetIndex);
@@ -1161,19 +1219,18 @@ export class PageObserver {
       const metrics = targets[targetIndex]?.scrollMetrics;
       if (ref && metrics) scrollMetricsByRef.set(ref, metrics);
     });
-    const coverage = interactiveCoverage(visibleElements, mainDocumentCoverage, scrollMetricsByRef);
-    const scrollHierarchy = pageScrollHierarchy(
-      mainDocumentCoverage,
-      selectedTargetIndexes,
-      targets,
-      refs,
-    );
+    const coverage = scopedRef
+      ? undefined
+      : interactiveCoverage(visibleElements, mainDocumentCoverage, scrollMetricsByRef);
+    const scrollHierarchy = scopedRef
+      ? undefined
+      : pageScrollHierarchy(mainDocumentCoverage, selectedTargetIndexes, targets, refs);
     const frameUrl = sessionObservations.find(
       ({ sessionTarget }) => sessionTarget.frame === 'main',
     )?.pageUrl;
     const pageUrl = frameUrl ?? (await this.#pageMetadata(browserSession.root, transport)).url;
     const snapshotId = createInteractiveSnapshotId();
-    const truncated = boundedEntries.length < originalCount;
+    const truncated = boundedEntries.length < originalCount || structuralScope?.truncated === true;
     const previous = this.#interactiveSnapshots.get(tabId);
     const current: InteractiveSnapshot = {
       id: snapshotId,
@@ -1185,10 +1242,14 @@ export class PageObserver {
       ),
       ...(coverage === undefined ? {} : { coverage }),
     };
-    const visualFallbackAllowed = deep || selectedTargets.length === 0 || hasVisualSurface;
-    this.#rememberInteractiveSnapshot(tabId, current);
+    const visualFallbackAllowed = selectedTargets.length === 0 || hasVisualSurface;
+    if (scopedRef) this.#interactiveSnapshots.delete(tabId);
+    else this.#rememberInteractiveSnapshot(tabId, current);
     const canReturnDelta =
-      options.since !== undefined && options.since.length > 0 && previous?.id === options.since;
+      !scopedRef &&
+      options.since !== undefined &&
+      options.since.length > 0 &&
+      previous?.id === options.since;
     if (canReturnDelta) {
       const delta = keyedInteractiveDelta(previous, current);
       if (delta !== null) {
@@ -1231,6 +1292,19 @@ export class PageObserver {
         snapshot: snapshotId,
         keys: INTERACTIVE_ENTRY_KEYS,
         elements,
+        ...(structuralScope === undefined
+          ? {}
+          : {
+              scope: {
+                ref: options.ref,
+                complete: false,
+                truncated: structuralScope.truncated,
+                nodes: structuralScope.nodes.map(({ backendNodeId, ...node }) => {
+                  const ref = scopedRefByNode.get(backendNodeId);
+                  return { ...node, ...(ref ? { ref } : {}) };
+                }),
+              },
+            }),
         ...(truncated ? { truncated: true } : {}),
         ...(coverage === undefined ? {} : { coverage }),
       },

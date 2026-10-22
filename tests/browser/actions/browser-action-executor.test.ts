@@ -3633,6 +3633,67 @@ describe('BrowserActionExecutor', () => {
     );
   });
 
+  it.each([
+    { markup: '<button>More</button>', x: 35 },
+    { markup: '<a href="/other">Open</a>', x: 35 },
+    { markup: '<div role="button">Expand</div>', x: 35 },
+    { markup: '<span>Ordinary label</span>', x: 60 },
+    { markup: '<input type="checkbox">Select', tag: 'label', x: 60 },
+    { markup: '<span></span>', shadow: true, x: 60 },
+    { markup: '<svg><path></path></svg>', x: 60 },
+  ])(
+    'does not click an independent nested control: $markup',
+    async ({ markup, x, tag, shadow }) => {
+      const target = document.createElement(tag ?? 'div');
+      target.setAttribute('role', 'button');
+      target.innerHTML = markup;
+      if (shadow) {
+        const child = target.firstElementChild;
+        if (child === null) throw new Error('Shadow fixture requires a host child.');
+        const root = child.attachShadow({ mode: 'open' });
+        root.innerHTML = '<span>Shadow label</span>';
+        Object.defineProperty(root, 'elementFromPoint', { value: () => root.firstElementChild });
+      }
+      document.body.append(target);
+      const original = Object.getOwnPropertyDescriptor(document, 'elementFromPoint');
+      Object.defineProperty(document, 'elementFromPoint', {
+        configurable: true,
+        value: (px: number) => (px === 60 ? target.firstElementChild : target),
+      });
+      const { executor, send } = harness({
+        responder: (_session, method, params) => {
+          if (
+            method !== 'Runtime.callFunctionOn' ||
+            typeof params?.functionDeclaration !== 'string' ||
+            !params.functionDeclaration.includes('__chatbrowserxActionablePoint')
+          )
+            return undefined;
+          const fn = Function(`return (${params.functionDeclaration});`)() as (
+            this: Element,
+            points: unknown,
+          ) => unknown;
+          const args = params.arguments as { value: unknown }[];
+          return { result: { type: 'number', value: fn.call(target, args[0]?.value) } };
+        },
+      });
+      try {
+        await executor.execute(
+          call('browser_click', { tabId: 7, ref: 'ref_1', button: 'left', count: 1 }),
+          new AbortController().signal,
+        );
+        expect(send).toHaveBeenCalledWith(
+          { tabId: 7 },
+          'Input.dispatchMouseEvent',
+          expect.objectContaining({ type: 'mousePressed', x, y: 35 }),
+        );
+      } finally {
+        target.remove();
+        if (original) Object.defineProperty(document, 'elementFromPoint', original);
+        else Reflect.deleteProperty(document, 'elementFromPoint');
+      }
+    },
+  );
+
   it('uses an uncovered inset corner when the center cross is occluded', async () => {
     const { executor, send, pointer } = harness({
       responder: (_session, method, params) => {

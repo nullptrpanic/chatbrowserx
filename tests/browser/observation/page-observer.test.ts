@@ -371,6 +371,68 @@ function mainFrameTree(
 describe('PageObserver', () => {
   afterEach(() => vi.unstubAllGlobals());
 
+  it('keeps hierarchy in compact deltas and isolates scoped evidence from full-page coverage', async () => {
+    let level = 1;
+    let name = 'Report';
+    let loader = 'loader-1';
+    const observer = new PageObserver({
+      sessions: sessions({ tabId: 7, generation: 1, root: { tabId: 7 }, children: new Map() }),
+      transport: debuggerTransport((_session, method) => {
+        if (method === 'Accessibility.getFullAXTree')
+          return {
+            nodes: [
+              {
+                nodeId: 'row',
+                backendDOMNodeId: 11,
+                ignored: false,
+                role: { value: 'treeitem' },
+                name: { value: name },
+                properties: [{ name: 'level', value: { type: 'integer', value: level } }],
+              },
+            ],
+          };
+        if (method === 'DOMSnapshot.captureSnapshot') return buttonDomSnapshot();
+        if (method === 'Page.getFrameTree') return mainFrameTree(loader);
+        return {};
+      }),
+      content: CONTENT,
+      refs: new ElementRefStore({ create: () => 'ref_scope' }),
+    });
+    const signal = new AbortController().signal;
+    const first = await observer.inspect(7, 'interactive', signal);
+    expect(first.data.elements).toEqual([expect.objectContaining({ h: { level: 1 } })]);
+    level = 2;
+    const changed = await observer.inspect(7, 'interactive', signal, {
+      since: first.data.snapshot as string,
+    });
+    expect(JSON.stringify(changed.data)).toContain('"level":2');
+    expect(changed.data.unchanged).not.toBe(true);
+    const scoped = await observer.inspect(7, 'interactive_deep', signal, { ref: 'ref_scope' });
+    expect(scoped.data).toMatchObject({
+      scope: {
+        ref: 'ref_scope',
+        complete: false,
+        nodes: expect.arrayContaining([expect.objectContaining({ ref: 'ref_scope' })]),
+      },
+    });
+    expect(JSON.stringify(scoped.data)).not.toContain('backendNodeId');
+    expect(scoped.data).not.toHaveProperty('coverage');
+    const after = await observer.inspect(7, 'interactive', signal, {
+      since: scoped.data.snapshot as string,
+    });
+    expect(after.data).toHaveProperty('elements');
+    expect(after.data).not.toHaveProperty('base');
+    name = 'Different virtual row';
+    await expect(
+      observer.inspect(7, 'interactive_deep', signal, { ref: 'ref_scope' }),
+    ).rejects.toMatchObject({ code: 'STALE_REF' });
+    name = 'Report';
+    loader = 'loader-new';
+    await expect(
+      observer.inspect(7, 'interactive_deep', signal, { ref: 'ref_scope' }),
+    ).rejects.toMatchObject({ code: 'STALE_REF' });
+  });
+
   it('uses compact native AX semantics on ordinary pages and keeps debugger details internal', async () => {
     const snapshot: BrowserSessionSnapshot = {
       tabId: 7,
@@ -461,7 +523,7 @@ describe('PageObserver', () => {
       visualFallbackAllowed: false,
       data: {
         mode: 'interactive',
-        keys: 'd=depth,r=role(default generic),n=name,s=state,a=extra actions(ref defaults click),f=frame',
+        keys: expect.any(String),
         elements: [
           {
             d: 1,
@@ -885,7 +947,7 @@ describe('PageObserver', () => {
     expect(coverage.primaryTarget).toBe('ref_history');
   });
 
-  it('allows visual fallback after deep native inspection exhausts semantic discovery', async () => {
+  it('does not automatically switch to screenshots when deep inspection still has actionable refs', async () => {
     const snapshot: BrowserSessionSnapshot = {
       tabId: 7,
       generation: 1,
@@ -936,7 +998,7 @@ describe('PageObserver', () => {
     expect(sessionPort.ensure).toHaveBeenCalledOnce();
     expect(result).toMatchObject({
       debuggerSession: 'ephemeral',
-      visualFallbackAllowed: true,
+      visualFallbackAllowed: false,
       data: {
         mode: 'interactive',
         elements: [expect.objectContaining({ ref: 'ref_1', n: 'Submit' })],
@@ -1719,7 +1781,7 @@ describe('PageObserver', () => {
     const result = await observer.inspect(7, 'interactive', new AbortController().signal);
 
     expect(result.data).toMatchObject({
-      keys: 'd=depth,r=role(default generic),n=name,s=state,a=extra actions(ref defaults click),f=frame',
+      keys: expect.any(String),
       elements: [{ d: 0, n: 'Custom option', ref: 'ref_generic' }],
     });
     const [element] = result.data.elements as Readonly<Record<string, unknown>>[];
@@ -1783,7 +1845,7 @@ describe('PageObserver', () => {
     expect(result.data).toMatchObject({
       mode: 'interactive',
       snapshot: expect.any(String),
-      keys: 'd=depth,r=role(default generic),n=name,s=state,a=extra actions(ref defaults click),f=frame',
+      keys: expect.any(String),
       elements: [{ d: 0, r: 'textbox', n: 'Query', a: ['type'], ref: 'ref_query' }],
     });
   });
@@ -2217,8 +2279,14 @@ describe('PageObserver', () => {
           visualViewport: {
             pageX: 0,
             pageY: 0,
-            clientWidth: 1255,
-            clientHeight: 800,
+            clientWidth: 2510,
+            clientHeight: 1600,
+          },
+          cssVisualViewport: {
+            pageX: 0,
+            pageY: 0,
+            clientWidth: 1255.5,
+            clientHeight: 800.25,
           },
         };
       }
@@ -2288,8 +2356,8 @@ describe('PageObserver', () => {
         mimeType: 'image/png',
         width: 1440,
         height: 918,
-        viewportWidth: 1255,
-        viewportHeight: 800,
+        viewportWidth: 1255.5,
+        viewportHeight: 800.25,
         attachmentId: 'attachment_screenshot',
       },
       observation: null,

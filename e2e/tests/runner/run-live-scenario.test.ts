@@ -246,6 +246,7 @@ async function runCompletedSnapshot(
   panelToolCount: number,
   trace?: LiveProviderTrace,
   liveScenario: LiveScenario = scenario,
+  readPageState?: LiveRuntime['readPageState'],
 ) {
   const base = liveRuntime((message) => {
     switch (message.type) {
@@ -269,6 +270,7 @@ async function runCompletedSnapshot(
             return trace;
           },
         };
+  if (readPageState !== undefined) runtime.readPageState = readPageState;
   return runLiveScenario(runtime, liveScenario, {
     now: () => 10_000,
     sleep: vi.fn(),
@@ -277,6 +279,44 @@ async function runCompletedSnapshot(
 }
 
 describe('live scenario orchestration', () => {
+  it('independently reads final page attributes after completion and fails closed without an adapter', async () => {
+    const required = {
+      ...scenario,
+      finalPageStates: [
+        {
+          url: 'https://example.com/{{RUN_ID}}',
+          selector: '[data-id="{{RUN_ID}}"]',
+          attributes: { 'data-parent': '{{RUN_ID}}' },
+        },
+      ],
+    };
+    const readback = vi.fn(async () => ({
+      count: 1,
+      attributes: { 'data-parent': 'run_evidence_check' },
+    }));
+    const report = await runCompletedSnapshot(
+      taskSnapshot('completed', true),
+      1,
+      undefined,
+      required,
+      readback,
+    );
+    expect(readback).toHaveBeenCalledExactlyOnceWith({
+      url: 'https://example.com/run_evidence_check',
+      selector: '[data-id="run_evidence_check"]',
+      attributes: { 'data-parent': 'run_evidence_check' },
+    });
+    expect(report.acceptance.passed).toBe(true);
+    const missing = await runCompletedSnapshot(
+      taskSnapshot('completed', true),
+      1,
+      undefined,
+      required,
+    );
+    expect(missing.acceptance.passed).toBe(false);
+    expect(missing.harnessError).toContain('Independent page readback is unavailable');
+  });
+
   it('does not submit a task when target environment verification fails', async () => {
     const runtime = liveRuntime(() => {
       throw new Error('No extension request is expected.');
@@ -375,7 +415,10 @@ describe('live scenario orchestration', () => {
       payload: { text: 'Send marker run_unique_123 once.' },
     });
     expect(report.acceptance.checks).toContainEqual(
-      expect.objectContaining({ name: 'required-mutation-readback', passed: true }),
+      expect.objectContaining({
+        name: 'required-mutation-readback',
+        passed: true,
+      }),
     );
   });
 

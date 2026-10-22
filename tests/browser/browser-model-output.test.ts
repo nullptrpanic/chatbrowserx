@@ -2,6 +2,35 @@ import { describe, expect, it } from 'vitest';
 import { compactBrowserModelOutput } from '../../src/browser/browser-model-output';
 
 describe('compactBrowserModelOutput', () => {
+  it('does not deduplicate against entries superseded by a later full snapshot', () => {
+    const full = JSON.stringify({
+      ok: true,
+      tabId: 7,
+      url: 'https://example.com/',
+      observation: null,
+      data: {
+        action: 'scroll',
+        observations: [
+          {
+            mode: 'interactive',
+            snapshot: 's1',
+            upsert: [{ k: 'node:status', e: { n: 'Ready' } }],
+          },
+          { mode: 'interactive', snapshot: 's2', elements: [{ n: 'Loading' }] },
+          {
+            mode: 'interactive',
+            snapshot: 's3',
+            base: 's2',
+            upsert: [{ k: 'node:status', e: { n: 'Ready' } }],
+          },
+        ],
+      },
+    });
+    expect(JSON.parse(compactBrowserModelOutput(full)).data.observations[2].upsert).toEqual([
+      { k: 'node:status', e: { n: 'Ready' } },
+    ]);
+  });
+
   it('removes only the protocol-defined null observation from a known success envelope', () => {
     const full = JSON.stringify({
       ok: true,
@@ -53,7 +82,7 @@ describe('compactBrowserModelOutput', () => {
     expect(compactBrowserModelOutput(full)).toBe(full);
   });
 
-  it('drops only passive node tombstones from traversal model evidence', () => {
+  it('retains passive and actionable removals for a consistent delta contract', () => {
     const full = JSON.stringify({
       ok: true,
       tabId: 7,
@@ -96,14 +125,14 @@ describe('compactBrowserModelOutput', () => {
 
     expect(compact.observation).toBeUndefined();
     expect(compact.data.latestSnapshot).toBe('snapshot_2');
-    expect(compact.data.observations[0]?.remove).toEqual(['ref:stale-action']);
+    expect(compact.data.observations[0]?.remove).toEqual(['node:passive-old', 'ref:stale-action']);
     expect(compact.data.observations[0]?.coverage).toEqual({
       targets: ['ref_document'],
       primaryTarget: 'ref_document',
     });
   });
 
-  it('drops passive tombstones from a single scroll verification without losing coverage', () => {
+  it('keeps the same keyed delta shape for scroll and ordinary action verification', () => {
     const full = JSON.stringify({
       ok: true,
       tabId: 7,
@@ -134,8 +163,8 @@ describe('compactBrowserModelOutput', () => {
           mode: 'interactive',
           snapshot: 'snapshot_2',
           base: 'snapshot_1',
-          remove: ['ref:stale-action'],
-          upsert: [{ d: 4, r: 'statictext', n: 'New text' }],
+          remove: ['node:old-paragraph', 'ref:stale-action'],
+          upsert: [{ k: 'node:new-paragraph', e: { d: 4, r: 'statictext', n: 'New text' } }],
           coverage: { targets: ['ref_document'], primaryTarget: 'ref_document' },
         },
       },
@@ -169,11 +198,10 @@ describe('compactBrowserModelOutput', () => {
     };
 
     expect(compact.observation).toEqual({ targetPresent: true, targetObscured: false });
-    expect(compact.data.observations[0]).not.toHaveProperty('remove');
-    expect(compactBrowserModelOutput(full).length).toBeLessThan(full.length);
+    expect(compact.data.observations[0]?.remove).toEqual(['node:passive-old']);
   });
 
-  it('removes delta transport identities without losing ordered semantic entries', () => {
+  it('preserves identities so later deltas can replace or remove the same entries', () => {
     const passive = { d: 4, r: 'statictext', n: 'Policy summary' };
     const actionable = {
       d: 2,
@@ -214,9 +242,10 @@ describe('compactBrowserModelOutput', () => {
       };
     };
 
-    expect(compact.data.observations[0]?.upsert).toEqual([passive, actionable]);
-    expect(compactBrowserModelOutput(full)).not.toContain('node:paragraph');
-    expect(compactBrowserModelOutput(full)).not.toContain('ref:ref_document');
+    expect(compact.data.observations[0]?.upsert).toEqual([
+      { k: 'node:paragraph', e: passive },
+      { k: 'ref:ref_document', e: actionable },
+    ]);
   });
 
   it('deduplicates unchanged identities while retaining changed and first actionable entries', () => {
@@ -265,16 +294,16 @@ describe('compactBrowserModelOutput', () => {
     const compact = JSON.parse(compactBrowserModelOutput(full)) as {
       readonly data: {
         readonly observations: readonly {
-          readonly upsert: readonly { readonly n: string }[];
+          readonly upsert: readonly { readonly e: { readonly n: string } }[];
         }[];
       };
     };
 
-    expect(compact.data.observations[0]?.upsert.map(({ n }) => n)).toEqual([
+    expect(compact.data.observations[0]?.upsert.map(({ e }) => e.n)).toEqual([
       'Repeated paragraph',
       'Document',
     ]);
-    expect(compact.data.observations[1]?.upsert.map(({ n }) => n)).toEqual(['Changed paragraph']);
+    expect(compact.data.observations[1]?.upsert.map(({ e }) => e.n)).toEqual(['Changed paragraph']);
   });
 
   it('preserves ordered state changes while dropping repeated transport state', () => {
@@ -331,19 +360,25 @@ describe('compactBrowserModelOutput', () => {
     const compact = JSON.parse(compactBrowserModelOutput(full)) as {
       readonly data: {
         readonly observations: readonly {
-          readonly upsert: readonly { readonly n: string }[];
+          readonly upsert: readonly { readonly e: { readonly n: string } }[];
           readonly coverage?: Readonly<Record<string, unknown>>;
         }[];
       };
     };
 
-    expect(compact.data.observations.map(({ upsert }) => upsert.map(({ n }) => n))).toEqual([
+    expect(compact.data.observations.map(({ upsert }) => upsert.map(({ e }) => e.n))).toEqual([
       ['Document', 'Loading'],
       ['Ready', 'Repeated title'],
       ['Loading', 'Repeated title'],
     ]);
-    expect(compact.data.observations[0]).not.toHaveProperty('coverage');
-    expect(compact.data.observations[1]).not.toHaveProperty('coverage');
+    expect(compact.data.observations[0]?.coverage).toEqual({
+      targets: ['ref_document'],
+      primaryTarget: 'ref_document',
+    });
+    expect(compact.data.observations[1]?.coverage).toEqual({
+      targets: ['ref_document'],
+      primaryTarget: 'ref_document',
+    });
     expect(compact.data.observations[2]?.coverage).toEqual({
       targets: ['ref_document'],
       primaryTarget: 'ref_document',

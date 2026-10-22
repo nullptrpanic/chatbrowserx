@@ -123,6 +123,20 @@ function check(name: string, passed: boolean, detail: string): LiveAcceptanceChe
   return { name, passed, detail };
 }
 
+function exactFinalInventory(text: string, requirement: LiveScenario['finalJsonItems']): boolean {
+  if (requirement === undefined) return true;
+  const blocks = [...text.matchAll(/```(?:json)?\s*\n([\s\S]*?)\n```/g)];
+  if (blocks.length > 1) return false;
+  const result = readOutput(blocks[0]?.[1] ?? text.trim());
+  const items = result?.[requirement.key];
+  return (
+    Array.isArray(items) &&
+    items.length === requirement.equals.length &&
+    new Set(items).size === items.length &&
+    items.every((item) => typeof item === 'string' && requirement.equals.includes(item))
+  );
+}
+
 function markdownCells(line: string): readonly string[] | null {
   const trimmed = line.trim();
   if (!trimmed.includes('|')) return null;
@@ -848,6 +862,31 @@ export function evaluateLiveRun(scenario: LiveScenario, input: LiveRunInput): Li
         ? 'Final text does not declare an unresolved scenario blocker.'
         : `Excluded blocker text present: ${presentExcludedFinalText.join(', ')}.`,
     ),
+    ...(scenario.finalJsonItems === undefined
+      ? []
+      : [
+          check(
+            'final-inventory-set',
+            exactFinalInventory(input.finalText, scenario.finalJsonItems),
+            'Final inventory must contain exactly the independently established items, without omissions, extras or duplicates.',
+          ),
+        ]),
+    ...(scenario.finalPageStates ?? []).map((requirement, index) => {
+      const actual = input.finalPageReadbacks?.[index];
+      return check(
+        `final-page-state-${String(index + 1)}`,
+        actual?.count === 1 &&
+          Object.entries(requirement.attributes).every(
+            ([name, expected]) => actual.attributes[name] === expected,
+          ),
+        JSON.stringify({
+          url: requirement.url,
+          selector: requirement.selector,
+          expected: requirement.attributes,
+          actual: actual ?? null,
+        }),
+      );
+    }),
     check(
       'final-text-length',
       scenario.minFinalTextLength === undefined ||

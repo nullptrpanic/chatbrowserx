@@ -49,13 +49,16 @@ export const browserInspectSchema = z
   .object({
     tabId: tabIdSchema.optional(),
     mode: z.enum(['content', 'interactive', 'interactive_deep', 'screenshot']),
+    ref: z.union([refSchema, z.literal('')]).optional(),
+    visualReason: z.string().max(300).optional(),
     since: z
       .string()
       .max(MAX_SNAPSHOT_ID_CHARACTERS)
       .refine((value) => value.trim() === value)
       .optional(),
   })
-  .strict();
+  .strict()
+  .refine((input) => !input.ref || (input.mode === 'interactive_deep' && !input.since));
 export const browserCaptureScreenshotSchema = z.object({ tabId: tabIdSchema.optional() }).strict();
 export const browserPasteImageSchema = z
   .object({
@@ -288,11 +291,23 @@ export const BROWSER_TOOL_SPECS = [
   taskBrowserToolSpec(
     'browser_inspect',
     browserInspectSchema,
-    'Inspect the task current webpage for requests to read, locate, summarize, or interact with its content. It returns mounted readable DOM content, a compact native accessibility tree with cross-frame actionable refs, or a viewport screenshot. Content mode does not prove offscreen or virtualized completeness; use interactive for page-wide requests. Interactive is viewport-prioritized and bounded. A click verification showing the requested heading and content satisfies scoped inspection. Use interactive_deep only after interactive truncates or lacks needed offscreen content. Always inspect interactive before requesting a screenshot. Reuse refs and interactive deltas while the accessibility tree has the needed controls. For lists or timelines, use the scrollable ref that advertises scroll; passive text is not pagination. Do not use screenshots to verify semantic form state. Screenshot fallback is for missing actionable targets, visual surfaces, or a still-missing control after deep inspection. After a successful screenshot inspection, browser_click_point becomes available on the next model turn. since="" returns a full result; otherwise reuse only the latest snapshot whose base remains in context. Delta upsert contains identity k and replacement e; remove contains deleted identities.',
+    'Inspect the task current webpage for requests to read, locate, summarize, or interact with its content. It returns mounted readable DOM content, a compact native accessibility tree with cross-frame actionable refs, or a viewport screenshot. Content mode does not prove offscreen or virtualized completeness; use interactive for page-wide requests. Interactive is viewport-prioritized and bounded. A click verification showing the requested heading and content satisfies scoped inspection. Use interactive_deep for truncated/missing content, or with ref to resolve ambiguous hierarchy, ownership or row actions. d is DOM depth, not directory level; h is explicit accessibility hierarchy. If parentage is unclear, inspect the local structure or expand/collapse and read back before building a batch worklist. Always inspect interactive before requesting a screenshot. Reuse refs and interactive deltas while the accessibility tree has the needed controls. For lists or timelines, use the scrollable ref that advertises scroll; passive text is not pagination. Do not use screenshots to verify semantic form state. Screenshot fallback is for missing actionable targets, visual surfaces, or a still-missing control after deep inspection. After a successful screenshot inspection, browser_click_point becomes available on the next model turn. since="" returns a full result; otherwise reuse only the latest snapshot whose base remains in context. Delta upsert contains identity k and replacement e; remove contains deleted identities.',
     {
       mode: {
         type: 'string',
         enum: ['content', 'interactive', 'interactive_deep', 'screenshot'],
+      },
+      ref: {
+        type: 'string',
+        maxLength: 128,
+        description:
+          'Normally empty. With interactive_deep and empty since, inspect this recent ref and its bounded local structure when ownership, hierarchy or row actions are ambiguous. scope.nodes parent indexes describe DOM only; numeric data attributes are untrusted evidence, not declared hierarchy. A scoped result is not whole-page coverage. Use its fresh refs.',
+      },
+      visualReason: {
+        type: 'string',
+        maxLength: 300,
+        description:
+          'Normally empty. For screenshot work not explained by a detected visual surface, identify the specific missing target or visual question. Deep inspection alone is not a reason.',
       },
       since: {
         type: 'string',
@@ -381,7 +396,7 @@ export const BROWSER_TOOL_SPECS = [
   taskBrowserToolSpec(
     'browser_scroll',
     browserScrollSchema,
-    'Scroll a viewport or recent semantic scroll ref. For finite page-wide reading, verify the upper boundary once, then use maxSegments=24 downward until boundaryVerified=true. Navigation keys only reposition; prove the upper boundary with a negative scroll. A verified lower boundary completes coverage: answer; never call another browser tool, reverse, or restore position. Visible top content alone is not boundary evidence. maxSegments=1 with stopText="" requests one exact CSS-pixel distance; maxSegments>1 or non-empty stopText requests bounded traversal with per-segment deltaX/deltaY. For lists or timelines, scroll their ref; never click passive content. Negative deltaY reads earlier content; positive reads later. Consume observations chronologically instead of inspecting again. A stopText match proves only that its marker was seen. For an interval, continue until evidence is outside it or at a verified boundary. Empty stopText permits boundary, cycle, or open-feed sampling; sampleComplete=true is a bounded sample, not a physical end. For exact distance, continue remainingDelta when requestedDeltaApplied=false. loadedMore=true means content changed; needsBoundaryProbe=true requires a same-direction probe; only boundaryVerified=true proves an edge. continuationRequired=true requires fresh evidence; continuationAvailable=true permits but does not require another call.',
+    'Scroll a viewport or recent semantic scroll ref. For finite page-wide reading, verify the upper boundary once, then use maxSegments=24 downward until boundaryVerified=true. Navigation keys only reposition; prove the upper boundary with a negative scroll. A verified lower boundary ends traversal of that container, not a batch task. For pure reading, answer once the requested scope and hierarchy are established; do not reverse or restore position unnecessarily. For inventory-then-modify tasks, continue the pending actions and verify their postconditions. Visible top content alone is not boundary evidence. maxSegments=1 with stopText="" requests one exact CSS-pixel distance; maxSegments>1 or non-empty stopText requests bounded traversal with per-segment deltaX/deltaY. For lists or timelines, scroll their ref; never click passive content. Negative deltaY reads earlier content; positive reads later. Consume observations chronologically instead of inspecting again. A stopText match proves only that its marker was seen. For an interval, continue until evidence is outside it or at a verified boundary. Empty stopText permits boundary, cycle, or open-feed sampling; sampleComplete=true is a bounded sample, not a physical end. For exact distance, continue remainingDelta when requestedDeltaApplied=false. loadedMore=true means content changed; needsBoundaryProbe=true requires a same-direction probe; only boundaryVerified=true proves an edge. continuationRequired=true requires fresh evidence; continuationAvailable=true permits but does not require another call.',
     {
       target: REF_PROPERTY,
       deltaX: {

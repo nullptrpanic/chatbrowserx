@@ -2,6 +2,7 @@ import { createServer, type Server } from 'node:http';
 import { extensionTest, expect } from './fixtures/extension-test';
 import { sendExtensionMessage } from './helpers/extension-runtime';
 import { closeHttpFixtureServer } from './helpers/http-server';
+import type { ExtensionSession } from './fixtures/extension-context';
 
 function syntheticAccessToken(): string {
   const encode = (value: unknown): string =>
@@ -85,17 +86,638 @@ function functionOutputs(body: unknown): readonly string[] {
     return [];
   }
   return body.input.flatMap((item) => {
-    if (
-      typeof item !== 'object' ||
-      item === null ||
-      item.type !== 'function_call_output' ||
-      typeof item.output !== 'string'
-    ) {
+    if (typeof item !== 'object' || item === null || item.type !== 'function_call_output') {
       return [];
     }
-    return [item.output];
+    if (typeof item.output === 'string') return [item.output];
+    if (!Array.isArray(item.output)) return [];
+    return item.output.flatMap((part: unknown) =>
+      typeof part === 'object' &&
+      part !== null &&
+      'type' in part &&
+      part.type === 'input_text' &&
+      'text' in part &&
+      typeof part.text === 'string'
+        ? [part.text]
+        : [],
+    );
   });
 }
+
+async function runFixtureTask(session: ExtensionSession, tabId: number, text: string) {
+  await sendExtensionMessage(session.sidePanelPage, {
+    version: 1,
+    requestId: 'reliability_settings',
+    type: 'settings.save',
+    payload: {
+      reasoningEffort: 'low',
+      systemPrompt: 'Use browser tools.',
+      language: 'en',
+      historyMessageLimit: 50,
+      codexAccessToken: syntheticAccessToken(),
+    },
+  });
+  const submitted = await sendExtensionMessage<{ task: { id: string } }>(session.sidePanelPage, {
+    version: 1,
+    requestId: 'reliability_submit',
+    type: 'chat.submit',
+    payload: { tabId, text, attachmentIds: [] },
+  });
+  await expect
+    .poll(
+      async () => {
+        const snapshot = await sendExtensionMessage<{
+          task: { status: string };
+        }>(session.sidePanelPage, {
+          version: 1,
+          requestId: `reliability_snapshot_${Date.now()}`,
+          type: 'task.getSnapshot',
+          payload: { taskId: submitted.task.id },
+        });
+        return snapshot.task.status;
+      },
+      { timeout: 30_000 },
+    )
+    .toBe('completed');
+}
+
+extensionTest(
+  'continues a premature final through durable progress without injecting instructions',
+  async ({ extensionSession }) => {
+    const server = createServer((_request, response) => {
+      response.writeHead(200, { 'Content-Type': 'text/html' });
+      response.end(
+        `<!doctype html><button onclick="document.querySelector('output').textContent='Alpha done; Beta done'">Finish batch</button><output>Alpha pending; Beta pending</output>`,
+      );
+    });
+    const port = await listen(server);
+    const page = await extensionSession.context.newPage();
+    try {
+      const url = `http://127.0.0.1:${port}/progress`;
+      await page.goto(url);
+      const tabId = await extensionSession.sidePanelPage.evaluate(
+        async (url) => (await chrome.tabs.query({ url }))[0]?.id,
+        url,
+      );
+      if (tabId === undefined) throw new Error('Fixture tab missing');
+      const state = {
+        scope: 'Finish Alpha and Beta',
+        inventoryComplete: true,
+        inventoryEvidence: 'Two explicitly requested items',
+        blocker: '',
+        items: ['Alpha', 'Beta'].map((id) => ({
+          id,
+          description: id,
+          status: 'pending',
+          evidence: '',
+          evidenceCallId: '',
+        })),
+      };
+      const inspect = {
+        tabId: 0,
+        mode: 'interactive',
+        since: '',
+        ref: '',
+        visualReason: '',
+      };
+      let turn = 0;
+      await extensionSession.context.route(
+        'https://chatgpt.com/backend-api/codex/responses',
+        async (route) => {
+          const request = route.request().postDataJSON();
+          expect(request.instructions).toBe('Use browser tools.');
+          const output = JSON.parse(functionOutputs(request).at(-1) ?? '{}');
+          let body: string;
+          switch (++turn) {
+            case 1:
+              body = toolResponse('p1', 'i1', 'plan', 'task_progress', {
+                update: state,
+              });
+              break;
+            case 2:
+              expect(output.state.items).toHaveLength(2);
+              body = finalTextResponse('partial', 'Still pending.');
+              break;
+            case 3:
+              expect(request.tool_choice).toBe('auto');
+              expect(
+                request.tools.some((tool: { name: string }) => tool.name === 'browser_click'),
+              ).toBe(true);
+              expect(JSON.stringify(request.input.at(-1))).toContain('runtime_completion_review');
+              expect(JSON.stringify(request.input.at(-1))).toContain('execute_pending');
+              body = toolResponse('p3', 'i3', 'review', 'task_progress', {
+                update: null,
+              });
+              break;
+            case 4:
+              expect(
+                output.state.items.every((item: { status: string }) => item.status === 'pending'),
+              ).toBe(true);
+              expect(output.review).toMatchObject({
+                completion: 'continue',
+                reason: 'pending_items',
+                next: { action: 'execute_pending', itemIds: ['Alpha', 'Beta'] },
+              });
+              body = toolResponse('p4', 'i4', 'inspect', 'browser_inspect', inspect);
+              break;
+            case 5: {
+              const button = output.data.elements.find(
+                (item: { n: string; r: string }) =>
+                  item.r === 'button' && item.n === 'Finish batch',
+              );
+              expect(button?.ref).toBeTruthy();
+              body = toolResponse('p5', 'i5', 'finish', 'browser_click', {
+                tabId: 0,
+                ref: button.ref,
+                button: 'left',
+                count: 1,
+              });
+              break;
+            }
+            case 6:
+              body = toolResponse('p6', 'i6', 'verified', 'browser_inspect', inspect);
+              break;
+            case 7:
+              expect(JSON.stringify(output)).toContain('Alpha done; Beta done');
+              body = toolResponse('p7', 'i7', 'recorded', 'task_progress', {
+                update: {
+                  ...state,
+                  items: state.items.map((item) => ({
+                    ...item,
+                    status: 'verified',
+                    evidence: 'Read back done status',
+                    evidenceCallId: output.data.snapshot,
+                  })),
+                },
+              });
+              break;
+            case 8:
+              expect(output.ok).toBe(false);
+              expect(output.availableEvidence.at(-1)?.callId).toBe('verified');
+              body = toolResponse('p8', 'i8', 'corrected', 'task_progress', {
+                update: {
+                  ...state,
+                  items: state.items.map((item) => ({
+                    ...item,
+                    status: 'verified',
+                    evidence: 'Read back done status',
+                    evidenceCallId: output.availableEvidence.at(-1).callId,
+                  })),
+                },
+              });
+              break;
+            case 9:
+              expect(output.review).toMatchObject({
+                completion: 'ready',
+                next: null,
+              });
+              body = finalTextResponse('complete', 'Both items verified.');
+              break;
+            default:
+              throw new Error('Unexpected extra completion loop');
+          }
+          await route.fulfill({
+            status: 200,
+            contentType: 'text/event-stream',
+            body,
+          });
+        },
+      );
+      await runFixtureTask(
+        extensionSession,
+        tabId,
+        'Finish both Alpha and Beta and verify the result.',
+      );
+      expect(turn).toBe(9);
+      await expect(page.locator('output')).toHaveText('Alpha done; Beta done');
+    } finally {
+      await page.close();
+      await closeHttpFixtureServer(server);
+    }
+  },
+);
+
+extensionTest.describe('screenshot coordinate units', () => {
+  extensionTest.use({
+    extensionBrowserArgs: ['--force-device-scale-factor=2'],
+  });
+  for (const zoom of [1, 1.5]) {
+    extensionTest(
+      `clicks the screenshot target at DPR 2 and browser zoom ${zoom}`,
+      async ({ extensionSession }) => {
+        const server = createServer((_request, response) => {
+          response.writeHead(200, { 'Content-Type': 'text/html' });
+          response.end(`<!doctype html><body style="margin:0;overflow:hidden">
+          <canvas style="position:fixed;left:75vw;top:75vh;width:15vw;height:15vh;background:blue"></canvas>
+          <output id="hit">waiting</output>
+          <script>document.querySelector('canvas').onclick = e => { document.querySelector('output').textContent = e.isTrusted ? 'trusted hit' : 'untrusted'; };</script>
+        </body>`);
+        });
+        const port = await listen(server);
+        const page = await extensionSession.context.newPage();
+        const url = `http://127.0.0.1:${port}/coordinates`;
+        try {
+          await page.goto(url);
+          const tabId = await extensionSession.sidePanelPage.evaluate(
+            async ({ url, zoom }) => {
+              const [tab] = await chrome.tabs.query({ url });
+              if (tab?.id === undefined) throw new Error('Fixture tab missing');
+              await chrome.tabs.setZoom(tab.id, zoom);
+              return tab.id;
+            },
+            { url, zoom },
+          );
+          const cssViewport = await page.evaluate(() => {
+            if (!visualViewport) throw new Error('Visual viewport unavailable');
+            return {
+              width: visualViewport.width,
+              height: visualViewport.height,
+            };
+          });
+          let turn = 0;
+          let capture:
+            | {
+                width: number;
+                height: number;
+                viewportWidth: number;
+                viewportHeight: number;
+              }
+            | undefined;
+          let clickOutput: unknown;
+          await extensionSession.context.route(
+            'https://chatgpt.com/backend-api/codex/responses',
+            async (route) => {
+              const output = JSON.parse(
+                functionOutputs(route.request().postDataJSON()).at(-1) ?? '{}',
+              );
+              turn += 1;
+              let body: string;
+              if (turn === 1)
+                body = toolResponse('i', 'ii', 'ic', 'browser_inspect', {
+                  tabId: 0,
+                  mode: 'interactive',
+                  since: '',
+                  visualReason: '',
+                });
+              else if (turn === 2)
+                body = toolResponse('s', 'si', 'sc', 'browser_inspect', {
+                  tabId: 0,
+                  mode: 'screenshot',
+                  since: '',
+                  visualReason: '',
+                });
+              else if (turn === 3) {
+                expect(output).toMatchObject({
+                  ok: true,
+                  data: { mode: 'screenshot' },
+                });
+                capture = output.data;
+                if (!capture) throw new Error('Screenshot missing');
+                body = toolResponse('c', 'ci', 'cc', 'browser_click_point', {
+                  tabId: 0,
+                  x: capture.width * 0.825,
+                  y: capture.height * 0.825,
+                  button: 'left',
+                  count: 1,
+                });
+              } else {
+                clickOutput = output;
+                body = finalTextResponse('done', 'Coordinates checked.');
+              }
+              await route.fulfill({
+                status: 200,
+                contentType: 'text/event-stream',
+                body,
+              });
+            },
+          );
+          await runFixtureTask(extensionSession, tabId, 'Click the blue visual target.');
+          expect(capture?.viewportWidth).toBeCloseTo(cssViewport.width, 1);
+          expect(capture?.viewportHeight).toBeCloseTo(cssViewport.height, 1);
+          expect(clickOutput).toMatchObject({ ok: true });
+          await expect(page.locator('#hit')).toHaveText('trusted hit');
+        } finally {
+          await page.close();
+          await closeHttpFixtureServer(server);
+        }
+      },
+    );
+  }
+});
+
+extensionTest(
+  'moves a synthetic batch by scoped refs, excludes a subtree and verifies each result without screenshots',
+  async ({ extensionSession }) => {
+    const server = createServer((_request, response) => {
+      response.writeHead(200, { 'Content-Type': 'text/html' });
+      response.end(`<!doctype html><body>
+      <nav aria-label="Library"><ul id="source" aria-label="Source" role="tree">
+        <li role="treeitem"><button>Alpha</button></li><li role="treeitem"><button>Beta</button></li>
+        <li role="treeitem"><button>Excluded</button><ul><li>Keep child</li></ul></li>
+      </ul><ul id="destination" aria-label="Destination" role="tree"></ul></nav>
+      <main><button>Alpha</button><button>Beta</button></main>
+      <div role="menu" hidden><button>Move to</button></div>
+      <dialog aria-label="Move document"><button id="target">Destination</button><button id="confirm" disabled>Confirm</button></dialog>
+      <output id="completed"></output>
+      <script>
+        let pending; const done = [];
+        document.querySelector('#source').oncontextmenu = e => {
+          if (e.target.tagName !== 'BUTTON') return;
+          e.preventDefault(); pending = e.target.closest('li'); document.querySelector('[role=menu]').hidden = false;
+        };
+        document.querySelector('[role=menu] button').onclick = () => {
+          document.querySelector('[role=menu]').hidden = true; document.querySelector('#confirm').disabled = true; document.querySelector('dialog').showModal();
+        };
+        document.querySelector('#target').onclick = () => document.querySelector('#confirm').disabled = false;
+        document.querySelector('#confirm').onclick = () => {
+          done.push(pending.innerText); document.querySelector('#destination').append(pending); pending = null;
+          document.querySelector('dialog').close(); document.querySelector('#completed').textContent = done.join(',');
+        };
+      </script></body>`);
+    });
+    const port = await listen(server);
+    const url = `http://127.0.0.1:${port}/library`;
+    const page = await extensionSession.context.newPage();
+    try {
+      await page.goto(url);
+      const tabId = await extensionSession.sidePanelPage.evaluate(
+        async (url) => (await chrome.tabs.query({ url }))[0]?.id,
+        url,
+      );
+      if (tabId === undefined) throw new Error('Fixture tab missing');
+      type Entry = {
+        n: string;
+        r?: string;
+        ref?: string;
+        c?: [string, string][];
+      };
+      const entries = new Map<string, Entry>();
+      let turn = 0;
+      const receipts: unknown[] = [];
+      await extensionSession.context.route(
+        'https://chatgpt.com/backend-api/codex/responses',
+        async (route) => {
+          const output = JSON.parse(functionOutputs(route.request().postDataJSON()).at(-1) ?? '{}');
+          if (turn > 0) receipts.push(output);
+          const data = output.data?.verification ?? output.data;
+          if (data?.elements) {
+            entries.clear();
+            data.elements.forEach((entry: Entry, i: number) =>
+              entries.set(entry.ref ?? `passive_${i}`, entry),
+            );
+          }
+          for (const identity of data?.remove ?? []) entries.delete(identity.replace(/^ref:/, ''));
+          for (const { k, e } of data?.upsert ?? []) entries.set(e.ref ?? k, e);
+          let body: string;
+          if (turn === 0)
+            body = toolResponse('inspect', 'inspect_i', 'inspect_c', 'browser_inspect', {
+              tabId: 0,
+              mode: 'interactive_deep',
+              since: '',
+              visualReason: '',
+            });
+          else if (turn <= 8) {
+            const step = (turn - 1) % 4;
+            const name =
+              step === 0
+                ? turn < 5
+                  ? 'Alpha'
+                  : 'Beta'
+                : ['', 'Move to', 'Destination', 'Confirm'][step];
+            const owner = step === 0 ? 'tree' : step === 1 ? 'menu' : 'dialog';
+            const entry = [...entries.values()].find(
+              (e) =>
+                e.ref &&
+                e.r === 'button' &&
+                e.n === name &&
+                e.c?.some(([role, label]) => role === owner && (step !== 0 || label === 'Source')),
+            );
+            if (!entry?.ref) throw new Error(`Missing scoped ${owner} control: ${name}`);
+            body = toolResponse(`r${turn}`, `i${turn}`, `c${turn}`, 'browser_click', {
+              tabId: 0,
+              ref: entry.ref,
+              button: step === 0 ? 'right' : 'left',
+              count: 1,
+            });
+          } else body = finalTextResponse('done', 'Batch checked.');
+          turn += 1;
+          await route.fulfill({
+            status: 200,
+            contentType: 'text/event-stream',
+            body,
+          });
+        },
+      );
+      await runFixtureTask(
+        extensionSession,
+        tabId,
+        'Move Alpha and Beta from Source to Destination, leaving Excluded and its child unchanged.',
+      );
+      expect(turn).toBe(10);
+      expect(receipts.every((receipt) => (receipt as { ok: boolean }).ok)).toBe(true);
+      await expect(page.locator('#source > li')).toHaveCount(1);
+      await expect(page.locator('#source')).toHaveText('ExcludedKeep child');
+      await expect(page.locator('#destination > li')).toHaveText(['Alpha', 'Beta']);
+      await expect(page.locator('#completed')).toHaveText('Alpha,Beta');
+      await expect(page.locator('dialog')).not.toBeVisible();
+    } finally {
+      await page.close();
+      await closeHttpFixtureServer(server);
+    }
+  },
+);
+
+extensionTest(
+  'expands and collapses an unnamed icon control without opening its neighboring document',
+  async ({ extensionSession }) => {
+    const server = createServer((_request, response) => {
+      response.writeHead(200, { 'Content-Type': 'text/html' });
+      response.end(`<!doctype html><style>
+        #row {display:flex;width:280px;height:36px;align-items:center;cursor:pointer}
+        #arrow {display:flex;width:20px;height:20px;align-items:center;justify-content:center}
+        #arrow [role=button] {width:10px;height:10px;cursor:pointer;background:#999}
+        #title {width:240px;height:36px}
+      </style><nav aria-label="Library"><div id="row">
+        <span id="arrow" class="branch-expand-arrow"><span role="button"></span></span>
+        <div id="title" role="button">Archive</div>
+      </div><ul hidden><li>Child document</li></ul></nav><output>waiting</output><script>
+        let opens = 0;
+        document.querySelector('#row').onclick = () => { opens++; };
+        document.querySelector('#arrow').onclick = e => {
+          e.stopPropagation(); const list = document.querySelector('ul'); list.hidden = !list.hidden;
+          document.querySelector('#arrow').className = list.hidden ? 'branch-expand-arrow' : 'branch-collapse-arrow';
+          document.querySelector('output').textContent = (list.hidden ? 'collapsed' : 'expanded') + ':' + opens;
+        };
+      </script>`);
+    });
+    const port = await listen(server);
+    const url = `http://127.0.0.1:${port}/unnamed-toggle`;
+    const page = await extensionSession.context.newPage();
+    try {
+      await page.goto(url);
+      const tabId = await extensionSession.sidePanelPage.evaluate(
+        async (url) => (await chrome.tabs.query({ url }))[0]?.id,
+        url,
+      );
+      if (tabId === undefined) throw new Error('Fixture tab missing');
+      let turn = 0;
+      await extensionSession.context.route(
+        'https://chatgpt.com/backend-api/codex/responses',
+        async (route) => {
+          const output = JSON.parse(functionOutputs(route.request().postDataJSON()).at(-1) ?? '{}');
+          if (turn > 0) expect(output.ok).toBe(true);
+          let body: string;
+          if (turn === 0 || turn === 2) {
+            if (turn === 2) await expect(page.locator('output')).toHaveText('expanded:0');
+            body = toolResponse(`r${turn}`, `i${turn}`, `c${turn}`, 'browser_inspect', {
+              tabId: 0,
+              mode: 'interactive',
+              since: '',
+              visualReason: '',
+            });
+          } else if (turn === 1 || turn === 3) {
+            const name = turn === 1 ? 'Branch expand arrow' : 'Branch collapse arrow';
+            const button = output.data.elements.find(
+              (e: { n: string; r?: string; ref?: string }) =>
+                e.n === name && e.r === 'button' && e.ref,
+            );
+            if (!button?.ref) throw new Error(`Missing icon control: ${name}`);
+            body = toolResponse(`r${turn}`, `i${turn}`, `c${turn}`, 'browser_click', {
+              tabId: 0,
+              ref: button.ref,
+              button: 'left',
+              count: 1,
+            });
+          } else
+            body = finalTextResponse('done', 'Expanded and collapsed without opening a document.');
+          turn += 1;
+          await route.fulfill({
+            status: 200,
+            contentType: 'text/event-stream',
+            body,
+          });
+        },
+      );
+      await runFixtureTask(
+        extensionSession,
+        tabId,
+        'Expand Archive, then collapse it without opening it.',
+      );
+      expect(turn).toBe(5);
+      await expect(page.locator('output')).toHaveText('collapsed:0');
+      await expect(page.locator('ul')).toBeHidden();
+    } finally {
+      await page.close();
+      await closeHttpFixtureServer(server);
+    }
+  },
+);
+
+extensionTest(
+  "joins flat-list structure to fresh refs and avoids a row's independent menu button",
+  async ({ extensionSession }) => {
+    const server = createServer((_request, response) => {
+      response.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
+      response.end(`<!doctype html><style>
+      [role=list] {width:300px;height:240px;overflow:auto}
+      [role=item] {height:80px}
+      [role=button] {position:relative;width:280px;height:60px;background:#eee}
+      .more-button {position:absolute;left:90px;width:100px;height:60px;top:0}
+    </style><nav aria-label="Library"><div role="list" aria-label="Documents">
+      <div role="item" data-depth="1"><button aria-expanded="true">Excluded</button></div>
+      <div role="item" data-depth="2"><div role="button" tabindex="0" aria-label="Report" data-key="child">Report<button class="more-button" data-action="child">⋯</button></div></div>
+      <div role="item" data-depth="1"><div role="button" tabindex="0" aria-label="Report" data-key="root">Report<button class="more-button" data-action="root">⋯</button></div></div>
+    </div></nav><output></output><script>
+      document.addEventListener('click', e => {
+        const menu=e.target.closest('[data-action]');
+        const row=e.target.closest('[data-key]');
+        document.querySelector('output').textContent = menu ? 'Menu '+menu.dataset.action : row ? 'Opened '+row.dataset.key : '';
+      });
+    </script>`);
+    });
+    const port = await listen(server);
+    const url = `http://127.0.0.1:${port}/flat-list`;
+    const page = await extensionSession.context.newPage();
+    try {
+      await page.goto(url);
+      const tabId = await extensionSession.sidePanelPage.evaluate(
+        async (url) => (await chrome.tabs.query({ url }))[0]?.id,
+        url,
+      );
+      if (tabId === undefined) throw new Error('Fixture tab missing');
+      let turn = 0;
+      await extensionSession.context.route(
+        'https://chatgpt.com/backend-api/codex/responses',
+        async (route) => {
+          const output = JSON.parse(functionOutputs(route.request().postDataJSON()).at(-1) ?? '{}');
+          let body: string;
+          if (turn === 0)
+            body = toolResponse('r0', 'i0', 'c0', 'browser_inspect', {
+              tabId: 0,
+              mode: 'interactive',
+              since: '',
+              ref: '',
+              visualReason: '',
+            });
+          else if (turn === 1) {
+            const report = output.data.elements.find(
+              (e: { n: string; r?: string; ref?: string }) =>
+                e.r === 'button' && e.n.startsWith('Report') && e.ref,
+            );
+            expect(report).toBeDefined();
+            body = toolResponse('r1', 'i1', 'c1', 'browser_inspect', {
+              tabId: 0,
+              mode: 'interactive_deep',
+              since: '',
+              ref: report.ref,
+              visualReason: '',
+            });
+          } else if (turn === 2) {
+            expect(output.ok).toBe(true);
+            expect(output.data.coverage).toBeUndefined();
+            const nodes = output.data.scope.nodes as {
+              name: string;
+              ref?: string;
+              parent?: number;
+              attributes: Record<string, string>;
+            }[];
+            const reports = nodes.filter((n) => n.name === 'Report' && n.ref);
+            expect(reports).toHaveLength(2);
+            const root = reports.find(
+              (n) => n.parent !== undefined && nodes[n.parent]?.attributes['data-depth'] === '1',
+            );
+            if (!root?.ref) throw new Error('Scoped evidence must identify the root document.');
+            body = toolResponse('r2', 'i2', 'c2', 'browser_click', {
+              tabId: 0,
+              ref: root.ref,
+              button: 'left',
+              count: 1,
+            });
+          } else {
+            expect(output.ok).toBe(true);
+            body = finalTextResponse('done', 'Opened only the root document.');
+          }
+          turn += 1;
+          await route.fulfill({
+            status: 200,
+            contentType: 'text/event-stream',
+            body,
+          });
+        },
+      );
+      await runFixtureTask(
+        extensionSession,
+        tabId,
+        'Open the root Report, not the excluded child or its menu.',
+      );
+      expect(turn).toBe(4);
+      await expect(page.locator('output')).toHaveText('Opened root');
+    } finally {
+      await page.close();
+      await closeHttpFixtureServer(server);
+    }
+  },
+);
 
 for (const delegated of [false, true]) {
   extensionTest(
@@ -209,15 +831,14 @@ for (const delegated of [false, true]) {
         await expect
           .poll(
             async () => {
-              const snapshot = await sendExtensionMessage<{ task: { status: string } }>(
-                extensionSession.sidePanelPage,
-                {
-                  version: 1,
-                  requestId: `scroll_snapshot_${String(Date.now())}`,
-                  type: 'task.getSnapshot',
-                  payload: { taskId: submitted.task.id },
-                },
-              );
+              const snapshot = await sendExtensionMessage<{
+                task: { status: string };
+              }>(extensionSession.sidePanelPage, {
+                version: 1,
+                requestId: `scroll_snapshot_${String(Date.now())}`,
+                type: 'task.getSnapshot',
+                payload: { taskId: submitted.task.id },
+              });
               return snapshot.task.status;
             },
             { timeout: 30_000 },

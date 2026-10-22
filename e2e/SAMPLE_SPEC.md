@@ -143,6 +143,23 @@ non-empty `includes` array. Draft/editor values and evidence observed before the
 not satisfy it. Every value must be structurally visible after that action and before the next
 submit-like action; named non-text evidence such as a content image is allowed.
 
+`finalJsonItems` optionally declares `{ "key": "documents", "equals": ["Alpha", "Beta"] }`.
+The answer must contain one JSON code block (or consist entirely of JSON) with that key's array.
+The array must equal the independently established inventory as an unordered set: no missing,
+additional, duplicate, or non-string entries. This checks inventory claims, not remote mutation
+success; a move still requires independent structural readback. Freeze the expected inventory
+before the attempt and increment `contractVersion` when it changes.
+
+`finalPageStates` optionally declares 1–100 independent read-only assertions, each with a same-origin
+HTTP(S) `url`, a bounded CSS `selector`, and 1–8 exact expected `attributes` (`data-*`, `aria-*`,
+`role`, or `title`). After the extension task ends, the shared runner reloads each URL in a separate
+tab using the existing authenticated session; it never performs the task's mutations. Exactly one
+matching node and all expected attributes are required. Missing, ambiguous or mismatched nodes fail
+acceptance; navigation/readback errors fail the harness. Expected and actual attributes are retained
+in acceptance checks, not taken from the model's final answer. Do not declare secret attributes or
+URLs. The run's `elapsedMs` measures the task and evidence collection before these independent
+post-run assertions; the assertions are not additional model/tool calls.
+
 ## Complete Sample
 
 The tracked [`samples/example/sample.json`](samples/example/sample.json) is the complete sample

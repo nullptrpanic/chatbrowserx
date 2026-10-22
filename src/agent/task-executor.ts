@@ -161,7 +161,7 @@ function taskErrorFromProvider(error: ProviderError): TaskError {
         retryable: true,
         recoveryAction: 'resume_task',
         userMessage: 'The provider is temporarily unavailable.',
-        evidenceRef: null,
+        evidenceRef: error.transientStage ? `provider:${error.transientStage}` : null,
       };
     case 'INVALID_RESPONSE':
       return {
@@ -195,6 +195,22 @@ function invalidModelResponseRetryCount(events: readonly TaskEvent[]): number {
       if (event.reason === 'model_request_started') break;
       if (event.reason.startsWith('invalid_model_response_retry:')) count += 1;
     }
+  }
+  return count;
+}
+
+/** Bound repeated final answers without intervening work; ordinary tool budgets still apply. */
+function completionReviewRetryCount(
+  events: readonly TaskEvent[],
+  runId: string,
+  toolName: string,
+): number {
+  let count = 0;
+  for (const event of [...events].reverse()) {
+    if (event.runId !== runId) break;
+    if (event.type === 'tool.call' && event.name !== toolName) break;
+    if (event.type === 'status.changed' && event.reason === `completion_review:${toolName}`)
+      count += 1;
   }
   return count;
 }
@@ -287,7 +303,7 @@ export class TaskExecutor {
             transientModelRetryCount += 1;
             snapshot = await this.#saveBoundary(snapshot, ownerId, signal, {
               type: 'planning.retrying',
-              reason: 'transient_model_retry:upstream_failure',
+              reason: `transient_model_retry:${error.transientStage ?? 'upstream_failure'}`,
             });
             await (this.#dependencies.sleep ?? sleepWithAbort)(retryDelay, signal);
             continue;
@@ -310,13 +326,13 @@ export class TaskExecutor {
         transientModelRetryCount = 0;
 
         if (result.type === 'task.completed') {
-          if (
-            await this.#dependencies.tools.blocksCompletion({
-              task: snapshot.task,
-              checkpoint: snapshot.checkpoint,
-              toolResults: snapshot.toolResults,
-            })
-          ) {
+          const completionContext = {
+            task: snapshot.task,
+            checkpoint: snapshot.checkpoint,
+            toolResults: snapshot.toolResults,
+            events: snapshot.events,
+          };
+          if (await this.#dependencies.tools.blocksCompletion(completionContext)) {
             await this.#interruptReply(snapshot.task, result.messageId);
             continue;
           }
@@ -328,10 +344,39 @@ export class TaskExecutor {
                 ...snapshot.checkpoint.continuationItems,
                 { type: 'message_ref' as const, messageId: result.messageId },
               ];
+          const review = await this.#dependencies.tools.reviewCompletion?.(completionContext);
+          const exhausted =
+            review?.type === 'continue' &&
+            completionReviewRetryCount(snapshot.events, snapshot.run.id, review.toolName) >= 2;
+          if (review?.type === 'continue' && !exhausted) {
+            await this.#interruptReply(snapshot.task, result.messageId);
+            snapshot = await this.#saveBoundary(snapshot, ownerId, signal, {
+              type: 'planning.retrying',
+              reason: `completion_review:${review.toolName}`,
+              ...(result.modelTurn === undefined
+                ? {}
+                : { modelTurn: taskModelTurnMetrics(result.modelTurn) }),
+            });
+            continue;
+          }
           try {
             return await this.#saveBoundary(snapshot, ownerId, signal, {
-              type: 'task.completed',
-              reason: result.reason,
+              type: review ? 'task.paused' : 'task.completed',
+              reason: review ? 'completion_review_blocked' : result.reason,
+              ...(review
+                ? {
+                    error: {
+                      code: 'TaskInputError' as const,
+                      retryable: true,
+                      recoveryAction: 'resume_task',
+                      userMessage:
+                        review.type === 'blocked'
+                          ? review.reason
+                          : 'The task still has unresolved progress, but repeated final answers did not advance it. Review the remaining work before resuming.',
+                      evidenceRef: null,
+                    },
+                  }
+                : {}),
               continuationItems,
               pendingToolCall: null,
               ...(result.modelTurn === undefined
@@ -493,6 +538,7 @@ export class TaskExecutor {
       task: snapshot.task,
       checkpoint: snapshot.checkpoint,
       toolResults: snapshot.toolResults,
+      events: snapshot.events,
       executionState: pending.executionState,
       resultId,
       currentTabId: snapshot.checkpoint.browserTargetTabId,

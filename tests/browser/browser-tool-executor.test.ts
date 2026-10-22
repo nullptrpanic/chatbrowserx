@@ -160,6 +160,17 @@ describe('BrowserToolExecutor', () => {
     expect(observer.inspect).toHaveBeenCalledWith(7, 'interactive', expect.any(AbortSignal), {
       since: 'snapshot_previous',
     });
+    await executor.execute(
+      call('browser_inspect', { tabId: 7, mode: 'interactive_deep', ref: 'ref_scope' }),
+      new AbortController().signal,
+      { currentTabId: 7 },
+    );
+    expect(observer.inspect).toHaveBeenLastCalledWith(
+      7,
+      'interactive_deep',
+      expect.any(AbortSignal),
+      { ref: 'ref_scope' },
+    );
   });
 
   it('maps tabId zero to the durable task target', async () => {
@@ -733,6 +744,36 @@ describe('BrowserToolExecutor', () => {
       needsInspect: false,
     });
     expect(observer.inspect).toHaveBeenCalledOnce();
+  });
+
+  it('allows explicit visual work despite unrelated semantic controls, after inspection', async () => {
+    const observer = {
+      inspect: vi.fn(async (_tabId: number, mode: string) => ({
+        tabId: 7,
+        url: 'https://example.com/editor',
+        data:
+          mode === 'screenshot'
+            ? { mode, width: 800, height: 600, viewportWidth: 800, viewportHeight: 600 }
+            : { mode: 'interactive', elements: [{ r: 'button', n: 'Help', ref: 'ref_help' }] },
+        observation: null,
+        attachmentIds: mode === 'screenshot' ? ['attachment_visual'] : [],
+        debuggerSession: 'ephemeral' as const,
+        visualFallbackAllowed: false,
+      })),
+    };
+    const executor = new BrowserToolExecutor({ tabs: tabPort(), observer });
+    const signal = new AbortController().signal;
+    const context = { currentTabId: 7 };
+    const input = {
+      mode: 'screenshot',
+      visualReason: 'The unlabeled diagram requires visual inspection.',
+    };
+    const before = await executor.execute(call('browser_inspect', input), signal, context);
+    expect(JSON.parse(before.output)).toMatchObject({ code: 'INTERACTIVE_INSPECTION_REQUIRED' });
+    await executor.execute(call('browser_inspect', { mode: 'interactive_deep' }), signal, context);
+    const result = await executor.execute(call('browser_inspect', input), signal, context);
+    expect(JSON.parse(result.output)).toMatchObject({ ok: true, data: { mode: 'screenshot' } });
+    expect(result.attachmentIds).toEqual(['attachment_visual']);
   });
 
   it('clears a selection mismatch fallback after fresh selectable refs are inspected', async () => {
@@ -2121,7 +2162,7 @@ describe('BrowserToolExecutor', () => {
     expect(result.modelOutput?.length).toBeLessThan(result.output.length);
   });
 
-  it('retains an oversized exact scroll audit when its compact model output fits', async () => {
+  it('rejects oversized deltas instead of silently discarding node removals to fit the limit', async () => {
     const passiveTombstones = Array.from(
       { length: 5_000 },
       (_, index) => `node:offscreen-paragraph-${index.toString().padStart(4, '0')}`,
@@ -2208,16 +2249,11 @@ describe('BrowserToolExecutor', () => {
       context,
     );
 
-    expect(result.output.length).toBeGreaterThan(100 * 1_024);
     expect(JSON.parse(result.output)).toMatchObject({
-      ok: true,
-      data: { action: 'scroll' },
+      ok: false,
+      code: 'RESULT_TOO_LARGE',
     });
-    expect(result.modelOutput?.length).toBeLessThanOrEqual(100 * 1_024);
-    expect(JSON.parse(result.modelOutput ?? '{}')).toMatchObject({
-      ok: true,
-      data: { verification: { snapshot: 'snapshot_after' } },
-    });
+    expect(result.modelOutput).toBeUndefined();
   });
 
   it('preserves partial traversal evidence when a later action fails', async () => {

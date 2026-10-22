@@ -18,6 +18,17 @@ export interface LiveMutationReadbackRequirement {
   readonly includes: readonly string[];
 }
 
+export interface LivePageStateRequirement {
+  readonly url: string;
+  readonly selector: string;
+  readonly attributes: Readonly<Record<string, string>>;
+}
+
+export interface LivePageStateReadback {
+  readonly count: number;
+  readonly attributes: Readonly<Record<string, string | null>>;
+}
+
 export interface LiveScenario {
   readonly contractVersion: number;
   readonly name: string;
@@ -58,6 +69,13 @@ export interface LiveScenario {
   /** Independent structural readback required after each named mutation action. */
   readonly requiredMutationReadbacks?: readonly LiveMutationReadbackRequirement[];
   readonly finalTextIncludes: readonly string[];
+  /** Exact unordered, duplicate-free inventory in one JSON code block (or a JSON-only answer). */
+  readonly finalJsonItems?: {
+    readonly key: string;
+    readonly equals: readonly string[];
+  };
+  /** Read-only, independently reloaded page assertions, never supplied by the model. */
+  readonly finalPageStates?: readonly LivePageStateRequirement[];
   /** Every inner group requires at least one normalized alternative to be present. */
   readonly finalTextIncludesAny?: readonly (readonly string[])[];
   /** Requires the first provider request to contain only the active user message. */
@@ -86,6 +104,7 @@ export interface LiveRunInput {
   readonly providerTrace?: LiveProviderTrace;
   /** Durable model retry boundaries used only to verify otherwise unavailable response bodies. */
   readonly providerRetryReasons?: readonly string[];
+  readonly finalPageReadbacks?: readonly LivePageStateReadback[];
 }
 
 export interface LiveAcceptanceCheck {

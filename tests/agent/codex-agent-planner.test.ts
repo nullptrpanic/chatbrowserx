@@ -201,7 +201,11 @@ function provider(events: () => AsyncGenerator<ModelStreamEvent>): {
 
 /** Returns the Sandbox discovery envelope consumed by the hidden Skill loader. */
 function sandboxWithSkills(
-  entries: readonly Readonly<{ name: string; description: string; path: string }>[],
+  entries: readonly Readonly<{
+    name: string;
+    description: string;
+    path: string;
+  }>[],
 ): SandboxExecutionPort & { readonly execute: ReturnType<typeof vi.fn> } {
   const stdout = [
     ...entries.flatMap(({ name, description, path }) => [
@@ -444,7 +448,11 @@ describe('CodexAgentPlanner', () => {
     const model = provider(async function* () {
       yield { type: 'response.started', responseId: 'response_followup' };
       yield { type: 'text.delta', delta: 'Continuation answer' };
-      yield { type: 'response.completed', responseId: 'response_followup', usage: null };
+      yield {
+        type: 'response.completed',
+        responseId: 'response_followup',
+        usage: null,
+      };
     });
     const planner = new CodexAgentPlanner({
       provider: model.instance,
@@ -469,7 +477,11 @@ describe('CodexAgentPlanner', () => {
     });
     expect(storage.messages.filter((m) => m.role === 'assistant')).toMatchObject([
       { id: 'assistant_original', text: 'Original answer' },
-      { id: 'message_followup', text: 'Continuation answer', status: 'complete' },
+      {
+        id: 'message_followup',
+        text: 'Continuation answer',
+        status: 'complete',
+      },
     ]);
   });
 
@@ -503,10 +515,17 @@ describe('CodexAgentPlanner', () => {
     const model = provider(async function* () {
       yield { type: 'response.started', responseId: 'resp_parallel_prepare' };
       yield { type: 'text.delta', delta: 'Ready.' };
-      yield { type: 'response.completed', responseId: 'resp_parallel_prepare', usage: null };
+      yield {
+        type: 'response.completed',
+        responseId: 'resp_parallel_prepare',
+        usage: null,
+      };
     });
     const storage = repositories();
-    storage.messages[0] = { ...USER_MESSAGE, attachmentIds: ['attachment_parallel'] };
+    storage.messages[0] = {
+      ...USER_MESSAGE,
+      attachmentIds: ['attachment_parallel'],
+    };
     let resolveDiscovery: ((output: string) => void) | undefined;
     const discovery = new Promise<string>((resolve) => {
       resolveDiscovery = resolve;
@@ -625,6 +644,7 @@ describe('CodexAgentPlanner', () => {
     });
     expect(model.requests[0]).not.toHaveProperty('continuation');
     expect(model.requests[0]?.tools.map(({ name }) => name)).toEqual([
+      'task_progress',
       ...FIRST_TURN_BROWSER_TOOL_NAMES,
       'tavily_search',
       'tavily_extract',
@@ -662,9 +682,11 @@ describe('CodexAgentPlanner', () => {
 
     expect(tavilyAvailability.isConfigured).toHaveBeenCalledTimes(2);
     expect(model.requests[0]?.tools.map(({ name }) => name)).toEqual([
+      'task_progress',
       ...FIRST_TURN_BROWSER_TOOL_NAMES,
     ]);
     expect(model.requests[1]?.tools.map(({ name }) => name)).toEqual([
+      'task_progress',
       ...FIRST_TURN_BROWSER_TOOL_NAMES,
       'tavily_search',
       'tavily_extract',
@@ -807,7 +829,7 @@ describe('CodexAgentPlanner', () => {
     ]);
   });
 
-  it('sends only the custom prompt when Sandbox Skills are unavailable', async () => {
+  it('keeps browser guidance without advertising unavailable Sandbox Skills', async () => {
     const model = provider(async function* () {
       yield { type: 'response.started', responseId: 'resp_without_sandbox' };
       yield { type: 'text.delta', delta: 'No Sandbox.' };
@@ -832,7 +854,9 @@ describe('CodexAgentPlanner', () => {
     await collect(planner);
 
     expect(model.requests[0]?.systemPrompt).toBe('Custom safe preference.');
+    expect(model.requests[0]?.systemPrompt).not.toContain('Sandbox Skills are available');
     expect(model.requests[0]?.tools.map(({ name }) => name)).toEqual([
+      'task_progress',
       ...FIRST_TURN_BROWSER_TOOL_NAMES,
       'tavily_search',
       'tavily_extract',
@@ -898,6 +922,7 @@ describe('CodexAgentPlanner', () => {
       },
     ]);
     expect(model.requests[0]?.tools.map(({ name }) => name)).toEqual([
+      'task_progress',
       ...FIRST_TURN_BROWSER_TOOL_NAMES,
       'tavily_search',
       'tavily_extract',
@@ -905,7 +930,15 @@ describe('CodexAgentPlanner', () => {
       'sandbox_read',
       'sandbox_exec',
     ]);
-    expect(model.requests[0]?.systemPrompt).toMatch(/^Custom safe preference\.\n\nSandbox Skills/);
+    expect(model.requests[0]?.systemPrompt).toMatch(
+      /^Custom safe preference\.\n\nSandbox Skills are available\./,
+    );
+    expect(model.requests[0]?.systemPrompt).toContain('\n\nSandbox Skills are available.');
+    expect(model.requests[0]?.systemPrompt).toContain(
+      "Honor the user's explicit choice of CLI/Skill or browser",
+    );
+    expect(model.requests[0]?.systemPrompt).not.toContain('Browser task execution:');
+    expect(model.requests[0]?.systemPrompt).not.toContain('Prefer direct bounded output');
     expect(model.requests[0]?.systemPrompt).toContain('Run the example workflow.');
     expect(model.requests[0]?.systemPrompt).toContain('/home/test/.codex/skills/example/SKILL.md');
     expect(model.requests[0]?.systemPrompt).toContain('Run an unrelated workflow.');
@@ -1252,7 +1285,11 @@ describe('CodexAgentPlanner', () => {
           delta: turn === 1 ? 'Second tool explanation.' : 'Final answer.',
         };
         if (turn === 1) {
-          yield { type: 'tool.started', callId: 'second_call', name: 'browser_list_tabs' };
+          yield {
+            type: 'tool.started',
+            callId: 'second_call',
+            name: 'browser_list_tabs',
+          };
           yield {
             type: 'tool.completed',
             callId: 'second_call',
@@ -1260,7 +1297,11 @@ describe('CodexAgentPlanner', () => {
             argumentsJson: '{}',
           };
         }
-        yield { type: 'response.completed', responseId: `response_${turn}`, usage: null };
+        yield {
+          type: 'response.completed',
+          responseId: `response_${turn}`,
+          usage: null,
+        };
       });
       let nextId = 0;
       const planner = new CodexAgentPlanner({
@@ -1295,14 +1336,22 @@ describe('CodexAgentPlanner', () => {
               argumentsJson: '{}',
               modelOutputItems: [{ type: 'assistant_message_ref', messageId: firstReply.id }],
             },
-            { type: 'function_call_output_ref', callId: 'first_call', resultId: result.id },
+            {
+              type: 'function_call_output_ref',
+              callId: 'first_call',
+              resultId: result.id,
+            },
           ],
         },
       };
       const outcome = (await collect(planner, undefined, input)).at(-1);
       expect(storage.messages.find(({ id }) => id === firstReply.id)).toEqual(firstReply);
       if (outcome?.type !== 'tool.call') throw new Error('Expected the second tool call.');
-      const secondResult = { ...result, id: 'second_result', callId: 'second_call' };
+      const secondResult = {
+        ...result,
+        id: 'second_result',
+        callId: 'second_call',
+      };
       input = {
         ...planInputFor(storage.messages),
         toolResults: [result, secondResult],
@@ -1317,7 +1366,11 @@ describe('CodexAgentPlanner', () => {
               argumentsJson: outcome.call.argumentsJson,
               modelOutputItems: outcome.modelOutputItems ?? [],
             },
-            { type: 'function_call_output_ref', callId: 'second_call', resultId: secondResult.id },
+            {
+              type: 'function_call_output_ref',
+              callId: 'second_call',
+              resultId: secondResult.id,
+            },
           ],
         },
       };
@@ -2034,7 +2087,10 @@ describe('CodexAgentPlanner', () => {
           type: 'message',
           role: 'user',
           content: expect.arrayContaining([
-            expect.objectContaining({ type: 'input_text', text: USER_MESSAGE.text }),
+            expect.objectContaining({
+              type: 'input_text',
+              text: USER_MESSAGE.text,
+            }),
           ]),
         }),
         {
@@ -2258,6 +2314,97 @@ describe('CodexAgentPlanner', () => {
     ]);
   });
 
+  it('sends runtime completion feedback with normal tools, then clears it after an action', async () => {
+    const model = provider(async function* () {
+      yield { type: 'response.started', responseId: 'resp_feedback' };
+      yield { type: 'text.delta', delta: 'Observed.' };
+      yield {
+        type: 'response.completed',
+        responseId: 'resp_feedback',
+        usage: null,
+      };
+    });
+    const storage = repositories();
+    const tools = bindToolRuntime(discoverTools(), new ToolServiceResolver());
+    tools.reviewCompletion = vi.fn(async () => ({
+      type: 'continue' as const,
+      toolName: 'task_progress',
+      feedback: JSON.stringify({
+        counts: { pending: 13 },
+        next: { action: 'execute_pending' },
+      }),
+    }));
+    const planner = new ModelTurnPlanner({
+      provider: model.instance,
+      tools,
+      settings: settings(),
+      conversations: storage.conversations,
+      tasks: storage.tasks,
+      attachments: storage.attachments,
+      ids: { create: (prefix) => `${prefix}_feedback` },
+      clock: { now: () => 500 },
+    });
+    const rejection: TaskEvent = {
+      id: 'rejected',
+      taskId: TASK.id,
+      runId: 'run_1',
+      sequence: 2,
+      at: 200,
+      type: 'status.changed',
+      taskStatus: 'planning',
+      runStatus: 'planning',
+      reason: 'completion_review:task_progress',
+      error: null,
+    };
+    await collect(planner, new AbortController().signal, {
+      ...PLAN_INPUT,
+      events: [...PLAN_INPUT.events, rejection],
+    });
+    const request = model.requests[0];
+    expect(request?.input.at(-1)).toMatchObject({
+      type: 'message',
+      role: 'user',
+      content: [
+        {
+          type: 'input_text',
+          text: expect.stringContaining('runtime_completion_review'),
+        },
+      ],
+    });
+    expect(JSON.stringify(request?.input.at(-1))).toContain('execute_pending');
+    expect(request?.toolChoice).toBeUndefined();
+    expect(request?.tools.some(({ name }) => name === 'browser_click')).toBe(true);
+    expect(request?.systemPrompt).toBe('Custom safe preference.');
+    await collect(planner, new AbortController().signal, {
+      ...PLAN_INPUT,
+      events: [
+        ...PLAN_INPUT.events,
+        rejection,
+        {
+          id: 'answer',
+          taskId: TASK.id,
+          runId: 'run_1',
+          sequence: 3,
+          at: 200,
+          type: 'message.recorded',
+          messageId: 'message_feedback',
+        },
+        {
+          id: 'action',
+          taskId: TASK.id,
+          runId: 'run_1',
+          sequence: 4,
+          at: 250,
+          type: 'tool.result',
+          callId: 'call_action',
+          resultId: 'result_action',
+        },
+      ],
+    });
+    expect(JSON.stringify(model.requests[1]?.input)).not.toContain('runtime_completion_review');
+    expect(tools.reviewCompletion).toHaveBeenCalledTimes(1);
+  });
+
   it('forces inspection before final text while a virtualized scroll is incomplete', async () => {
     const model = provider(async function* () {
       yield { type: 'response.started', responseId: 'resp_forced_inspect' };
@@ -2361,8 +2508,13 @@ describe('CodexAgentPlanner', () => {
       type: 'function',
       name: 'browser_inspect',
     });
-    expect(model.requests[0]?.tools.map(({ name }) => name)).toEqual(['browser_inspect']);
-    expect(model.requests[0]?.tools[0]?.parameters).toMatchObject({
+    expect(model.requests[0]?.tools.map(({ name }) => name)).toEqual([
+      'task_progress',
+      'browser_inspect',
+    ]);
+    expect(
+      model.requests[0]?.tools.find(({ name }) => name === 'browser_inspect')?.parameters,
+    ).toMatchObject({
       properties: {
         tabId: { enum: [0] },
         mode: { enum: ['interactive'] },

@@ -111,6 +111,22 @@ const CASES = [
 const NAMES = CASES.map(([name]) => name);
 
 describe('BROWSER_TOOL_DEFINITIONS', () => {
+  it('accepts scoped deep inspection but rejects scope on other modes or a full-page delta', () => {
+    const parse = (args: Record<string, unknown>) =>
+      parseBrowserToolCall({
+        callId: 'scope',
+        name: 'browser_inspect',
+        argumentsJson: JSON.stringify(args),
+      });
+    expect(parse({ mode: 'interactive_deep', ref: 'row_1' }).arguments).toMatchObject({
+      ref: 'row_1',
+    });
+    expect(parse({ mode: 'interactive', ref: '', since: '' }).operation).toBe('inspect');
+    expect(() => parse({ mode: 'content', ref: 'row_1' })).toThrow();
+    expect(() =>
+      parse({ mode: 'interactive_deep', ref: 'row_1', since: 'page_snapshot' }),
+    ).toThrow();
+  });
   it('exposes one unified scroll tool for distance and bounded traversal', () => {
     const scroll = BROWSER_TOOL_DEFINITIONS.find(({ name }) => name === 'browser_scroll');
     const parameters = scroll?.parameters as {
@@ -294,7 +310,8 @@ describe('BROWSER_TOOL_DEFINITIONS', () => {
       'never click same-page or table-of-contents links',
     );
     expect(definitions.get('browser_scroll')).toContain('verify the upper boundary once');
-    expect(definitions.get('browser_scroll')).toContain('never call another browser tool');
+    // Boundary-only termination is not valid for inventory-then-modify tasks.
+    // The browser batch E2E verifies that actions can continue after traversal.
   });
 
   it('requires an explicit string base snapshot on model-generated inspections', () => {

@@ -6,11 +6,7 @@ function record(value: unknown): Record<string, unknown> | null {
     : null;
 }
 
-function compactScrollObservation(
-  value: unknown,
-  currentEntries: Map<string, string>,
-  keepCoverage: boolean,
-): unknown {
+function compactScrollObservation(value: unknown, currentEntries: Map<string, string>): unknown {
   const observation = record(value);
   if (
     observation === null ||
@@ -21,15 +17,12 @@ function compactScrollObservation(
   }
 
   const compact = { ...observation };
+  // A full snapshot replaces the delta base; prior values can no longer suppress later upserts.
+  if (Array.isArray(observation.elements)) currentEntries.clear();
   if (Array.isArray(observation.remove)) {
     for (const identity of observation.remove) {
       if (typeof identity === 'string') currentEntries.delete(identity);
     }
-    const actionableRemovals = observation.remove.filter(
-      (identity): identity is string => typeof identity === 'string' && identity.startsWith('ref:'),
-    );
-    if (actionableRemovals.length === 0) delete compact.remove;
-    else compact.remove = actionableRemovals;
   }
 
   if (Array.isArray(observation.upsert)) {
@@ -40,10 +33,9 @@ function compactScrollObservation(
       const signature = JSON.stringify(entry);
       const changed = currentEntries.get(item.k) !== signature;
       currentEntries.set(item.k, signature);
-      return changed ? [entry] : [];
+      return changed ? [value] : [];
     });
   }
-  if (!keepCoverage) delete compact.coverage;
   return compact;
 }
 
@@ -52,13 +44,12 @@ function compactScrollData(data: Record<string, unknown>): Record<string, unknow
   const currentEntries = new Map<string, string>();
   const compact = { ...data };
   if (Array.isArray(data.observations)) {
-    const lastObservationIndex = data.observations.length - 1;
-    compact.observations = data.observations.map((observation, index) =>
-      compactScrollObservation(observation, currentEntries, index === lastObservationIndex),
+    compact.observations = data.observations.map((observation) =>
+      compactScrollObservation(observation, currentEntries),
     );
   }
   for (const key of ['verification', 'pageVerification'] as const) {
-    if (key in data) compact[key] = compactScrollObservation(data[key], currentEntries, true);
+    if (key in data) compact[key] = compactScrollObservation(data[key], currentEntries);
   }
   return compact;
 }

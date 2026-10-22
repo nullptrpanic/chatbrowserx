@@ -313,6 +313,136 @@ async function runBrowserProgressScenario(
 }
 
 describe('TaskExecutor', () => {
+  it.each(['continue', 'blocked', 'no-progress', 'user-stop'] as const)(
+    'reviews recorded progress before finishing (%s)',
+    async (mode) => {
+      const database = await openChatBrowserDatabase(createTestDatabaseName(`completion-${mode}`));
+      const repository = new IndexedDbTaskRepository(database);
+      const dependencies = sources();
+      const commands = new TaskCommandService(
+        repository,
+        dependencies.clock,
+        dependencies.ids,
+        dependencies.conversations,
+      );
+      const created = await commands.create({
+        conversationId: 'conversation_1',
+        tabId: 7,
+        goal: 'Move Alpha and Beta',
+      });
+      const initial = {
+        scope: 'Move Alpha and Beta',
+        inventoryComplete: true,
+        inventoryEvidence: 'Both user-specified items',
+        blocker: mode === 'blocked' ? 'Permission denied for Beta' : '',
+        items: ['alpha', 'beta'].map((id) => ({
+          id,
+          description: id,
+          status: 'pending',
+          evidence: '',
+          evidenceCallId: '',
+        })),
+      };
+      const progress = (id: string, update: unknown): AgentEvent =>
+        sandboxCall(id, 'task_progress', { update });
+      const calls: (AgentEvent | 'final')[] = [progress('plan', initial), 'final'];
+      if (mode === 'continue')
+        calls.push(
+          progress('review', null),
+          browserCall('verify', 'browser_inspect', { mode: 'interactive' }),
+          progress('verified', {
+            ...initial,
+            items: initial.items.map((item) => ({
+              ...item,
+              status: 'verified',
+              evidence: 'Observed in destination',
+              evidenceCallId: 'verify',
+            })),
+          }),
+          'final',
+        );
+      if (mode === 'no-progress')
+        calls.push(progress('review1', null), 'final', progress('review2', null), 'final');
+      let turn = 0;
+      const planner = {
+        plan: () =>
+          (async function* () {
+            const next = calls[turn++];
+            if (!next) throw new Error('Unbounded completion retries');
+            if (next !== 'final') {
+              yield next;
+              return;
+            }
+            if (mode === 'user-stop') await commands.pause(created.task.id);
+            const messageId = `answer_${turn}`;
+            await dependencies.conversations.appendMessage({
+              id: messageId,
+              taskId: created.task.id,
+              conversationId: 'conversation_1',
+              kind: 'conversation',
+              role: 'assistant',
+              status: 'complete',
+              text: 'Progress report',
+              attachmentIds: [],
+              createdAt: turn,
+              updatedAt: turn,
+            });
+            yield {
+              type: 'task.completed',
+              reason: 'model_response_completed',
+              messageId,
+            } as const;
+          })(),
+      };
+      try {
+        const executor = new TaskExecutor({
+          repository,
+          conversations: dependencies.conversations,
+          planner,
+          tavily: tavilyPort(),
+          browser: browserPort(),
+          clock: dependencies.clock,
+          ids: dependencies.ids,
+        });
+        const result = await executor.run(created.task.id, new AbortController().signal);
+        expect(result.task.status).toBe(mode === 'continue' ? 'completed' : 'paused');
+        expect(turn).toBe(calls.length);
+        const messages = await dependencies.conversations.listTaskMessages(created.task.id);
+        expect(messages.filter((message) => message.status === 'interrupted')).toHaveLength(
+          mode === 'blocked' || mode === 'user-stop' ? 0 : mode === 'continue' ? 1 : 2,
+        );
+        if (mode === 'user-stop') expect(result.run?.error).toBeNull();
+        else if (mode !== 'continue') expect(result.run?.error?.retryable).toBe(true);
+        else expect(result.toolResults.at(-1)?.output).toContain('verified');
+        if (mode === 'blocked') {
+          calls.push(
+            'final',
+            progress('resume-read', null),
+            browserCall('resume-verify', 'browser_inspect', { mode: 'interactive' }),
+            progress('resume-done', {
+              ...initial,
+              blocker: '',
+              items: initial.items.map((item) => ({
+                ...item,
+                status: 'verified',
+                evidence: 'Observed destination after permission granted',
+                evidenceCallId: 'resume-verify',
+              })),
+            }),
+            'final',
+          );
+          await commands.resume(created.task.id);
+          const resumed = await executor.run(created.task.id, new AbortController().signal);
+          expect(resumed.task.status).toBe('completed');
+          expect(resumed.run?.attempt).toBe(2);
+          expect(turn).toBe(calls.length);
+        }
+      } finally {
+        database.close();
+      }
+    },
+  );
+
   it('does not execute when a detached wake-up targets an older run', async () => {
     const database = await openChatBrowserDatabase(createTestDatabaseName('stale-run-wakeup'));
     const repository = new IndexedDbTaskRepository(database);
@@ -887,6 +1017,91 @@ describe('TaskExecutor', () => {
       needsInspect: false,
     });
   });
+
+  it.each([true, false])(
+    'does not block repeatable clicks solely because AX is unchanged (%s)',
+    async (unchanged) => {
+      const calls = Array.from({ length: 3 }, (_, index) =>
+        browserCall(`click_${index}`, 'browser_click', {
+          ref: 'ref_menu',
+          button: 'left',
+          count: 1,
+        }),
+      );
+      let count = 0;
+      const execute = vi.fn<BrowserExecutionPort['execute']>(async () => ({
+        output: JSON.stringify({
+          ok: true,
+          tabId: 7,
+          url: 'https://example.test/menu',
+          data: {
+            action: 'click',
+            dispatched: true,
+            verified: 'target_remeasured',
+            verification: unchanged
+              ? { mode: 'interactive', snapshot: `s${++count}`, unchanged: true }
+              : {
+                  mode: 'interactive',
+                  snapshot: `s${++count}`,
+                  elements: [{ r: 'status', n: `Step ${count}` }],
+                },
+          },
+          observation: null,
+        }),
+        attachmentIds: [],
+      }));
+      const result = await runBrowserProgressScenario(
+        `dispatched-click-${unchanged}`,
+        calls,
+        execute,
+      );
+      expect(execute).toHaveBeenCalledTimes(3);
+      expect(JSON.parse(result.toolResults.at(-1)?.output ?? '{}')).toMatchObject({ ok: true });
+    },
+  );
+
+  it.each([true, false])(
+    'allows different targets without injecting progress instructions (%s)',
+    async (stalled) => {
+      const calls = Array.from({ length: 4 }, (_, index) =>
+        browserCall(`probe_${index}`, 'browser_click', {
+          ref: `ref_${index}`,
+          button: 'left',
+          count: 1,
+        }),
+      );
+      let count = 0;
+      const execute = vi.fn<BrowserExecutionPort['execute']>(async () => ({
+        output: JSON.stringify({
+          ok: true,
+          tabId: 7,
+          url: 'https://example.test/menu',
+          data: {
+            action: 'click',
+            dispatched: true,
+            verification: {
+              mode: 'interactive',
+              snapshot: `s${++count}`,
+              ...(stalled || count < 4
+                ? { unchanged: true }
+                : { elements: [{ r: 'dialog', n: 'Move to' }] }),
+            },
+          },
+          observation: null,
+        }),
+        attachmentIds: [],
+      }));
+      const result = await runBrowserProgressScenario(`changed-refs-${stalled}`, calls, execute);
+      expect(execute).toHaveBeenCalledTimes(4);
+      const contract = await bindToolRuntime(
+        discoverTools().filter((tool) => tool.declaration.name.startsWith('browser_')),
+        new ToolServiceResolver(),
+      ).contract({
+        toolResults: result.toolResults,
+      });
+      expect(contract.systemPrompt).toBe('');
+    },
+  );
 
   it('blocks a repeated immobile scroll at the same position before redispatch', async () => {
     const calls = [
@@ -2605,7 +2820,7 @@ describe('TaskExecutor', () => {
             text: 'Checked the source before the outage.',
           };
         }
-        throw providerErrorFromCode('TRANSIENT');
+        throw providerErrorFromCode('TRANSIENT', { transientStage: 'stream_idle_timeout' });
       })(),
     );
     const executor = new TaskExecutor({
@@ -2626,7 +2841,7 @@ describe('TaskExecutor', () => {
       result.events.filter(
         (event) =>
           event.type === 'status.changed' &&
-          event.reason === 'transient_model_retry:upstream_failure',
+          event.reason === 'transient_model_retry:stream_idle_timeout',
       ),
     ).toHaveLength(3);
     expect(result.events.find(({ type }) => type === 'reasoning.summary')).toMatchObject({

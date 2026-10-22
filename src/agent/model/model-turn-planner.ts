@@ -119,6 +119,7 @@ export class ModelTurnPlanner implements AgentPlanner {
       task: input.task,
       checkpoint: input.checkpoint,
       toolResults: input.toolResults,
+      events: input.events,
     };
     const settingsPromise = prepareModelInput('settings', this.#dependencies.settings.get());
     const conversationViewPromise = prepareModelInput(
@@ -169,6 +170,37 @@ export class ModelTurnPlanner implements AgentPlanner {
     const systemPrompt = [context.systemPrompt, registeredContract.systemPrompt]
       .filter((section) => section.length > 0)
       .join('\n\n');
+    // A rejected final is a runtime observation, not a new user request or system rule.
+    // Keep ordinary action tools available; forcing a ledger read cannot advance the work.
+    const rejection = input.events.findLast(
+      (event) =>
+        event.runId === input.checkpoint.runId &&
+        (event.type === 'tool.result' ||
+          (event.type === 'status.changed' && event.reason.startsWith('completion_review:'))),
+    );
+    const review =
+      rejection?.type === 'status.changed'
+        ? await this.#dependencies.tools.reviewCompletion?.(toolContext)
+        : null;
+    const modelInput = [...context.input];
+    if (review?.type === 'continue') {
+      modelInput.push({
+        type: 'message',
+        role: 'user',
+        content: [
+          {
+            type: 'input_text',
+            text: JSON.stringify({
+              type: 'runtime_completion_review',
+              source: review.toolName,
+              finalAccepted: false,
+              taskStatus: 'running',
+              feedback: review.feedback,
+            }),
+          },
+        ],
+      });
+    }
     const state: ModelTurnState = {
       responseId: null,
       completed: false,
@@ -191,7 +223,7 @@ export class ModelTurnPlanner implements AgentPlanner {
           model: settings.model,
           reasoningEffort: settings.reasoningEffort,
           systemPrompt,
-          input: context.input,
+          input: modelInput,
           tools,
           ...(registeredContract.toolChoice === undefined
             ? {}
@@ -277,7 +309,7 @@ export class ModelTurnPlanner implements AgentPlanner {
       }
       const completedAt = this.#dependencies.clock.now();
       const modelTurn: AgentModelTurn = {
-        inputItemCount: context.input.length,
+        inputItemCount: modelInput.length,
         elapsedMs: Math.max(0, completedAt - turnStartedAt),
         firstEventMs: Math.max(0, firstEventAt - turnStartedAt),
         ...(firstTextAt === null ? {} : { firstTextMs: Math.max(0, firstTextAt - turnStartedAt) }),

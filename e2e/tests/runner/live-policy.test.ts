@@ -45,6 +45,84 @@ function completedInput(): LiveRunInput {
 }
 
 describe('live E2E acceptance policy', () => {
+  it.each([
+    { readbacks: undefined, passed: false },
+    { readbacks: [], passed: false },
+    {
+      readbacks: [{ count: 1, attributes: { 'data-parent': 'destination' } }],
+      passed: true,
+    },
+    {
+      readbacks: [{ count: 1, attributes: { 'data-parent': 'original' } }],
+      passed: false,
+    },
+    {
+      readbacks: [{ count: 2, attributes: { 'data-parent': 'destination' } }],
+      passed: false,
+    },
+    { readbacks: [{ count: 0, attributes: {} }], passed: false },
+    {
+      readbacks: [{ count: 1, attributes: { 'data-parent': null } }],
+      passed: false,
+    },
+  ])(
+    'requires independent final page state even when the model claims completion: $readbacks',
+    ({ readbacks, passed }) => {
+      const required = {
+        ...scenario,
+        finalPageStates: [
+          {
+            url: 'https://example.com/document/a',
+            selector: '[data-id="a"]',
+            attributes: { 'data-parent': 'destination' },
+          },
+        ],
+      };
+      const input = {
+        ...completedInput(),
+        ...(readbacks === undefined ? {} : { finalPageReadbacks: readbacks }),
+      };
+      expect(evaluateLiveRun(required, input).passed).toBe(passed);
+    },
+  );
+
+  it.each([
+    { items: ['Alpha', 'Beta'], passed: true },
+    { items: ['Beta', 'Alpha'], passed: true },
+    { items: ['Alpha'], passed: false },
+    { items: ['Alpha', 'Beta', 'Excluded child'], passed: false },
+    { items: ['Alpha', 'Alpha', 'Beta'], passed: false },
+    { items: 'Alpha, Beta', passed: false },
+  ])(
+    'checks the exact inventory set, including omissions and excluded children: $items',
+    ({ items, passed }) => {
+      const inventory = {
+        ...scenario,
+        finalJsonItems: { key: 'documents', equals: ['Alpha', 'Beta'] },
+      };
+      const result = evaluateLiveRun(inventory, {
+        ...completedInput(),
+        finalText: `Example chat inventory\n\`\`\`json\n${JSON.stringify({ documents: items })}\n\`\`\``,
+      });
+      expect(result.passed).toBe(passed);
+    },
+  );
+
+  it('does not accept an ambiguous inventory with two result blocks', () => {
+    const result = evaluateLiveRun(
+      {
+        ...scenario,
+        ...{ finalJsonItems: { key: 'documents', equals: ['Alpha'] } },
+      },
+      {
+        ...completedInput(),
+        finalText:
+          'Example chat inventory\n```json\n{"documents":["Alpha"]}\n```\n```json\n{"documents":["Excluded"]}\n```',
+      },
+    );
+    expect(result.passed).toBe(false);
+  });
+
   it('accepts one completed structural read', () => {
     const result = evaluateLiveRun(scenario, completedInput());
 
@@ -138,7 +216,10 @@ describe('live E2E acceptance policy', () => {
           {
             output: JSON.stringify({
               ok: true,
-              data: { segments: 1, observations: [{ segment: 0 }, { segment: 1 }] },
+              data: {
+                segments: 1,
+                observations: [{ segment: 0 }, { segment: 1 }],
+              },
             }),
           },
         ),
@@ -155,7 +236,10 @@ describe('live E2E acceptance policy', () => {
           {
             output: JSON.stringify({
               ok: true,
-              data: { segments: 1, observations: [{ segment: 0 }, { segment: 1 }] },
+              data: {
+                segments: 1,
+                observations: [{ segment: 0 }, { segment: 1 }],
+              },
             }),
           },
         ),
@@ -172,13 +256,19 @@ describe('live E2E acceptance policy', () => {
 
     expect(accepted.checks).toEqual(
       expect.arrayContaining([
-        expect.objectContaining({ name: 'scroll-traversal-limit', passed: true }),
+        expect.objectContaining({
+          name: 'scroll-traversal-limit',
+          passed: true,
+        }),
       ]),
     );
     expect(accepted.passed).toBe(true);
     expect(rejected.checks).toEqual(
       expect.arrayContaining([
-        expect.objectContaining({ name: 'scroll-traversal-limit', passed: false }),
+        expect.objectContaining({
+          name: 'scroll-traversal-limit',
+          passed: false,
+        }),
       ]),
     );
     expect(rejected.passed).toBe(false);

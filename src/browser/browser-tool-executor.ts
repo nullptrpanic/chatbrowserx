@@ -987,7 +987,9 @@ export class BrowserToolExecutor implements BrowserExecutionPort {
           }
           const input = call.arguments as {
             readonly mode: 'content' | 'interactive' | 'interactive_deep' | 'screenshot';
+            readonly visualReason?: string;
             readonly since?: string;
+            readonly ref?: string;
           };
           const targetTabId = requiredTaskTabId(taskTarget);
           if (input.mode !== 'screenshot') this.#screenshotScales.delete(targetTabId);
@@ -1003,7 +1005,7 @@ export class BrowserToolExecutor implements BrowserExecutionPort {
               );
               break;
             }
-            if (!allowed && !mismatchFallback) {
+            if (!allowed && !mismatchFallback && !input.visualReason?.trim()) {
               output = failure(
                 'SEMANTIC_INSPECTION_AVAILABLE',
                 'The current accessibility tree already contains sufficient semantic targets. Continue with refs and verify state with mode interactive.',
@@ -1017,10 +1019,11 @@ export class BrowserToolExecutor implements BrowserExecutionPort {
             await this.#retainRunner(targetTabId, context?.sessionOwnerId);
           }
           const observed: PageObservationResult =
-            input.since === undefined
+            input.since === undefined && !input.ref
               ? await this.#dependencies.observer.inspect(targetTabId, input.mode, signal)
               : await this.#dependencies.observer.inspect(targetTabId, input.mode, signal, {
-                  since: input.since,
+                  ...(input.since === undefined ? {} : { since: input.since }),
+                  ...(input.ref ? { ref: input.ref } : {}),
                 });
           if (input.mode === 'interactive' || input.mode === 'interactive_deep') {
             this.#rememberInteractiveObservation(targetTabId, observed);

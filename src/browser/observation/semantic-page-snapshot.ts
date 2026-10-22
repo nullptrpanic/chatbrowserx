@@ -1,6 +1,7 @@
 import type { Protocol } from 'devtools-protocol';
 import { readSelectionState } from '../selection-state';
 import { SemanticSnapshotIndex } from './semantic-snapshot-index';
+import { ElementRefStoreError } from './element-ref-store';
 
 export const SEMANTIC_SNAPSHOT_STYLES = [
   'cursor',
@@ -23,6 +24,16 @@ export interface SemanticPageEntry {
   readonly state?: readonly string[];
   readonly actions?: readonly SemanticAction[];
   readonly frame?: string;
+  /** Bounded semantic owners, outermost first; DOM depth alone is not ownership. */
+  readonly context?: readonly (readonly [string, string])[];
+  /** Explicit accessibility hierarchy, never inferred from DOM depth or custom attributes. */
+  readonly hierarchy?: {
+    readonly level?: number;
+    readonly posInSet?: number;
+    readonly setSize?: number;
+  };
+  /** Uninterpreted scalar DOM attributes and their distance from the target (0 = target). */
+  readonly domContext?: readonly [number, Readonly<Record<string, string>>];
   /** Internal selection evidence only; compact model entries never serialize geometry. */
   readonly inViewport?: boolean;
 }
@@ -81,6 +92,17 @@ export interface SemanticPageSnapshot {
   readonly targets: readonly SemanticPageTarget[];
   readonly hasVisualSurface: boolean;
   readonly scrollOwnerProbes: readonly SemanticScrollOwnerProbe[];
+  readonly scope?: {
+    readonly nodes: readonly {
+      /** Internal join key; replaced with a fresh semantic ref by PageObserver. */
+      readonly backendNodeId: number;
+      readonly parent?: number;
+      readonly tag: string;
+      readonly name: string;
+      readonly attributes: Readonly<Record<string, string>>;
+    }[];
+    readonly truncated: boolean;
+  };
 }
 
 export interface SemanticScrollOwnerProbe {
@@ -94,6 +116,7 @@ interface BuildSemanticPageSnapshotInput {
   readonly domSnapshot: Protocol.DOMSnapshot.CaptureSnapshotResponse;
   readonly frame: string;
   readonly scrollOwnerBackendNodeIds?: readonly number[];
+  readonly scopeBackendNodeId?: number;
   readonly viewport?: {
     readonly x: number;
     readonly y: number;
@@ -170,11 +193,13 @@ const SYNTHETIC_ACTION_WORDS = new Set([
   'add',
   'cancel',
   'close',
+  'collapse',
   'compose',
   'create',
   'delete',
   'download',
   'edit',
+  'expand',
   'more',
   'next',
   'open',
@@ -247,6 +272,50 @@ function axState(node: Protocol.Accessibility.AXNode): readonly string[] {
   return uniqueState(state);
 }
 
+function explicitHierarchy(
+  node: SnapshotDomNode | undefined,
+  ax: Protocol.Accessibility.AXNode | undefined,
+): SemanticPageEntry['hierarchy'] {
+  const hierarchy: { level?: number; posInSet?: number; setSize?: number } = {};
+  for (const [key, attribute, property] of [
+    ['level', 'aria-level', 'level'],
+    ['posInSet', 'aria-posinset', 'posinset'],
+    ['setSize', 'aria-setsize', 'setsize'],
+  ] as const) {
+    const raw =
+      node?.attributes.get(attribute) ??
+      ax?.properties?.find((entry) => String(entry.name) === property)?.value.value;
+    const value =
+      typeof raw === 'number' || (typeof raw === 'string' && /^\d+$/.test(raw)) ? Number(raw) : NaN;
+    if (Number.isSafeInteger(value) && value > 0) hierarchy[key] = value;
+  }
+  return Object.keys(hierarchy).length ? hierarchy : undefined;
+}
+
+function scalarDomAttributes(node: SnapshotDomNode): Record<string, string> {
+  return Object.fromEntries(
+    [...node.attributes]
+      .filter(
+        ([key, value]) =>
+          /^data-/.test(key) &&
+          key.length <= 80 &&
+          !/secret|token|password|auth|session|credential/i.test(key) &&
+          /^(?:true|false|-?\d{1,9}(?:\.\d{1,6})?)$/.test(value),
+      )
+      .slice(0, 4),
+  );
+}
+
+function rawDomContext(node: SnapshotDomNode | undefined): SemanticPageEntry['domContext'] {
+  for (let distance = 0; node && distance <= 3; distance += 1) {
+    const attributes = scalarDomAttributes(node);
+    if (Object.keys(attributes).length) return [distance, attributes];
+    if (node.scrollableX || node.scrollableY || UNSAFE_CLICK_NODE_NAMES.has(node.nodeName)) break;
+    node = node.parent ?? undefined;
+  }
+  return undefined;
+}
+
 function uniqueState(values: readonly string[]): readonly string[] {
   const byName = new Map<string, string>();
   for (const value of values) {
@@ -308,6 +377,15 @@ function compactTargetEntries(
       role: preferredEntryRole(existing.role, entry.role),
       name: mergedEntryName(existing.name, entry.name),
       targetIndex,
+      ...(existing.context === undefined && entry.context === undefined
+        ? {}
+        : { context: existing.context ?? entry.context }),
+      ...(existing.hierarchy === undefined && entry.hierarchy === undefined
+        ? {}
+        : { hierarchy: existing.hierarchy ?? entry.hierarchy }),
+      ...(existing.domContext === undefined && entry.domContext === undefined
+        ? {}
+        : { domContext: existing.domContext ?? entry.domContext }),
       ...((existing.state?.length ?? 0) + (entry.state?.length ?? 0) === 0
         ? {}
         : {
@@ -977,6 +1055,63 @@ function semanticAncestorPath(
   return path.reverse();
 }
 
+const OWNER_ROLES = new Set([
+  'navigation',
+  'main',
+  'complementary',
+  'dialog',
+  'alertdialog',
+  'menu',
+  'menubar',
+  'tree',
+  'treeitem',
+  'list',
+  'listitem',
+  'row',
+  'grid',
+  'table',
+  'toolbar',
+  'form',
+  'region',
+]);
+const OWNER_TAG_ROLES: Readonly<Record<string, string>> = {
+  NAV: 'navigation',
+  MAIN: 'main',
+  ASIDE: 'complementary',
+  DIALOG: 'dialog',
+  FORM: 'form',
+  TABLE: 'table',
+  TR: 'row',
+  UL: 'list',
+  OL: 'list',
+  LI: 'listitem',
+};
+
+function semanticOwnerContext(
+  node: SnapshotDomNode | undefined,
+  axByBackendId: ReadonlyMap<number, Protocol.Accessibility.AXNode>,
+): readonly (readonly [string, string])[] {
+  const owners: [string, string][] = [];
+  let parent = node?.parent;
+  for (
+    let depth = 0;
+    parent && depth < 80 && owners.length < 4;
+    depth += 1, parent = parent.parent
+  ) {
+    const ax = axByBackendId.get(parent.backendNodeId);
+    const role = (
+      axText(ax?.role) ||
+      parent.attributes.get('role') ||
+      OWNER_TAG_ROLES[parent.nodeName] ||
+      ''
+    ).toLowerCase();
+    if (!OWNER_ROLES.has(role)) continue;
+    const name = normalizedText(axText(ax?.name) || parent.attributes.get('aria-label'), 120);
+    owners.push([role, name]);
+  }
+  return owners.reverse();
+}
+
 function stableDomAttributes(node: SnapshotDomNode): readonly (readonly [string, string])[] {
   const attributes: [string, string][] = [];
   for (const name of ['id', 'data-testid', 'data-test-id', 'name', 'role', 'type'] as const) {
@@ -1107,7 +1242,7 @@ function syntheticClickableName(
   node: SnapshotDomNode,
 ): { readonly name: string; readonly role: string } | undefined {
   const hint = contextualSyntheticActionHint(node);
-  const name = syntheticTargetName(node, hint?.name ?? '');
+  const name = syntheticTargetName(node, hint?.name ?? '', hint !== undefined);
   if (!name) return undefined;
   const declaredRole = normalizedText(node.attributes.get('role'), 100).toLowerCase();
   const role =
@@ -1124,13 +1259,14 @@ function syntheticClickableName(
   return { name, role };
 }
 
-function syntheticTargetName(node: SnapshotDomNode, fallback: string): string {
+function syntheticTargetName(node: SnapshotDomNode, fallback: string, preferHint = false): string {
   for (const attribute of ['aria-label', 'placeholder', 'data-placeholder', 'title', 'name']) {
     const value = syntheticNameText(node.attributes.get(attribute));
     if (value) return value;
   }
   const own = syntheticNameText(domSubtreeText(node, 200));
   if (own) return own;
+  if (preferHint && fallback) return fallback;
   const parent = node.parent;
   if (parent?.bounds && node.bounds) {
     const parentArea = parent.bounds[2] * parent.bounds[3];
@@ -1255,12 +1391,106 @@ function orderedAxNodes(
   return ordered;
 }
 
+/** Local rendered structure, not application state or a guessed custom-tree schema. */
+function scopedDomEvidence(
+  target: SnapshotDomNode,
+  axByBackendId: ReadonlyMap<number, Protocol.Accessibility.AXNode>,
+) {
+  const ancestors: SnapshotDomNode[] = [];
+  const owners = new Set([
+    'list',
+    'tree',
+    'grid',
+    'table',
+    'menu',
+    'navigation',
+    'dialog',
+    'region',
+  ]);
+  let root = target;
+  for (let depth = 0; root.parent && depth < 6; depth += 1) {
+    const role =
+      axText(axByBackendId.get(root.backendNodeId)?.role) ||
+      root.attributes.get('role') ||
+      OWNER_TAG_ROLES[root.nodeName];
+    if (owners.has(role?.toLowerCase() ?? '') || root.scrollableX || root.scrollableY) break;
+    if (UNSAFE_CLICK_NODE_NAMES.has(root.parent.nodeName)) break;
+    ancestors.unshift(root);
+    root = root.parent;
+  }
+  const included = new Set<SnapshotDomNode>();
+  const nodes: NonNullable<SemanticPageSnapshot['scope']>['nodes'][number][] = [];
+  const indexes = new Map<SnapshotDomNode, number>();
+  const queue = [root, ...ancestors];
+  let characters = 0;
+  let truncated = false;
+  for (let cursor = 0; cursor < queue.length; cursor += 1) {
+    const node = queue[cursor];
+    if (
+      !node ||
+      included.has(node) ||
+      !node.visible ||
+      node.nodeName.startsWith('#') ||
+      ['SCRIPT', 'STYLE'].includes(node.nodeName)
+    )
+      continue;
+    const attributes: Record<string, string> = scalarDomAttributes(node);
+    for (const [key, value] of node.attributes) {
+      const structural = [
+        'role',
+        'aria-level',
+        'aria-posinset',
+        'aria-setsize',
+        'aria-expanded',
+        'aria-selected',
+        'aria-label',
+        'title',
+      ].includes(key);
+      if (structural && Object.keys(attributes).length < 12)
+        attributes[key] = normalizedText(value, 80);
+    }
+    const parent = node.parent ? indexes.get(node.parent) : undefined;
+    const evidence = {
+      backendNodeId: node.backendNodeId,
+      ...(parent === undefined ? {} : { parent }),
+      tag: node.nodeName.toLowerCase(),
+      name: normalizedText(
+        axText(axByBackendId.get(node.backendNodeId)?.name) ||
+          node.attributes.get('aria-label') ||
+          (['INPUT', 'TEXTAREA'].includes(node.nodeName) ? '' : domSubtreeText(node, 80)),
+        80,
+      ),
+      attributes,
+    };
+    const size = JSON.stringify(evidence).length;
+    if (nodes.length >= 120 || characters + size > 8_000) {
+      truncated = true;
+      break;
+    }
+    characters += size;
+    indexes.set(node, nodes.length);
+    nodes.push(evidence);
+    included.add(node);
+    if (!['INPUT', 'TEXTAREA'].includes(node.nodeName)) {
+      for (const child of node.children) queue.push(child);
+    }
+  }
+  return { included, evidence: { nodes, truncated } };
+}
+
 /** Joins native AX semantics with bounded DOMSnapshot action evidence. */
 export function buildSemanticPageSnapshot(
   input: BuildSemanticPageSnapshotInput,
 ): SemanticPageSnapshot {
   const domByBackendId = snapshotDomNodes(input.domSnapshot);
   const axById = new Map(input.axNodes.map((node) => [node.nodeId, node]));
+  const axByBackendId = new Map(
+    input.axNodes.flatMap((node) =>
+      !node.ignored && node.backendDOMNodeId !== undefined
+        ? [[node.backendDOMNodeId, node] as const]
+        : [],
+    ),
+  );
   const entries: SemanticPageEntry[] = [];
   const targets: SemanticPageTarget[] = [];
   const targetIndexes = new Map<number, number>();
@@ -1269,6 +1499,17 @@ export function buildSemanticPageSnapshot(
   const domNodes = [...domByBackendId.values()];
   const snapshotIndex = new SemanticSnapshotIndex(domNodes, input.viewport);
   const clippedBoundsCache = new Map<SnapshotDomNode, SnapshotBounds | undefined>();
+  const scopeTarget =
+    input.scopeBackendNodeId === undefined
+      ? undefined
+      : domByBackendId.get(input.scopeBackendNodeId);
+  if (input.scopeBackendNodeId !== undefined && (!scopeTarget || !scopeTarget.visible)) {
+    throw new ElementRefStoreError(
+      'STALE_REF',
+      'The scoped element reference is stale. Inspect the current page again.',
+    );
+  }
+  const scope = scopeTarget ? scopedDomEvidence(scopeTarget, axByBackendId) : undefined;
 
   for (const node of orderedAxNodes(input.axNodes)) {
     if (node.ignored) continue;
@@ -1420,6 +1661,10 @@ export function buildSemanticPageSnapshot(
     if (seenEntries.has(dedupeKey)) continue;
     seenEntries.add(dedupeKey);
     const inViewport = viewportMembership(targetDomNode ?? domNode, input.viewport);
+    const context =
+      targetIndex === undefined ? [] : semanticOwnerContext(targetDomNode, axByBackendId);
+    const hierarchy = explicitHierarchy(domNode, node);
+    const domContext = hierarchy ? undefined : rawDomContext(targetDomNode ?? domNode);
     entries.push(
       semanticPageEntry(
         `${input.frame}:ax:${backendNodeId === undefined ? node.nodeId : String(backendNodeId)}`,
@@ -1428,6 +1673,9 @@ export function buildSemanticPageSnapshot(
           role: effectiveRole,
           name,
           ...(targetIndex === undefined ? {} : { targetIndex }),
+          ...(context.length === 0 ? {} : { context }),
+          ...(hierarchy === undefined ? {} : { hierarchy }),
+          ...(domContext === undefined ? {} : { domContext }),
           ...(state.length === 0 ? {} : { state }),
           ...(actions.length === 0 ? {} : { actions }),
           ...(input.frame === 'main' ? {} : { frame: input.frame }),
@@ -1501,7 +1749,12 @@ export function buildSemanticPageSnapshot(
         ? 'Search'
         : 'Editable field'
       : (clickable?.name ?? 'Scrollable area');
-    const name = syntheticTargetName(domNode, fallback);
+    const name = editableRole
+      ? syntheticTargetName(domNode, fallback)
+      : (clickable?.name ?? syntheticTargetName(domNode, fallback));
+    const context = semanticOwnerContext(domNode, axByBackendId);
+    const hierarchy = explicitHierarchy(domNode, axByBackendId.get(domNode.backendNodeId));
+    const domContext = hierarchy ? undefined : rawDomContext(domNode);
     const inViewport = viewportMembership(domNode, input.viewport);
     const targetIndex = targets.length;
     const scrollMetrics = scrollMetricsFor(domNode);
@@ -1530,6 +1783,9 @@ export function buildSemanticPageSnapshot(
         role,
         name,
         targetIndex,
+        ...(context.length === 0 ? {} : { context }),
+        ...(hierarchy === undefined ? {} : { hierarchy }),
+        ...(domContext === undefined ? {} : { domContext }),
         ...(state.length === 0 ? {} : { state }),
         actions,
         ...(input.frame === 'main' ? {} : { frame: input.frame }),
@@ -1553,8 +1809,26 @@ export function buildSemanticPageSnapshot(
     },
   );
   return {
-    ...compactTargetEntries(entries, targets),
+    ...compactTargetEntries(
+      scope
+        ? entries.filter((entry) => {
+            const backendNodeId =
+              entry.targetIndex === undefined
+                ? Number(entry.identity.split(':').at(-1))
+                : targets[entry.targetIndex]?.backendNodeId;
+            const node =
+              backendNodeId === undefined ? undefined : domByBackendId.get(backendNodeId);
+            if (!node) return false;
+            return (
+              scope.included.has(node) ||
+              (node.nodeName === '#TEXT' && node.parent !== null && scope.included.has(node.parent))
+            );
+          })
+        : entries,
+      targets,
+    ),
     hasVisualSurface: domNodes.some(isVisualSurface),
     scrollOwnerProbes,
+    ...(scope === undefined ? {} : { scope: scope.evidence }),
   };
 }

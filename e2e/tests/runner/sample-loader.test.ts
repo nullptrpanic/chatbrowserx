@@ -140,14 +140,42 @@ describe('self-contained E2E samples', () => {
     value.evaluation.policy.requiredMutationReadbacks = [
       { actionName: 'Save', includes: ['unique event', 'Saved'] },
     ];
+    value.evaluation.policy.finalJsonItems = {
+      key: 'documents',
+      equals: ['Alpha', 'Beta'],
+    };
+    const finalPageStates = [
+      {
+        url: 'https://example.com/a',
+        selector: '[data-id="a"]',
+        attributes: { 'data-parent': 'b' },
+      },
+    ];
+    value.evaluation.policy.finalPageStates = finalPageStates;
     const root = await createSampleRoot(value);
 
     const loaded = await loadEvaluationSample(root, sample.id);
 
     expect(loaded.scenario).toMatchObject({
       requiredMutationReadbacks: [{ actionName: 'Save', includes: ['unique event', 'Saved'] }],
+      finalJsonItems: { key: 'documents', equals: ['Alpha', 'Beta'] },
+      finalPageStates,
     });
   });
+
+  it.each(['https://elsewhere.example.com/a', 'file:///a', 'https://user:password@example.com/a'])(
+    'rejects unrelated or credentialed page readbacks: %s',
+    async (url) => {
+      const value = structuredClone(sample) as unknown as {
+        evaluation: { policy: Record<string, unknown> };
+      };
+      value.evaluation.policy.finalPageStates = [
+        { url, selector: '[data-id="a"]', attributes: { 'data-parent': 'b' } },
+      ];
+      const root = await createSampleRoot(value);
+      await expect(loadEvaluationSample(root, sample.id)).rejects.toThrow('finalPageStates');
+    },
+  );
 
   it('materializes the navigation keypress allowlist', async () => {
     const value = structuredClone(sample) as unknown as {

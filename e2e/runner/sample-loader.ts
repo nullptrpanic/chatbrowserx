@@ -89,6 +89,37 @@ const policySchema = z
     requiredToolOutputIncludes: z.array(nonEmptyString).optional(),
     requiredMutationReadbacks: z.array(mutationReadbackSchema).min(1).optional(),
     finalTextIncludes: nonEmptyStrings,
+    finalJsonItems: z
+      .object({ key: nonEmptyString, equals: z.array(nonEmptyString) })
+      .strict()
+      .refine(({ equals }) => new Set(equals).size === equals.length, {
+        message: 'must not contain duplicate inventory items.',
+      })
+      .optional(),
+    finalPageStates: z
+      .array(
+        z
+          .object({
+            url: z.url(),
+            selector: nonEmptyString.max(1000),
+            attributes: z
+              .record(
+                z.string().regex(/^(?:data-[\w-]+|aria-[\w-]+|role|title)$/),
+                z.string().max(2000),
+              )
+              .refine(
+                (attributes) =>
+                  Object.keys(attributes).length > 0 && Object.keys(attributes).length <= 8,
+                {
+                  message: 'must contain between one and eight attributes.',
+                },
+              ),
+          })
+          .strict(),
+      )
+      .min(1)
+      .max(100)
+      .optional(),
     finalTextIncludesAny: z.array(nonEmptyStrings).min(1).optional(),
     requireFreshProviderContext: z.boolean().optional(),
     finalTextExcludes: z.array(nonEmptyString).optional(),
@@ -186,6 +217,19 @@ export function parseEvaluationSample(
   if (targetUrl.origin !== sample.target.expectedOrigin) {
     throw new Error(`Sample "${sample.id}" target.expectedOrigin must match target.url.`);
   }
+  for (const state of sample.evaluation.policy.finalPageStates ?? []) {
+    const url = new URL(state.url);
+    if (
+      !['http:', 'https:'].includes(url.protocol) ||
+      url.origin !== targetUrl.origin ||
+      url.username ||
+      url.password
+    ) {
+      throw new Error(
+        `Sample "${sample.id}" finalPageStates must use the target HTTP(S) origin without URL credentials.`,
+      );
+    }
+  }
   const forbiddenTools = new Set(sample.execution.forbiddenTools);
   const overlap = sample.execution.requiredTools.find((tool) => forbiddenTools.has(tool));
   if (overlap !== undefined) {
@@ -261,6 +305,8 @@ export function materializeLiveScenario(sample: EvaluationSampleDefinition): Liv
     ...(policy.requiredMutationReadbacks === undefined
       ? {}
       : { requiredMutationReadbacks: policy.requiredMutationReadbacks }),
+    ...(policy.finalJsonItems === undefined ? {} : { finalJsonItems: policy.finalJsonItems }),
+    ...(policy.finalPageStates === undefined ? {} : { finalPageStates: policy.finalPageStates }),
     ...(policy.finalTextIncludesAny === undefined
       ? {}
       : { finalTextIncludesAny: policy.finalTextIncludesAny }),

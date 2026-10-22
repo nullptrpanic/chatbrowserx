@@ -6,6 +6,7 @@ describe('built-in tool discovery', () => {
     const declarations = await discoverToolDeclarations();
 
     expect(declarations.map(({ name }) => name)).toEqual([
+      'task_progress',
       'browser_get_current_tab',
       'browser_list_tabs',
       'browser_open_tab',
