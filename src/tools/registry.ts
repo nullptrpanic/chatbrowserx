@@ -66,16 +66,6 @@ export function bindToolRuntime(
       return null;
     },
 
-    async blocksCompletion(context) {
-      for (const runtime of runtimes) {
-        if ((await runtime.blocksCompletion?.(context, services)) === true) return true;
-      }
-      for (const declaration of declarations) {
-        if ((await declaration.blocksCompletion?.(context)) === true) return true;
-      }
-      return false;
-    },
-
     async preflight(call, context, signal) {
       return (
         (await byName.get(call.name)?.runtime?.preflight?.(call, context, services, signal)) ?? null

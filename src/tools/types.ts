@@ -106,7 +106,6 @@ export interface ToolDeclaration<TArguments = unknown> {
   readonly policy: ToolExecutionPolicy;
   available?(context: ToolRuntimeContext): boolean | Promise<boolean>;
   model?(context: ToolRuntimeContext): ToolModelExposure | null | Promise<ToolModelExposure | null>;
-  blocksCompletion?(context: ToolRuntimeContext): boolean | Promise<boolean>;
   reviewCompletion?(context: ToolRuntimeContext): ToolCompletionReview | null;
   callsUsed?(context: ToolRuntimeContext): number;
   createCall?(call: ValidatedToolCall<TArguments>): ValidatedToolCall<TArguments>;
@@ -145,10 +144,6 @@ export interface ToolRuntimeHooks {
     services: ToolServiceResolver,
     signal: AbortSignal,
   ): ToolPreparation | Promise<ToolPreparation>;
-  blocksCompletion?(
-    context: ToolRuntimeContext,
-    services: ToolServiceResolver,
-  ): boolean | Promise<boolean>;
   preflight?(
     call: ValidatedToolCall,
     context: ToolRuntimeContext,
@@ -174,7 +169,6 @@ export interface ModelToolContract {
 
 export interface ToolRuntimePort {
   contract(context: ToolRuntimeContext, signal?: AbortSignal): Promise<ModelToolContract>;
-  blocksCompletion(context: ToolRuntimeContext): Promise<boolean>;
   reviewCompletion?(context: ToolRuntimeContext): Promise<ToolCompletionReview | null>;
   preflight(
     call: ValidatedToolCall,

@@ -8,7 +8,7 @@ import {
   type ParsedBrowserToolCall,
 } from './contract';
 import type { ModelToolDefinition } from '../model-tool';
-import type { ToolDeclaration, ToolRuntimeContext } from '../types';
+import type { ToolCompletionReview, ToolDeclaration, ToolRuntimeContext } from '../types';
 import {
   browserScrollContinuationForCheckpoint,
   browserToolContractForCheckpoint,
@@ -89,9 +89,19 @@ export function browserTool(
     },
     ...(order === 0
       ? {
-          blocksCompletion(context: ToolRuntimeContext) {
+          reviewCompletion(context: ToolRuntimeContext): ToolCompletionReview | null {
             const state = browserState(context);
-            return state !== null && browserScrollContinuationForCheckpoint(state) !== null;
+            const continuation = state && browserScrollContinuationForCheckpoint(state);
+            if (!continuation) return null;
+            return {
+              type: 'continue',
+              toolName: 'browser_scroll',
+              feedback: JSON.stringify({
+                completion: 'continue',
+                reason: 'unfinished_scroll',
+                next: { ...continuation, action: `browser_${continuation.next}` },
+              }),
+            };
           },
         }
       : {}),

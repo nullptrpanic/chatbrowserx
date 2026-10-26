@@ -332,10 +332,6 @@ export class TaskExecutor {
             toolResults: snapshot.toolResults,
             events: snapshot.events,
           };
-          if (await this.#dependencies.tools.blocksCompletion(completionContext)) {
-            await this.#interruptReply(snapshot.task, result.messageId);
-            continue;
-          }
           const continuationItems = snapshot.checkpoint.continuationItems.some(
             (item) => item.type === 'message_ref' && item.messageId === result.messageId,
           )

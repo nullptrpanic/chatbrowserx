@@ -1222,6 +1222,85 @@ describe('TaskExecutor', () => {
     });
   });
 
+  it('bounds repeated finals during unfinished scroll and persists rejected turn metrics', async () => {
+    const finals: AgentEvent[] = Array.from({ length: 3 }, (_, i) => ({
+      type: 'task.completed',
+      reason: 'model_response_completed',
+      messageId: `scroll_final_${i}`,
+      modelTurn: {
+        responseId: `response_${i}`,
+        inputItemCount: 2,
+        elapsedMs: 25,
+        firstEventMs: 4,
+        usage: null,
+      },
+    }));
+    const result = await runBrowserProgressScenario(
+      'scroll-final-loop',
+      [
+        browserCall('unfinished_scroll', 'browser_scroll', {
+          tabId: 0,
+          target: 'ref_history',
+          deltaX: 0,
+          deltaY: -10_000,
+          maxSegments: 1,
+          stopText: '',
+        }),
+        ...finals,
+        browserCall('too_late_scroll', 'browser_scroll', {
+          tabId: 0,
+          target: 'ref_history',
+          deltaX: 0,
+          deltaY: -9_035,
+          maxSegments: 1,
+          stopText: '',
+        }),
+        browserCall('too_late_inspect', 'browser_inspect', { tabId: 0, mode: 'interactive' }),
+      ],
+      async (call) => ({
+        output: JSON.stringify({
+          ok: true,
+          tabId: 7,
+          data: {
+            action: 'scroll',
+            requestedDeltaApplied: call.callId !== 'unfinished_scroll',
+            remainingDeltaX: 0,
+            remainingDeltaY: call.callId === 'unfinished_scroll' ? -9_035 : 0,
+            loadedMore: call.callId === 'unfinished_scroll',
+            boundaryVerified: false,
+          },
+        }),
+        attachmentIds: [],
+      }),
+      ({ taskId, appendMessage, now }) => {
+        for (let i = 0; i < 3; i++) {
+          const at = now();
+          void appendMessage({
+            id: `scroll_final_${i}`,
+            kind: 'conversation',
+            conversationId: 'conversation_1',
+            taskId,
+            role: 'assistant',
+            status: 'complete',
+            text: 'Done',
+            attachmentIds: [],
+            createdAt: at,
+            updatedAt: at,
+          });
+        }
+      },
+    );
+    expect(result.task.status).toBe('paused');
+    expect(
+      result.events.filter(
+        (event) => event.type === 'status.changed' && event.reason.startsWith('completion_review:'),
+      ),
+    ).toHaveLength(2);
+    expect(result.events.filter((event) => event.type === 'model.turn')).toHaveLength(3);
+    expect(result.run.error?.recoveryAction).toBe('resume_task');
+    expect(result.toolResults).toHaveLength(1);
+  });
+
   it('rejects a premature final answer until an unfinished virtualized scroll is inspected and resumed', async () => {
     const calls: readonly AgentEvent[] = [
       browserCall('call_scroll_initial', 'browser_scroll', {
@@ -1342,6 +1421,11 @@ describe('TaskExecutor', () => {
 
     expect(result.task.status).toBe('completed');
     expect(execute).toHaveBeenCalledTimes(4);
+    expect(
+      result.events.filter(
+        (event) => event.type === 'status.changed' && event.reason.startsWith('completion_review:'),
+      ),
+    ).toHaveLength(1);
     expect(
       result.events.filter(
         (event) => event.type === 'status.changed' && event.taskStatus === 'completed',
