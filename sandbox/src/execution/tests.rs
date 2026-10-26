@@ -220,3 +220,89 @@ async fn agora_runtime_executes_and_records_detailed_events() {
     );
     assert!(snapshot.executions[0].process_events > 0);
 }
+
+#[cfg(target_os = "macos")]
+#[tokio::test]
+async fn agora_runtime_preserves_encrypted_io_across_launchers() {
+    let cases = [
+        (
+            "direct redirection",
+            "/usr/bin/printf direct-ready > direct.txt; /bin/cat direct.txt",
+            "direct-ready",
+        ),
+        (
+            "consecutive exec redirection",
+            "/usr/bin/env /usr/bin/env /usr/bin/printf launch-ready > launch.txt; /bin/cat launch.txt",
+            "launch-ready",
+        ),
+        (
+            "launcher append",
+            "/usr/bin/printf first > append.txt; /usr/bin/env /usr/bin/printf second >> append.txt; /bin/cat append.txt",
+            "firstsecond",
+        ),
+        (
+            "Python launcher heredoc",
+            "/usr/bin/python3 - <<'PY'\nprint('python-ready')\nPY",
+            "python-ready\n",
+        ),
+        (
+            "Python launcher redirected output",
+            "/usr/bin/python3 - <<'PY' > python.txt\nprint('python-file')\nPY\n/bin/cat python.txt",
+            "python-file\n",
+        ),
+        (
+            "JSON read after redirection",
+            "/usr/bin/printf '{\"ok\":true}' > payload.json\n/usr/bin/python3 - <<'PY'\nimport json\nprint(json.load(open('payload.json'))['ok'])\nPY",
+            "True\n",
+        ),
+    ];
+    let mut failures = Vec::new();
+    for (name, command, expected) in cases {
+        let directory = tempfile::tempdir().unwrap();
+        let config_path = directory.path().join("sandbox.json");
+        std::fs::write(
+            &config_path,
+            serde_json::to_vec(&serde_json::json!({
+                "address": "127.0.0.1:43129",
+                "web_address": "127.0.0.1:43130",
+                "secret": "0123456789abcdef0123456789abcdef",
+                "log_file": "sandbox.log",
+                "timeout_seconds": 20,
+                "sandbox": {
+                    "workspace": "workspace",
+                    "log_file": "audit.jsonl",
+                    "filesystem": {
+                        "local": { "encrypt": "encrypted", "key": "test-only-key" }
+                    },
+                    "tls": "off"
+                }
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        let config = crate::config::Config::load(&config_path).unwrap();
+        let runtime = super::AgoraRuntime::new(config.sandbox().unwrap()).unwrap();
+        let executor = ExecutionService::new(
+            Arc::new(runtime),
+            AuditLog::in_memory(),
+            Duration::from_secs(20),
+            4096,
+            4096,
+        );
+        let output = executor
+            .execute(ShellCommand {
+                command: format!("set -euo pipefail\n{command}"),
+                cwd: Some(directory.path().to_path_buf()),
+                env: BTreeMap::new(),
+            })
+            .await
+            .unwrap_or_else(|error| panic!("{name}: {error:?}"));
+        if output.code != 0 || output.stdout != expected || !output.stderr.is_empty() {
+            failures.push(format!(
+                "{name}: code={}, stdout={:?}, stderr={:?}, expected={expected:?}",
+                output.code, output.stdout, output.stderr
+            ));
+        }
+    }
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
