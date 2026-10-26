@@ -263,7 +263,18 @@ function plainRecord(value: unknown): Readonly<Record<string, unknown>> | null {
 }
 
 function sensitiveName(name: string): boolean {
-  return SENSITIVE_NAME.test(name) || /(?:access|refresh|id)[-_]?token/i.test(name);
+  // Field names occur in JSON, form paths and case-insensitive HTTP headers.
+  const normalized = name
+    .replace(/([a-z0-9])([A-Z])/g, '$1_$2')
+    .replace(/([A-Z])([A-Z][a-z])/g, '$1_$2')
+    .replace(/[^a-z0-9]+/gi, '_');
+  return (
+    SENSITIVE_NAME.test(normalized) ||
+    /(?:access|refresh|id)[-_]?token/i.test(name) ||
+    /(?:authorization|cookie|token|secret|password|passwd|apikey|credential|session(?:id)?)$/i.test(
+      name,
+    )
+  );
 }
 
 function safeHttpUrl(value: unknown): string | null {

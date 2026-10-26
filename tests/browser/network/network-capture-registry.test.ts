@@ -11,7 +11,13 @@ import { NetworkCaptureRegistry } from '../../../src/browser/network/network-cap
 function transport() {
   const eventListeners = new Set<DebuggerEventListener>();
   const detachListeners = new Set<DebuggerDetachListener>();
-  const send = vi.fn(async (_session: DebuggerSession, method: string) => {
+  const send = vi.fn<
+    (
+      session: DebuggerSession,
+      method: string,
+      params?: Readonly<Record<string, unknown>>,
+    ) => Promise<Record<string, unknown>>
+  >(async (_session, method) => {
     if (method === 'Network.getRequestPostData') {
       return {
         postData: JSON.stringify({
@@ -634,6 +640,101 @@ describe('NetworkCaptureRegistry', () => {
     expect(details.responseBody.text).toContain('"value":"visible"');
     expect(JSON.stringify(details)).not.toContain('secret');
     expect(JSON.stringify(details).length).toBeLessThanOrEqual(100 * 1_024);
+  });
+
+  it('redacts camelCase and acronym secrets across URLs, headers, previews and bodies', async () => {
+    const debuggerTransport = transport();
+    const capture = registry(debuggerTransport);
+    const fields = {
+      clientSecret: 'canary-client',
+      sessionId: 'canary-session',
+      csrfToken: 'canary-csrf',
+      XSRFToken: 'canary-xsrf',
+      APIKey: 'canary-api',
+      'auth[password]': 'canary-password',
+      description: 'ordinary',
+      tokenizer: 'ordinary',
+    };
+    const form = new URLSearchParams(fields).toString();
+    await capture.start(7, new AbortController().signal);
+    request(
+      debuggerTransport,
+      'camel_json',
+      `https://api.test/items?${form}`,
+      {},
+      {
+        method: 'POST',
+        hasPostData: true,
+        postData: JSON.stringify({ nested: [fields] }),
+        headers: { ...fields, 'Content-Type': 'application/json' },
+      },
+    );
+    response(debuggerTransport, 'camel_json');
+    request(
+      debuggerTransport,
+      'camel_form',
+      `https://api.test/form?${form}`,
+      {},
+      {
+        method: 'POST',
+        hasPostData: true,
+        postData: form,
+        headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+      },
+    );
+    await capture.stop(7);
+    debuggerTransport.send.mockImplementation(async (_session, method, params) => {
+      if (method === 'Network.getRequestPostData') {
+        return {
+          postData:
+            params?.requestId === 'camel_json' ? JSON.stringify({ nested: [fields] }) : form,
+        };
+      }
+      if (method === 'Network.getResponseBody') {
+        return { body: JSON.stringify({ nested: [fields] }), base64Encoded: false };
+      }
+      return {};
+    });
+    const listed = await capture.list(7, '', 10, 'recent', '');
+    const results = await capture.get(
+      7,
+      listed.requests.map(({ requestId }) => ({
+        requestId,
+        includeRequestBody: true,
+        includeResponseBody: true,
+      })),
+    );
+    const output = JSON.stringify({ listed, results });
+    expect(output).not.toContain('canary-');
+    const jsonResult = results.find((result) => result.ok && result.request.url.includes('/items'));
+    if (!jsonResult?.ok) throw new Error('Expected JSON response.');
+    expect(JSON.parse(jsonResult.request.responseBody.text ?? '')).toEqual({
+      nested: [
+        {
+          clientSecret: '[redacted]',
+          sessionId: '[redacted]',
+          csrfToken: '[redacted]',
+          XSRFToken: '[redacted]',
+          APIKey: '[redacted]',
+          'auth[password]': '[redacted]',
+          description: 'ordinary',
+          tokenizer: 'ordinary',
+        },
+      ],
+    });
+    expect(jsonResult.request.requestBody.text).toBe(jsonResult.request.responseBody.text);
+    const formResult = results.find((result) => result.ok && result.request.url.includes('/form'));
+    if (!formResult?.ok) throw new Error('Expected form request.');
+    expect(new URLSearchParams(formResult.request.requestBody.text ?? '').get('clientSecret')).toBe(
+      '[redacted]',
+    );
+    expect(new URLSearchParams(formResult.request.requestBody.text ?? '').get('description')).toBe(
+      'ordinary',
+    );
+    expect(jsonResult.request.requestHeaders).toMatchObject({
+      description: 'ordinary',
+      tokenizer: 'ordinary',
+    });
   });
 
   it('marks binary and unavailable bodies without leaking payloads', async () => {
