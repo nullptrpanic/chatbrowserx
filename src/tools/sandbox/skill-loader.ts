@@ -12,6 +12,8 @@ const MAX_FRONTMATTER_BYTES = 64 * 1_024;
 const MAX_DISCOVERY_BYTES = 60_000;
 const SNAPSHOT_TTL_MS = 5 * 60 * 1_000;
 const MAX_SNAPSHOT_AGE_MS = 2 * SNAPSHOT_TTL_MS;
+const DISCOVERY_TIMEOUT_MS = 5_000;
+const FAILED_REFRESH_RETRY_MS = 30_000;
 const SCAN_END = '__CHATBROWSERX_SCAN_END__';
 
 const DISCOVERY_COMMAND = `set -euo pipefail
@@ -74,6 +76,7 @@ type SkillSnapshot = Readonly<{ prompt: string; scannedAt: number }>;
 
 const snapshots = new WeakMap<object, SkillSnapshot>();
 const refreshes = new WeakMap<object, Promise<string | null>>();
+const failedRefreshes = new WeakMap<object, number>();
 
 const outputSchema = z
   .object({
@@ -229,19 +232,35 @@ async function discoverSkillPrompt(
   }
 }
 
-function refreshSkillPrompt(
-  execution: SandboxExecutionPort,
-  signal: AbortSignal,
-  key: object,
-): Promise<string | null> {
+function refreshSkillPrompt(execution: SandboxExecutionPort, key: object): Promise<string | null> {
   const existing = refreshes.get(key);
   if (existing !== undefined) return existing;
-  const refresh = discoverSkillPrompt(execution, signal)
+  const failedAt = failedRefreshes.get(key);
+  const now = Date.now();
+  if (failedAt !== undefined && now >= failedAt && now - failedAt < FAILED_REFRESH_RETRY_MS) {
+    return Promise.resolve(null);
+  }
+  // The shared scan owns its deadline; cancelling one waiter must not cancel other tasks.
+  const controller = new AbortController();
+  let timeout: ReturnType<typeof setTimeout>;
+  const deadline = new Promise<null>((resolve) => {
+    timeout = setTimeout(() => {
+      resolve(null);
+      controller.abort();
+    }, DISCOVERY_TIMEOUT_MS);
+  });
+  const refresh = Promise.race([discoverSkillPrompt(execution, controller.signal), deadline])
     .then((prompt) => {
-      if (prompt !== null) snapshots.set(key, { prompt, scannedAt: Date.now() });
+      if (prompt !== null) {
+        snapshots.set(key, { prompt, scannedAt: Date.now() });
+        failedRefreshes.delete(key);
+      } else {
+        failedRefreshes.set(key, Date.now());
+      }
       return prompt;
     })
     .finally(() => {
+      clearTimeout(timeout);
       if (refreshes.get(key) === refresh) refreshes.delete(key);
     });
   refreshes.set(key, refresh);
@@ -254,10 +273,10 @@ export async function loadSandboxSkillPrompt(
   signal: AbortSignal,
   configurationKey?: object,
 ): Promise<string | null> {
-  if (!services.has(sandboxService)) return null;
+  if (signal.aborted || !services.has(sandboxService)) return null;
   const execution = services.get(sandboxService).execution;
   const key = configurationKey ?? (await execution.configurationKey());
-  if (key === null) return null;
+  if (key === null || signal.aborted) return null;
   const now = Date.now();
   const snapshot = snapshots.get(key);
   if (
@@ -272,8 +291,20 @@ export async function loadSandboxSkillPrompt(
     now >= snapshot.scannedAt &&
     now - snapshot.scannedAt < MAX_SNAPSHOT_AGE_MS
   ) {
-    void refreshSkillPrompt(execution, signal, key);
+    void refreshSkillPrompt(execution, key);
     return snapshot.prompt;
   }
-  return refreshSkillPrompt(execution, signal, key);
+  const refresh = refreshSkillPrompt(execution, key);
+  return new Promise((resolve) => {
+    const abort = () => {
+      signal.removeEventListener('abort', abort);
+      resolve(null);
+    };
+    signal.addEventListener('abort', abort, { once: true });
+    void refresh.then((prompt) => {
+      signal.removeEventListener('abort', abort);
+      resolve(signal.aborted ? null : prompt);
+    });
+    if (signal.aborted) abort();
+  });
 }

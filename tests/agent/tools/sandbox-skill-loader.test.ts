@@ -8,6 +8,8 @@ import type { SandboxExecutionPort } from '../../../src/sandbox/sandbox-tool-exe
 import { ToolServiceResolver } from '../../../src/tools/service-resolver';
 import { loadSandboxSkillPrompt } from '../../../src/tools/sandbox/skill-loader';
 import { createSandboxToolService, sandboxService } from '../../../src/tools/sandbox/service';
+import { bindToolRuntime } from '../../../src/tools/registry';
+import { sandboxExecTool, sandboxReadTool, sandboxRuntime } from '../../../src/tools/sandbox/tool';
 
 const execFileAsync = promisify(execFile);
 
@@ -63,7 +65,151 @@ async function loadPrompt(home: string): Promise<string | null> {
   return loadSandboxSkillPrompt(services, new AbortController().signal);
 }
 
+function discoveryServices(execute: SandboxExecutionPort['execute']) {
+  const services = new ToolServiceResolver();
+  services.bind(
+    sandboxService,
+    createSandboxToolService({
+      execute,
+      async configurationKey() {
+        return this;
+      },
+      recover: async () => ({ status: 'not_found' as const }),
+    }),
+  );
+  return services;
+}
+
+function discoveryOutput(description: string) {
+  return JSON.stringify({
+    code: 0,
+    stdout: [
+      '/home/test/.codex/skills/example/SKILL.md',
+      `name: example\ndescription: ${description}`,
+      '__CHATBROWSERX_SCAN_END__',
+      '0',
+      '',
+    ].join('\0'),
+    stderr: '',
+    truncated: false,
+  });
+}
+
 describe('Sandbox Skill loader', () => {
+  it('bounds cold discovery, keeps Sandbox tools available and recovers after a failed scan', async () => {
+    vi.useFakeTimers();
+    let scanSignal: AbortSignal | undefined;
+    let finishLate!: (output: string) => void;
+    const execute = vi.fn<SandboxExecutionPort['execute']>((_call, signal) => {
+      scanSignal = signal;
+      return new Promise<string>((resolve) => {
+        finishLate = resolve;
+      });
+    });
+    const services = discoveryServices(execute);
+    const runtime = bindToolRuntime(
+      [
+        { declaration: sandboxReadTool, runtime: sandboxRuntime },
+        { declaration: sandboxExecTool, runtime: sandboxRuntime },
+      ],
+      services,
+    );
+    let contract: Awaited<ReturnType<typeof runtime.contract>> | undefined;
+    const first = runtime.contract({}).then((value) => {
+      contract = value;
+    });
+    try {
+      await vi.advanceTimersByTimeAsync(5_000);
+      expect(contract?.definitions.map(({ name }) => name)).toEqual([
+        'sandbox_read',
+        'sandbox_exec',
+      ]);
+      expect(scanSignal?.aborted).toBe(true);
+      expect(contract?.systemPrompt).toBe('');
+      await runtime.contract({});
+      expect(execute).toHaveBeenCalledTimes(1);
+      execute.mockResolvedValue(discoveryOutput('recovered catalog'));
+      await vi.advanceTimersByTimeAsync(30_000);
+      expect((await runtime.contract({})).systemPrompt).toContain('recovered catalog');
+      finishLate(discoveryOutput('late obsolete catalog'));
+      await vi.advanceTimersByTimeAsync(0);
+      expect((await runtime.contract({})).systemPrompt).not.toContain('late obsolete');
+      expect(execute).toHaveBeenCalledTimes(2);
+    } finally {
+      finishLate(discoveryOutput('late obsolete catalog'));
+      await first;
+      vi.useRealTimers();
+    }
+  });
+
+  it('lets one cold-load caller abort without poisoning another caller or the shared snapshot', async () => {
+    vi.useFakeTimers();
+    let finish!: (output: string) => void;
+    const execute = vi.fn<SandboxExecutionPort['execute']>(
+      () =>
+        new Promise((resolve) => {
+          finish = resolve;
+        }),
+    );
+    const services = discoveryServices(execute);
+    const controller = new AbortController();
+    let firstResult: string | null | undefined;
+    const first = loadSandboxSkillPrompt(services, controller.signal).then((value) => {
+      firstResult = value;
+    });
+    const second = loadSandboxSkillPrompt(services, new AbortController().signal);
+    try {
+      await vi.advanceTimersByTimeAsync(0);
+      controller.abort();
+      await vi.advanceTimersByTimeAsync(0);
+      expect(firstResult).toBeNull();
+      finish(discoveryOutput('shared catalog'));
+      expect(await second).toContain('shared catalog');
+      expect(await loadSandboxSkillPrompt(services, new AbortController().signal)).toContain(
+        'shared catalog',
+      );
+      expect(execute).toHaveBeenCalledOnce();
+      expect(vi.getTimerCount()).toBe(0);
+    } finally {
+      finish(discoveryOutput('shared catalog'));
+      await first;
+      await second;
+      vi.useRealTimers();
+    }
+  });
+
+  it('retains a valid stale catalog on refresh timeout without retrying every model turn', async () => {
+    vi.useFakeTimers();
+    const execute = vi.fn<SandboxExecutionPort['execute']>(async () =>
+      discoveryOutput('cached catalog'),
+    );
+    const services = discoveryServices(execute);
+    try {
+      expect(await loadSandboxSkillPrompt(services, new AbortController().signal)).toContain(
+        'cached catalog',
+      );
+      execute.mockImplementation(() => new Promise(() => {}));
+      await vi.advanceTimersByTimeAsync(5 * 60_000);
+      expect(await loadSandboxSkillPrompt(services, new AbortController().signal)).toContain(
+        'cached catalog',
+      );
+      await vi.advanceTimersByTimeAsync(5_000);
+      expect(await loadSandboxSkillPrompt(services, new AbortController().signal)).toContain(
+        'cached catalog',
+      );
+      expect(execute).toHaveBeenCalledTimes(2);
+      execute.mockResolvedValue(discoveryOutput('refreshed catalog'));
+      await vi.advanceTimersByTimeAsync(30_000);
+      await loadSandboxSkillPrompt(services, new AbortController().signal);
+      await vi.advanceTimersByTimeAsync(0);
+      expect(await loadSandboxSkillPrompt(services, new AbortController().signal)).toContain(
+        'refreshed catalog',
+      );
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it('uses one bounded shell scan without per-file head or wc subprocesses', async () => {
     const execute = vi.fn<SandboxExecutionPort['execute']>(async () =>
       JSON.stringify({
