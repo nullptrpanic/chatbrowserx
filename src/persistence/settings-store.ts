@@ -1,7 +1,8 @@
 import { z } from 'zod';
+import { REASONING_EFFORTS, type ReasoningEffort } from '../shared/reasoning-effort';
 import { ChromeLocalStorageArea, type StorageAreaPort } from './storage-area';
 
-export type ReasoningEffort = 'low' | 'medium' | 'high' | 'xhigh';
+export type { ReasoningEffort } from '../shared/reasoning-effort';
 export type AppLanguage = 'system' | 'zh-CN' | 'en' | 'ja';
 
 export interface AppSettings {
@@ -56,7 +57,7 @@ const sandboxServerSchema = z
 const storedAppSettingsSchema = z
   .object({
     model: z.string().trim().min(1).max(256),
-    reasoningEffort: z.enum(['low', 'medium', 'high', 'xhigh']),
+    reasoningEffort: z.enum(REASONING_EFFORTS),
     systemPrompt: z.string().max(20_000),
     language: z.enum(['system', 'zh-CN', 'en', 'ja']),
     historyMessageLimit: z.number().int().min(1).max(200).default(50),

@@ -188,7 +188,7 @@ describe('translation authorization', () => {
       cacheKey: '["gpt-5.6-terra","medium","en"]',
     });
   });
-  it.each(['low', 'medium', 'high', 'xhigh'] as const)(
+  it.each(['low', 'medium', 'high', 'xhigh', 'max', 'ultra'] as const)(
     'translates source text using configured effort %s without capturing pixels',
     async (reasoningEffort) => {
       const requests: unknown[] = [];

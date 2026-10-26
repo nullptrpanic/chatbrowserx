@@ -1,4 +1,5 @@
 import { z } from 'zod';
+import { REASONING_EFFORTS } from '../../shared/reasoning-effort';
 import type {
   PanelEditableSettings,
   PanelSettingsSnapshot,
@@ -37,7 +38,7 @@ const messageSourcePageSchema = z
 const settingsSchema = z
   .object({
     model: z.string().min(1).max(256),
-    reasoningEffort: z.enum(['low', 'medium', 'high', 'xhigh']),
+    reasoningEffort: z.enum(REASONING_EFFORTS),
     systemPrompt: z.string().max(20_000),
     language: z.enum(['system', 'zh-CN', 'en', 'ja']),
     historyMessageLimit: z.number().int().min(1).max(50).default(50),
@@ -50,7 +51,7 @@ const settingsSchema = z
 const editableSettingsSchema = z
   .object({
     model: z.string().min(1).max(256),
-    reasoningEffort: z.enum(['low', 'medium', 'high', 'xhigh']),
+    reasoningEffort: z.enum(REASONING_EFFORTS),
     systemPrompt: z.string().max(20_000),
     language: z.enum(['system', 'zh-CN', 'en', 'ja']),
     historyMessageLimit: z.number().int().min(1).max(50).default(50),

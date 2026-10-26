@@ -1,3 +1,5 @@
+import type { ReasoningEffort } from '../reasoning-effort';
+
 export type PanelTaskStatus =
   'queued' | 'planning' | 'waiting_for_auth' | 'paused' | 'completed' | 'failed' | 'cancelled';
 
@@ -141,7 +143,7 @@ export interface PanelTask {
 
 export interface PanelSettingsSnapshot {
   readonly model: string;
-  readonly reasoningEffort: 'low' | 'medium' | 'high' | 'xhigh';
+  readonly reasoningEffort: ReasoningEffort;
   readonly systemPrompt: string;
   readonly language: 'system' | 'zh-CN' | 'en' | 'ja';
   readonly historyMessageLimit: number;
@@ -154,7 +156,7 @@ export interface PanelSettingsSnapshot {
 /** Settings returned only to the trusted settings screen after an explicit request. */
 export interface PanelEditableSettings {
   readonly model: string;
-  readonly reasoningEffort: 'low' | 'medium' | 'high' | 'xhigh';
+  readonly reasoningEffort: ReasoningEffort;
   readonly systemPrompt: string;
   readonly language: 'system' | 'zh-CN' | 'en' | 'ja';
   readonly historyMessageLimit: number;

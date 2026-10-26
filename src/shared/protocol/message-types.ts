@@ -2,6 +2,7 @@ import type {
   TranslationTexts,
   TranslationLensOptions,
 } from '../../translation/region-translation';
+import type { ReasoningEffort } from '../reasoning-effort';
 
 export const PROTOCOL_VERSION = 1 as const;
 
@@ -35,7 +36,7 @@ export type ExtensionMessage =
       'settings.save',
       {
         model?: string | undefined;
-        reasoningEffort: 'low' | 'medium' | 'high' | 'xhigh';
+        reasoningEffort: ReasoningEffort;
         systemPrompt: string;
         language: 'system' | 'zh-CN' | 'en' | 'ja';
         historyMessageLimit?: number | undefined;

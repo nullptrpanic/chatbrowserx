@@ -5,6 +5,28 @@ import {
 } from '../../../src/shared/protocol/parse-message';
 
 describe('parseExtensionMessage', () => {
+  it.each(['max', 'ultra'])('accepts Codex effort %s in settings messages', (reasoningEffort) => {
+    expect(
+      parseExtensionMessage({
+        version: 1,
+        requestId: 'req_reasoning',
+        type: 'settings.save',
+        payload: { reasoningEffort, systemPrompt: '', language: 'en' },
+      }),
+    ).toMatchObject({ payload: { reasoningEffort } });
+  });
+
+  it('rejects a misspelled reasoning effort', () => {
+    expect(() =>
+      parseExtensionMessage({
+        version: 1,
+        requestId: 'req_reasoning',
+        type: 'settings.save',
+        payload: { reasoningEffort: 'utral', systemPrompt: '', language: 'en' },
+      }),
+    ).toThrow(/invalid extension message/i);
+  });
+
   it('accepts arbitrary nonempty model IDs without a whitelist', () => {
     const message = {
       version: 1,

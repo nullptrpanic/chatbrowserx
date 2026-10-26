@@ -173,6 +173,8 @@ export function SettingsView({ settings, t, onLoad, onSave }: SettingsViewProps)
                 <option value="medium">Medium</option>
                 <option value="high">High</option>
                 <option value="xhigh">XHigh</option>
+                <option value="max">Max</option>
+                <option value="ultra">Ultra</option>
               </select>
             </label>
             <label className="form-field" htmlFor="system-prompt">

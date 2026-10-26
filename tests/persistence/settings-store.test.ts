@@ -3,6 +3,19 @@ import { ChromeSettingsStore, DEFAULT_APP_SETTINGS } from '../../src/persistence
 import { MemoryStorageArea } from './test-helpers';
 
 describe('ChromeSettingsStore', () => {
+  it.each(['max', 'ultra'] as const)(
+    'persists and reloads Codex effort %s',
+    async (reasoningEffort) => {
+      const storage = new MemoryStorageArea();
+      await new ChromeSettingsStore(storage).save({ ...DEFAULT_APP_SETTINGS, reasoningEffort });
+
+      await expect(new ChromeSettingsStore(storage).get()).resolves.toEqual({
+        ...DEFAULT_APP_SETTINGS,
+        reasoningEffort,
+      });
+    },
+  );
+
   it('migrates stored settings without a history limit to the default', async () => {
     const storage = new MemoryStorageArea();
     storage.values['settings.app'] = {
@@ -90,7 +103,7 @@ describe('ChromeSettingsStore', () => {
     const store = new ChromeSettingsStore(storage);
 
     await expect(
-      store.save({ ...DEFAULT_APP_SETTINGS, reasoningEffort: 'ultra' as never }),
+      store.save({ ...DEFAULT_APP_SETTINGS, reasoningEffort: 'utral' as never }),
     ).rejects.toThrow(/invalid app settings/i);
     await store.reset();
 

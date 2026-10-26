@@ -1,9 +1,10 @@
 import type { ExtensionMessage } from '../../src/shared/protocol/message-types';
+import { REASONING_EFFORTS } from '../../src/shared/reasoning-effort';
 import { jsonRecord } from './json-contract';
 
 type SettingsSavePayload = Extract<ExtensionMessage, { readonly type: 'settings.save' }>['payload'];
 
-const REASONING_EFFORTS = new Set(['low', 'medium', 'high', 'xhigh']);
+const REASONING_EFFORT_SET = new Set<string>(REASONING_EFFORTS);
 const LANGUAGES = new Set(['system', 'zh-CN', 'en', 'ja']);
 
 /** Creates the in-memory settings payload used to give an isolated build the same test inputs. */
@@ -12,7 +13,7 @@ export function settingsTransferPayload(value: unknown): SettingsSavePayload {
   if (settings === null) throw new Error('Source extension returned invalid editable settings.');
   if (
     typeof settings.reasoningEffort !== 'string' ||
-    !REASONING_EFFORTS.has(settings.reasoningEffort)
+    !REASONING_EFFORT_SET.has(settings.reasoningEffort)
   ) {
     throw new Error('Source extension returned an invalid reasoning effort.');
   }

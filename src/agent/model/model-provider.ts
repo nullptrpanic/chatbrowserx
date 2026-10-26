@@ -1,9 +1,10 @@
+import type { ReasoningEffort } from '../../shared/reasoning-effort';
 import type { ModelToolChoice, ModelToolDefinition } from '../../tools/model-tool';
 import type { ModelStreamEvent } from './model-stream-event';
 
 export type { ModelToolChoice, ModelToolDefinition } from '../../tools/model-tool';
 
-export type ModelReasoningEffort = 'low' | 'medium' | 'high' | 'xhigh';
+export type ModelReasoningEffort = ReasoningEffort;
 
 export type ModelMessageContent =
   | { readonly type: 'input_text'; readonly text: string }

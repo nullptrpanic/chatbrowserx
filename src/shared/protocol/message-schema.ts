@@ -1,4 +1,5 @@
 import { z } from 'zod';
+import { REASONING_EFFORTS } from '../reasoning-effort';
 import { PROTOCOL_VERSION, type ExtensionMessage, type PageCommand } from './message-types';
 import {
   translationTextsSchema,
@@ -121,7 +122,7 @@ const settingsSaveSchema = z
     payload: z
       .object({
         model: z.string().trim().min(1).max(256).optional(),
-        reasoningEffort: z.enum(['low', 'medium', 'high', 'xhigh']),
+        reasoningEffort: z.enum(REASONING_EFFORTS),
         systemPrompt: z.string().max(20_000),
         language: z.enum(['system', 'zh-CN', 'en', 'ja']),
         historyMessageLimit: z.number().int().min(1).max(50).default(50),

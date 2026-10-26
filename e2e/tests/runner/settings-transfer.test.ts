@@ -2,6 +2,19 @@ import { describe, expect, it } from 'vitest';
 import { settingsTransferPayload } from '../../runner/settings-transfer';
 
 describe('live settings transfer', () => {
+  it.each(['max', 'ultra'])('preserves Codex effort %s for isolated builds', (reasoningEffort) => {
+    expect(
+      settingsTransferPayload({
+        reasoningEffort,
+        systemPrompt: '',
+        language: 'en',
+        historyMessageLimit: 50,
+        codexAccessToken: 'codex-test-token',
+        tavilyKey: '',
+      }),
+    ).toMatchObject({ reasoningEffort });
+  });
+
   it('copies the execution settings and credentials needed by an isolated baseline build', () => {
     expect(
       settingsTransferPayload({
