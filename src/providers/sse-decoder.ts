@@ -9,6 +9,7 @@ export interface DecodedSseEvent {
 
 export interface DecodeSseStreamOptions {
   readonly idleTimeoutMs?: number;
+  readonly signal?: AbortSignal;
 }
 
 interface PendingEvent {
@@ -114,39 +115,39 @@ function assertEventSize(pending: PendingEvent, lineBuffer: string, encoder: Tex
 function readWithIdleTimeout(
   reader: ReadableStreamDefaultReader<Uint8Array>,
   idleTimeoutMs: number | undefined,
+  signal: AbortSignal | undefined,
 ): Promise<ReadableStreamReadResult<Uint8Array>> {
-  if (idleTimeoutMs === undefined) return reader.read();
-  if (!Number.isSafeInteger(idleTimeoutMs) || idleTimeoutMs <= 0) {
+  if (signal?.aborted) return Promise.reject(providerErrorFromCode('ABORTED'));
+  if (idleTimeoutMs === undefined && signal === undefined) return reader.read();
+  if (idleTimeoutMs !== undefined && (!Number.isSafeInteger(idleTimeoutMs) || idleTimeoutMs <= 0)) {
     throw new TypeError('SSE idle timeout must be a positive safe integer.');
   }
 
   return new Promise((resolve, reject) => {
     let settled = false;
-    const timeout = setTimeout(() => {
+    const fail = (error: unknown) => {
       if (settled) return;
       settled = true;
-      void reader
-        .cancel()
-        .catch(() => undefined)
-        .then(() =>
-          reject(providerErrorFromCode('TRANSIENT', { transientStage: 'stream_idle_timeout' })),
-        );
-    }, idleTimeoutMs);
+      clearTimeout(timeout);
+      signal?.removeEventListener('abort', abort);
+      reject(error);
+    };
+    const abort = () => fail(providerErrorFromCode('ABORTED'));
+    const timeout =
+      idleTimeoutMs === undefined
+        ? undefined
+        : setTimeout(() => {
+            fail(providerErrorFromCode('TRANSIENT', { transientStage: 'stream_idle_timeout' }));
+          }, idleTimeoutMs);
+    signal?.addEventListener('abort', abort, { once: true });
 
-    void reader.read().then(
-      (read) => {
-        if (settled) return;
-        settled = true;
-        clearTimeout(timeout);
-        resolve(read);
-      },
-      (error: unknown) => {
-        if (settled) return;
-        settled = true;
-        clearTimeout(timeout);
-        reject(error);
-      },
-    );
+    void reader.read().then((read) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timeout);
+      signal?.removeEventListener('abort', abort);
+      resolve(read);
+    }, fail);
   });
 }
 
@@ -168,7 +169,7 @@ export async function* decodeSseStream(
 
   try {
     while (!reachedDone) {
-      const read = await readWithIdleTimeout(reader, options.idleTimeoutMs);
+      const read = await readWithIdleTimeout(reader, options.idleTimeoutMs, options.signal);
       lineBuffer += decoder.decode(read.value, { stream: !read.done });
       assertEventSize(pending, lineBuffer, encoder);
 
@@ -205,9 +206,8 @@ export async function* decodeSseStream(
       }
     }
   } finally {
-    if (reachedDone) {
-      await reader.cancel().catch(() => undefined);
-    }
+    // Cleanup must not delay DONE, cancellation, parse errors or the idle deadline.
+    void reader.cancel().catch(() => undefined);
     reader.releaseLock();
   }
 }

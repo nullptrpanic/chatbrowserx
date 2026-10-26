@@ -71,6 +71,189 @@ const ACCESS_TOKEN = jwt({
 });
 
 describe('CodexProvider', () => {
+  it('clears the header deadline so an active stream can run longer than ninety seconds', async () => {
+    vi.useFakeTimers();
+    let source!: ReadableStreamDefaultController<Uint8Array>;
+    let requestSignal: AbortSignal | null | undefined;
+    const provider = new CodexProvider(credentialStore(ACCESS_TOKEN), async (_url, init) => {
+      requestSignal = init?.signal;
+      return new Response(
+        new ReadableStream<Uint8Array>({
+          start(controller) {
+            source = controller;
+          },
+        }),
+        {
+          headers: { 'Content-Type': 'text/event-stream' },
+        },
+      );
+    });
+    const result = collect(provider.stream(REQUEST, new AbortController().signal));
+    const send = (event: string, data: unknown) =>
+      source.enqueue(
+        new TextEncoder().encode(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`),
+      );
+    try {
+      await vi.advanceTimersByTimeAsync(0);
+      send('response.created', { type: 'response.created', response: { id: 'long' } });
+      await vi.advanceTimersByTimeAsync(60_000);
+      send('response.output_text.delta', { type: 'response.output_text.delta', delta: 'Working' });
+      await vi.advanceTimersByTimeAsync(60_000);
+      expect(requestSignal?.aborted).toBe(false);
+      send('response.completed', { type: 'response.completed', response: { id: 'long' } });
+      source.close();
+      expect(await result).toContainEqual({
+        type: 'response.completed',
+        responseId: 'long',
+        usage: null,
+      });
+      expect(vi.getTimerCount()).toBe(0);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('bounds response-header wait even when the transport ignores abort, and cancels late bodies', async () => {
+    vi.useFakeTimers();
+    let respond!: (response: Response) => void;
+    let requestSignal: AbortSignal | null | undefined;
+    const provider = new CodexProvider(credentialStore(ACCESS_TOKEN), (_input, init) => {
+      requestSignal = init?.signal;
+      return new Promise<Response>((resolve) => {
+        respond = resolve;
+      });
+    });
+    const controller = new AbortController();
+    let failure: unknown;
+    const result = collect(provider.stream(REQUEST, controller.signal)).catch((error: unknown) => {
+      failure = error;
+    });
+    let cancelled = false;
+    try {
+      await vi.advanceTimersByTimeAsync(90_000);
+      expect(failure).toMatchObject({ code: 'TRANSIENT', transientStage: 'request_transport' });
+      expect(requestSignal?.aborted).toBe(true);
+    } finally {
+      controller.abort();
+      respond(
+        new Response(
+          new ReadableStream({
+            cancel() {
+              cancelled = true;
+            },
+          }),
+        ),
+      );
+      await result;
+      await vi.advanceTimersByTimeAsync(0);
+      vi.useRealTimers();
+    }
+    expect(cancelled).toBe(true);
+  });
+
+  it.each(['headers', 'stream'] as const)(
+    'honors user abort promptly while waiting for %s',
+    async (phase) => {
+      vi.useFakeTimers();
+      let respond!: (response: Response) => void;
+      let finishCancel!: () => void;
+      const cancellation = new Promise<void>((resolve) => {
+        finishCancel = resolve;
+      });
+      const response = new Response(new ReadableStream({ cancel: () => cancellation }), {
+        headers: { 'Content-Type': 'text/event-stream' },
+      });
+      const controller = new AbortController();
+      const provider = new CodexProvider(credentialStore(ACCESS_TOKEN), () =>
+        phase === 'stream'
+          ? Promise.resolve(response)
+          : new Promise<Response>((resolve) => {
+              respond = resolve;
+            }),
+      );
+      let failure: unknown;
+      const result = collect(provider.stream(REQUEST, controller.signal)).catch(
+        (error: unknown) => {
+          failure = error;
+        },
+      );
+      try {
+        await vi.advanceTimersByTimeAsync(0);
+        controller.abort();
+        await vi.advanceTimersByTimeAsync(0);
+        expect(failure).toMatchObject({ code: 'ABORTED', retryable: false });
+      } finally {
+        if (phase === 'headers') respond(response);
+        finishCancel();
+        await vi.advanceTimersByTimeAsync(90_000);
+        await result;
+        vi.useRealTimers();
+      }
+    },
+  );
+
+  it.each(['invalid-content', 'upstream-error', 'done'] as const)(
+    'does not let body cleanup delay %s',
+    async (mode) => {
+      vi.useFakeTimers();
+      let finishCancel!: () => void;
+      const cancellation = new Promise<void>((resolve) => {
+        finishCancel = resolve;
+      });
+      const body = new ReadableStream<Uint8Array>({
+        start(controller) {
+          controller.enqueue(
+            new TextEncoder().encode(
+              mode === 'done'
+                ? sseBody([
+                    {
+                      event: 'response.created',
+                      data: { type: 'response.created', response: { id: 'r_cleanup' } },
+                    },
+                    {
+                      event: 'response.completed',
+                      data: { type: 'response.completed', response: { id: 'r_cleanup' } },
+                    },
+                  ])
+                : 'event: error\ndata: {"type":"error","code":"server_error"}\n\n',
+            ),
+          );
+        },
+        cancel: () => cancellation,
+      });
+      const provider = new CodexProvider(
+        credentialStore(ACCESS_TOKEN),
+        async () =>
+          new Response(body, {
+            headers: {
+              'Content-Type': mode === 'invalid-content' ? 'text/html' : 'text/event-stream',
+            },
+          }),
+      );
+      let outcome: unknown;
+      const result = collect(provider.stream(REQUEST, new AbortController().signal)).then(
+        () => {
+          outcome = 'complete';
+        },
+        (error: unknown) => {
+          outcome = error;
+        },
+      );
+      try {
+        await vi.advanceTimersByTimeAsync(0);
+        if (mode === 'done') expect(outcome).toBe('complete');
+        else
+          expect(outcome).toMatchObject({
+            code: mode === 'invalid-content' ? 'INVALID_RESPONSE' : 'TRANSIENT',
+          });
+      } finally {
+        finishCancel();
+        await result;
+        vi.useRealTimers();
+      }
+    },
+  );
+
   it('streams valid SSE when the fixed endpoint omits Content-Type', async () => {
     const events = [
       {
@@ -393,7 +576,7 @@ describe('CodexProvider', () => {
       CODEX_RESPONSES_URL,
       expect.objectContaining({
         method: 'POST',
-        signal: controller.signal,
+        signal: expect.any(AbortSignal),
         headers: expect.objectContaining({
           Authorization: `Bearer ${ACCESS_TOKEN}`,
           'ChatGPT-Account-ID': 'acct_test',

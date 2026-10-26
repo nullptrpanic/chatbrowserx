@@ -16,6 +16,7 @@ import { buildCodexRequest } from './codex-request';
 export type FetchPort = (input: RequestInfo | URL, init?: RequestInit) => Promise<Response>;
 
 const CODEX_STREAM_IDLE_TIMEOUT_MS = 90_000;
+const CODEX_RESPONSE_HEADERS_TIMEOUT_MS = 90_000;
 export class CodexProvider implements ModelProviderPort {
   readonly #credentials: CredentialStore;
   readonly #fetch: FetchPort;
@@ -37,6 +38,40 @@ export class CodexProvider implements ModelProviderPort {
     return { accessToken, accountId: extractChatGptAccountId(accessToken) };
   }
 
+  /** Bounds header wait separately from streaming; a late transport result is discarded. */
+  async #fetchResponse(url: string, init: RequestInit, signal: AbortSignal): Promise<Response> {
+    const deadline = new AbortController();
+    const requestSignal = AbortSignal.any([signal, deadline.signal]);
+    let timeout: ReturnType<typeof setTimeout> | undefined;
+    let abort: (() => void) | undefined;
+    try {
+      return await new Promise<Response>((resolve, reject) => {
+        abort = () =>
+          reject(
+            signal.aborted
+              ? providerErrorFromCode('ABORTED')
+              : providerErrorFromCode('TRANSIENT', { transientStage: 'request_transport' }),
+          );
+        if (requestSignal.aborted) {
+          abort();
+          return;
+        }
+        requestSignal.addEventListener('abort', abort, { once: true });
+        timeout = setTimeout(() => deadline.abort(), CODEX_RESPONSE_HEADERS_TIMEOUT_MS);
+        void this.#fetch(url, { ...init, signal: requestSignal }).then((response) => {
+          if (requestSignal.aborted) {
+            void response.body?.cancel().catch(() => undefined);
+            return;
+          }
+          resolve(response);
+        }, reject);
+      });
+    } finally {
+      clearTimeout(timeout);
+      if (abort) requestSignal.removeEventListener('abort', abort);
+    }
+  }
+
   /** Streams one fixed-endpoint Codex response as normalized provider events. */
   async *stream(request: ModelRequest, signal: AbortSignal): AsyncGenerator<ModelStreamEvent> {
     if (signal.aborted) {
@@ -48,12 +83,15 @@ export class CodexProvider implements ModelProviderPort {
 
     let response: Response;
     try {
-      response = await this.#fetch(outbound.url, {
-        method: 'POST',
-        headers: outbound.headers,
-        body: JSON.stringify(outbound.body),
+      response = await this.#fetchResponse(
+        outbound.url,
+        {
+          method: 'POST',
+          headers: outbound.headers,
+          body: JSON.stringify(outbound.body),
+        },
         signal,
-      });
+      );
     } catch (error) {
       if (signal.aborted || isAbortFailure(error)) {
         throw providerErrorFromCode('ABORTED');
@@ -65,7 +103,7 @@ export class CodexProvider implements ModelProviderPort {
       return await throwProviderHttpError(response);
     }
     if (signal.aborted) {
-      await response.body?.cancel().catch(() => undefined);
+      void response.body?.cancel().catch(() => undefined);
       throw providerErrorFromCode('ABORTED');
     }
     const contentType = response.headers.get('Content-Type')?.trim().toLowerCase() ?? '';
@@ -73,7 +111,7 @@ export class CodexProvider implements ModelProviderPort {
       response.body === null ||
       (contentType.length > 0 && !contentType.includes('text/event-stream'))
     ) {
-      await response.body?.cancel().catch(() => undefined);
+      void response.body?.cancel().catch(() => undefined);
       throw providerErrorFromCode('INVALID_RESPONSE', {
         status: response.status,
         invalidResponseStage: 'response_transport',
@@ -84,6 +122,7 @@ export class CodexProvider implements ModelProviderPort {
     try {
       for await (const decoded of decodeSseStream(response.body, {
         idleTimeoutMs: CODEX_STREAM_IDLE_TIMEOUT_MS,
+        signal,
       })) {
         if (signal.aborted) {
           throw providerErrorFromCode('ABORTED');
@@ -105,7 +144,7 @@ export class CodexProvider implements ModelProviderPort {
       }
       throw providerErrorFromCode('TRANSIENT', { transientStage: 'stream_interrupted' });
     } finally {
-      await response.body.cancel().catch(() => undefined);
+      void response.body.cancel().catch(() => undefined);
     }
   }
 }

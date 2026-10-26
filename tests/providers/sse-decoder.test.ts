@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import type { ProviderError } from '../../src/agent/model/model-provider-error';
 import { decodeSseStream, type DecodedSseEvent } from '../../src/providers/sse-decoder';
 
@@ -36,6 +36,90 @@ async function collect(iterable: AsyncIterable<DecodedSseEvent>): Promise<Decode
 }
 
 describe('decodeSseStream', () => {
+  it('reports idle timeout without waiting for upstream cancellation', async () => {
+    vi.useFakeTimers();
+    let finishCancel!: () => void;
+    const cancellation = new Promise<void>((resolve) => {
+      finishCancel = resolve;
+    });
+    let cancelled = false;
+    const stream = new ReadableStream<Uint8Array>({
+      cancel() {
+        cancelled = true;
+        return cancellation;
+      },
+    });
+    let failure: unknown;
+    const result = collect(decodeSseStream(stream, { idleTimeoutMs: 10 })).catch(
+      (error: unknown) => {
+        failure = error;
+      },
+    );
+    try {
+      await vi.advanceTimersByTimeAsync(10);
+      expect(failure).toMatchObject({ code: 'TRANSIENT', transientStage: 'stream_idle_timeout' });
+      expect(cancelled).toBe(true);
+      expect(stream.locked).toBe(false);
+    } finally {
+      finishCancel();
+      await result;
+      vi.useRealTimers();
+    }
+  });
+
+  it.each(['done', 'invalid', 'return'] as const)(
+    'releases the stream on %s without waiting for cancellation',
+    async (mode) => {
+      vi.useFakeTimers();
+      let finishCancel!: () => void;
+      const cancellation = new Promise<void>((resolve) => {
+        finishCancel = resolve;
+      });
+      let cancelled = false;
+      const stream = new ReadableStream<Uint8Array>({
+        start(controller) {
+          controller.enqueue(
+            new TextEncoder().encode(
+              mode === 'done'
+                ? 'data: [DONE]\n\n'
+                : mode === 'invalid'
+                  ? 'data: {broken}\n\n'
+                  : 'data: {"value":1}\n\n',
+            ),
+          );
+        },
+        cancel() {
+          cancelled = true;
+          return cancellation;
+        },
+      });
+      let settled = false;
+      const iterator = decodeSseStream(stream);
+      const result = (
+        mode === 'return'
+          ? iterator.next().then(() => iterator.return(undefined))
+          : collect(iterator)
+      ).then(
+        () => {
+          settled = true;
+        },
+        () => {
+          settled = true;
+        },
+      );
+      try {
+        await vi.advanceTimersByTimeAsync(0);
+        expect(settled).toBe(true);
+        expect(cancelled).toBe(true);
+        expect(stream.locked).toBe(false);
+      } finally {
+        finishCancel();
+        await result;
+        vi.useRealTimers();
+      }
+    },
+  );
+
   it('decodes fragmented fields, JSON, event boundaries, and UTF-8 code points', async () => {
     const source =
       'event: response.output_text.delta\ndata: {"delta":"你好"}\n\n' +
