@@ -10,6 +10,31 @@ import {
   type ProgressState,
 } from './contract';
 
+/** Reject transport/execution failures, not successful observations of a negative result. */
+function usableEvidence(context: ToolRuntimeContext): readonly MaterializedToolResult[] {
+  return (context.toolResults ?? []).filter((result) => {
+    if (
+      result.taskId !== context.task?.id ||
+      result.toolName === TASK_PROGRESS_TOOL ||
+      result.toolName === 'commit_context'
+    )
+      return false;
+    try {
+      const output: unknown = JSON.parse(result.output);
+      if (typeof output !== 'object' || output === null || Array.isArray(output)) return false;
+      const value = output as Record<string, unknown>;
+      return (
+        Object.keys(value).length > 0 &&
+        value.ok !== false &&
+        (typeof value.code !== 'number' || value.code === 0) &&
+        (value.executionStatus === undefined || value.executionStatus === 'succeeded')
+      );
+    } catch {
+      return false;
+    }
+  });
+}
+
 function latestProgress(context: ToolRuntimeContext): {
   state: ProgressState;
   result: MaterializedToolResult;
@@ -25,6 +50,13 @@ function latestProgress(context: ToolRuntimeContext): {
       };
       if (output.ok !== true || output.updated !== true) continue;
       const state = progressStateSchema.parse(output.state);
+      const evidence = new Set(usableEvidence(context).map(({ callId }) => callId));
+      // Reconcile persisted ledgers created before evidence validation, without rewriting history.
+      state.items = state.items.map((item) =>
+        item.status === 'verified' && !evidence.has(item.evidenceCallId)
+          ? { ...item, status: 'uncertain' }
+          : item,
+      );
       const sequence =
         context.events?.find(
           (event) => event.type === 'tool.result' && event.resultId === result.id,
@@ -160,12 +192,7 @@ export const taskProgressTool: ToolDeclaration<ProgressInput> = {
     const update = call.arguments.update;
     // Provider envelope IDs are not reliably visible to the model. Expose actual, bounded
     // references here rather than asking it to guess IDs or changing every tool's output.
-    const evidenceResults = (context.toolResults ?? []).filter(
-      (result) =>
-        result.taskId === context.task?.id &&
-        result.toolName !== TASK_PROGRESS_TOOL &&
-        result.toolName !== 'commit_context',
-    );
+    const evidenceResults = usableEvidence(context);
     const availableEvidence = evidenceResults
       .slice(-12)
       .map(({ callId, toolName }) => ({ callId, toolName }));
@@ -199,7 +226,9 @@ export const taskProgressTool: ToolDeclaration<ProgressInput> = {
         item.status === 'verified' &&
         !evidenceResults.some((result) => result.callId === item.evidenceCallId)
       ) {
-        return fail(`${item.id}: verified requires an existing observation tool call ID.`);
+        return fail(
+          `${item.id}: verified requires a usable observation tool call ID; failed or missing results cannot verify an outcome.`,
+        );
       }
     }
     const items = new Map(previous?.state.items.map((item) => [item.id, item]));

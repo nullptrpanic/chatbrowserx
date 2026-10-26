@@ -113,6 +113,75 @@ const plan = {
 };
 
 describe('durable task progress', () => {
+  it.each([
+    ['browser_inspect', '{"ok":false,"code":"PAGE_UNAVAILABLE","message":"Page closed"}'],
+    ['browser_inspect', ''],
+    ['browser_inspect', '{broken'],
+    ['browser_inspect', '{}'],
+    ['sandbox_exec', '{"code":1,"stdout":"","stderr":"permission denied","truncated":false}'],
+    ['sandbox_exec', '{"code":0,"stdout":"","stderr":"","executionStatus":"running"}'],
+  ])('rejects unusable %s evidence: %s', async (toolName, output) => {
+    const f = fixture();
+    await f.update(plan);
+    const evidenceCallId = f.receipt(toolName, output);
+    const result = await f.update({
+      ...plan,
+      items: plan.items.slice(0, 2).map((item) => ({
+        ...item,
+        status: 'verified',
+        evidence: 'Observed destination',
+        evidenceCallId,
+      })),
+    });
+    expect(result).toMatchObject({ ok: false, state: plan, availableEvidence: [] });
+    expect((await f.update(null)).state).toEqual(plan);
+    expect(await runtime().reviewCompletion?.(f.context)).toMatchObject({ type: 'continue' });
+  });
+
+  it.each([
+    ['browser_inspect', '{"ok":true,"data":{"items":[]}}'],
+    [
+      'sandbox_exec',
+      '{"code":0,"stdout":"HTTP 404: document absent","stderr":"","truncated":false}',
+    ],
+    ['sandbox_read', '{"code":0,"content":"","startLine":1,"endLine":0,"truncated":false}'],
+  ])('retains successful negative observations from %s', async (toolName, output) => {
+    const f = fixture();
+    const evidenceCallId = f.receipt(toolName, output);
+    expect(
+      await f.update({
+        ...plan,
+        items: plan.items.slice(0, 2).map((item) => ({
+          ...item,
+          status: 'verified',
+          evidence: 'Readback confirms absence',
+          evidenceCallId,
+        })),
+      }),
+    ).toMatchObject({ ok: true, review: { completion: 'ready' } });
+  });
+
+  it('reconciles legacy verified items backed only by failed observations', async () => {
+    const f = fixture();
+    const evidenceCallId = f.receipt('browser_inspect', '{"ok":false,"code":"PAGE_UNAVAILABLE"}');
+    f.receipt(
+      'task_progress',
+      JSON.stringify({
+        ok: true,
+        updated: true,
+        state: {
+          ...plan,
+          items: [{ ...plan.items[0], status: 'verified', evidence: 'Done', evidenceCallId }],
+        },
+      }),
+    );
+    expect(await f.update(null)).toMatchObject({
+      state: { items: [{ id: 'alpha', status: 'uncertain' }] },
+      review: { completion: 'continue', reason: 'unverified_outcomes' },
+    });
+    expect(await runtime().reviewCompletion?.(f.context)).toMatchObject({ type: 'continue' });
+  });
+
   it('returns current verification facts before pending actions after a rejected final', async () => {
     const f = fixture();
     await f.update({
