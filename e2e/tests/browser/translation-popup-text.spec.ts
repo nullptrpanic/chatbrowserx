@@ -1,7 +1,11 @@
 import { extensionTest, expect } from './fixtures/extension-test';
 import { setupTranslationFixture as setup } from './helpers/translation-fixture';
 
-extensionTest.use({ extensionHeadless: true });
+extensionTest.use({
+  extensionHeadless: true,
+  // Exact pixel comparisons need one raster backend for translucent layer edges.
+  extensionBrowserArgs: ['--disable-gpu'],
+});
 
 extensionTest(
   'retains the original opaque popup envelope when translated text contracts',
@@ -53,7 +57,9 @@ for (const [background, css, translates] of [
   ['transparent', 'background:transparent', false],
   ['alpha gradient', 'background:linear-gradient(white,rgba(255,255,255,.5))', false],
   ['partial gradient', 'background:linear-gradient(white,white) 0 0 / 30% 30% no-repeat', false],
-  ['translucent owner', 'background:white;opacity:.5', false],
+  // Keep the same compositor layer before/after opening the lens: Chromium 156
+  // otherwise rounds native translucent pixels differently when promoting the popup.
+  ['translucent owner', 'background:white;opacity:.5;will-change:opacity', false],
   ['below-media ancestor', 'background:transparent', false],
 ] as const)
   extensionTest(
