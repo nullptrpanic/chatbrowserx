@@ -32,6 +32,20 @@ inside these margins is reported as inconclusive.
 Statuses are `admitted`, `rejected`, `measuring`, and `queued`. `implemented` alone is not a status
 because unmeasured code is not an accepted optimization.
 
+## Current Capability Reference
+
+On 2026-11-13 the user requested a new performance reference for the framework Agent/Provider
+architecture: retain native conversation and tool evidence until compaction, preserve interrupted
+input, and enable Provider-hosted search. The earlier truncated-history/tool-set baseline is retained
+as migration-cost evidence; resource gates apply between equivalent capability sets under
+`EVALUATION_STANDARD.md`.
+
+The local frozen reference is `081eb45a627d64439b5b0836e4c5416bd638cb28-dirty-20f7e92a6a7fa7bf`,
+recorded under `e2e/.runtime/agent-final-sampling/frozen-baseline/`. Status remains **measuring**:
+the final network sample passed 1/2, editor replacement 2/2, and public documentation reading 2/2.
+The network failure is a one-character request-ID transcription error; it is not waived by the new
+resource reference. No full-matrix or general success-rate claim is made.
+
 ## Critical Baseline Set
 
 Use the frozen sample contracts already stored outside Git under `e2e/samples/`:
@@ -373,3 +387,228 @@ duplicate them here.
   claim. Task elapsed excludes independent post-task readback; the two real passes required about
   137 and 128 additional seconds for readback/reporting. Phase 3F remains measuring for general
   performance, while the concrete task and user-requested manual-test preparation are verified.
+- 2026-11-13 — Bounded follow-up to the framework migration retains complete conversation history.
+  Network detail arguments now enumerate IDs actually disclosed by the current capture; request ID
+  formats and exact runtime lookup are unchanged. The progress-tool description scopes its ledger
+  requirements to opted-in multi-deliverable tasks. A registered `load_tools` exposes optional
+  Provider tools on demand, using durable current-task receipts and no extra system instructions.
+  The first candidate still overused progress once and skipped an explicit search once; both
+  failures remain recorded, followed by narrower tool-description corrections. E2E also omitted
+  the existing `providerHosted` flag from current snapshots and rejected it in saved results;
+  two regression tests reproduce that harness defect, and both boundaries now retain the flag.
+  Against the frozen same-capability `20f7e92a6a7fa7bf` reference, candidate `a06992dfa4441b7f`
+  passed network 2/2 (`092355.523Z`, mean 62,470 Tokens / 26.848 seconds) and public MDN reading
+  2/2 (`092654.146Z`, mean 17,582.5 Tokens / 6.994 seconds). Native search passed 2/2
+  (`092254.485Z`) but costs 16,862.5 Tokens / 12.613 seconds versus 12,400.5 / 7.230 seconds:
+  the explicit loading turn is a measured trade-off, not an improvement for search-only work.
+  The final editor batch (`092514.489Z`) passed once and hit a Cloudflare challenge once without
+  writing; standalone readiness recovered and one further unchanged-contract attempt passed
+  (`092840.780Z`). Do not use the blocked attempt's lower usage as a performance gain. All batch
+  timestamps above have the prefix `20261113T` and live under their sample's `benchmark/` directory.
+  Earlier regressions remain in editor batch `090425.037Z` and search batch `091301.277Z`;
+  the hosted-evidence harness failure remains in search batch `091504.312Z`.
+  Scoped validation passed 243 tests across 19 files, touched-file formatting/lint, typecheck,
+  build, and all 47 sample contracts. E2E used the frozen candidate build; subsequent concurrent
+  selection-translation changes are outside these live results. These small samples are not a
+  reliability guarantee. Changes remain uncommitted.
+
+- 2026-11-13 — Network references and Provider cache affinity (bounded follow-up).
+  The network reader no longer repeats listed IDs in its JSON schema. It reuses the existing
+  compact browser-reference function, keeps exact legacy-ID lookup, and validates disclosure in
+  the owning frozen capture. Pagination, invalid IDs, old captures, and alias deduplication have
+  regression coverage. No request content is discarded.
+  A fixed-input diagnostic found zero reported cache reads across three identical requests.
+  The official Codex client uses a stable `session-id` header for ChatGPT cache affinity. Changing
+  only that header (identical serialized request-body hashes) produced 6,912 cached input Tokens
+  out of 7,515 on both warm repeats, while all three unkeyed controls reported zero. The Provider
+  interface now accepts an optional generic session ID; only the Codex backend maps it to a header.
+  Normal model calls and compaction share the conversation ID. No request-body cache options,
+  server-side conversation state, global instructions, or dependencies were added.
+  Source: https://github.com/openai/codex/blob/main/codex-rs/core/src/client.rs
+  and https://github.com/openai/codex/blob/main/codex-rs/codex-api/src/requests/headers.rs.
+  Frozen local baseline `f76f1a86a7a98d0e` and final candidate `9239e26d7a705d46` each passed
+  network 2/2, batches `20261113T100937.085Z` and `20261113T102125.654Z`. Both used seven model
+  requests and six identical tool calls per attempt, with no retries, compaction, screenshots,
+  stale refs, or mismatched evidence. Mean total Tokens fell from 62,750.5 to 53,816 (-14.2%),
+  uncached input from 51,396.5 to 16,891.5 (-67.1%), task time from 28.182 to 23.9935 seconds
+  (-14.9%), and total Provider time from 24.728 to 20.091 seconds (-18.8%). Formal comparison
+  reports valid evidence and comparable success/performance metrics. All instructions were empty.
+  The intermediate short-reference-only batch `20261113T101250.973Z` remains preserved; one
+  attempt skipped a wait, so it must not be used to attribute every saved Token to schema size.
+  Runtime diagnostics and frozen manifests are under `e2e/.runtime/network-cache-followup/`.
+  Scoped validation passed 144 tests in 13 files, touched-file formatting/lint, typecheck, and build.
+  This is positive evidence for the affected network path, not a full-matrix or long-run reliability
+  claim. Broader admission remains measuring; changes are uncommitted.
+
+## Remaining Framework Follow-ups
+
+These are proposals, not authorization to widen the current implementation. Long-term memory is
+excluded. Preserve complete model-visible history until compaction and keep system instructions
+limited to user configuration and registered tool contributions.
+
+| Priority | Candidate                                                                              | Expected benefit                                                                           | Cost / main risk                                                                                    | Status       |
+| -------- | -------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------ | --------------------------------------------------------------------------------------------------- | ------------ |
+| P1       | Natural long-context compaction and restart/interruption replay                        | Correctness evidence for long sessions; detect lost evidence and duplicate effects         | Natural compaction passed with the live Provider; controlled cancellation and restart checks passed | scoped pass  |
+| P1       | Stable tool contracts across task phases                                               | Better cache reuse without discarding history                                              | Measured changes are useful tab/scroll constraints; retain them                                     | measured     |
+| P1       | Remove the explicit loader round when search capability is already known by the caller | Lower search-only latency and model-request overhead                                       | Medium; avoid keyword routing and preserve the non-search savings of lazy loading                   | queued       |
+| P2       | Restore the saved native window before reading all historical messages/tasks           | Lower local startup I/O and memory in long conversations; no model Token reduction claimed | Implemented indexed message reads; task metadata still loads for history tools                      | scoped pass  |
+| P2       | Audit existing bounded browser snapshot differences and full-read fallback             | Find measurable missed reuse without introducing another diff implementation               | Already implemented in PageObserver; further optimization requires evidence                         | audit queued |
+| P2       | A second real Provider contract run                                                    | Prove backend extensibility beyond the existing foreign-wire-format fixture                | Medium; authentication, usage, hosted tools, and compaction must all map correctly                  | queued       |
+| P3       | Cross-conversation exact history search                                                | Reuse prior evidence without replaying unrelated sessions                                  | Medium; explicit access scope and indexing needed; this is not long-term memory                     | queued       |
+| P3       | Stateful/incremental transport or a native Agent harness                               | Less repeated upload and less custom lifecycle ownership                                   | High; process deployment, reconnect, protocol, and recovery risks; no rewrite planned               | queued       |
+
+### 2026-11-13: Scoped lifecycle and message-read follow-up
+
+- Starting artifact: `081eb45a627d64439b5b0836e4c5416bd638cb28-dirty-9239e26d7a705d46`.
+  Lifecycle/I/O candidate: `...dirty-57aae4c29f3edab6`; final contract clarification:
+  `...dirty-454d57b49e18471d`. Frozen artifacts, original files, diagnostics, and failed evidence
+  are retained under `e2e/.runtime/agent-lifecycle-followup/`. Changes remain uncommitted.
+- A cancelled SDK stream can end without a terminal answer. Check cancellation before reporting
+  `INVALID_RESPONSE`; do not weaken completed-response validation. Cancellation before tool
+  dispatch and during compaction now pass, preserving receipts and queued supplements.
+- Saved native sessions use existing task-indexed message reads plus explicit older reply targets.
+  Preserve chronological supplement order, the history-tool task catalog, and full reconstruction
+  for records without a native window. Exact model-input equality passes with a compacted window,
+  old image reply, two supplements, and 1000 unrelated messages. No model Token savings claimed.
+- Isolated real-Chromium IndexedDB measurements (five alternating reads after warmup, 4060 text
+  characters/message, four relevant messages): 100 messages 0.92 -> 0.12 ms; 1000 messages
+  17.60 -> 1.02 ms; 10000 messages 138.30 -> 0.30 ms. These are local read costs, not total task
+  latency. The final case avoids materializing 40.6 MB of unrelated message text.
+- Schema attribution found capture-tab binding (-231 characters once, then stable) and scroll-ref
+  binding (+88 characters). Both remain. A new real network failure captured 180 requests but the
+  model used a regex-escaped URL filter against literal substring matching. Clarify the field's
+  existing semantics; no regex support, site logic, automatic retry, or acceptance relaxation.
+  Preserve failed batch `browser-network-evidence/20261113T110731.518Z`. The corrected frozen
+  contract passed 5/5 in `20261113T111046.282Z`: mean 52576.6 Tokens, 27.664 s, 5.8 tool calls,
+  and 24.282 s Provider time per task. This is scoped correctness evidence, not a speed claim.
+- Controlled reply/history browser tests passed 5/5, including actual Worker stop/restart during
+  compaction recovery. Scoped unit/integration runs passed 118 tests and 195 network-contract
+  tests (overlapping scopes), with formatting, lint, typecheck, and build passing. The build's
+  pre-existing `inlineDynamicImports` warning is unchanged from the starting artifact.
+- Natural compaction remains unverified: catalog discovery succeeded but returned only
+  `codex-auto-review`, not configured `gpt-5.6-terra`. Two diagnostic precondition failures sent
+  no model requests. Do not guess the missing window, override a threshold, switch models, or
+  describe the controlled compaction tests as natural long-session validation.
+- The final frozen candidate also passed the MDN read-only smoke 1/1 in
+  `translation-mdn-readable/20261113T111433.659Z`; the earlier I/O-only smoke remains in
+  `20261113T110719.349Z`. Full-matrix and natural-long-context acceptance are not claimed.
+- A separately labeled frozen-baseline control (`...dirty-9239e26d7a705d46+lifecycle-control`,
+  `browser-network-evidence/20261113T111730.124Z`) requested five attempts and stopped on its first
+  substantive failure: 181 requests captured, regex-escaped literal filter, zero matches, missing
+  `browser_network_get`. This reproduces the contract defect before the current I/O/cancellation
+  changes. It is 0/1 executed, not 0/5. Its incomplete-task Tokens/time cannot be compared against
+  successful candidate runs; no end-to-end performance gain or five-by-five result is claimed.
+
+### 2026-11-14: Archived-answer retrieval
+
+- Added declared `initialHistory` fixtures to the shared live runner. Synthetic archived tasks
+  remain in durable storage while a summary-only model window omits their answers. Authentication,
+  execution, evidence collection, and immutable reports use the normal runbook. This tests real
+  model retrieval decisions, not natural context compaction or actual cancellation of remote work.
+- Frozen samples: `history-recall-exact`, `history-recall-paraphrase`, and
+  `history-recall-interrupted`, three attempts per candidate. No site mutation is authorized.
+- The first revision passed exact quotation 3/3 and interrupted-status recall 1/1, but paraphrased
+  recall only 2/3. Failed evidence is preserved in
+  `samples/history-recall-paraphrase/benchmark/20261113T222142.698Z/02.json`: four keyword searches
+  returned only the current question or no matches; the model declared the answer unavailable
+  without browsing. All five Provider responses completed successfully, with no retry or harness
+  failure. The answer remained in the archive and was recovered in the preceding two attempts.
+- Smallest correction: clarify only `history_search`'s existing empty-query browse behavior before
+  declaring information unavailable. No global instructions, matching algorithm, sample input,
+  acceptance conditions, or storage format changed.
+- Candidate `...dirty-658fcbf8dcc45f70` passed all three samples 3/3 each. Exact quotations also
+  matched the complete stored answer after removing presentation whitespace/blockquote markers.
+  All nine first-request window checks passed; no Provider retries or remote writes occurred.
+  The initial candidate was `...dirty-cd79f6e022697bf1`; its failed report remains immutable.
+- Paraphrased recall changed from 2/3 to 3/3. Including the original failed attempt, mean total
+  Tokens were 32,254 -> 23,592.667, tool calls 5 -> 3.333, elapsed time 17.833 -> 14.434 seconds,
+  and cumulative Provider time 16.477 -> 13.333 seconds. Uncached input was 9,314 -> 9,193.667
+  Tokens, so total-token reduction is not an equivalent billing reduction. Candidate tool counts
+  were 2, 3, and 5; the description improves recovery but does not guarantee the minimum calls.
+- Exact recall stayed 3/3 and two tools/three Provider requests, with mean total Tokens
+  17,770 -> 17,926.667 (+0.9%) and elapsed time 19.556 -> 19.533 seconds. This small contract cost
+  is retained for the recovery improvement. Interrupted recall passed 3/3 at mean 22,022.667
+  Tokens, three tools/four requests, and 13.313 seconds; the earlier 1/1 is not an equal-size baseline.
+- Candidate batches: exact `20261113T222556.212Z`; paraphrased `20261113T222356.695Z` (one attempt)
+  and `20261113T222445.053Z` (two); interrupted `20261113T222717.404Z`. Each is below its sample's
+  `benchmark/` directory with per-attempt facts and the derived batch report. These synthetic,
+  small-archive live runs are scoped evidence, not broad semantic-search or compaction guarantees.
+
+### 2026-11-14: History search efficiency and full quotation
+
+- The slow paraphrased attempt spent four keyword calls on empty or current-question matches. The
+  reader now skips the current input when searching and emits each context excerpt once per page.
+  Matched message IDs, chronological paging, and anchored reads are retained. The tool description
+  is shorter and directs the model to recent history when literal search is unhelpful.
+- Compare `...dirty-658fcbf8dcc45f70` with `...dirty-fcb34be4f061330c` using three sequential attempts
+  per side of each frozen v1 sample. All three stayed at 3/3. Provider tool definitions were 363
+  characters shorter per request. The paraphrased browse response fell from 3,830 to 2,309
+  characters and its maximum calls fell from five to three. Two literal misses still preceded
+  each successful browse.
+
+| Sample             | Mean total Tokens | Mean elapsed seconds | Mean tool calls |
+| ------------------ | ----------------- | -------------------- | --------------- |
+| Exact recall       | 17,927 → 16,623   | 19.53 → 19.58        | 2.00 → 2.00     |
+| Paraphrased recall | 23,593 → 20,212   | 14.43 → 13.01        | 3.33 → 3.00     |
+| Interrupted recall | 22,023 → 18,442   | 13.31 → 12.80        | 3.00 → 2.67     |
+
+- Mean first-text latency rose from 1.32 to 1.71 seconds for exact recall and from 1.19 to 2.16
+  seconds for interrupted recall. These small, sequential batches establish the observed latency
+  difference. Attribution and broader performance admission remain open.
+- A stronger browse-first description (`...dirty-864f54801de18f50`) used one tool in two of three
+  paraphrased attempts. Its interrupted batch stopped after one pass in two attempts. The failed
+  answer used objects in `unconfirmed`, whose contract requires task-name strings. Both statuses
+  and supporting facts were correct.
+  Retain `samples/history-recall-interrupted/benchmark/20261114T024009.664Z/02.json`. The frozen
+  acceptance criterion stands and the more conservative description is retained.
+- Full-quote acceptance now rejects a missing passage even when every marker survives. The
+  strengthened `history-recall-exact` v2 passed 3/3 in `20261114T024324.629Z`. The new
+  `history-recall-paginated` passed 3/3 (`20261114T023536.845Z`, `20261114T024424.991Z`), twice
+  advancing through `nextCursor` to an answer behind 16 newer messages and once finding it directly
+  by keyword. All quotes matched in full. The model catalog still lists only `codex-auto-review`
+  for this Profile, so the configured model's natural compaction remains unverified.
+- The comparable v1 runs are in exact batch `20261114T022746.645Z`, paraphrased batches
+  `20261114T022717.107Z` and `20261114T022847.659Z`, and interrupted batch `20261114T022918.281Z`.
+
+### 2026-11-14: Model catalog, native compaction, and short history fallback
+
+- The old catalog client version returned only a hidden auto-review entry. The updated version
+  returned the configured model's 272,000-token context window and supported reasoning efforts.
+  Settings suggestions honor the Provider's visibility flag. Explicit model IDs retain access
+  to their capability metadata.
+- A keyword miss can include one recent excerpt page when no individual term matches and the
+  entire readable archive fits the requested page. The exact-match fields and cursor semantics
+  are preserved. Repeat calls can reference an identical page still in the model window. The
+  durable report retains the full result. Tool definitions matched the baseline in all four samples.
+- An unbounded fallback repeated payloads on a paginated sample and raised mean total Tokens
+  from 32,969 to 39,638 in batch `20261114T032600.506Z`. Other candidates omitted an interrupted
+  task's status or produced objects where the answer contract requires task-name strings. Failed
+  attempts remain in the interrupted sample's `20261114T031448.130Z/02.json` and
+  `20261114T034429.991Z/02.json`. No acceptance conditions changed.
+
+| Frozen sample      | Passes    | Mean total Tokens | Mean model seconds | Mean tool calls | Mean elapsed seconds |
+| ------------------ | --------- | ----------------- | ------------------ | --------------- | -------------------- |
+| Exact recall       | 3/3 → 3/3 | 16,586 → 16,617   | 18.28 → 18.09      | 2.00 → 2.00     | 19.33 → 24.83        |
+| Paraphrased recall | 3/3 → 3/3 | 20,212 → 12,108   | 11.11 → 6.84       | 3.00 → 1.33     | 13.01 → 15.64        |
+| Interrupted recall | 3/3 → 3/3 | 18,442 → 18,437   | 11.59 → 11.54      | 2.67 → 2.67     | 12.80 → 19.09        |
+| Paginated recall   | 3/3 → 3/3 | 32,969 → 32,755   | 25.32 → 25.29      | 4.33 → 4.33     | 26.98 → 32.27        |
+
+- Compared `...dirty-fcb34be4f061330c` with `...dirty-0c7448f3320a33a1`. Candidate batches in
+  table order are `20261114T035234.996Z`, `20261114T035006.377Z`, `20261114T034857.410Z`, and
+  `20261114T035055.745Z`. Paginated recall used a cursor in two of three attempts on each side.
+  Its mean first-text time within the text-producing model call rose from 1.52 to 1.68 seconds.
+- Stored task timestamps place the slow first attempts' 17–19 seconds before task creation.
+  Inside those tasks, model time accounted for all but 0.13–0.29 seconds. A timed smoke
+  (`20261114T041039.292Z`) spent 16.45 seconds opening the target in the runner and 22 ms
+  submitting the task. Two earlier timed runs opened the same target in about one second.
+  Keep the elapsed results as measured. This comparison supports the paraphrase Token and
+  model-round improvement. Elapsed and first-text performance admission remains open.
+- The live native-compaction sample starts with a synthetic uncompressed archive and uses actual
+  Provider usage and the configured context limit. Batches `20261114T035351.931Z` and
+  `20261114T040528.834Z` verified a Provider compaction item, its replay, and full quotation via
+  history. Each took four Provider requests and two tools. Controlled browser checks separately
+  covered restart after cancellation and attachment reuse.
+- On the final settings build (`...dirty-1611276fe2a970ae`), a live UI check found 8 suggestions
+  out of 10 catalog entries, verified the configured model's metadata, and confirmed a manually
+  entered hidden model still uses the catalog's reasoning default. The same build passed the
+  timed paraphrase smoke.
