@@ -167,12 +167,23 @@ npm run e2e:live:benchmark -- <sample-id> <required-runs>
 Run the same frozen contract and count for the candidate, then compare the labels under
 `EVALUATION_STANDARD.md`.
 
+For an explicitly requested local reference before commit, copy the verified `dist/` into a stable
+ignored path under `e2e/.runtime/`. Record the exact dirty product revision, file hashes, model
+settings, and capability set beside it. Use that frozen directory and revision with the same
+`CHATBROWSERX_LIVE_EXTENSION_PATH`, `CHATBROWSERX_LIVE_PRODUCT_REVISION`, and `seed-product` flow
+above. Never rebuild in place or label a dirty artifact as its clean HEAD. This local reference
+does not authorize committing or pushing.
+
 ## Framework Checks
+
+Select checks using [AGENTS.md](../AGENTS.md#local-iteration-and-verification). The commands below
+describe how to run each validation scope; they do not require browser or full repository checks
+for every local edit.
 
 ### Fast translation feedback
 
-During implementation, run the changed unit tests and the smallest affected browser regression
-first. Use the representative translation lane before expanding to the full suite:
+For translation behavior changes, run the affected unit tests and the smallest relevant browser
+regression first. Add the representative translation lane when shared browser behavior is affected:
 
 ```bash
 npm run test:e2e:quick
@@ -181,7 +192,8 @@ npm run test:e2e:quick
 This builds once and runs eight existing `@smoke` cases: navigation/icons, read-only tables,
 window/nested scrolling, explicit refresh, dynamic/static neighbors, native video preservation,
 partial model responses/cache, and context without editable drafts. It stops on the first failure.
-The fast lane is not the final gate and does not replace the affected bug's specific regression.
+The fast lane supplements the affected bug's specific regression. A smoke pass does not imply
+that the full browser suite passed; whether broader checks are needed depends on the change's impact.
 
 For a build already frozen for this source revision, reuse it without a second build:
 
@@ -195,7 +207,7 @@ npm run test:e2e:built -- --project=translation --no-deps translation-motion.spe
 product source, assets, dependencies or build configuration. The normal `test:e2e:quick` and
 `test:e2e` commands still build by default. Never rebuild a candidate while another test uses it.
 
-### Final browser gate and parallelism
+### Full browser gate and parallelism
 
 `npm run test:e2e` still runs **every** browser case, exactly once by default. The `foreground`
 project uses one worker. After it completes, the `translation` project uses up to two headless
@@ -207,12 +219,13 @@ Use `--project=translation --no-deps` only for targeted work; omitting dependenc
 gate. To diagnose a concurrency-only failure, rerun the same cases with `--workers=1`, retaining
 both outcomes. Do not increase retries or drop a case to hide concurrency failures.
 
-After focused checks and any required real-page replay pass, freeze the final candidate and run
-one complete repository gate. A later test-only selection/docs change does not justify repeating
-the real-site matrix. A later product change requires the affected regressions and final gates
-again. Format/lint and independent deterministic checks may run concurrently, but isolate timed
-comparisons from CPU-heavy checks. Authenticated live evaluations retain the stricter Profile and
-resource isolation rules above; the two-worker setting does not authorize sharing a live Profile.
+When a full repository gate is justified under the root instructions, run it once on a frozen
+candidate after focused checks and any required real-page replay pass. A later edit requires
+rechecking the affected behavior; it does not automatically require repeating the full gate or
+real-site matrix. Format/lint and independent deterministic checks may run concurrently, but
+isolate timed comparisons from CPU-heavy checks. Authenticated live evaluations retain the
+stricter Profile and resource isolation rules above; the two-worker setting does not authorize
+sharing a live Profile.
 
 For a narrow harness change:
 
@@ -222,6 +235,6 @@ npm run e2e:catalog:validate
 npx playwright test --config e2e/playwright.config.ts --list
 ```
 
-Before completing a framework or product change, run the repository gates listed once in
-EVALUATION_STANDARD.md. Browser tests are deterministic product checks; they are not a substitute
-for an authenticated live sample run.
+The full repository command list is in EVALUATION_STANDARD.md; select its scope under the root
+instructions. Browser tests are deterministic product checks; when authenticated live verification
+is required, they are not a substitute for a live sample run.

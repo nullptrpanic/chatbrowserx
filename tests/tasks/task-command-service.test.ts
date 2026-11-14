@@ -475,9 +475,17 @@ describe('TaskCommandService', () => {
   it('clears only resumable context while retaining permanent task facts', async () => {
     const fixture = await setup('command-clear-context');
     const created = await createSubmission(fixture);
+    await fixture.database.put('agent-sessions', {
+      conversationId: created.task.conversationId,
+      taskId: created.task.id,
+      items: [{ type: 'compaction', id: 'own-window', encrypted_content: 'opaque' }],
+      admittedMessageIds: [],
+      lastInputTokens: null,
+    });
     const cancelled = await fixture.commands.cancel(created.task.id);
     const cleared = await fixture.commands.clearContext(created.task.id);
 
+    expect(await fixture.repository.getAgentSession(created.task.conversationId)).toBeUndefined();
     expect(cleared).toMatchObject({
       task: { id: created.task.id, status: 'cancelled' },
       run: { id: cancelled.run.id, checkpointId: null },

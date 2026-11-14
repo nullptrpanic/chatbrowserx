@@ -11,7 +11,7 @@ import { ScreenshotError } from '../../attachments/screenshot-error';
 import type { PanelService } from '../../tasks/panel-service';
 import type { TranslationController } from '../../translation/translation-controller';
 import { TranslationResponseError } from '../../translation/region-translation';
-import { isProviderError } from '../../agent/model/model-provider-error';
+import { isProviderError } from '../../providers/provider-error';
 import { TranslationStateError } from '../../translation/translation-state-error';
 
 export interface RuntimeMessageContext {

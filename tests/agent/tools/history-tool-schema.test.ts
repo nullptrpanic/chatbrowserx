@@ -2,11 +2,13 @@ import { describe, expect, it } from 'vitest';
 import {
   historyDetailReadDefinition,
   historyReadDefinition,
+  historySearchDefinition,
   resultReadDefinition,
 } from '../../../src/tools/history/contract';
 import {
   historyDetailReadTool,
   historyReadTool,
+  historySearchTool,
   historyRuntime,
   resultReadTool,
 } from '../../../src/tools/history/tool';
@@ -18,11 +20,13 @@ const HISTORY_TOOL_DEFINITIONS = [
   historyReadDefinition,
   historyDetailReadDefinition,
   resultReadDefinition,
+  historySearchDefinition,
 ];
 const catalog = new ToolDeclarationCatalog();
 catalog.register(historyReadTool, historyRuntime);
 catalog.register(historyDetailReadTool, historyRuntime);
 catalog.register(resultReadTool, historyRuntime);
+catalog.register(historySearchTool, historyRuntime);
 const runtime = bindToolRuntime(catalog.seal(), new ToolServiceResolver());
 
 describe('history tool contracts', () => {
@@ -31,6 +35,7 @@ describe('history tool contracts', () => {
       'history_read',
       'history_detail_read',
       'result_read',
+      'history_search',
     ]);
     for (const definition of HISTORY_TOOL_DEFINITIONS) {
       const parameters = definition.parameters as {
@@ -44,6 +49,45 @@ describe('history tool contracts', () => {
     expect(HISTORY_TOOL_DEFINITIONS[0]?.description).toContain('offset');
     expect(HISTORY_TOOL_DEFINITIONS[1]?.description).toContain('detailId');
     expect(HISTORY_TOOL_DEFINITIONS[2]?.description).toContain('history_read');
+  });
+
+  it('accepts bounded search, browsing and message anchors without a model-controlled conversation scope', async () => {
+    const contract = await runtime.contract({ historyAvailable: true });
+    for (const query of ['', '截图 TOKEN']) {
+      expect(
+        contract.parse({
+          name: 'history_search',
+          callId: 'search',
+          argumentsJson: JSON.stringify({ query, cursor: '', limit: 5 }),
+        }),
+      ).toMatchObject({ arguments: { query, cursor: '', limit: 5 } });
+    }
+    expect(
+      contract.parse({
+        name: 'history_read',
+        callId: 'read',
+        argumentsJson: JSON.stringify({
+          taskId: 'task_1',
+          offset: null,
+          messageId: 'answer_1',
+          cursor: '',
+          limit: 5,
+        }),
+      }),
+    ).toMatchObject({ arguments: { messageId: 'answer_1' } });
+    for (const input of [
+      { query: '', cursor: '', limit: 11 },
+      { query: '', cursor: '', limit: 0 },
+      { query: 'x'.repeat(513), cursor: '', limit: 5 },
+      { query: '', cursor: '', limit: 5, conversationId: 'foreign' },
+    ])
+      expect(() =>
+        contract.parse({
+          name: 'history_search',
+          callId: 'bad',
+          argumentsJson: JSON.stringify(input),
+        }),
+      ).toThrow();
   });
 
   it('parses relative and exact task selectors through history_read', async () => {

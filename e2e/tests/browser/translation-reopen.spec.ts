@@ -1,21 +1,67 @@
+import { codexFixtureEvents } from './helpers/codex-fixture';
 import { extensionTest, expect } from './fixtures/extension-test';
 import { sendExtensionMessage } from './helpers/extension-runtime';
+import { setupTranslationFixture } from './helpers/translation-fixture';
 
 extensionTest.use({ extensionHeadless: true });
+
+extensionTest(
+  'uses provider defaults for translation and retains its cache across reopening',
+  async ({ extensionSession }) => {
+    const fixture = await setupTranslationFixture(
+      extensionSession,
+      '<main><p>Original paragraph.</p></main>',
+      { 'Original paragraph.': 'Translated paragraph.' },
+    );
+    const { context, sidePanelPage: panel } = extensionSession;
+    await panel.evaluate(async () => {
+      const stored = await chrome.storage.local.get('settings.app');
+      const settings = stored['settings.app'];
+      if (!settings || typeof settings !== 'object') throw new Error('Fixture settings missing');
+      await chrome.storage.local.set({
+        'settings.app': {
+          ...settings,
+          model: '',
+          reasoningEffort: '',
+        },
+      });
+    });
+    const requests: unknown[] = [];
+    context.on('request', (request) => {
+      if (request.url() === 'https://chatgpt.com/backend-api/codex/responses')
+        requests.push(request.postDataJSON());
+    });
+    await fixture.toggle();
+    const lens = fixture.page.locator('[data-chatbrowserx-overlay="translation"]');
+    await expect(lens).toHaveAttribute('data-status', 'ready');
+    expect(requests).toHaveLength(1);
+    expect(requests[0]).toMatchObject({
+      model: 'gpt-5.6-terra',
+      reasoning: { effort: 'medium' },
+    });
+    await fixture.page.keyboard.press('Escape');
+    await expect(lens).toHaveCount(0);
+    await fixture.toggle();
+    await expect(lens).toHaveAttribute('data-status', 'ready');
+    expect(requests).toHaveLength(1);
+  },
+);
 
 extensionTest(
   'retains page translations across Escape and preserves native navigation links',
   async ({ extensionSession }, testInfo) => {
     const { context, sidePanelPage: panel } = extensionSession;
     const token = Buffer.from(
-      JSON.stringify({ 'https://api.openai.com/auth': { chatgpt_account_id: 'acct_reopen' } }),
+      JSON.stringify({
+        'https://api.openai.com/auth': { chatgpt_account_id: 'acct_reopen' },
+      }),
     ).toString('base64url');
     const settings = {
       model: 'gpt-5.6-terra',
       reasoningEffort: 'medium',
       language: 'zh-CN',
       systemPrompt: '',
-      codexAccessToken: `e30.${token}.`,
+      accessToken: `e30.${token}.`,
     } as const;
     await sendExtensionMessage(panel, {
       version: 1,
@@ -33,7 +79,10 @@ extensionTest(
     <script>window.clicks=[];document.querySelector('nav').addEventListener('click',e=>window.clicks.push({trusted:e.isTrusted,href:e.target.closest('a')?.getAttribute('href')}));</script>`,
       }),
     );
-    const requests: { language: string; texts: { id: string; text: string }[] }[] = [];
+    const requests: {
+      language: string;
+      texts: { id: string; text: string }[];
+    }[] = [];
     await context.route('https://chatgpt.com/backend-api/codex/responses', (route) => {
       const input = JSON.parse(route.request().postDataJSON().input[0].content[0].text);
       requests.push(input);
@@ -47,11 +96,14 @@ extensionTest(
         id: t.id,
         translation: translations[t.text] ?? t.text,
       }));
-      const events = [
+      const events = codexFixtureEvents([
         { type: 'response.created', response: { id: 'reopen' } },
-        { type: 'response.output_text.delta', delta: JSON.stringify({ blocks }) },
+        {
+          type: 'response.output_text.delta',
+          delta: JSON.stringify({ blocks }),
+        },
         { type: 'response.completed', response: { id: 'reopen' } },
-      ];
+      ]);
       return route.fulfill({
         contentType: 'text/event-stream',
         body: events.map((e) => `event: ${e.type}\ndata: ${JSON.stringify(e)}\n\n`).join(''),
@@ -111,7 +163,11 @@ extensionTest(
       ['博客', '#blog'],
     ]) {
       const link = initial?.find((t) => t.text === text);
-      expect(link).toMatchObject({ color: 'rgb(0, 102, 204)', decoration: 'underline', href });
+      expect(link).toMatchObject({
+        color: 'rgb(0, 102, 204)',
+        decoration: 'underline',
+        href,
+      });
       if (!link) throw new Error('Missing translated link');
       await page.mouse.click(link.x, link.y);
     }
@@ -119,7 +175,9 @@ extensionTest(
       { trusted: false, href: '#home' },
       { trusted: false, href: '#blog' },
     ]);
-    await page.screenshot({ path: testInfo.outputPath('translated-links.png') });
+    await page.screenshot({
+      path: testInfo.outputPath('translated-links.png'),
+    });
     for (const scroll of [20, 40, 0]) {
       await page.keyboard.press('Escape');
       await expect(lens).toHaveCount(0);

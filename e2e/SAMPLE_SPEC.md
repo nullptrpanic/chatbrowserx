@@ -41,6 +41,7 @@ valid sample, attempt, and batch-summary reference.
 | resources       | object           | Cross-process remote-resource isolation keys.             |
 | target          | object           | Initial page, origin, and readiness timeout.              |
 | environment     | object           | Setup instructions and machine-readable readiness checks. |
+| initialHistory  | optional object  | Synthetic archived tasks with an optional summary window. |
 | input           | object           | Exact user request sent to a fresh WorkSession.           |
 | execution       | object           | Runtime budget and tool boundary.                         |
 | sideEffects     | object           | Coarse read-only or page-mutation authorization.          |
@@ -48,6 +49,19 @@ valid sample, attempt, and batch-summary reference.
 
 Human metadata and setup instructions use English. Exact input and literal evidence may use the
 target page's language.
+
+`initialHistory.tasks` contains synthetic archived tasks. Each task has a terminal `status`
+(`completed`, `failed`, or `cancelled`) and `messages`. Each message has `role` (`user` or
+`assistant`), `text`, and `status` (`complete`, `interrupted`, or `error`). Start each task with a
+user message and end the archive with a completed task so `input.text` starts a fresh task.
+The complete fixture travels in `sample.json`. Use synthetic facts and keep the expected answer
+out of the evaluated question.
+
+With `initialHistory.summary`, the runner seeds a summary-only model window for retrieval tests.
+Keep expected answers out of the summary. Omit `summary` to start with the uncompressed archived
+messages. Use `requireNativeCompaction` to test the selected model's real compaction and replay.
+Provide enough normal input to reach the discovered budget and bound the attempt's timeout and
+tool calls. Provider and tool metrics cover the evaluated question.
 
 ### resources
 
@@ -119,6 +133,7 @@ acceptance checks, and product safety rules.
 | forbidScreenshotInspect              | boolean                | yes      | Fail screenshot-based inspection when true.                           |
 | forbidSubmittedType                  | boolean                | yes      | Fail submitted typing operations when true.                           |
 | finalTextIncludes                    | non-empty string array | yes      | Every normalized literal must occur in final output.                  |
+| finalQuoteIncludes                   | non-empty string       | no       | Complete consecutive quote, ignoring whitespace and quote/bold marks. |
 | minFinalTextLength                   | non-negative integer   | no       | Optional coarse minimum when explicit output checks are insufficient. |
 | expectedSubmittedTypeCount           | non-negative integer   | no       | Exact submitted typing count.                                         |
 | expectedToolCounts                   | integer map            | no       | Exact count for every named tool.                                     |
@@ -135,6 +150,7 @@ acceptance checks, and product safety rules.
 | requiredMutationReadbacks            | object array           | no       | Structural values required after each named commit button.            |
 | finalTextIncludesAny                 | array of string arrays | no       | Require one alternative from every inner group.                       |
 | requireFreshProviderContext          | boolean                | no       | Require only the active request in the first Provider context.        |
+| requireNativeCompaction              | boolean                | no       | Require a Provider-produced compaction window and its replay.         |
 | finalTextExcludes                    | string array           | no       | Any normalized matching literal fails output.                         |
 | minimumMarkdownTableRows             | positive integer       | no       | Minimum Markdown data-row count.                                      |
 
@@ -215,6 +231,9 @@ All fields below are required. failure is null for a pass and an object for a fa
 | evidence.taskId / conversationId                  | Opaque execution identifiers, or `null` when preflight failed before creation.                      |
 | evidence.toolResults                              | Complete bounded and redacted tool arguments, results, and attachment references.                   |
 | evidence.providerTrace                            | Bounded structural Provider request and response evidence.                                          |
+
+Tool results may include `providerHosted: true` for tools executed inside a Provider request.
+They count toward tool usage but do not require a separate local function-output round trip.
 
 The directory identifies the batch and filenames identify attempt order:
 

@@ -1,7 +1,7 @@
 import { afterEach, beforeEach, expect, it, vi } from 'vitest';
 import { TranslationController } from '../../src/translation/translation-controller';
 import { DEFAULT_APP_SETTINGS } from '../../src/persistence/settings-store';
-import { providerErrorFromCode } from '../../src/agent/model/model-provider-error';
+import { providerErrorFromCode } from '../../src/providers/provider-error';
 
 beforeEach(() => {
   vi.useFakeTimers();

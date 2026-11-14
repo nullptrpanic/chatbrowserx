@@ -2,15 +2,14 @@ import { ChromeLocalStorageArea, type TrustedStorageAreaPort } from './storage-a
 
 export interface CredentialStore {
   initialize(): Promise<void>;
-  getCodexAccessToken(): Promise<string | undefined>;
-  setCodexAccessToken(value: string): Promise<void>;
+  getProviderToken(key: string): Promise<string | undefined>;
+  setProviderToken(key: string, value: string): Promise<void>;
   getTavilyKey(): Promise<string | undefined>;
   setTavilyKey(value: string): Promise<void>;
   getSandboxToken(): Promise<string | undefined>;
   setSandboxToken(value: string): Promise<void>;
 }
 
-const CODEX_TOKEN_KEY = 'credentials.codexAccessToken';
 const TAVILY_KEY = 'credentials.tavilyKey';
 const SANDBOX_TOKEN_KEY = 'credentials.sandboxToken';
 
@@ -32,17 +31,17 @@ export class ChromeCredentialStore implements CredentialStore {
   }
 
   /**
-   * Reads the Codex Access Token only for trusted extension services.
+   * Reads a provider-owned credential only for trusted extension services.
    */
-  async getCodexAccessToken(): Promise<string | undefined> {
-    return this.#readCredential(CODEX_TOKEN_KEY, 'Codex Access Token');
+  async getProviderToken(key: string): Promise<string | undefined> {
+    return this.#readCredential(`credentials.${key}`, 'Provider Access Token');
   }
 
   /**
-   * Saves a nonblank Codex Access Token and redacts any lower-level storage failure.
+   * Saves a provider-owned credential and redacts lower-level storage failures.
    */
-  async setCodexAccessToken(value: string): Promise<void> {
-    await this.#writeCredential(CODEX_TOKEN_KEY, value, 'Codex Access Token');
+  async setProviderToken(key: string, value: string): Promise<void> {
+    await this.#writeCredential(`credentials.${key}`, value, 'Provider Access Token');
   }
 
   /** Reads the Tavily Key only for trusted extension services. */

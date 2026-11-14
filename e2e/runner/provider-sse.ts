@@ -5,6 +5,8 @@ const MAX_EVENT_TYPES = 32;
 const SAFE_LABEL = /^[A-Za-z0-9_.:-]{1,128}$/u;
 
 export interface ProviderSseSummary {
+  readonly hostedToolOutputCount?: number;
+  readonly compactionOutputCount?: number;
   readonly bodyBytes: number;
   readonly bodyTooLarge: boolean;
   readonly completed: boolean;
@@ -38,6 +40,8 @@ export function summarizeProviderSse(body: Buffer, status: number | null): Provi
 
   const eventTypes = new Set<string>();
   const reasoningItems = new Set<string>();
+  const hostedItems = new Set<string>();
+  const compactionItems = new Set<string>();
   const errorCodes = new Set<string>();
   const errorTypes = new Set<string>();
   let completed = false;
@@ -64,6 +68,18 @@ export function summarizeProviderSse(body: Buffer, status: number | null): Provi
         reasoningItems.add(safeLabel(item.id) ?? `reasoning_${String(reasoningItems.size + 1)}`);
       }
       const response = jsonRecord(payload?.response);
+      const outputs = [
+        item,
+        ...(Array.isArray(response?.output) ? response.output.map(jsonRecord) : []),
+      ];
+      for (const output of outputs) {
+        if (typeof output?.id !== 'string') continue;
+        if (output.type === 'web_search_call') hostedItems.add(output.id);
+        if (output.type === 'compaction' && typeof output.encrypted_content === 'string')
+          compactionItems.add(output.id);
+        if (output.type === 'reasoning' && typeof output.encrypted_content === 'string')
+          reasoningItems.add(output.id);
+      }
       for (const error of [jsonRecord(payload?.error), jsonRecord(response?.error)]) {
         const code = safeLabel(error?.code);
         const type = safeLabel(error?.type);
@@ -81,6 +97,8 @@ export function summarizeProviderSse(body: Buffer, status: number | null): Provi
     failed,
     eventTypes: [...eventTypes],
     encryptedReasoningOutputCount: reasoningItems.size,
+    ...(hostedItems.size ? { hostedToolOutputCount: hostedItems.size } : {}),
+    ...(compactionItems.size ? { compactionOutputCount: compactionItems.size } : {}),
     errorCodes: [...errorCodes],
     errorTypes: [...errorTypes],
     captureError: null,

@@ -89,6 +89,7 @@ const policySchema = z
     requiredToolOutputIncludes: z.array(nonEmptyString).optional(),
     requiredMutationReadbacks: z.array(mutationReadbackSchema).min(1).optional(),
     finalTextIncludes: nonEmptyStrings,
+    finalQuoteIncludes: nonEmptyString.max(20_000).optional(),
     finalJsonItems: z
       .object({ key: nonEmptyString, equals: z.array(nonEmptyString) })
       .strict()
@@ -122,9 +123,44 @@ const policySchema = z
       .optional(),
     finalTextIncludesAny: z.array(nonEmptyStrings).min(1).optional(),
     requireFreshProviderContext: z.boolean().optional(),
+    requireNativeCompaction: z.boolean().optional(),
     finalTextExcludes: z.array(nonEmptyString).optional(),
     minFinalTextLength: nonNegativeInteger.optional(),
     minimumMarkdownTableRows: positiveInteger.optional(),
+  })
+  .strict();
+
+const initialHistorySchema = z
+  .object({
+    summary: nonEmptyString.max(20_000).optional(),
+    tasks: z
+      .array(
+        z
+          .object({
+            status: z.enum(['completed', 'failed', 'cancelled']),
+            messages: z
+              .array(
+                z
+                  .object({
+                    role: z.enum(['user', 'assistant']),
+                    text: nonEmptyString.max(20_000),
+                    status: z.enum(['complete', 'interrupted', 'error']),
+                  })
+                  .strict(),
+              )
+              .min(1)
+              .max(100)
+              .refine((messages) => messages[0]?.role === 'user', {
+                message: 'must start with a user message.',
+              }),
+          })
+          .strict(),
+      )
+      .min(1)
+      .max(50)
+      .refine((tasks) => tasks.at(-1)?.status === 'completed', {
+        message: 'must end with a completed task so the evaluated question starts a fresh task.',
+      }),
   })
   .strict();
 
@@ -146,6 +182,7 @@ const sampleSchema = z
       })
       .strict(),
     environment: environmentSchema,
+    initialHistory: initialHistorySchema.optional(),
     input: z.object({ text: nonEmptyString }).strict(),
     execution: z
       .object({
@@ -252,6 +289,7 @@ export function materializeLiveScenario(sample: EvaluationSampleDefinition): Liv
     taskText: sample.input.text,
     readinessTimeoutMs: sample.target.readinessTimeoutMs,
     environment: sample.environment,
+    ...(sample.initialHistory ? { initialHistory: sample.initialHistory } : {}),
     taskTimeoutMs: sample.execution.taskTimeoutMs,
     maxToolCalls: sample.execution.maxToolCalls,
     requiredTools: sample.execution.requiredTools,
@@ -305,6 +343,9 @@ export function materializeLiveScenario(sample: EvaluationSampleDefinition): Liv
     ...(policy.requiredMutationReadbacks === undefined
       ? {}
       : { requiredMutationReadbacks: policy.requiredMutationReadbacks }),
+    ...(policy.finalQuoteIncludes === undefined
+      ? {}
+      : { finalQuoteIncludes: policy.finalQuoteIncludes }),
     ...(policy.finalJsonItems === undefined ? {} : { finalJsonItems: policy.finalJsonItems }),
     ...(policy.finalPageStates === undefined ? {} : { finalPageStates: policy.finalPageStates }),
     ...(policy.finalTextIncludesAny === undefined
@@ -313,6 +354,9 @@ export function materializeLiveScenario(sample: EvaluationSampleDefinition): Liv
     ...(policy.requireFreshProviderContext === undefined
       ? {}
       : { requireFreshProviderContext: policy.requireFreshProviderContext }),
+    ...(policy.requireNativeCompaction === undefined
+      ? {}
+      : { requireNativeCompaction: policy.requireNativeCompaction }),
     ...(policy.finalTextExcludes === undefined
       ? {}
       : { finalTextExcludes: policy.finalTextExcludes }),

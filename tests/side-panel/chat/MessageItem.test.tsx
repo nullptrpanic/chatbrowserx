@@ -4,6 +4,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import { createTranslator } from '../../../src/shared/i18n/i18n';
 import { copyMessageToClipboard } from '../../../src/side-panel/chat/copy-message';
 import { MessageItem } from '../../../src/side-panel/chat/MessageItem';
+import type { PanelMessage, PanelTask } from '../../../src/shared/protocol/panel-types';
 
 const t = createTranslator('zh-CN');
 const attachments = {
@@ -46,6 +47,54 @@ function requireBlob(value: ClipboardItemData | undefined): Blob {
 }
 
 describe('MessageItem', () => {
+  it('shows the public summary beside streaming text and removes it when the answer completes', () => {
+    const message: PanelMessage = {
+      id: 'answer',
+      taskId: 'task',
+      role: 'assistant',
+      status: 'streaming',
+      text: 'Answer in progress.',
+      attachmentIds: [],
+      createdAt: 1,
+      updatedAt: 1,
+    };
+    const task: PanelTask = {
+      id: 'task',
+      latestRunId: null,
+      runs: [],
+      detailLevel: 'summary',
+      status: 'planning',
+      goal: 'Answer',
+      tabId: 1,
+      createdAt: 1,
+      updatedAt: 2,
+      sequence: 1,
+      completedToolCallCount: 0,
+      detailItemCount: 0,
+      contextCleared: false,
+      lastError: null,
+      events: [],
+      toolResults: [],
+      supplements: [],
+      reasoningSummary: 'Checking the available evidence.',
+    };
+    const { rerender } = render(
+      <MessageItem message={message} task={task} attachments={attachments} t={t} />,
+    );
+    expect(screen.getByText(task.reasoningSummary ?? '')).toBeVisible();
+    expect(screen.getByText(message.text)).toBeVisible();
+    rerender(
+      <MessageItem
+        message={{ ...message, status: 'complete', text: 'Final answer.' }}
+        task={{ ...task, status: 'completed' }}
+        attachments={attachments}
+        t={t}
+      />,
+    );
+    expect(screen.queryByText('Checking the available evidence.')).not.toBeInTheDocument();
+    expect(screen.getByText('Final answer.')).toBeVisible();
+  });
+
   it.each(['planning', 'queued', 'waiting_for_auth', 'paused', 'completed', 'failed'] as const)(
     'does not tell the user to submit again when the owning run is %s',
     (status) => {

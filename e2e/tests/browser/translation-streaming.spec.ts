@@ -21,13 +21,13 @@ for (const outcome of ['complete', 'fail', 'cancel'] as const) {
           reasoningEffort: 'medium',
           systemPrompt: '',
           language: 'zh-CN',
-          codexAccessToken: `e30.${token}.`,
+          accessToken: `e30.${token}.`,
         },
       });
       await context.route('https://translation-stream.test/', (route) =>
         route.fulfill({
           contentType: 'text/html',
-          body: '<!doctype html><style>body{margin:0;height:2000px;font:20px Arial}p{position:absolute;left:440px;width:350px;margin:0}#first{top:340px}#second{top:390px}</style><p id="first">Save</p><p id="second">Close</p>',
+          body: '<!doctype html><style>body{margin:0;height:2000px;font:20px Arial}p{position:absolute;left:440px;width:350px;margin:0}#visible{top:340px}#buffered{top:550px}</style><p id="buffered">Close</p><p id="visible">Save</p>',
         }),
       );
       // Redirect synthetic Provider traffic to a real paused SSE stream. All production code,
@@ -48,11 +48,14 @@ for (const outcome of ['complete', 'fail', 'cancel'] as const) {
 
           const input = JSON.parse(body).input[0].content[0].text as string;
           const { texts } = JSON.parse(input) as { texts: { id: string; text: string }[] };
-          const first = texts.find((t) => t.text === 'Save');
-          const second = texts.find((t) => t.text === 'Close');
-          if (!first || !second || texts.length !== 2) throw new Error('Unexpected text batch');
-          const firstBlock = { id: first.id, translation: '保存' };
-          secondBlock = { id: second.id, translation: '关闭' };
+          // Stream in request order. The earlier DOM paragraph starts outside the lens.
+          const [first, second] = texts.map(({ id, text }) => ({
+            id,
+            translation: text === 'Save' ? '保存' : text === 'Close' ? '关闭' : undefined,
+          }));
+          if (!first?.translation || !second?.translation || texts.length !== 2)
+            throw new Error('Unexpected text batch');
+          secondBlock = second;
           response.writeHead(200, {
             'Content-Type': 'text/event-stream',
             'Access-Control-Allow-Origin': '*',
@@ -60,7 +63,7 @@ for (const outcome of ['complete', 'fail', 'cancel'] as const) {
           emit({ type: 'response.created', response: { id: 'stream' } });
           emit({
             type: 'response.output_text.delta',
-            delta: '{"blocks":[' + JSON.stringify(firstBlock),
+            delta: '{"blocks":[' + JSON.stringify(first),
           });
         });
       });
@@ -127,10 +130,13 @@ for (const outcome of ['complete', 'fail', 'cancel'] as const) {
             type: 'response.output_text.delta',
             delta: ',' + JSON.stringify(secondBlock) + ']}',
           });
-          emit({ type: 'response.completed', response: { id: 'stream' } });
+          emit({
+            type: 'response.completed',
+            response: { id: 'stream', status: 'completed', output: [] },
+          });
           pending?.end();
           await expect(lens).toHaveAttribute('data-status', 'ready');
-          expect((await read()).map((e) => e.text)).toEqual(['保存', '关闭']);
+          expect((await read()).map((e) => e.text)).toEqual(['关闭', '保存']);
           await page.mouse.move(620, 400);
           await page.waitForTimeout(1300);
           await expect(lens).toHaveAttribute('data-status', 'ready');

@@ -1,3 +1,4 @@
+import { codexFixtureEvents } from './helpers/codex-fixture';
 import { extensionTest, expect } from './fixtures/extension-test';
 import type { ExtensionSession } from './fixtures/extension-context';
 import { sendExtensionMessage } from './helpers/extension-runtime';
@@ -24,7 +25,7 @@ async function fixture(
       reasoningEffort: 'medium',
       language: 'zh-CN',
       systemPrompt: '',
-      codexAccessToken: `e30.${token}.`,
+      accessToken: `e30.${token}.`,
     },
   });
   await context.route('https://translation-followup.test/', (r) =>
@@ -41,11 +42,11 @@ async function fixture(
       if (!(t.text in translations)) throw new Error(`Unexpected source: ${t.text}`);
       return { id: t.id, translation: translations[t.text] };
     });
-    const events = [
+    const events = codexFixtureEvents([
       { type: 'response.created', response: { id: 'followup' } },
       { type: 'response.output_text.delta', delta: JSON.stringify({ blocks }) },
       { type: 'response.completed', response: { id: 'followup' } },
-    ];
+    ]);
     return r.fulfill({
       contentType: 'text/event-stream',
       body: events.map((e) => `event: ${e.type}\ndata: ${JSON.stringify(e)}\n\n`).join(''),

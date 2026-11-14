@@ -1,17 +1,20 @@
 import { z } from 'zod';
-import { REASONING_EFFORTS, type ReasoningEffort } from '../shared/reasoning-effort';
+import type { ReasoningEffort } from '../shared/reasoning-effort';
 import { ChromeLocalStorageArea, type StorageAreaPort } from './storage-area';
 
 export type { ReasoningEffort } from '../shared/reasoning-effort';
 export type AppLanguage = 'system' | 'zh-CN' | 'en' | 'ja';
 
 export interface AppSettings {
+  readonly providerId?: string;
   readonly model: string;
   readonly reasoningEffort: ReasoningEffort;
   readonly systemPrompt: string;
   readonly language: AppLanguage;
   readonly historyMessageLimit: number;
   readonly sandboxServer?: string;
+  readonly credentialSource?: 'manual' | 'sandbox';
+  readonly authPath?: string;
 }
 
 export interface SettingsStore {
@@ -56,12 +59,15 @@ const sandboxServerSchema = z
   });
 const storedAppSettingsSchema = z
   .object({
-    model: z.string().trim().min(1).max(256),
-    reasoningEffort: z.enum(REASONING_EFFORTS),
+    providerId: z.string().max(128).default(''),
+    model: z.string().trim().max(256),
+    reasoningEffort: z.string().trim().max(64),
     systemPrompt: z.string().max(20_000),
     language: z.enum(['system', 'zh-CN', 'en', 'ja']),
     historyMessageLimit: z.number().int().min(1).max(200).default(50),
     sandboxServer: sandboxServerSchema.default(''),
+    credentialSource: z.enum(['manual', 'sandbox']).default('manual'),
+    authPath: z.string().trim().max(4096).default(''),
   })
   .strict();
 const appSettingsSchema = storedAppSettingsSchema.extend({
@@ -69,12 +75,15 @@ const appSettingsSchema = storedAppSettingsSchema.extend({
 });
 
 export const DEFAULT_APP_SETTINGS: AppSettings = Object.freeze({
-  model: 'gpt-5.6-terra',
-  reasoningEffort: 'medium',
+  providerId: '',
+  model: '',
+  reasoningEffort: '',
   systemPrompt: '',
   language: 'system',
   historyMessageLimit: 50,
   sandboxServer: '',
+  credentialSource: 'manual',
+  authPath: '',
 });
 
 export class ChromeSettingsStore implements SettingsStore {

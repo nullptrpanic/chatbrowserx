@@ -10,7 +10,7 @@ export function isAbortFailure(error: unknown): boolean {
     : typeof error === 'object' && error !== null && 'name' in error && error.name === 'AbortError';
 }
 
-function retryAfterMs(value: string | null, now = Date.now()): number | null {
+export function retryAfterMs(value: string | null, now = Date.now()): number | null {
   if (value === null) return null;
   const seconds = Number(value);
   if (Number.isFinite(seconds) && seconds >= 0) return Math.round(seconds * 1_000);

@@ -30,7 +30,7 @@ function buildSnapshot(): PanelSnapshot {
       systemPrompt: '',
       language: 'zh-CN',
       historyMessageLimit: 50,
-      hasCodexToken: true,
+      hasAccessToken: true,
       hasTavilyKey: true,
     },
   };
@@ -45,6 +45,36 @@ const attachments = {
 };
 
 describe('App background connection', () => {
+  it('submits with Sandbox authentication configured without requiring a stored manual token', async () => {
+    const base = buildSnapshot();
+    const current: PanelSnapshot = {
+      ...base,
+      settings: {
+        ...base.settings,
+        credentialSource: 'sandbox',
+        hasAccessToken: false,
+        sandboxServer: 'http://127.0.0.1:43130',
+        hasSandboxToken: true,
+      },
+    };
+    const send = vi.fn<RuntimePort['send']>(async (message) => ({
+      version: 1,
+      requestId: message.requestId,
+      ok: true,
+      data:
+        message.type === 'panel.getSnapshot'
+          ? current
+          : message.type === 'chat.submit'
+            ? { task: { conversationId: 'sandbox_auth' } }
+            : { connected: true },
+    }));
+    const user = userEvent.setup();
+    render(<App runtimePort={{ send }} environment={environment} attachmentClient={attachments} />);
+    await user.type(await screen.findByRole('textbox'), 'Use Sandbox authentication.');
+    await user.click(screen.getByRole('button', { name: '发送' }));
+    expect(send.mock.calls.some(([message]) => message.type === 'chat.submit')).toBe(true);
+  });
+
   it('selects an assistant answer for reply and submits its stable identifiers', async () => {
     const base = buildSnapshot();
     const task = {
@@ -129,7 +159,7 @@ describe('App background connection', () => {
     expect(screen.queryByText('回复 ChatBrowserX')).not.toBeInTheDocument();
   });
 
-  it('edits and saves an arbitrary model ID and the history message limit', async () => {
+  it('preserves an arbitrary model ID without a fixed history-count setting', async () => {
     const send = vi.fn<RuntimePort['send']>(async (message) => {
       const settings = {
         model: 'gpt-5.6-terra',
@@ -137,7 +167,7 @@ describe('App background connection', () => {
         systemPrompt: '',
         language: 'zh-CN' as const,
         historyMessageLimit: 50,
-        hasCodexToken: true,
+        hasAccessToken: true,
         hasTavilyKey: true,
       };
       return {
@@ -148,7 +178,7 @@ describe('App background connection', () => {
           message.type === 'panel.getSnapshot'
             ? { ...buildSnapshot(), settings }
             : message.type === 'settings.get'
-              ? { ...settings, codexAccessToken: '', tavilyKey: '' }
+              ? { ...settings, accessToken: '', tavilyKey: '' }
               : message.type === 'settings.save'
                 ? settings
                 : { connected: true },
@@ -158,12 +188,8 @@ describe('App background connection', () => {
 
     render(<App runtimePort={{ send }} environment={environment} attachmentClient={attachments} />);
     await user.click(await screen.findByRole('button', { name: '设置' }));
-    const input = await screen.findByRole('spinbutton', {
-      name: '历史消息条数',
-    });
-    await user.clear(input);
-    await user.type(input, '24');
-    const model = screen.getByRole('textbox', { name: '模型' });
+    expect(screen.queryByRole('spinbutton', { name: '历史消息条数' })).not.toBeInTheDocument();
+    const model = screen.getByRole('combobox', { name: '模型' });
     await user.clear(model);
     await user.type(model, 'custom-model-id');
     await user.click(screen.getByRole('button', { name: '保存设置' }));
@@ -171,7 +197,7 @@ describe('App background connection', () => {
     expect(send).toHaveBeenCalledWith(
       expect.objectContaining({
         type: 'settings.save',
-        payload: expect.objectContaining({ model: 'custom-model-id', historyMessageLimit: 24 }),
+        payload: expect.objectContaining({ model: 'custom-model-id' }),
       }),
     );
   });
@@ -198,7 +224,7 @@ describe('App background connection', () => {
                   language: settings.language,
                   historyMessageLimit: settings.historyMessageLimit,
                   sandboxServer: settings.sandboxServer,
-                  codexAccessToken: '',
+                  accessToken: '',
                   tavilyKey: '',
                   sandboxToken: 'stored-sandbox-token',
                 }
@@ -248,7 +274,7 @@ describe('App background connection', () => {
                 reasoningEffort: 'medium',
                 systemPrompt: '',
                 language: 'zh-CN',
-                codexAccessToken: 'saved-token',
+                accessToken: 'saved-token',
                 tavilyKey: 'saved-tavily-key',
               }
             : { connected: true },
@@ -259,9 +285,7 @@ describe('App background connection', () => {
     await user.click(await screen.findByRole('button', { name: '设置' }));
 
     const tokenInput = await screen.findByDisplayValue('saved-token');
-    const tavilyInput = await screen.findByDisplayValue('saved-tavily-key');
     expect(tokenInput).toHaveAttribute('type', 'password');
-    expect(tavilyInput).toHaveAttribute('type', 'password');
 
     const showTokenButton = screen.getAllByRole('button', {
       name: '显示密钥',
@@ -269,7 +293,6 @@ describe('App background connection', () => {
     if (showTokenButton === undefined) throw new Error('Token reveal button is missing.');
     await user.click(showTokenButton);
     expect(tokenInput).toHaveAttribute('type', 'text');
-    expect(tavilyInput).toHaveAttribute('type', 'password');
     expect(send).toHaveBeenCalledWith(
       expect.objectContaining({ type: 'settings.get', payload: {} }),
     );
@@ -285,7 +308,7 @@ describe('App background connection', () => {
           ...current,
           settings: {
             ...current.settings,
-            hasCodexToken: saved,
+            hasAccessToken: saved,
             hasTavilyKey: saved,
           },
         };
@@ -295,14 +318,14 @@ describe('App background connection', () => {
           reasoningEffort: 'medium',
           systemPrompt: '',
           language: 'zh-CN',
-          codexAccessToken: '',
+          accessToken: '',
           tavilyKey: '',
         };
       } else if (message.type === 'settings.save') {
         saved = true;
         data = {
           ...buildSnapshot().settings,
-          hasCodexToken: true,
+          hasAccessToken: true,
           hasTavilyKey: true,
         };
       }
@@ -312,10 +335,8 @@ describe('App background connection', () => {
 
     render(<App runtimePort={{ send }} environment={environment} attachmentClient={attachments} />);
     await user.click(await screen.findByRole('button', { name: '设置' }));
-    const tokenInput = screen.getByLabelText(/Codex Access Token/);
-    const tavilyInput = screen.getByLabelText(/Tavily API Key/);
+    const tokenInput = screen.getByLabelText(/Access Token/);
     await user.type(tokenInput, 'new-token');
-    await user.type(tavilyInput, 'new-tavily-key');
 
     await user.click(screen.getByRole('button', { name: '保存设置' }));
 
@@ -325,14 +346,13 @@ describe('App background connection', () => {
       expect.objectContaining({
         type: 'settings.save',
         payload: expect.objectContaining({
-          codexAccessToken: 'new-token',
-          tavilyKey: 'new-tavily-key',
+          accessToken: 'new-token',
         }),
       }),
     );
   });
 
-  it('omits a Tavily key that the user clears so the stored value is preserved', async () => {
+  it('omits a manual access token that the user clears so the stored value is preserved', async () => {
     const send = vi.fn<RuntimePort['send']>(async (message) => ({
       version: 1,
       requestId: message.requestId,
@@ -347,8 +367,8 @@ describe('App background connection', () => {
                 systemPrompt: '',
                 language: 'zh-CN',
                 historyMessageLimit: 50,
-                codexAccessToken: '',
-                tavilyKey: 'saved-tavily-key',
+                accessToken: 'saved-token',
+                tavilyKey: '',
               }
             : message.type === 'settings.save'
               ? buildSnapshot().settings
@@ -358,14 +378,14 @@ describe('App background connection', () => {
 
     render(<App runtimePort={{ send }} environment={environment} attachmentClient={attachments} />);
     await user.click(await screen.findByRole('button', { name: '设置' }));
-    const tavilyInput = await screen.findByLabelText(/Tavily API Key/);
-    await user.clear(tavilyInput);
+    const tokenInput = await screen.findByLabelText(/Access Token/);
+    await user.clear(tokenInput);
     await user.click(screen.getByRole('button', { name: '保存设置' }));
 
     const saveMessage = send.mock.calls
       .map(([message]) => message)
       .find((message) => message.type === 'settings.save');
-    expect(saveMessage?.payload).not.toHaveProperty('tavilyKey');
+    expect(saveMessage?.payload).not.toHaveProperty('accessToken');
   });
 
   it('reports a credential load failure separately from save failures', async () => {

@@ -1,7 +1,29 @@
 import { describe, expect, it } from 'vitest';
 import { summarizeResponsesRequestBody } from '../../runner/provider-trace';
+import { summarizeProviderSse } from '../../runner/provider-sse';
 
 describe('live Responses API trace sanitization', () => {
+  it('counts hosted search and compaction once across item and terminal events without retaining opaque data', () => {
+    const output = [
+      { type: 'web_search_call', id: 'ws_fixture', action: { query: 'private query' } },
+      { type: 'compaction', id: 'cp_fixture', encrypted_content: 'private encrypted data' },
+    ];
+    const events = [
+      ...output.map((item) => ({ type: 'response.output_item.done', item })),
+      { type: 'response.completed', response: { output } },
+    ];
+    const summary = summarizeProviderSse(
+      Buffer.from(events.map((event) => `data: ${JSON.stringify(event)}\n\n`).join('')),
+      200,
+    );
+    expect(summary).toMatchObject({
+      completed: true,
+      hostedToolOutputCount: 1,
+      compactionOutputCount: 1,
+    });
+    expect(JSON.stringify(summary)).not.toContain('private');
+  });
+
   it('retains only structural request evidence and validates function-call pairing', () => {
     const activeUserText = 'Read the exact private conversation.';
     const tools = [

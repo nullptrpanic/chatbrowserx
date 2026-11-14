@@ -153,14 +153,24 @@ function buildFixture() {
       save: vi.fn(async () => undefined),
     },
     credentials: {
-      getCodexAccessToken: vi.fn(async () => 'secret-token'),
-      setCodexAccessToken: vi.fn(async () => undefined),
       getTavilyKey: vi.fn(async () => 'secret-tavily-key'),
       setTavilyKey: vi.fn(async () => undefined),
       getSandboxToken: vi.fn(async (): Promise<string | undefined> => undefined),
       setSandboxToken: vi.fn(async () => undefined),
     },
     agent: {
+      getProviderConfiguration: vi.fn(async () => ({
+        providerId: 'fixture',
+        model: 'gpt-5.6-terra',
+        reasoningEffort: 'medium',
+        credentialSource: 'manual' as const,
+        authPath: '/fixture/auth.json',
+        hasAccessToken: true,
+        providers: [],
+      })),
+      readProviderToken: vi.fn(async () => 'secret-token'),
+      saveProviderToken: vi.fn(async () => undefined),
+      listModels: vi.fn(async () => []),
       start: vi.fn(async () => ({
         task,
         run,
@@ -754,7 +764,7 @@ describe('PanelService', () => {
       },
       conversation: { id: fixture.conversation.id, taskStatus: 'completed' },
       task: { id: fixture.task.id, sequence: 1 },
-      settings: { hasCodexToken: true, hasTavilyKey: true },
+      settings: { hasAccessToken: true, hasTavilyKey: true },
       attachments: [{ id: 'attachment_1', fileName: 'photo.png' }],
     });
     expect(JSON.stringify(snapshot)).not.toContain('secret-token');
@@ -1331,13 +1341,20 @@ describe('PanelService', () => {
     const service = new PanelService(fixture.dependencies);
 
     await expect(service.getSettings()).resolves.toEqual({
+      providerId: 'fixture',
+      providers: [],
+      credentialSource: 'manual',
+      authPath: '/fixture/auth.json',
+      hasAccessToken: true,
+      models: [],
+      modelDiscoveryFailed: false,
       model: 'gpt-5.6-terra',
       reasoningEffort: 'medium',
       systemPrompt: '',
       language: 'zh-CN',
       historyMessageLimit: 50,
       sandboxServer: '',
-      codexAccessToken: 'secret-token',
+      accessToken: 'secret-token',
       tavilyKey: 'secret-tavily-key',
       sandboxToken: 'secret-sandbox-token',
     });
@@ -1415,12 +1432,12 @@ describe('PanelService', () => {
       systemPrompt: 'Be concise',
       language: 'en',
       historyMessageLimit: 24,
-      codexAccessToken: 'new-token',
+      accessToken: 'new-token',
       tavilyKey: 'new-tavily-key',
     });
     await service.clearConversation(fixture.conversation.id);
 
-    expect(fixture.dependencies.credentials.setCodexAccessToken).toHaveBeenCalledWith('new-token');
+    expect(fixture.dependencies.agent.saveProviderToken).toHaveBeenCalledWith('new-token');
     expect(fixture.dependencies.credentials.setTavilyKey).toHaveBeenCalledWith('new-tavily-key');
     expect(fixture.dependencies.settings.save).toHaveBeenCalledWith(
       expect.objectContaining({ model: 'custom-model-id', historyMessageLimit: 24 }),

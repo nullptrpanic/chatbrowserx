@@ -8,7 +8,6 @@ import {
 } from '../../src/agent/task-executor';
 import type { AgentEvent, AgentPlanInput } from '../../src/agent/execution-types';
 import { parseBrowserToolCall } from '../../src/tools/browser/contract';
-import { parseContextCommitToolCall } from '../../src/tools/context/contract';
 import type { BrowserExecutionPort } from '../../src/browser/browser-execution-types';
 import { openChatBrowserDatabase } from '../../src/persistence/open-database';
 import {
@@ -16,9 +15,16 @@ import {
   type ConversationRepository,
 } from '../../src/persistence/conversation-repository';
 import { IndexedDbTaskRepository } from '../../src/persistence/task-repository';
-import { providerErrorFromCode } from '../../src/agent/model/model-provider-error';
-import type { TavilyExecutionPort } from '../../src/tools/tavily/types';
-import { tavilyErrorFromCode } from '../../src/tools/tavily/error';
+import { providerErrorFromCode } from '../../src/providers/provider-error';
+import {
+  fixtureTools,
+  fixtureService,
+  fixtureError,
+  type FixtureExecutionPort,
+} from './fixtures/execution-tool';
+interface AgentPlanner {
+  plan(input: AgentPlanInput, signal: AbortSignal): AsyncIterable<AgentEvent>;
+}
 import { SandboxClientError } from '../../src/sandbox/sandbox-client';
 import type { SandboxExecutionPort } from '../../src/sandbox/sandbox-tool-executor';
 import { TaskCommandService as DurableTaskCommandService } from '../../src/tasks/task-command-service';
@@ -30,7 +36,6 @@ import { bindToolRuntime } from '../../src/tools/registry';
 import { discoverTools } from '../../src/tools/discover';
 import { ToolServiceResolver } from '../../src/tools/service-resolver';
 import { historyService } from '../../src/tools/history/service';
-import { tavilyService } from '../../src/tools/tavily/service';
 import { createSandboxToolService, sandboxService } from '../../src/tools/sandbox/service';
 import { browserService } from '../../src/tools/browser/service';
 
@@ -145,7 +150,7 @@ async function seedExecutorConversation(
   });
 }
 
-function tavilyPort(overrides: Partial<TavilyExecutionPort> = {}): TavilyExecutionPort {
+function fixturePort(overrides: Partial<FixtureExecutionPort> = {}): FixtureExecutionPort {
   return {
     isConfigured: vi.fn(async () => true),
     search: vi.fn(async () => ({ results: [], truncated: false })),
@@ -155,8 +160,9 @@ function tavilyPort(overrides: Partial<TavilyExecutionPort> = {}): TavilyExecuti
   };
 }
 
-type TestTaskExecutorDependencies = Omit<TaskExecutorDependencies, 'tools'> & {
-  readonly tavily: TavilyExecutionPort;
+type TestTaskExecutorDependencies = Omit<TaskExecutorDependencies, 'tools' | 'runtime'> & {
+  readonly planner: AgentPlanner;
+  readonly fixture: FixtureExecutionPort;
   readonly history?: TaskHistoryReaderPort;
   readonly sandbox?: SandboxExecutionPort;
   readonly browser: BrowserExecutionPort;
@@ -165,9 +171,9 @@ type TestTaskExecutorDependencies = Omit<TaskExecutorDependencies, 'tools'> & {
 /** Binds legacy test doubles through the same registered runtime used by production Agent setup. */
 class TaskExecutor extends ProductionTaskExecutor {
   constructor(dependencies: TestTaskExecutorDependencies) {
-    const { tavily, history, sandbox, browser, ...executorDependencies } = dependencies;
+    const { fixture, history, sandbox, browser, planner, ...executorDependencies } = dependencies;
     const services = new ToolServiceResolver();
-    services.bind(tavilyService, tavily);
+    services.bind(fixtureService, fixture);
     services.bind(browserService, browser);
     if (history !== undefined) services.bind(historyService, history);
     if (sandbox !== undefined) {
@@ -175,7 +181,23 @@ class TaskExecutor extends ProductionTaskExecutor {
     }
     super({
       ...executorDependencies,
-      tools: bindToolRuntime(discoverTools(), services),
+      tools: bindToolRuntime([...discoverTools(), ...fixtureTools], services),
+      runtime: {
+        async run(hooks, signal) {
+          // These tests exercise host recovery/effect guards; framework iteration has its own tests.
+          while (!signal.aborted) {
+            const input = await hooks.prepare();
+            let observed = false;
+            for await (const event of planner.plan(input, signal)) {
+              observed = true;
+              const result = await hooks.observe(event);
+              if (result.task.status !== 'planning') return;
+            }
+            if (!observed) throw new Error('Scripted runtime did not produce an event.');
+          }
+          throw new DOMException('Aborted', 'AbortError');
+        },
+      },
     });
   }
 }
@@ -204,7 +226,7 @@ function searchCall(callId: string): AgentEvent {
     type: 'tool.call',
     call: {
       callId,
-      name: 'tavily_search',
+      name: 'fixture_search',
       argumentsJson: JSON.stringify(SEARCH_ARGUMENTS),
       arguments: SEARCH_ARGUMENTS,
     },
@@ -218,17 +240,6 @@ function browserCall(callId: string, name: string, arguments_: unknown): AgentEv
       callId,
       name,
       argumentsJson: JSON.stringify(arguments_),
-    }),
-  };
-}
-
-function contextCommitCall(callId: string, state: string, throughCallId: string): AgentEvent {
-  return {
-    type: 'tool.call',
-    call: parseContextCommitToolCall({
-      callId,
-      name: 'commit_context',
-      argumentsJson: JSON.stringify({ state, throughCallId }),
     }),
   };
 }
@@ -299,7 +310,7 @@ async function runBrowserProgressScenario(
     repository,
     conversations: dependencies.conversations,
     planner,
-    tavily: tavilyPort(),
+    fixture: fixturePort(),
     browser: browserPort({ execute }),
     clock: dependencies.clock,
     ids: dependencies.ids,
@@ -399,7 +410,7 @@ describe('TaskExecutor', () => {
           repository,
           conversations: dependencies.conversations,
           planner,
-          tavily: tavilyPort(),
+          fixture: fixturePort(),
           browser: browserPort(),
           clock: dependencies.clock,
           ids: dependencies.ids,
@@ -467,7 +478,7 @@ describe('TaskExecutor', () => {
       repository,
       conversations: dependencies.conversations,
       planner: { plan },
-      tavily: tavilyPort(),
+      fixture: fixturePort(),
       browser: browserPort(),
       clock: dependencies.clock,
       ids: dependencies.ids,
@@ -536,9 +547,10 @@ describe('TaskExecutor', () => {
             } as const;
           })(),
       },
-      tavily: tavilyPort(),
+      fixture: fixturePort(),
       browser: browserPort(),
       history: {
+        searchHistory: vi.fn(),
         readAttachments: vi.fn(async () => null),
         readHistory,
         readDetail: vi.fn(),
@@ -552,7 +564,11 @@ describe('TaskExecutor', () => {
       executor.run(created.task.id, new AbortController().signal),
     ).resolves.toMatchObject({ task: { status: 'completed' } });
     expect(readHistory).toHaveBeenCalledWith(
-      { conversationId: 'conversation_1', currentTaskId: created.task.id },
+      {
+        conversationId: 'conversation_1',
+        currentTaskId: created.task.id,
+        currentTaskLastEventSequence: expect.any(Number),
+      },
       { taskId: 'task_old', offset: null, cursor: '', limit: 50 },
     );
     database.close();
@@ -588,7 +604,7 @@ describe('TaskExecutor', () => {
             } as const;
           })(),
       },
-      tavily: tavilyPort(),
+      fixture: fixturePort(),
       browser: browserPort(),
       clock: dependencies.clock,
       ids: dependencies.ids,
@@ -660,7 +676,7 @@ describe('TaskExecutor', () => {
       })();
     });
     let searchAttempts = 0;
-    const tavily = tavilyPort({
+    const fixture = fixturePort({
       search: vi.fn(async () => {
         searchAttempts += 1;
         if (searchAttempts === 1) throw providerErrorFromCode('ABORTED');
@@ -671,7 +687,7 @@ describe('TaskExecutor', () => {
       repository,
       conversations: dependencies.conversations,
       planner: { plan },
-      tavily,
+      fixture,
       browser: browserPort(),
       clock: dependencies.clock,
       ids: dependencies.ids,
@@ -683,7 +699,7 @@ describe('TaskExecutor', () => {
     const interrupted = await commands.getSnapshot(created.task.id);
     expect(interrupted.checkpoint?.pendingToolCall).toMatchObject({
       callId: 'call_search',
-      name: 'tavily_search',
+      name: 'fixture_search',
     });
     expect(interrupted.checkpoint?.continuationItems.at(-1)).toMatchObject({
       type: 'function_call',
@@ -718,7 +734,7 @@ describe('TaskExecutor', () => {
       expect.arrayContaining(['model.turn', 'tool.call', 'tool.result', 'status.changed']),
     );
     expect(plan).toHaveBeenCalledTimes(2);
-    expect(tavily.search).toHaveBeenCalledTimes(2);
+    expect(fixture.search).toHaveBeenCalledTimes(2);
     database.close();
   });
 
@@ -778,7 +794,7 @@ describe('TaskExecutor', () => {
       repository,
       conversations: dependencies.conversations,
       planner: { plan },
-      tavily: tavilyPort(),
+      fixture: fixturePort(),
       browser: browserPort({ execute }),
       clock: dependencies.clock,
       ids: dependencies.ids,
@@ -857,7 +873,7 @@ describe('TaskExecutor', () => {
       repository,
       conversations: dependencies.conversations,
       planner: { plan },
-      tavily: tavilyPort(),
+      fixture: fixturePort(),
       browser: browserPort({ execute }),
       clock: dependencies.clock,
       ids: dependencies.ids,
@@ -960,7 +976,7 @@ describe('TaskExecutor', () => {
       repository,
       conversations: dependencies.conversations,
       planner,
-      tavily: tavilyPort(),
+      fixture: fixturePort(),
       browser: browserPort({ execute }),
       clock: dependencies.clock,
       ids: dependencies.ids,
@@ -1728,7 +1744,7 @@ describe('TaskExecutor', () => {
       repository,
       conversations: dependencies.conversations,
       planner,
-      tavily: tavilyPort(),
+      fixture: fixturePort(),
       browser: browserPort({
         execute: vi.fn(async () => ({
           output: '{"ok":true,"data":{"mode":"screenshot"}}',
@@ -1807,7 +1823,7 @@ describe('TaskExecutor', () => {
             } as const;
           })(),
       },
-      tavily: tavilyPort(),
+      fixture: fixturePort(),
       browser: browserPort({
         execute: vi.fn(async () => ({
           output: '{"ok":true,"data":{"full":"audit"}}',
@@ -1904,7 +1920,7 @@ describe('TaskExecutor', () => {
       repository,
       conversations: dependencies.conversations,
       planner,
-      tavily: tavilyPort(),
+      fixture: fixturePort(),
       browser: browserPort({
         execute: executeBrowser,
       }),
@@ -1986,7 +2002,7 @@ describe('TaskExecutor', () => {
       repository,
       conversations: dependencies.conversations,
       planner,
-      tavily: tavilyPort(),
+      fixture: fixturePort(),
       browser: browserPort({ execute }),
       clock: dependencies.clock,
       ids: dependencies.ids,
@@ -2078,7 +2094,7 @@ describe('TaskExecutor', () => {
       repository,
       conversations: dependencies.conversations,
       planner,
-      tavily: tavilyPort(),
+      fixture: fixturePort(),
       browser: browserPort(),
       sandbox: {
         execute,
@@ -2165,7 +2181,7 @@ describe('TaskExecutor', () => {
       repository,
       conversations: dependencies.conversations,
       planner,
-      tavily: tavilyPort(),
+      fixture: fixturePort(),
       browser: browserPort(),
       sandbox: {
         execute,
@@ -2260,7 +2276,7 @@ describe('TaskExecutor', () => {
             }
           })(),
       },
-      tavily: tavilyPort(),
+      fixture: fixturePort(),
       browser: browserPort(),
       sandbox: {
         execute,
@@ -2329,7 +2345,7 @@ describe('TaskExecutor', () => {
             }
           })(),
       },
-      tavily: tavilyPort(),
+      fixture: fixturePort(),
       browser: browserPort(),
       sandbox: {
         execute,
@@ -2386,7 +2402,7 @@ describe('TaskExecutor', () => {
             });
           })(),
       },
-      tavily: tavilyPort(),
+      fixture: fixturePort(),
       browser: browserPort(),
       sandbox: {
         async configurationKey() {
@@ -2455,7 +2471,7 @@ describe('TaskExecutor', () => {
             }
           })(),
       },
-      tavily: tavilyPort(),
+      fixture: fixturePort(),
       browser: browserPort(),
       sandbox: {
         async configurationKey() {
@@ -2525,7 +2541,7 @@ describe('TaskExecutor', () => {
             }
           })(),
       },
-      tavily: tavilyPort(),
+      fixture: fixturePort(),
       browser: browserPort(),
       sandbox: {
         execute,
@@ -2589,7 +2605,7 @@ describe('TaskExecutor', () => {
             });
           })(),
       },
-      tavily: tavilyPort(),
+      fixture: fixturePort(),
       browser: browserPort(),
       sandbox: {
         execute,
@@ -2666,7 +2682,7 @@ describe('TaskExecutor', () => {
       repository,
       conversations: dependencies.conversations,
       planner,
-      tavily: tavilyPort(),
+      fixture: fixturePort(),
       browser: browserPort({ execute }),
       clock: dependencies.clock,
       ids: dependencies.ids,
@@ -2726,7 +2742,7 @@ describe('TaskExecutor', () => {
       repository,
       conversations: dependencies.conversations,
       planner,
-      tavily: tavilyPort(),
+      fixture: fixturePort(),
       browser: browserPort({ execute, release }),
       clock: dependencies.clock,
       ids: dependencies.ids,
@@ -2760,7 +2776,7 @@ describe('TaskExecutor', () => {
     database.close();
   });
 
-  it('runs a pure model turn without invoking Tavily', async () => {
+  it('runs a pure model turn without invoking Fixture', async () => {
     const database = await openChatBrowserDatabase(createTestDatabaseName('text-executor'));
     const repository = new IndexedDbTaskRepository(database);
     const dependencies = sources();
@@ -2792,7 +2808,7 @@ describe('TaskExecutor', () => {
       repository,
       conversations: dependencies.conversations,
       planner: { plan },
-      tavily: tavilyPort(),
+      fixture: fixturePort(),
       browser: browserPort(),
       clock: dependencies.clock,
       ids: dependencies.ids,
@@ -2812,127 +2828,6 @@ describe('TaskExecutor', () => {
       summary: 'Verified the available context.',
     });
     expect(plan).toHaveBeenCalledOnce();
-    database.close();
-  });
-
-  it('retries one transient model failure without pausing the task', async () => {
-    const database = await openChatBrowserDatabase(createTestDatabaseName('transient-retry'));
-    const repository = new IndexedDbTaskRepository(database);
-    const dependencies = sources();
-    const commands = new TaskCommandService(
-      repository,
-      dependencies.clock,
-      dependencies.ids,
-      dependencies.conversations,
-    );
-    const created = await commands.create({
-      conversationId: 'conversation_1',
-      tabId: 7,
-      goal: 'Retry one stalled model response',
-    });
-    let attempt = 0;
-    const sleep = vi.fn(async () => undefined);
-    const plan = vi.fn(() =>
-      (async function* () {
-        attempt += 1;
-        if (attempt === 1) {
-          throw providerErrorFromCode('TRANSIENT');
-        }
-        yield {
-          type: 'task.completed' as const,
-          reason: 'retried',
-          messageId: 'message_retry',
-        };
-      })(),
-    );
-    const executor = new TaskExecutor({
-      repository,
-      conversations: dependencies.conversations,
-      planner: { plan },
-      tavily: tavilyPort(),
-      browser: browserPort(),
-      clock: dependencies.clock,
-      ids: dependencies.ids,
-      sleep,
-    });
-
-    const result = await executor.run(created.task.id, new AbortController().signal);
-
-    expect(result.task.status).toBe('completed');
-    expect(result.events.map((event) => event.type)).toEqual([
-      'message.recorded',
-      'status.changed',
-      'status.changed',
-      'status.changed',
-      'status.changed',
-    ]);
-    expect(result.events).toContainEqual(
-      expect.objectContaining({
-        type: 'status.changed',
-        reason: 'transient_model_retry:upstream_failure',
-      }),
-    );
-    expect(sleep).toHaveBeenCalledTimes(1);
-    expect(sleep).toHaveBeenCalledWith(500, expect.any(AbortSignal));
-    expect(plan).toHaveBeenCalledTimes(2);
-    database.close();
-  });
-
-  it('keeps a completed reasoning summary and pauses after three transient retries', async () => {
-    const database = await openChatBrowserDatabase(createTestDatabaseName('reasoning-failure'));
-    const repository = new IndexedDbTaskRepository(database);
-    const dependencies = sources();
-    const commands = new TaskCommandService(
-      repository,
-      dependencies.clock,
-      dependencies.ids,
-      dependencies.conversations,
-    );
-    const created = await commands.create({
-      conversationId: 'conversation_1',
-      tabId: 7,
-      goal: 'Keep the reasoning summary',
-    });
-    let attempt = 0;
-    const sleep = vi.fn(async () => undefined);
-    const plan = vi.fn(() =>
-      (async function* () {
-        attempt += 1;
-        if (attempt === 1) {
-          yield {
-            type: 'reasoning.summary' as const,
-            text: 'Checked the source before the outage.',
-          };
-        }
-        throw providerErrorFromCode('TRANSIENT', { transientStage: 'stream_idle_timeout' });
-      })(),
-    );
-    const executor = new TaskExecutor({
-      repository,
-      conversations: dependencies.conversations,
-      planner: { plan },
-      tavily: tavilyPort(),
-      browser: browserPort(),
-      clock: dependencies.clock,
-      ids: dependencies.ids,
-      sleep,
-    });
-
-    const result = await executor.run(created.task.id, new AbortController().signal);
-
-    expect(result.task.status).toBe('paused');
-    expect(
-      result.events.filter(
-        (event) =>
-          event.type === 'status.changed' &&
-          event.reason === 'transient_model_retry:stream_idle_timeout',
-      ),
-    ).toHaveLength(3);
-    expect(result.events.find(({ type }) => type === 'reasoning.summary')).toMatchObject({
-      summary: 'Checked the source before the outage.',
-    });
-    expect(plan).toHaveBeenCalledTimes(4);
-    expect(sleep).toHaveBeenCalledTimes(3);
     database.close();
   });
 
@@ -2963,7 +2858,7 @@ describe('TaskExecutor', () => {
             type: 'tool.call',
             call: {
               callId: 'call_extract',
-              name: 'tavily_extract',
+              name: 'fixture_extract',
               argumentsJson:
                 '{"urls":["https://example.com/a"],"query":"auth","extractDepth":"basic"}',
               arguments: {
@@ -2982,12 +2877,12 @@ describe('TaskExecutor', () => {
         }
       })();
     });
-    const tavily = tavilyPort({
+    const fixture = fixturePort({
       search: vi.fn(async () => {
         const pending = await commands.getSnapshot(created.task.id);
         expect(pending.checkpoint?.pendingToolCall).toMatchObject({
           callId: 'call_search',
-          name: 'tavily_search',
+          name: 'fixture_search',
         });
         expect(pending.checkpoint?.continuationItems.at(-1)).toMatchObject({
           type: 'function_call',
@@ -3023,7 +2918,7 @@ describe('TaskExecutor', () => {
       repository,
       conversations: dependencies.conversations,
       planner: { plan },
-      tavily,
+      fixture,
       browser: browserPort(),
       clock: dependencies.clock,
       ids: dependencies.ids,
@@ -3046,7 +2941,7 @@ describe('TaskExecutor', () => {
     expect(result.toolResults).toHaveLength(2);
     expect(result.toolResults[0]).toMatchObject({
       callId: 'call_search',
-      toolName: 'tavily_search',
+      toolName: 'fixture_search',
       argumentsJson: JSON.stringify(SEARCH_ARGUMENTS),
     });
     expect(JSON.parse(result.toolResults[0]?.output ?? '')).toMatchObject({
@@ -3056,291 +2951,11 @@ describe('TaskExecutor', () => {
     });
     expect(result.toolResults[1]).toMatchObject({
       callId: 'call_extract',
-      toolName: 'tavily_extract',
+      toolName: 'fixture_extract',
     });
     expect(result.toolResults.every(({ id }) => id.length > 0)).toBe(true);
-    expect(tavily.search).toHaveBeenCalledOnce();
-    expect(tavily.extract).toHaveBeenCalledOnce();
-    database.close();
-  });
-
-  it('compacts through the requested cursor while retaining later results and full audit', async () => {
-    const database = await openChatBrowserDatabase(
-      createTestDatabaseName('context-commit-executor'),
-    );
-    const repository = new IndexedDbTaskRepository(database);
-    const dependencies = sources();
-    const commands = new TaskCommandService(
-      repository,
-      dependencies.clock,
-      dependencies.ids,
-      dependencies.conversations,
-    );
-    const created = await commands.create({
-      conversationId: 'conversation_1',
-      tabId: 7,
-      goal: 'Research and preserve only the stable working state',
-      userMessageId: 'message_user',
-    });
-    const transitions: Parameters<typeof repository.saveTransition>[0][] = [];
-    const originalSaveTransition = repository.saveTransition.bind(repository);
-    vi.spyOn(repository, 'saveTransition').mockImplementation(async (input) => {
-      transitions.push(input);
-      await originalSaveTransition(input);
-    });
-    const inputs: AgentPlanInput[] = [];
-    const commitState =
-      'Goal: finish the research. Verified: the search completed. Next: answer the user.';
-    const plan = vi.fn<(input: AgentPlanInput) => AsyncGenerator<AgentEvent>>((input) => {
-      inputs.push(input);
-      return (async function* () {
-        if (inputs.length === 1) {
-          yield searchCall('call_search_1');
-        } else if (inputs.length === 2) {
-          yield searchCall('call_search_2');
-        } else if (inputs.length === 3) {
-          yield contextCommitCall('call_commit', commitState, 'call_search_1');
-        } else {
-          yield {
-            type: 'task.completed',
-            reason: 'model_response_completed',
-            messageId: 'message_answer',
-          };
-        }
-      })();
-    });
-    const tavily = tavilyPort();
-    const resetObservationBaselines = vi.fn();
-    const browser = browserPort({ resetObservationBaselines });
-    const executor = new TaskExecutor({
-      repository,
-      conversations: dependencies.conversations,
-      planner: { plan },
-      tavily,
-      browser,
-      clock: dependencies.clock,
-      ids: dependencies.ids,
-    });
-
-    const result = await executor.run(created.task.id, new AbortController().signal);
-
-    expect(result.task.status).toBe('completed');
-    expect(result.events.map(({ type }) => type)).toEqual([
-      'message.recorded',
-      'status.changed',
-      'status.changed',
-      'tool.call',
-      'tool.result',
-      'tool.call',
-      'tool.result',
-      'tool.call',
-      'tool.result',
-      'status.changed',
-    ]);
-    const commitBoundary = transitions.find(({ events }) =>
-      events.some((event) => event.type === 'tool.call' && event.name === 'commit_context'),
-    );
-    expect(commitBoundary?.checkpoint?.pendingToolCall).toEqual({
-      callId: 'call_commit',
-      name: 'commit_context',
-      argumentsJson: JSON.stringify({
-        state: commitState,
-        throughCallId: 'call_search_1',
-      }),
-      executionState: 'recorded',
-    });
-    expect(result.toolResults.map(({ toolName }) => toolName)).toEqual([
-      'tavily_search',
-      'tavily_search',
-      'commit_context',
-    ]);
-    expect(inputs[3]?.checkpoint.continuationItems).toEqual([
-      { type: 'message_ref', messageId: 'message_user' },
-      {
-        type: 'function_call',
-        callId: 'call_commit',
-        name: 'commit_context',
-        argumentsJson: JSON.stringify({
-          state: commitState,
-          throughCallId: 'call_search_1',
-        }),
-      },
-      expect.objectContaining({
-        type: 'function_call_output_ref',
-        callId: 'call_commit',
-        attachmentIds: [],
-      }),
-      {
-        type: 'function_call',
-        callId: 'call_search_2',
-        name: 'tavily_search',
-        argumentsJson: JSON.stringify(SEARCH_ARGUMENTS),
-      },
-      expect.objectContaining({
-        type: 'function_call_output_ref',
-        callId: 'call_search_2',
-        attachmentIds: [],
-      }),
-    ]);
-    expect(
-      JSON.parse(
-        inputs[3]?.toolResults.find((item) => item.callId === 'call_commit')?.output ?? '',
-      ),
-    ).toMatchObject({ ok: true, compactedCalls: 1, releasedImages: 0 });
-    expect(tavily.search).toHaveBeenCalledTimes(2);
-    expect(resetObservationBaselines).toHaveBeenCalledOnce();
-    expect(browser.execute).not.toHaveBeenCalled();
-    database.close();
-  });
-
-  it('recovers an invalid context commit cursor without discarding raw tool history', async () => {
-    const database = await openChatBrowserDatabase(
-      createTestDatabaseName('invalid-context-commit-cursor'),
-    );
-    const repository = new IndexedDbTaskRepository(database);
-    const dependencies = sources();
-    const commands = new TaskCommandService(
-      repository,
-      dependencies.clock,
-      dependencies.ids,
-      dependencies.conversations,
-    );
-    const created = await commands.create({
-      conversationId: 'conversation_1',
-      tabId: 7,
-      goal: 'Recover a browser task after a bad commit cursor',
-      userMessageId: 'message_user',
-    });
-    const inputs: AgentPlanInput[] = [];
-    const plan = vi.fn<(input: AgentPlanInput) => AsyncGenerator<AgentEvent>>((input) => {
-      inputs.push(input);
-      return (async function* () {
-        if (inputs.length === 1) {
-          yield searchCall('call_search');
-          return;
-        }
-        if (inputs.length === 2) {
-          yield contextCommitCall(
-            'call_bad_commit',
-            'The search result is preserved. Next: continue the browser task.',
-            'call_hallucinated',
-          );
-          return;
-        }
-        if (inputs.length === 3) {
-          yield contextCommitCall(
-            'call_good_commit',
-            'The search result is preserved. Next: continue the browser task.',
-            'call_search',
-          );
-          return;
-        }
-        yield {
-          type: 'task.completed',
-          reason: 'model_response_completed',
-          messageId: 'message_answer',
-        };
-      })();
-    });
-    const executor = new TaskExecutor({
-      repository,
-      conversations: dependencies.conversations,
-      planner: { plan },
-      tavily: tavilyPort(),
-      browser: browserPort(),
-      clock: dependencies.clock,
-      ids: dependencies.ids,
-    });
-
-    const result = await executor.run(created.task.id, new AbortController().signal);
-
-    expect(result.task.status).toBe('completed');
-    expect(inputs).toHaveLength(4);
-    const retryInput = inputs[2];
-    expect(
-      retryInput?.checkpoint.continuationItems.some(
-        (item) => item.type === 'function_call' && item.callId === 'call_search',
-      ),
-    ).toBe(true);
-    expect(retryInput?.toolResults.find((item) => item.callId === 'call_bad_commit')).toMatchObject(
-      {
-        output: JSON.stringify({
-          ok: false,
-          code: 'INVALID_CONTEXT_COMMIT_CURSOR',
-          message:
-            'throughCallId did not match a current completed non-commit tool call. Retry commit_context with one of validThroughCallIds.',
-          validThroughCallIds: ['call_search'],
-        }),
-      },
-    );
-    expect(result.toolResults.map(({ callId }) => callId)).toEqual([
-      'call_search',
-      'call_bad_commit',
-      'call_good_commit',
-    ]);
-    expect(
-      inputs[3]?.checkpoint.continuationItems.some(
-        (item) =>
-          'callId' in item && (item.callId === 'call_search' || item.callId === 'call_bad_commit'),
-      ),
-    ).toBe(false);
-    database.close();
-  });
-
-  it('allows an internal context commit after the Tavily family reaches its call limit', async () => {
-    const database = await openChatBrowserDatabase(
-      createTestDatabaseName('context-commit-after-tavily-limit'),
-    );
-    const repository = new IndexedDbTaskRepository(database);
-    const dependencies = sources();
-    const commands = new TaskCommandService(
-      repository,
-      dependencies.clock,
-      dependencies.ids,
-      dependencies.conversations,
-    );
-    const created = await commands.create({
-      conversationId: 'conversation_1',
-      tabId: 7,
-      goal: 'Commit after bounded research',
-    });
-    let turn = 0;
-    const plan = () =>
-      (async function* () {
-        turn += 1;
-        if (turn <= 8) {
-          yield searchCall(`call_search_${turn}`);
-        } else if (turn === 9) {
-          yield contextCommitCall(
-            'call_commit',
-            'Eight searches completed. Next: answer.',
-            'call_search_8',
-          );
-        } else {
-          yield {
-            type: 'task.completed',
-            reason: 'model_response_completed',
-            messageId: 'message_answer',
-          } as const;
-        }
-      })();
-    const tavily = tavilyPort();
-    const executor = new TaskExecutor({
-      repository,
-      conversations: dependencies.conversations,
-      planner: { plan },
-      tavily,
-      browser: browserPort(),
-      clock: dependencies.clock,
-      ids: dependencies.ids,
-    });
-
-    const result = await executor.run(created.task.id, new AbortController().signal);
-
-    expect(result.task.status).toBe('completed');
-    expect(turn).toBe(10);
-    expect(tavily.search).toHaveBeenCalledTimes(8);
-    expect(result.toolResults.at(-1)?.toolName).toBe('commit_context');
+    expect(fixture.search).toHaveBeenCalledOnce();
+    expect(fixture.extract).toHaveBeenCalledOnce();
     database.close();
   });
 
@@ -3377,12 +2992,12 @@ describe('TaskExecutor', () => {
           };
       })();
     });
-    const tavily = tavilyPort();
+    const fixture = fixturePort();
     const executor = new TaskExecutor({
       repository,
       conversations: dependencies.conversations,
       planner: { plan },
-      tavily,
+      fixture,
       browser: browserPort(),
       clock: dependencies.clock,
       ids: dependencies.ids,
@@ -3400,11 +3015,11 @@ describe('TaskExecutor', () => {
     const recovered = await executor.run(created.task.id, new AbortController().signal);
     expect(recovered.task.status).toBe('completed');
     expect(seenResultCounts).toEqual([0, 1, 1]);
-    expect(tavily.search).toHaveBeenCalledOnce();
+    expect(fixture.search).toHaveBeenCalledOnce();
     database.close();
   });
 
-  it('executes a persisted pending Tavily call before asking the planner again', async () => {
+  it('executes a persisted pending Fixture call before asking the planner again', async () => {
     const database = await openChatBrowserDatabase(createTestDatabaseName('pending-tool-recovery'));
     const repository = new IndexedDbTaskRepository(database);
     const dependencies = sources();
@@ -3434,12 +3049,12 @@ describe('TaskExecutor', () => {
           };
       })();
     });
-    let tavilyCalls = 0;
-    const tavily = tavilyPort({
+    let fixtureCalls = 0;
+    const fixture = fixturePort({
       search: vi.fn(async () => {
-        tavilyCalls += 1;
-        order.push(`tavily_${tavilyCalls}`);
-        if (tavilyCalls === 1) throw providerErrorFromCode('ABORTED');
+        fixtureCalls += 1;
+        order.push(`fixture_${fixtureCalls}`);
+        if (fixtureCalls === 1) throw providerErrorFromCode('ABORTED');
         return { results: [], truncated: false };
       }),
     });
@@ -3447,7 +3062,7 @@ describe('TaskExecutor', () => {
       repository,
       conversations: dependencies.conversations,
       planner: { plan },
-      tavily,
+      fixture,
       browser: browserPort(),
       clock: dependencies.clock,
       ids: dependencies.ids,
@@ -3460,14 +3075,14 @@ describe('TaskExecutor', () => {
       task: { status: 'planning' },
       toolResults: [],
       checkpoint: {
-        pendingToolCall: { callId: 'call_pending', name: 'tavily_search' },
+        pendingToolCall: { callId: 'call_pending', name: 'fixture_search' },
       },
     });
 
     const recovered = await executor.run(created.task.id, new AbortController().signal);
 
     expect(recovered.task.status).toBe('completed');
-    expect(order).toEqual(['planner_1', 'tavily_1', 'tavily_2', 'planner_2']);
+    expect(order).toEqual(['planner_1', 'fixture_1', 'fixture_2', 'planner_2']);
     expect(plan).toHaveBeenCalledTimes(2);
     database.close();
   });
@@ -3550,7 +3165,7 @@ describe('TaskExecutor', () => {
         };
       })();
     });
-    const tavily = tavilyPort({
+    const fixture = fixturePort({
       search: vi.fn(async () => {
         const firstAt = dependencies.clock.now();
         await commands.appendSupplement({
@@ -3585,7 +3200,7 @@ describe('TaskExecutor', () => {
       repository,
       conversations,
       planner: { plan },
-      tavily,
+      fixture,
       browser: browserPort(),
       clock: dependencies.clock,
       ids: dependencies.ids,
@@ -3603,7 +3218,7 @@ describe('TaskExecutor', () => {
     database.close();
   });
 
-  it.each(['completion', 'interrupted stream'] as const)(
+  it.each(['completion'] as const)(
     'preserves the previous answer in model context when a supplement follows %s',
     async (boundary) => {
       const database = await openChatBrowserDatabase(
@@ -3682,7 +3297,6 @@ describe('TaskExecutor', () => {
               createdAt: supplementAt,
               updatedAt: supplementAt,
             });
-            if (boundary === 'interrupted stream') throw providerErrorFromCode('TRANSIENT');
           } else {
             expect(input.checkpoint.continuationItems.slice(-2)).toEqual([
               { type: 'message_ref', messageId: 'message_answer' },
@@ -3718,7 +3332,7 @@ describe('TaskExecutor', () => {
         repository,
         conversations,
         planner: { plan },
-        tavily: tavilyPort(),
+        fixture: fixturePort(),
         browser: browserPort(),
         clock: dependencies.clock,
         ids: dependencies.ids,
@@ -3777,12 +3391,12 @@ describe('TaskExecutor', () => {
         turn += 1;
         yield searchCall('call_duplicate');
       })();
-    const tavily = tavilyPort();
+    const fixture = fixturePort();
     const executor = new TaskExecutor({
       repository,
       conversations: dependencies.conversations,
       planner: { plan },
-      tavily,
+      fixture,
       browser: browserPort(),
       clock: dependencies.clock,
       ids: dependencies.ids,
@@ -3801,13 +3415,13 @@ describe('TaskExecutor', () => {
         ({ role }) => role === 'assistant',
       ),
     ).toEqual([]);
-    expect(tavily.search).toHaveBeenCalledOnce();
+    expect(fixture.search).toHaveBeenCalledOnce();
     database.close();
   });
 
-  it('fails before a ninth completed Tavily call can execute', async () => {
+  it('fails before a ninth completed Fixture call can execute', async () => {
     const database = await openChatBrowserDatabase(createTestDatabaseName('tool-call-limit'));
-    await seedExecutorConversation(database, 'Tavily limit');
+    await seedExecutorConversation(database, 'Fixture limit');
     const repository = new IndexedDbTaskRepository(database);
     const dependencies = sources();
     const commands = new TaskCommandService(
@@ -3827,12 +3441,12 @@ describe('TaskExecutor', () => {
         turn += 1;
         yield searchCall(`call_${String(turn)}`);
       })();
-    const tavily = tavilyPort();
+    const fixture = fixturePort();
     const executor = new TaskExecutor({
       repository,
       conversations: dependencies.conversations,
       planner: { plan },
-      tavily,
+      fixture,
       browser: browserPort(),
       clock: dependencies.clock,
       ids: dependencies.ids,
@@ -3841,7 +3455,7 @@ describe('TaskExecutor', () => {
     const result = await executor.run(created.task.id, new AbortController().signal);
 
     expect(turn).toBe(9);
-    expect(tavily.search).toHaveBeenCalledTimes(8);
+    expect(fixture.search).toHaveBeenCalledTimes(8);
     expect(result.task.status).toBe('failed');
     expect(result.run.error).toMatchObject({
       code: 'ToolCallLimitError',
@@ -3889,7 +3503,7 @@ describe('TaskExecutor', () => {
       repository,
       conversations: dependencies.conversations,
       planner: { plan },
-      tavily: tavilyPort(),
+      fixture: fixturePort(),
       browser,
       clock: dependencies.clock,
       ids: dependencies.ids,
@@ -3980,7 +3594,7 @@ describe('TaskExecutor', () => {
       repository,
       conversations: dependencies.conversations,
       planner: { plan },
-      tavily: tavilyPort(),
+      fixture: fixturePort(),
       browser,
       clock: dependencies.clock,
       ids: dependencies.ids,
@@ -4028,7 +3642,7 @@ describe('TaskExecutor', () => {
             throw providerErrorFromCode('AUTH', { status: 401 });
           })(),
       },
-      tavily: tavilyPort(),
+      fixture: fixturePort(),
       browser: browserPort(),
       clock: dependencies.clock,
       ids: dependencies.ids,
@@ -4074,7 +3688,7 @@ describe('TaskExecutor', () => {
             });
           })(),
       },
-      tavily: tavilyPort(),
+      fixture: fixturePort(),
       browser: browserPort(),
       clock: dependencies.clock,
       ids: dependencies.ids,
@@ -4145,7 +3759,7 @@ describe('TaskExecutor', () => {
             });
           })(),
       },
-      tavily: tavilyPort(),
+      fixture: fixturePort(),
       browser: browserPort(),
       clock: dependencies.clock,
       ids: dependencies.ids,
@@ -4154,205 +3768,13 @@ describe('TaskExecutor', () => {
     await expect(
       executor.run(created.task.id, new AbortController().signal),
     ).resolves.toMatchObject({ task: { status: 'failed' } });
-    expect(attempts).toBe(4);
+    // This scripted host fixture has no model retry loop; SDK retries are covered separately.
+    expect(attempts).toBe(1);
     expect(
       dependencies.conversations.appendMessage.mock.calls
         .map(([message]) => message)
         .filter(({ role }) => role === 'assistant'),
     ).toEqual([]);
-    database.close();
-  });
-
-  it('retries one invalid model response before any tool dispatch and preserves safe evidence', async () => {
-    const database = await openChatBrowserDatabase(createTestDatabaseName('invalid-model-retry'));
-    const repository = new IndexedDbTaskRepository(database);
-    const dependencies = sources();
-    const commands = new TaskCommandService(
-      repository,
-      dependencies.clock,
-      dependencies.ids,
-      dependencies.conversations,
-    );
-    const created = await commands.create({
-      conversationId: 'conversation_1',
-      tabId: 7,
-      goal: 'Retry a malformed model turn safely',
-    });
-    let attempts = 0;
-    const browser = browserPort();
-    const executor = new TaskExecutor({
-      repository,
-      conversations: dependencies.conversations,
-      planner: {
-        plan: () =>
-          (async function* () {
-            attempts += 1;
-            if (attempts === 1) {
-              throw providerErrorFromCode('INVALID_RESPONSE', {
-                invalidResponseStage: 'sse_protocol',
-              });
-            }
-            yield {
-              type: 'task.completed',
-              reason: 'model_response_completed',
-              messageId: 'message_answer',
-            } as const;
-          })(),
-      },
-      tavily: tavilyPort(),
-      browser,
-      clock: dependencies.clock,
-      ids: dependencies.ids,
-    });
-
-    const result = await executor.run(created.task.id, new AbortController().signal);
-
-    expect(result.task.status).toBe('completed');
-    expect(attempts).toBe(2);
-    expect(browser.execute).not.toHaveBeenCalled();
-    expect(result.events).toEqual(
-      expect.arrayContaining([
-        expect.objectContaining({
-          type: 'status.changed',
-          taskStatus: 'planning',
-          reason: 'invalid_model_response_retry:sse_protocol',
-          error: null,
-        }),
-      ]),
-    );
-    database.close();
-  });
-
-  it('resets the invalid-response retry budget after a successful model turn', async () => {
-    const database = await openChatBrowserDatabase(
-      createTestDatabaseName('invalid-model-retry-reset'),
-    );
-    const repository = new IndexedDbTaskRepository(database);
-    const dependencies = sources();
-    const commands = new TaskCommandService(
-      repository,
-      dependencies.clock,
-      dependencies.ids,
-      dependencies.conversations,
-    );
-    const created = await commands.create({
-      conversationId: 'conversation_1',
-      tabId: 7,
-      goal: 'Reset malformed response retries after valid progress',
-    });
-    let attempts = 0;
-    const executor = new TaskExecutor({
-      repository,
-      conversations: dependencies.conversations,
-      planner: {
-        plan: () =>
-          (async function* () {
-            attempts += 1;
-            if (attempts <= 3 || (attempts >= 5 && attempts <= 7)) {
-              throw providerErrorFromCode('INVALID_RESPONSE', {
-                invalidResponseStage: 'sse_protocol',
-              });
-            }
-            if (attempts === 4) {
-              yield {
-                ...searchCall('call_valid_progress'),
-                modelTurn: {
-                  inputItemCount: 1,
-                  elapsedMs: 20,
-                  firstEventMs: 5,
-                  usage: null,
-                },
-              };
-              return;
-            }
-            yield {
-              type: 'task.completed',
-              reason: 'model_response_completed',
-              messageId: 'message_answer',
-            } as const;
-          })(),
-      },
-      tavily: tavilyPort(),
-      browser: browserPort(),
-      clock: dependencies.clock,
-      ids: dependencies.ids,
-    });
-
-    const result = await executor.run(created.task.id, new AbortController().signal);
-
-    expect(result.task.status).toBe('completed');
-    expect(attempts).toBe(8);
-    expect(
-      result.events.filter(
-        (event) =>
-          event.type === 'status.changed' &&
-          event.reason === 'invalid_model_response_retry:sse_protocol',
-      ),
-    ).toHaveLength(6);
-    database.close();
-  });
-
-  it('fails after three invalid-response retries and exposes only the safe stage', async () => {
-    const database = await openChatBrowserDatabase(
-      createTestDatabaseName('invalid-model-retry-exhausted'),
-    );
-    await seedExecutorConversation(database, 'Invalid model response');
-    const repository = new IndexedDbTaskRepository(database);
-    const dependencies = sources();
-    const commands = new TaskCommandService(
-      repository,
-      dependencies.clock,
-      dependencies.ids,
-      dependencies.conversations,
-    );
-    const created = await commands.create({
-      conversationId: 'conversation_1',
-      tabId: 7,
-      goal: 'Stop after a bounded malformed model retry',
-    });
-    let attempts = 0;
-    const executor = new TaskExecutor({
-      repository,
-      conversations: dependencies.conversations,
-      planner: {
-        plan: () =>
-          (async function* () {
-            yield* [];
-            attempts += 1;
-            throw providerErrorFromCode('INVALID_RESPONSE', {
-              invalidResponseStage: 'tool_call',
-            });
-          })(),
-      },
-      tavily: tavilyPort(),
-      browser: browserPort(),
-      clock: dependencies.clock,
-      ids: dependencies.ids,
-    });
-
-    const result = await executor.run(created.task.id, new AbortController().signal);
-
-    expect(attempts).toBe(4);
-    expect(
-      result.events.filter(
-        (event) =>
-          event.type === 'status.changed' &&
-          event.reason === 'invalid_model_response_retry:tool_call',
-      ),
-    ).toHaveLength(3);
-    expect(result.task.status).toBe('failed');
-    expect(result.run.error).toMatchObject({
-      code: 'InvalidProviderResponse',
-      userMessage: 'The provider returned an invalid response (stage: tool_call).',
-    });
-    expect(result.events).toContainEqual(
-      expect.objectContaining({
-        type: 'status.changed',
-        taskStatus: 'failed',
-        reason: 'invalid_model_response:tool_call',
-      }),
-    );
-    expect(JSON.stringify(result.events)).not.toContain('encrypted_content');
     database.close();
   });
 
@@ -4362,10 +3784,10 @@ describe('TaskExecutor', () => {
     ['TRANSIENT', 'paused', 'TransientProviderError'],
     ['INVALID_RESPONSE', 'failed', 'InvalidProviderResponse'],
   ] as const)(
-    'maps Tavily %s failures to a durable %s boundary',
+    'maps Fixture %s failures to a durable %s boundary',
     async (code, status, taskCode) => {
-      const database = await openChatBrowserDatabase(createTestDatabaseName(`tavily-${code}`));
-      await seedExecutorConversation(database, `Tavily ${code}`);
+      const database = await openChatBrowserDatabase(createTestDatabaseName(`fixture-${code}`));
+      await seedExecutorConversation(database, `Fixture ${code}`);
       const repository = new IndexedDbTaskRepository(database);
       const dependencies = sources();
       const commands = new TaskCommandService(
@@ -4377,7 +3799,7 @@ describe('TaskExecutor', () => {
       const created = await commands.create({
         conversationId: 'conversation_1',
         tabId: 7,
-        goal: 'Handle Tavily failure',
+        goal: 'Handle Fixture failure',
       });
       const executor = new TaskExecutor({
         repository,
@@ -4388,9 +3810,9 @@ describe('TaskExecutor', () => {
               yield searchCall('call_failure');
             })(),
         },
-        tavily: tavilyPort({
+        fixture: fixturePort({
           search: vi.fn(async () => {
-            throw tavilyErrorFromCode(code);
+            throw fixtureError(code);
           }),
         }),
         browser: browserPort(),
@@ -4403,15 +3825,15 @@ describe('TaskExecutor', () => {
       expect(result.task.status).toBe(status);
       expect(result.run.error).toMatchObject({ code: taskCode });
       if (code === 'AUTH') {
-        expect(result.run.error?.userMessage).toMatch(/tavily/i);
+        expect(result.run.error?.userMessage).toMatch(/fixture/i);
       }
       expect(result.toolResults).toEqual([]);
       database.close();
     },
   );
 
-  it('propagates an aborted Tavily request and leaves the task at its recoverable checkpoint', async () => {
-    const database = await openChatBrowserDatabase(createTestDatabaseName('tavily-aborted'));
+  it('propagates an aborted Fixture request and leaves the task at its recoverable checkpoint', async () => {
+    const database = await openChatBrowserDatabase(createTestDatabaseName('fixture-aborted'));
     const repository = new IndexedDbTaskRepository(database);
     const dependencies = sources();
     const commands = new TaskCommandService(
@@ -4423,7 +3845,7 @@ describe('TaskExecutor', () => {
     const created = await commands.create({
       conversationId: 'conversation_1',
       tabId: 7,
-      goal: 'Abort Tavily request',
+      goal: 'Abort Fixture request',
     });
     const executor = new TaskExecutor({
       repository,
@@ -4434,9 +3856,9 @@ describe('TaskExecutor', () => {
             yield searchCall('call_aborted');
           })(),
       },
-      tavily: tavilyPort({
+      fixture: fixturePort({
         search: vi.fn(async () => {
-          throw tavilyErrorFromCode('ABORTED');
+          throw fixtureError('ABORTED');
         }),
       }),
       browser: browserPort(),
@@ -4452,68 +3874,6 @@ describe('TaskExecutor', () => {
       toolResults: [],
       checkpoint: { pendingToolCall: { callId: 'call_aborted' } },
     });
-    database.close();
-  });
-
-  it('persists native compaction as a hidden planning boundary and continues the loop', async () => {
-    const database = await openChatBrowserDatabase(
-      createTestDatabaseName('native-context-compaction-boundary'),
-    );
-    const repository = new IndexedDbTaskRepository(database);
-    const dependencies = sources();
-    const commands = new TaskCommandService(
-      repository,
-      dependencies.clock,
-      dependencies.ids,
-      dependencies.conversations,
-    );
-    const created = await commands.create({
-      conversationId: 'conversation_1',
-      tabId: 7,
-      goal: 'Continue after compacting local process context',
-    });
-    let turn = 0;
-    const browser = browserPort();
-    const executor = new TaskExecutor({
-      repository,
-      conversations: dependencies.conversations,
-      planner: {
-        plan: () =>
-          (async function* () {
-            turn += 1;
-            if (turn === 1) {
-              yield {
-                type: 'context.compacted',
-                continuationItems: [
-                  {
-                    type: 'compaction',
-                    itemId: 'cmp_native',
-                    encryptedContent: 'opaque-native-context',
-                  },
-                ],
-              } as const;
-              return;
-            }
-            yield {
-              type: 'task.completed',
-              reason: 'model_response_completed',
-              messageId: 'message_answer',
-            } as const;
-          })(),
-      },
-      tavily: tavilyPort(),
-      browser,
-      clock: dependencies.clock,
-      ids: dependencies.ids,
-    });
-
-    const result = await executor.run(created.task.id, new AbortController().signal);
-
-    expect(result.task.status).toBe('completed');
-    expect(result.events.map(({ type }) => type)).toContain('context.compacted');
-    expect(result.checkpoint).toBeNull();
-    expect(browser.resetObservationBaselines).toHaveBeenCalledOnce();
-    expect(turn).toBe(2);
     database.close();
   });
 });

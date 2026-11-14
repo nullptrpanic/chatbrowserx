@@ -1,4 +1,5 @@
 import type { z } from 'zod';
+import type { Tool } from '@openai/agents-core';
 import type { Checkpoint } from '../tasks/checkpoint-types';
 import type { ContinuationItem, PendingToolCall } from '../tasks/continuation-types';
 import type { MaterializedToolResult } from '../tasks/tool-result-types';
@@ -18,6 +19,7 @@ export interface ToolExecutionPolicy {
 }
 
 export interface ToolRuntimeContext {
+  readonly optionalTools?: readonly Tool[];
   readonly task?: Task;
   readonly checkpoint?: Checkpoint;
   readonly toolResults?: readonly MaterializedToolResult[];
@@ -39,6 +41,7 @@ export interface ValidatedToolCall<TArguments = unknown> extends ModelToolCallSo
 export interface ToolModelExposure {
   readonly definition: ModelToolDefinition;
   readonly force?: boolean;
+  readonly additionalTools?: readonly Tool[];
 }
 
 export type ToolCompletionReview =
@@ -162,6 +165,7 @@ export interface RegisteredTool {
 
 export interface ModelToolContract {
   readonly definitions: readonly ModelToolDefinition[];
+  readonly additionalTools?: readonly Tool[];
   readonly toolChoice?: ModelToolChoice;
   readonly systemPrompt: string;
   parse(source: ModelToolCallSource): ValidatedToolCall;

@@ -1,3 +1,4 @@
+import { codexFixtureEvents } from './codex-fixture';
 import type { ExtensionSession } from '../fixtures/extension-context';
 import { expect } from '../fixtures/extension-test';
 import { sendExtensionMessage } from './extension-runtime';
@@ -23,7 +24,7 @@ export async function setupTranslationFixture(
       reasoningEffort: 'medium',
       language: 'en',
       systemPrompt: '',
-      codexAccessToken: `e30.${token}.`,
+      accessToken: `e30.${token}.`,
     },
   });
   await context.route(url, (r) =>
@@ -46,14 +47,14 @@ export async function setupTranslationFixture(
       if (!(t.text in translations)) throw new Error(`Unexpected source: ${t.text}`);
       return { id: t.id, translation: translations[t.text] };
     });
-    const events = [
+    const events = codexFixtureEvents([
       { type: 'response.created', response: { id: 'readability' } },
       {
         type: 'response.output_text.delta',
         delta: JSON.stringify({ blocks }),
       },
       { type: 'response.completed', response: { id: 'readability' } },
-    ];
+    ]);
     return r.fulfill({
       contentType: 'text/event-stream',
       body: events.map((e) => `event: ${e.type}\ndata: ${JSON.stringify(e)}\n\n`).join(''),

@@ -1,6 +1,17 @@
 import type { MessageKey } from './messages.zh-CN';
 
 export const en = {
+  credentialSource: 'Model authentication',
+  credentialSandbox: 'Sync from Sandbox',
+  credentialManual: 'Enter manually',
+  credentialPath: 'Sandbox authentication file',
+  credentialSandboxHint:
+    'Read the access token from the Sandbox host. If the file is unavailable, switch to manual entry.',
+  modelDiscoveryFailed:
+    'Model discovery failed; current settings are preserved. Check authentication and save again.',
+  taskCompacting: 'Compacting context…',
+  taskCompacted: 'Context compacted',
+  taskCompactionFailed: 'Context compaction failed; the previous context is preserved',
   brand: 'ChatBrowserX',
   newTask: 'New task',
   history: 'History',
@@ -186,7 +197,8 @@ export const en = {
   settingsTitle: 'Settings',
   settingsGeneralTab: 'General',
   settingsSandboxTab: 'Sandbox',
-  codexToken: 'Codex Access Token',
+  modelProvider: 'Model provider',
+  providerToken: 'Access Token',
   tavilyKey: 'Tavily API Key',
   sandboxServer: 'Sandbox Server',
   sandboxServerHint: 'Use HTTPS remotely. HTTP is allowed only for local addresses.',
@@ -206,7 +218,7 @@ export const en = {
   settingsSaved: 'Settings saved',
   settingsLoadFailed: 'Could not load credentials. Reopen Settings to try again.',
   settingsSaveFailed: 'Could not save settings. Check the input.',
-  accessTokenMissing: 'Add a Codex Access Token in Settings. Your conversation will stay intact.',
+  accessTokenMissing: 'Add a Access Token in Settings. Your conversation will stay intact.',
   openSettings: 'Open settings',
   close: 'Close',
 } satisfies Record<MessageKey, string>;

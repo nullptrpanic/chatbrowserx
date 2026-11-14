@@ -9,12 +9,12 @@ describe('ChromeCredentialStore', () => {
     const store = new ChromeCredentialStore(storage);
 
     await store.initialize();
-    await store.setCodexAccessToken('  codex-token  ');
+    await store.setProviderToken('fixtureAccessToken', '  provider-token  ');
     await store.setTavilyKey('  new-tavily-key  ');
     await store.setSandboxToken('  sandbox-token  ');
 
     expect(storage.accessLevel).toBe('TRUSTED_CONTEXTS');
-    await expect(store.getCodexAccessToken()).resolves.toBe('codex-token');
+    await expect(store.getProviderToken('fixtureAccessToken')).resolves.toBe('provider-token');
     await expect(store.getTavilyKey()).resolves.toBe('new-tavily-key');
     await expect(store.getSandboxToken()).resolves.toBe('sandbox-token');
   });
@@ -22,7 +22,9 @@ describe('ChromeCredentialStore', () => {
   it('rejects blank credentials', async () => {
     const store = new ChromeCredentialStore(new MemoryStorageArea());
 
-    await expect(store.setCodexAccessToken('   ')).rejects.toThrow(/codex access token/i);
+    await expect(store.setProviderToken('fixtureAccessToken', '   ')).rejects.toThrow(
+      /provider access token/i,
+    );
     await expect(store.setTavilyKey('   ')).rejects.toThrow(/tavily key/i);
     await expect(store.setSandboxToken('   ')).rejects.toThrow(/sandbox token/i);
   });
@@ -34,10 +36,10 @@ describe('ChromeCredentialStore', () => {
     const secret = 'secret-token-value';
 
     try {
-      await store.setCodexAccessToken(secret);
+      await store.setProviderToken('fixtureAccessToken', secret);
       throw new Error('Expected the credential write to fail.');
     } catch (error) {
-      expect(String(error)).toMatch(/unable to store codex access token/i);
+      expect(String(error)).toMatch(/unable to store provider access token/i);
       expect(String(error)).not.toContain(secret);
     }
   });

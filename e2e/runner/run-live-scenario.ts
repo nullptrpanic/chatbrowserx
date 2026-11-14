@@ -2,6 +2,7 @@ import { randomUUID } from 'node:crypto';
 import type { Page } from '@playwright/test';
 import type { ExtensionSession } from './extension-session';
 import { jsonRecord } from './json-contract';
+import { seedHistoryFixture } from './history-fixture';
 import {
   configuredEnvironmentFailureMessage,
   evaluateConfiguredLiveEnvironment,
@@ -14,6 +15,7 @@ import { evaluateLiveRun, sanitizeToolPayload } from './live-policy';
 import { ResponsesTraceCollector } from './provider-trace';
 import type {
   LiveModelMetrics,
+  LiveInitialHistory,
   LivePageStateRequirement,
   LivePageStateReadback,
   LiveProviderTrace,
@@ -75,12 +77,13 @@ export interface LiveTarget {
 
 export interface LiveRuntime {
   openTarget(scenario: LiveScenario): Promise<LiveTarget>;
+  seedHistory?(history: LiveInitialHistory, runId: string, tabId: number): Promise<string>;
   verifyEnvironment?(
     scenario: LiveScenario,
     target: LiveTarget,
   ): Promise<LiveEnvironmentVerification>;
   send(message: ExtensionMessage): Promise<unknown>;
-  startProviderTrace?(activeUserText: string): void;
+  startProviderTrace?(activeUserText: string): void | Promise<void>;
   finishProviderTrace?(): Promise<LiveProviderTrace>;
   readPageState?(requirement: LivePageStateRequirement): Promise<LivePageStateReadback>;
 }
@@ -123,6 +126,7 @@ interface RuntimeTaskEvent {
 }
 
 interface RuntimeToolResult {
+  readonly providerHosted?: boolean;
   readonly id: string;
   readonly callId: string;
   readonly toolName: string;
@@ -250,6 +254,7 @@ function readLegacyToolResult(value: unknown, index: number): RuntimeToolResult 
     toolName: requiredString(result.toolName, field + '.toolName'),
     argumentsJson: requiredString(result.argumentsJson, field + '.argumentsJson'),
     output: requiredString(result.output, field + '.output'),
+    ...(result.providerHosted === true ? { providerHosted: true } : {}),
     ...(typeof result.modelOutput === 'string' ? { modelOutput: result.modelOutput } : {}),
     attachmentIds,
   };
@@ -274,6 +279,7 @@ function readRuntimeToolResult(value: unknown, index: number): RuntimeToolResult
     id: requiredString(result.id, field + '.id'),
     callId: requiredString(result.callId, field + '.callId'),
     toolName: requiredString(result.toolName, field + '.toolName'),
+    ...(result.providerHosted === true ? { providerHosted: true } : {}),
     argumentsJson: requiredString(result.argumentsJson, field + '.argumentsJson'),
     output: requiredString(result.output, field + '.output'),
     ...(typeof result.modelOutput === 'string' ? { modelOutput: result.modelOutput } : {}),
@@ -368,6 +374,7 @@ function readPreflightSnapshot(value: unknown): readonly string[] {
 function readToolResults(results: readonly RuntimeToolResult[]): LiveToolResult[] {
   return results.map((result) => ({
     toolName: result.toolName,
+    ...(result.providerHosted ? { providerHosted: true } : {}),
     argumentsJson: result.argumentsJson,
     output: result.output,
     auditOutputCharacters: result.output.length,
@@ -379,6 +386,7 @@ function readToolResults(results: readonly RuntimeToolResult[]): LiveToolResult[
 function reportedToolResults(results: readonly LiveToolResult[]): LiveToolResult[] {
   return results.map((result) => ({
     toolName: result.toolName.slice(0, 128),
+    ...(result.providerHosted ? { providerHosted: true } : {}),
     argumentsJson: sanitizeToolPayload(result.argumentsJson, MAX_REPORTED_ARGUMENT_CHARACTERS),
     output: sanitizeToolPayload(result.output, MAX_REPORTED_OUTPUT_CHARACTERS),
     ...(result.auditOutputCharacters === undefined
@@ -496,6 +504,11 @@ function validateProviderEvidence(
       'Provider requests exist but TaskSnapshot has no model.turn events.',
     );
   }
+  if (modelTurns.length !== providerTrace.requestCount) {
+    throw new LiveEvidenceMismatchError(
+      'Provider requests and durable model-turn metrics disagree.',
+    );
+  }
   if (
     modelTurns.some(
       (event) =>
@@ -519,12 +532,22 @@ function validateProviderEvidence(
       event.type === 'context.cleared' ||
       (event.type === 'tool.call' && event.name === 'context_commit'),
   );
-  if (providerFunctionOutputs > snapshot.toolResults.length) {
+  const localResults = snapshot.toolResults.filter((result) => !result.providerHosted).length;
+  const hostedResults = snapshot.toolResults.length - localResults;
+  const hostedOutputs = providerTrace.requests.reduce(
+    (sum, request) => sum + (request.response.hostedToolOutputCount ?? 0),
+    0,
+  );
+  if (hostedOutputs !== hostedResults)
+    throw new LiveEvidenceMismatchError(
+      'Provider hosted tools and TaskSnapshot hosted results disagree.',
+    );
+  if (providerFunctionOutputs > localResults) {
     throw new LiveEvidenceMismatchError(
       'Provider function outputs exceed TaskSnapshot tool results.',
     );
   }
-  if (!contextWasCompacted && providerFunctionOutputs !== snapshot.toolResults.length) {
+  if (!contextWasCompacted && providerFunctionOutputs !== localResults) {
     throw new LiveEvidenceMismatchError(
       'Provider function outputs and TaskSnapshot tool results disagree.',
     );
@@ -859,7 +882,16 @@ export async function runLiveScenario(
         throw new Error('A leftover Live E2E task could not be cancelled.');
       }
     }
-    runtime.startProviderTrace?.(expandedScenario.taskText);
+    let historyConversationId: string | undefined;
+    if (expandedScenario.initialHistory) {
+      if (!runtime.seedHistory) throw new Error('Live runtime cannot seed declared history.');
+      historyConversationId = await withRequestTimeout(
+        runtime.seedHistory(expandedScenario.initialHistory, runId, target.tabId),
+        cleanupRequestTimeoutMs,
+        'Live history fixture setup',
+      );
+    }
+    await runtime.startProviderTrace?.(expandedScenario.taskText);
     const deadline = dependencies.now() + expandedScenario.taskTimeoutMs;
 
     latestSnapshot = readTaskSnapshot(
@@ -869,6 +901,7 @@ export async function runLiveScenario(
             tabId: target.tabId,
             text: expandedScenario.taskText,
             attachmentIds: [],
+            ...(historyConversationId ? { conversationId: historyConversationId } : {}),
           }),
         ),
         Math.max(1, deadline - dependencies.now()),
@@ -1074,6 +1107,9 @@ export function createPlaywrightLiveRuntime(session: ExtensionSession): LiveRunt
   const providerTrace = new ResponsesTraceCollector(session.context, session.extensionId);
   const targetPages = new Map<number, Page>();
   return {
+    seedHistory(history, runId, tabId) {
+      return seedHistoryFixture(session.sidePanelPage, history, runId, tabId);
+    },
     async openTarget(scenario) {
       const targetPagePromise = session.context.waitForEvent('page', {
         timeout: scenario.readinessTimeoutMs,
@@ -1172,7 +1208,7 @@ export function createPlaywrightLiveRuntime(session: ExtensionSession): LiveRunt
       return typed.data;
     },
     startProviderTrace(activeUserText) {
-      providerTrace.start(activeUserText);
+      return providerTrace.start(activeUserText);
     },
     async finishProviderTrace() {
       return providerTrace.finish();

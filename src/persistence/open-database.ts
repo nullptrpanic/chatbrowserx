@@ -63,6 +63,7 @@ const upgradeDatabase: NonNullable<OpenDBCallbacks<ChatBrowserDatabase>['upgrade
     });
     attachmentReferences.createIndex('by-attachment', 'attachmentId');
     attachmentReferences.createIndex('by-reference', 'referenceId');
+    database.createObjectStore('agent-sessions', { keyPath: 'conversationId' });
     return;
   }
 
@@ -74,6 +75,7 @@ const upgradeDatabase: NonNullable<OpenDBCallbacks<ChatBrowserDatabase>['upgrade
       });
     }
   }
+  if (oldVersion < 5) database.createObjectStore('agent-sessions', { keyPath: 'conversationId' });
 };
 
 /**

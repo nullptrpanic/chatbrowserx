@@ -67,6 +67,10 @@ export function App({ runtimePort, environment, panelClient, attachmentClient }:
       false);
   const loadSettings = useCallback(() => client.getSettings(), [client]);
   const sandboxConfigured = (snapshot?.settings.sandboxServer?.trim().length ?? 0) > 0;
+  const authenticationConfigured =
+    snapshot?.settings.credentialSource === 'sandbox'
+      ? sandboxConfigured && snapshot.settings.hasSandboxToken === true
+      : snapshot?.settings.hasAccessToken === true;
 
   useEffect(() => {
     if (taskLocked) setReplyTarget(null);
@@ -122,7 +126,7 @@ export function App({ runtimePort, environment, panelClient, attachmentClient }:
                 <p>{t('pageUnsupported')}</p>
               </section>
             ) : null}
-            {!snapshot.settings.hasCodexToken ? (
+            {!authenticationConfigured ? (
               <section className="auth-card">
                 <KeyRound size={18} />
                 <div>
@@ -157,7 +161,7 @@ export function App({ runtimePort, environment, panelClient, attachmentClient }:
             text={draftText}
             running={running}
             taskLocked={taskLocked}
-            hasToken={snapshot.settings.hasCodexToken}
+            hasToken={authenticationConfigured}
             regionTranslationActive={state.regionTranslationActive}
             t={t}
             onTextChange={setDraftText}

@@ -11,6 +11,8 @@ import type { ToolResult } from './tool-result-types';
 export interface TaskHistoryContext {
   readonly conversationId: ConversationId;
   readonly currentTaskId: TaskId;
+  /** Host-owned boundary; never supplied by the model. */
+  readonly currentTaskLastEventSequence?: number;
 }
 
 export interface HistoryReadInput {
@@ -18,7 +20,39 @@ export interface HistoryReadInput {
   readonly offset: number | null;
   readonly cursor: string;
   readonly limit: number;
+  readonly messageId?: string | null | undefined;
 }
+
+export interface HistorySearchInput {
+  readonly query: string;
+  readonly cursor: string;
+  readonly limit: number;
+}
+
+interface HistoryMessagePreview {
+  readonly messageId: string;
+  readonly role: MessageRecord['role'];
+  readonly status: MessageRecord['status'];
+  readonly createdAt: number;
+  readonly text: string;
+  readonly textLength: number;
+}
+
+interface HistorySearchPage {
+  readonly items: readonly {
+    readonly taskId: TaskId;
+    readonly taskStatus: TaskStatus;
+    readonly messageId: string;
+    readonly context: readonly HistoryMessagePreview[];
+  }[];
+  readonly totalCount: number;
+  readonly nextCursor: string | null;
+  readonly hasMore: boolean;
+}
+
+export type HistorySearchResponse =
+  | (HistorySearchPage & { readonly ok: true; readonly recent?: HistorySearchPage })
+  | HistoryReadError;
 
 export interface ResultReadInput {
   readonly resultId: string;
@@ -173,6 +207,10 @@ export type HistoryDetailReadResponse =
   | HistoryReadError;
 
 export interface TaskHistoryReaderPort {
+  searchHistory(
+    context: TaskHistoryContext,
+    input: HistorySearchInput,
+  ): Promise<HistorySearchResponse>;
   readAttachments(
     context: TaskHistoryContext,
     attachmentIds: readonly string[],
@@ -189,6 +227,8 @@ interface CursorPayload {
   readonly version: 1;
   readonly taskId: TaskId;
   readonly lastSequence: number;
+  readonly throughSequence?: number;
+  readonly messageId?: string;
 }
 
 interface DetailPayload {
@@ -208,7 +248,7 @@ function historyNotFound(): HistoryReadError {
   return {
     ok: false,
     code: 'HISTORY_NOT_FOUND',
-    message: 'The requested previous task is unavailable in this conversation.',
+    message: 'The requested task history is unavailable in this conversation.',
     retryable: false,
   };
 }
@@ -217,7 +257,7 @@ function invalidCursor(): HistoryReadError {
   return {
     ok: false,
     code: 'INVALID_CURSOR',
-    message: 'The history cursor is invalid for the requested task.',
+    message: 'The history cursor is invalid for this request. Restart with an empty cursor.',
     retryable: false,
   };
 }
@@ -240,14 +280,14 @@ function detailNotFound(): HistoryReadError {
   };
 }
 
-function encodeCursor(payload: CursorPayload): string {
+function encodeReference(payload: unknown): string {
   const bytes = new TextEncoder().encode(JSON.stringify(payload));
   let binary = '';
   for (const byte of bytes) binary += String.fromCharCode(byte);
   return btoa(binary).replaceAll('+', '-').replaceAll('/', '_').replace(/=+$/u, '');
 }
 
-function decodeCursor(value: string): CursorPayload | null {
+function decodeReference(value: string): Record<string, unknown> | null {
   try {
     const padded = value
       .replaceAll('-', '+')
@@ -256,29 +296,30 @@ function decodeCursor(value: string): CursorPayload | null {
     const binary = atob(padded);
     const bytes = Uint8Array.from(binary, (character) => character.charCodeAt(0));
     const parsed: unknown = JSON.parse(new TextDecoder().decode(bytes));
-    if (
-      typeof parsed !== 'object' ||
-      parsed === null ||
-      !('version' in parsed) ||
-      parsed.version !== HISTORY_PROJECTION_VERSION ||
-      !('taskId' in parsed) ||
-      typeof parsed.taskId !== 'string' ||
-      !('lastSequence' in parsed) ||
-      !Number.isSafeInteger(parsed.lastSequence)
-    ) {
-      return null;
-    }
-    return parsed as unknown as CursorPayload;
+    return typeof parsed === 'object' && parsed !== null && !Array.isArray(parsed)
+      ? (parsed as Record<string, unknown>)
+      : null;
   } catch {
     return null;
   }
 }
 
-function encodeDetail(payload: DetailPayload): string {
-  const bytes = new TextEncoder().encode(JSON.stringify(payload));
-  let binary = '';
-  for (const byte of bytes) binary += String.fromCharCode(byte);
-  return btoa(binary).replaceAll('+', '-').replaceAll('/', '_').replace(/=+$/u, '');
+function decodeCursor(value: string): CursorPayload | null {
+  const parsed = decodeReference(value);
+  if (
+    parsed === null ||
+    !('version' in parsed) ||
+    parsed.version !== HISTORY_PROJECTION_VERSION ||
+    !('taskId' in parsed) ||
+    typeof parsed.taskId !== 'string' ||
+    !('lastSequence' in parsed) ||
+    !Number.isSafeInteger(parsed.lastSequence) ||
+    ('throughSequence' in parsed && !Number.isSafeInteger(parsed.throughSequence)) ||
+    ('messageId' in parsed && typeof parsed.messageId !== 'string')
+  ) {
+    return null;
+  }
+  return parsed as unknown as CursorPayload;
 }
 
 function isHistoryDetailField(value: unknown): value is HistoryDetailField {
@@ -293,32 +334,36 @@ function isHistoryDetailField(value: unknown): value is HistoryDetailField {
 }
 
 function decodeDetail(value: string): DetailPayload | null {
-  try {
-    const padded = value
-      .replaceAll('-', '+')
-      .replaceAll('_', '/')
-      .padEnd(Math.ceil(value.length / 4) * 4, '=');
-    const binary = atob(padded);
-    const bytes = Uint8Array.from(binary, (character) => character.charCodeAt(0));
-    const parsed: unknown = JSON.parse(new TextDecoder().decode(bytes));
-    if (
-      typeof parsed !== 'object' ||
-      parsed === null ||
-      !('version' in parsed) ||
-      parsed.version !== HISTORY_DETAIL_VERSION ||
-      !('taskId' in parsed) ||
-      typeof parsed.taskId !== 'string' ||
-      !('sequence' in parsed) ||
-      !Number.isSafeInteger(parsed.sequence) ||
-      !('field' in parsed) ||
-      !isHistoryDetailField(parsed.field)
-    ) {
-      return null;
-    }
-    return parsed as unknown as DetailPayload;
-  } catch {
+  const parsed = decodeReference(value);
+  if (
+    parsed === null ||
+    !('version' in parsed) ||
+    parsed.version !== HISTORY_DETAIL_VERSION ||
+    !('taskId' in parsed) ||
+    typeof parsed.taskId !== 'string' ||
+    !('sequence' in parsed) ||
+    !Number.isSafeInteger(parsed.sequence) ||
+    !('field' in parsed) ||
+    !isHistoryDetailField(parsed.field)
+  ) {
     return null;
   }
+  return parsed as unknown as DetailPayload;
+}
+
+function searchPreview(message: MessageRecord, terms: readonly string[]): HistoryMessagePreview {
+  const lower = message.text.toLowerCase();
+  const match = terms.map((term) => lower.indexOf(term)).find((index) => index >= 0) ?? 0;
+  const start = Math.max(0, match - 100);
+  const end = Math.min(message.text.length, start + 350);
+  return {
+    messageId: message.id,
+    role: message.role,
+    status: message.status,
+    createdAt: message.createdAt,
+    text: `${start > 0 ? '…' : ''}${message.text.slice(start, end)}${end < message.text.length ? '…' : ''}`,
+    textLength: message.text.length,
+  };
 }
 
 function projectedField(
@@ -332,7 +377,7 @@ function projectedField(
   return {
     preview: value.slice(0, HISTORY_FIELD_PREVIEW_CHARACTERS),
     length: value.length,
-    detailId: value.length > HISTORY_FIELD_PREVIEW_CHARACTERS ? encodeDetail(payload) : null,
+    detailId: value.length > HISTORY_FIELD_PREVIEW_CHARACTERS ? encodeReference(payload) : null,
   };
 }
 
@@ -594,7 +639,7 @@ export class TaskHistoryReader implements TaskHistoryReaderPort {
     TaskRepository,
     'listByConversation' | 'listEvents' | 'getToolResult' | 'get'
   >;
-  readonly #conversations: Pick<ConversationRepository, 'listTaskMessages'>;
+  readonly #conversations: Pick<ConversationRepository, 'listTaskMessages' | 'listMessages'>;
   readonly #attachments: Pick<AttachmentRepository, 'get'>;
 
   constructor(dependencies: {
@@ -602,12 +647,204 @@ export class TaskHistoryReader implements TaskHistoryReaderPort {
       TaskRepository,
       'listByConversation' | 'listEvents' | 'getToolResult' | 'get'
     >;
-    readonly conversations: Pick<ConversationRepository, 'listTaskMessages'>;
+    readonly conversations: Pick<ConversationRepository, 'listTaskMessages' | 'listMessages'>;
     readonly attachments: Pick<AttachmentRepository, 'get'>;
   }) {
     this.#tasks = dependencies.tasks;
     this.#conversations = dependencies.conversations;
     this.#attachments = dependencies.attachments;
+  }
+
+  #isReadable(task: Task, context: TaskHistoryContext): boolean {
+    return (
+      isHistoricalTask(task, context) ||
+      (task.conversationId === context.conversationId &&
+        task.id === context.currentTaskId &&
+        Number.isSafeInteger(context.currentTaskLastEventSequence) &&
+        (context.currentTaskLastEventSequence ?? -1) >= 0)
+    );
+  }
+
+  /** Reads an immutable event prefix, excluding messages appended after that boundary. */
+  async #records(selected: Task, throughSequence?: number) {
+    const [storedEvents, storedMessages] = await Promise.all([
+      this.#tasks.listEvents(selected.id),
+      this.#conversations.listTaskMessages(selected.id),
+    ]);
+    const boundary = throughSequence ?? selected.lastEventSequence;
+    const task = { ...selected, lastEventSequence: boundary };
+    const events = orderedTaskEvents(
+      task,
+      storedEvents.filter((event) => event.sequence <= boundary),
+    );
+    const messageIds = new Set(
+      events.flatMap((event) =>
+        event.type === 'message.recorded' || event.type === 'supplement.queued'
+          ? [event.messageId]
+          : [],
+      ),
+    );
+    const messages =
+      throughSequence === undefined
+        ? storedMessages
+        : storedMessages.filter((message) => messageIds.has(message.id));
+    const cutoff = events.at(-1)?.at ?? selected.createdAt;
+    const messageById = new Map(
+      [...validatedTaskMessages(task, events, messages)].filter(
+        ([, message]) =>
+          message.status !== 'streaming' &&
+          (throughSequence === undefined || message.updatedAt <= cutoff),
+      ),
+    );
+    return { events, messageById };
+  }
+
+  async searchHistory(
+    context: TaskHistoryContext,
+    input: HistorySearchInput,
+  ): Promise<HistorySearchResponse> {
+    const query = input.query.trim().toLowerCase().replace(/\s+/gu, ' ');
+    const cursor = input.cursor === '' ? null : decodeReference(input.cursor);
+    if (
+      input.cursor !== '' &&
+      (cursor === null ||
+        cursor.version !== 1 ||
+        cursor.conversationId !== context.conversationId ||
+        cursor.query !== query ||
+        typeof cursor.messageId !== 'string')
+    )
+      return invalidCursor();
+    const tasks = new Map(
+      (await this.#tasks.listByConversation(context.conversationId))
+        .filter((task) => this.#isReadable(task, context))
+        .map((task) => [task.id, task]),
+    );
+    const records = new Map<
+      string,
+      {
+        events: readonly TaskEvent[];
+        messageById: ReadonlyMap<string, MessageRecord>;
+      }
+    >();
+    const current = tasks.get(context.currentTaskId);
+    let activeMessageId: string | undefined;
+    if (current) {
+      const record = await this.#records(
+        current,
+        Math.min(current.lastEventSequence, context.currentTaskLastEventSequence ?? 0),
+      );
+      records.set(current.id, record);
+      const activeInput = record.events.findLast(
+        (event) =>
+          (event.type === 'message.recorded' || event.type === 'supplement.applied') &&
+          record.messageById.get(event.messageId)?.role === 'user',
+      );
+      if (activeInput && 'messageId' in activeInput) activeMessageId = activeInput.messageId;
+    }
+    const messages = (await this.#conversations.listMessages(context.conversationId)).flatMap(
+      (message) => {
+        const saved =
+          message.taskId === context.currentTaskId
+            ? records.get(message.taskId)?.messageById.get(message.id)
+            : message;
+        if (
+          !saved ||
+          saved.id === activeMessageId ||
+          saved.conversationId !== context.conversationId ||
+          !tasks.has(saved.taskId) ||
+          saved.status === 'streaming' ||
+          saved.role === 'system'
+        )
+          return [];
+        return [saved];
+      },
+    );
+    let terms = query === '' ? [] : query.split(' ');
+    let matches =
+      terms.length === 0
+        ? messages
+        : messages.filter(({ text }) => {
+            const lower = text.toLowerCase();
+            return terms.every((term) => lower.includes(term));
+          });
+    const recentFallback =
+      query !== '' &&
+      matches.length === 0 &&
+      cursor === null &&
+      messages.length > 0 &&
+      messages.length <= input.limit &&
+      !messages.some(({ text }) => {
+        const lower = text.toLowerCase();
+        return terms.some((term) => lower.includes(term));
+      });
+    if (recentFallback) {
+      terms = [];
+      matches = messages;
+    }
+    matches.sort((a, b) => b.createdAt - a.createdAt || (a.id < b.id ? 1 : a.id > b.id ? -1 : 0));
+    const anchor =
+      cursor === null ? -1 : matches.findIndex((message) => message.id === cursor.messageId);
+    if (cursor !== null && anchor < 0) return invalidCursor();
+    const page = matches.slice(anchor + 1, anchor + 1 + input.limit);
+    const matchedIds = new Set(page.map(({ id }) => id));
+    const excerptIds = new Set<string>();
+    const items = [];
+    for (const message of page) {
+      const task = tasks.get(message.taskId);
+      if (!task) throw new Error('Task history search owner is invalid.');
+      let record = records.get(task.id);
+      if (!record) {
+        record = await this.#records(task);
+        records.set(task.id, record);
+      }
+      const neighbors = record.events.flatMap((event) => {
+        const value =
+          event.type === 'message.recorded' || event.type === 'supplement.queued'
+            ? record.messageById.get(event.messageId)
+            : undefined;
+        return value && value.id !== activeMessageId && value.role !== 'system' ? [value] : [];
+      });
+      const index = neighbors.findIndex(({ id }) => id === message.id);
+      if (index < 0) throw new Error('Task history search message association is invalid.');
+      const question = neighbors.findLastIndex(
+        (neighbor, position) => position <= index && neighbor.role === 'user',
+      );
+      const positions = [...new Set([question, index - 1, index, index + 1])]
+        .filter((position) => position >= 0 && position < neighbors.length)
+        .sort((a, b) => a - b);
+      items.push({
+        taskId: task.id,
+        taskStatus: task.status,
+        messageId: message.id,
+        context: positions.flatMap((position) => {
+          const neighbor = neighbors[position];
+          if (!neighbor) return [];
+          // Each hit keeps its own excerpt. Share any other excerpts once per page.
+          if (neighbor.id !== message.id) {
+            if (matchedIds.has(neighbor.id) || excerptIds.has(neighbor.id)) return [];
+            excerptIds.add(neighbor.id);
+          }
+          return [searchPreview(neighbor, terms)];
+        }),
+      });
+    }
+    const hasMore = anchor + 1 + page.length < matches.length;
+    const result = {
+      items,
+      totalCount: matches.length,
+      hasMore,
+      nextCursor: hasMore
+        ? encodeReference({
+            version: 1,
+            conversationId: context.conversationId,
+            query,
+            messageId: page.at(-1)?.id,
+          })
+        : null,
+    };
+    return recentFallback
+      ? { ok: true, items: [], totalCount: 0, nextCursor: null, hasMore: false, recent: result }
+      : { ok: true, ...result };
   }
 
   async readAttachments(
@@ -635,34 +872,52 @@ export class TaskHistoryReader implements TaskHistoryReaderPort {
       if (input.offset !== null) throw new Error('Task history selector is invalid.');
       selected = await this.#tasks.get(input.taskId);
     }
-    if (selected === undefined || !isHistoricalTask(selected, context)) return historyNotFound();
-    return this.#readSelectedHistory(selected, input);
+    if (selected === undefined || !this.#isReadable(selected, context)) return historyNotFound();
+    return this.#readSelectedHistory(selected, context, input);
   }
 
   async #readSelectedHistory(
     selected: Task,
-    input: Pick<HistoryReadInput, 'cursor' | 'limit'>,
+    context: TaskHistoryContext,
+    input: Pick<HistoryReadInput, 'cursor' | 'limit' | 'messageId'>,
   ): Promise<HistoryReadResponse> {
     const cursor = input.cursor === '' ? null : decodeCursor(input.cursor);
-    if (input.cursor !== '' && (cursor === null || cursor.taskId !== selected.id)) {
+    if (
+      input.cursor !== '' &&
+      (cursor === null ||
+        cursor.taskId !== selected.id ||
+        (cursor.messageId ?? null) !== (input.messageId ?? null))
+    ) {
       return invalidCursor();
     }
-
-    const [storedEvents, messages] = await Promise.all([
-      this.#tasks.listEvents(selected.id),
-      this.#conversations.listTaskMessages(selected.id),
-    ]);
-    const events = orderedTaskEvents(
+    const boundary =
+      selected.id === context.currentTaskId
+        ? Math.min(selected.lastEventSequence, context.currentTaskLastEventSequence ?? 0)
+        : selected.lastEventSequence;
+    const throughSequence = cursor?.throughSequence ?? boundary;
+    if (throughSequence < 0 || throughSequence > boundary) return invalidCursor();
+    const { events, messageById } = await this.#records(
       selected,
-      storedEvents,
-      'Task history event records are inconsistent.',
+      selected.id === context.currentTaskId || cursor?.throughSequence !== undefined
+        ? throughSequence
+        : undefined,
     );
-    const messageById = validatedTaskMessages(selected, events, messages);
-    const visibleEvents = events.filter(visibleHistoryEvent);
-    const start =
+    const visibleEvents = events.filter((event) => {
+      if (event.type === 'message.recorded' || event.type === 'supplement.queued')
+        return messageById.has(event.messageId);
+      return !input.messageId && visibleHistoryEvent(event);
+    });
+    let start =
       cursor === null
         ? 0
         : visibleEvents.findIndex(({ sequence }) => sequence > cursor.lastSequence);
+    if (input.messageId && cursor === null) {
+      const anchor = visibleEvents.findIndex(
+        (event) => 'messageId' in event && event.messageId === input.messageId,
+      );
+      if (anchor < 0) return historyNotFound();
+      start = Math.max(0, anchor - 1);
+    }
     if (cursor !== null && start < 0) return invalidCursor();
     const pageEvents = visibleEvents.slice(start, start + input.limit);
     const pageResultEvents = pageEvents.filter(
@@ -726,10 +981,12 @@ export class TaskHistoryReader implements TaskHistoryReaderPort {
       remainingCount,
       nextCursor:
         hasMore && lastSequence !== undefined
-          ? encodeCursor({
+          ? encodeReference({
               version: HISTORY_PROJECTION_VERSION,
               taskId: selected.id,
               lastSequence,
+              throughSequence,
+              ...(input.messageId ? { messageId: input.messageId } : {}),
             })
           : null,
       hasMore,
@@ -743,19 +1000,16 @@ export class TaskHistoryReader implements TaskHistoryReaderPort {
     const payload = decodeDetail(input.detailId);
     if (payload === null) return detailNotFound();
     const selected = await this.#tasks.get(payload.taskId);
-    if (selected === undefined || !isHistoricalTask(selected, context)) return detailNotFound();
+    if (selected === undefined || !this.#isReadable(selected, context)) return detailNotFound();
     if (payload.field === 'task_goal' && payload.sequence === 0) {
       return characterRange(input.detailId, payload, selected.goal, input);
     }
 
-    const [storedEvents, messages] = await Promise.all([
-      this.#tasks.listEvents(selected.id),
-      this.#conversations.listTaskMessages(selected.id),
-    ]);
-    const events = orderedTaskEvents(
+    const { events, messageById } = await this.#records(
       selected,
-      storedEvents,
-      'Task history event records are inconsistent.',
+      selected.id === context.currentTaskId
+        ? Math.min(selected.lastEventSequence, context.currentTaskLastEventSequence ?? 0)
+        : undefined,
     );
     const event = events.find(({ sequence }) => sequence === payload.sequence);
     if (event === undefined) return detailNotFound();
@@ -765,8 +1019,8 @@ export class TaskHistoryReader implements TaskHistoryReaderPort {
       payload.field === 'message_text' &&
       (event.type === 'message.recorded' || event.type === 'supplement.queued')
     ) {
-      const messageById = validatedTaskMessages(selected, events, messages);
-      value = messageById.get(event.messageId)?.text ?? null;
+      const message = messageById.get(event.messageId);
+      value = message?.status === 'streaming' ? null : (message?.text ?? null);
     } else if (payload.field === 'reasoning_summary' && event.type === 'reasoning.summary') {
       value = event.summary;
     } else if (payload.field === 'tool_arguments' && event.type === 'tool.call') {
@@ -791,11 +1045,21 @@ export class TaskHistoryReader implements TaskHistoryReaderPort {
     if (
       task === undefined ||
       task.conversationId !== context.conversationId ||
-      task.id === context.currentTaskId ||
-      !isHistoricalTask(task, context)
+      !this.#isReadable(task, context)
     ) {
       return resultNotFound();
     }
+    if (
+      task.id === context.currentTaskId &&
+      !(await this.#tasks.listEvents(task.id)).some(
+        (event) =>
+          event.type === 'tool.result' &&
+          event.resultId === result.id &&
+          event.callId === result.callId &&
+          event.sequence <= (context.currentTaskLastEventSequence ?? -1),
+      )
+    )
+      return resultNotFound();
     const content = result.output.slice(input.offset, input.offset + input.limit);
     const consumedCount = Math.min(input.offset + content.length, result.output.length);
     const remainingCount = result.output.length - consumedCount;

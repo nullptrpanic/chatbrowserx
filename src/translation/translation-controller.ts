@@ -22,6 +22,7 @@ type TranslationRequest = { id: string; abort: AbortController };
 
 const cacheKey = (settings: AppSettings) =>
   JSON.stringify([
+    settings.providerId ?? '',
     settings.model,
     settings.reasoningEffort,
     resolveLanguage(settings.language, navigator.language),

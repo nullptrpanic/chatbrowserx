@@ -35,12 +35,15 @@ export type ExtensionMessage =
   | Message<
       'settings.save',
       {
+        providerId?: string | undefined;
         model?: string | undefined;
         reasoningEffort: ReasoningEffort;
+        credentialSource?: 'manual' | 'sandbox' | undefined;
+        authPath?: string | undefined;
         systemPrompt: string;
         language: 'system' | 'zh-CN' | 'en' | 'ja';
         historyMessageLimit?: number | undefined;
-        codexAccessToken?: string | undefined;
+        accessToken?: string | undefined;
         tavilyKey?: string | undefined;
         sandboxServer?: string | undefined;
         sandboxToken?: string | undefined;

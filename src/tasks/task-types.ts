@@ -93,6 +93,7 @@ export type TaskEvent =
 
 /** Numeric-only model telemetry attached to its durable task boundary. */
 export interface TaskModelTurnMetrics {
+  readonly kind?: 'generation' | 'compaction';
   readonly inputItemCount: number;
   readonly elapsedMs: number;
   readonly firstEventMs: number;

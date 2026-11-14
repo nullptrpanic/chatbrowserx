@@ -8,6 +8,8 @@ owns environment reconstruction and commands. SAMPLE_SPEC.md owns data formats.
 - A sample fixes one target, exact input, execution budget, side-effect mode, and deterministic
   acceptance policy.
 - An attempt starts one fresh WorkSession and ends with one immutable report.
+  A declared `initialHistory` fixture may populate that attempt's isolated conversation first;
+  its archived outcomes are synthetic, while the evaluated question uses the real Provider.
 - A batch is one command's ordered attempts for one product revision and one timestamp directory.
 - A batch summary is a replaceable aggregate derived from its immutable attempt reports.
 - `benchmark/` stores every evaluation batch, including a one-attempt smoke run; do not retain
@@ -58,7 +60,8 @@ An attempt passes only when all applicable facts agree:
 - Read-only samples made no remote mutation; declared mutations have verified readback.
 - A declared mutation checkpoint is satisfied only by structural evidence observed after its
   named commit action; draft state and model claims are not completion evidence.
-- Provider continuation is complete and compactionRequests is zero.
+- Provider continuation is complete and legacy `/responses/compact` requests are zero. Native
+  `/responses` compaction must return a verified opaque window before that window is replayed.
 - No unexplained fallback, stale reference, mismatch, loop, unsafe traversal, or ambiguous mutation
   makes the evidence untrustworthy.
 
@@ -74,7 +77,10 @@ attempt rather than weakening the contract.
 For Responses API evidence, verify chronological input order, one active request, unique complete
 function-call/output pairs, and continuation items. The contract is `/responses` with `store:false`,
 no `/responses/compact`, no unsupported state-linking fields, one definition per callable tool, and
-a declared tool choice. Replay encrypted reasoning exactly once for its model turn; never log it.
+a declared tool choice. A native `compaction_trigger` can replace prior input only after the
+response returns a compaction item; retain its metrics and lifecycle evidence. Replay encrypted
+reasoning exactly once for its model turn until compaction; never log it. Reconcile provider-hosted
+search outputs separately from local function-call/output pairs against permanent tool receipts.
 
 ## Failure Handling
 
@@ -100,8 +106,14 @@ Compare only attempts with:
 - sample ID and contractVersion;
 - one explicit product revision per side;
 - identical model settings and acceptance policy;
+- equivalent model-visible capabilities: history/tool-result retention, compaction policy, and
+  enabled tools, including Provider-hosted search;
 - profile initialization rule and relevant authenticated state;
 - predeclared attempt count and first-attempt semantics.
+
+When the user changes the required capabilities, freeze a new performance reference for that
+capability set. Keep the previous results as migration-cost evidence, not an equivalent-capability
+performance gate. A new reference never waives correctness checks or erases failed attempts.
 
 Use:
 
@@ -120,12 +132,17 @@ claim.
 
 ## Repository Gates
 
-Run narrow checks first. During translation development, use the affected regression plus the
-representative `npm run test:e2e:quick` lane from RUNBOOK.md. Do not repeatedly run all browser
-cases or the real-site matrix after each local edit. Preserve full regression coverage: the quick
-lane is early feedback, never evidence that all repository checks or all websites passed.
+Select local validation scope using [AGENTS.md](../AGENTS.md#local-iteration-and-verification).
+Passing the checks appropriate to a bounded change is sufficient for local completion; the
+command list below is not mandatory for every harness or production edit. Existing CI/release
+requirements still apply.
 
-Before completing a harness or production change, freeze the candidate and run:
+Run narrow checks first. During translation development, use the affected regression and add the
+representative `npm run test:e2e:quick` lane from RUNBOOK.md when shared browser behavior is
+affected. Preserve all regression cases; a targeted or smoke pass is never evidence that all
+repository checks or all websites passed.
+
+When a full repository gate is justified under the root instructions, freeze the candidate and run:
 
 ```bash
 npm run format:check

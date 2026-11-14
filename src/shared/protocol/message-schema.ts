@@ -1,5 +1,4 @@
 import { z } from 'zod';
-import { REASONING_EFFORTS } from '../reasoning-effort';
 import { PROTOCOL_VERSION, type ExtensionMessage, type PageCommand } from './message-types';
 import {
   translationTextsSchema,
@@ -121,12 +120,15 @@ const settingsSaveSchema = z
     type: z.literal('settings.save'),
     payload: z
       .object({
+        providerId: z.string().min(1).max(128).optional(),
         model: z.string().trim().min(1).max(256).optional(),
-        reasoningEffort: z.enum(REASONING_EFFORTS),
+        reasoningEffort: z.string().trim().min(1).max(64),
+        credentialSource: z.enum(['manual', 'sandbox']).optional(),
+        authPath: z.string().trim().max(4096).optional(),
         systemPrompt: z.string().max(20_000),
         language: z.enum(['system', 'zh-CN', 'en', 'ja']),
         historyMessageLimit: z.number().int().min(1).max(50).default(50),
-        codexAccessToken: z.string().trim().min(1).max(20_000).optional(),
+        accessToken: z.string().trim().min(1).max(20_000).optional(),
         tavilyKey: z.string().trim().min(1).max(20_000).optional(),
         sandboxServer: z.string().trim().max(2_048).optional(),
         sandboxToken: z.string().trim().min(1).max(20_000).optional(),

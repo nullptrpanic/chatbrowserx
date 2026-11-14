@@ -174,6 +174,11 @@ export function MessageItem({
             ) : null}
           </div>
         )}
+        {message.role === 'assistant' &&
+        (run?.status ?? task?.status) === 'planning' &&
+        task?.reasoningSummary ? (
+          <RestrictedMarkdown text={task.reasoningSummary} />
+        ) : null}
         {answers.map((answer) => (
           <div className="message-answer-segment" key={answer.replySegment?.id ?? 'original'}>
             {answer.replySegment?.supplements.map((supplement) => (

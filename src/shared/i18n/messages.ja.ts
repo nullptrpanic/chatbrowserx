@@ -1,6 +1,17 @@
 import type { MessageKey } from './messages.zh-CN';
 
 export const ja = {
+  credentialSource: 'モデル認証',
+  credentialSandbox: 'Sandbox から同期',
+  credentialManual: '手動入力',
+  credentialPath: 'Sandbox 認証ファイル',
+  credentialSandboxHint:
+    'Sandbox ホストから Access Token を取得します。ファイルを取得できない場合は手動入力に切り替えてください。',
+  modelDiscoveryFailed:
+    'モデル一覧を取得できませんでした。現在の設定は保持されています。認証を確認して再保存してください。',
+  taskCompacting: 'コンテキストを圧縮中…',
+  taskCompacted: 'コンテキストを圧縮しました',
+  taskCompactionFailed: '圧縮に失敗しました。元のコンテキストは保持されています',
   brand: 'ChatBrowserX',
   newTask: '新しいタスク',
   history: '履歴',
@@ -187,7 +198,8 @@ export const ja = {
   settingsTitle: '設定',
   settingsGeneralTab: '一般',
   settingsSandboxTab: 'Sandbox',
-  codexToken: 'Codex Access Token',
+  modelProvider: 'モデルプロバイダー',
+  providerToken: 'Access Token',
   tavilyKey: 'Tavily API Key',
   sandboxServer: 'Sandbox Server',
   sandboxServerHint: 'リモート接続には HTTPS、ローカル接続には HTTP も使用できます。',
@@ -207,7 +219,7 @@ export const ja = {
   settingsSaved: '設定を保存しました',
   settingsLoadFailed: '認証情報を読み込めません。設定を開き直して再試行してください。',
   settingsSaveFailed: '設定を保存できません。入力を確認してください。',
-  accessTokenMissing: '設定で Codex Access Token を追加してください。会話は保持されます。',
+  accessTokenMissing: '設定で Access Token を追加してください。会話は保持されます。',
   openSettings: '設定を開く',
   close: '閉じる',
 } satisfies Record<MessageKey, string>;

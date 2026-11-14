@@ -29,6 +29,24 @@ function report(overrides: Partial<LiveRunReport> = {}): LiveRunReport {
 }
 
 describe('evaluation result', () => {
+  it('retains hosted-tool provenance in the persisted result', () => {
+    const toolResult = {
+      toolName: 'web_search_call',
+      providerHosted: true,
+      argumentsJson: '{}',
+      output: '{"status":"completed"}',
+      attachmentIds: [],
+    };
+    const result = createEvaluationResult(
+      scenario,
+      batch,
+      1,
+      report({ toolResults: [toolResult] }),
+    );
+
+    expect(result.evidence.toolResults).toEqual([toolResult]);
+  });
+
   it('writes provider diagnostics outside the comparable benchmark collection', async () => {
     const root = await mkdtemp(join(tmpdir(), 'chatbrowserx-e2e-diagnostic-'));
     const path = await writeDiagnosticEvaluationResult(root, scenario, batch, report());

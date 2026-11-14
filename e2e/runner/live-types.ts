@@ -29,6 +29,18 @@ export interface LivePageStateReadback {
   readonly attributes: Readonly<Record<string, string | null>>;
 }
 
+export interface LiveInitialHistory {
+  readonly summary?: string | undefined;
+  readonly tasks: readonly {
+    readonly status: 'completed' | 'failed' | 'cancelled';
+    readonly messages: readonly {
+      readonly role: 'user' | 'assistant';
+      readonly text: string;
+      readonly status: 'complete' | 'interrupted' | 'error';
+    }[];
+  }[];
+}
+
 export interface LiveScenario {
   readonly contractVersion: number;
   readonly name: string;
@@ -39,6 +51,7 @@ export interface LiveScenario {
   readonly taskText: string;
   readonly readinessTimeoutMs: number;
   readonly environment?: LiveEnvironmentDefinition;
+  readonly initialHistory?: LiveInitialHistory;
   readonly taskTimeoutMs: number;
   readonly maxToolCalls: number;
   readonly requiredTools: readonly string[];
@@ -69,6 +82,8 @@ export interface LiveScenario {
   /** Independent structural readback required after each named mutation action. */
   readonly requiredMutationReadbacks?: readonly LiveMutationReadbackRequirement[];
   readonly finalTextIncludes: readonly string[];
+  /** Complete consecutive passage, allowing Markdown quote/bold markers and whitespace. */
+  readonly finalQuoteIncludes?: string;
   /** Exact unordered, duplicate-free inventory in one JSON code block (or a JSON-only answer). */
   readonly finalJsonItems?: {
     readonly key: string;
@@ -80,6 +95,8 @@ export interface LiveScenario {
   readonly finalTextIncludesAny?: readonly (readonly string[])[];
   /** Requires the first provider request to contain only the active user message. */
   readonly requireFreshProviderContext?: boolean;
+  /** Requires a real Provider compaction response followed by replay of the opaque window. */
+  readonly requireNativeCompaction?: boolean;
   /** Any occurrence indicates the model reported an unresolved blocker instead of success. */
   readonly finalTextExcludes?: readonly string[];
   /** Optional coarse output-size guard; prefer explicit semantic checks when sufficient. */
@@ -89,6 +106,7 @@ export interface LiveScenario {
 }
 
 export interface LiveToolResult {
+  readonly providerHosted?: boolean;
   readonly toolName: string;
   readonly argumentsJson: string;
   readonly output: string;
@@ -200,6 +218,8 @@ export interface LiveProviderRequestBodySummary {
 }
 
 export interface LiveProviderResponseSummary {
+  readonly hostedToolOutputCount?: number;
+  readonly compactionOutputCount?: number;
   readonly status: number | null;
   readonly contentType: string | null;
   readonly bodyBytes: number;

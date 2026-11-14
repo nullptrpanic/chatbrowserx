@@ -130,6 +130,32 @@ describe('live E2E acceptance policy', () => {
     expect(result.checks.every((check) => check.passed)).toBe(true);
   });
 
+  it('checks the full quoted text even when a partial quote contains all required phrases', () => {
+    const quotation = {
+      ...scenario,
+      finalTextIncludes: ['First line.', 'Last line.'],
+      finalQuoteIncludes: 'First line.\nAn important qualification.\nLast line.',
+    };
+    const input = completedInput();
+    const full = evaluateLiveRun(quotation, {
+      ...input,
+      finalText:
+        'The earlier answer was:\n> First line.\n> **An important qualification.**\n> Last line.',
+    });
+    const partial = evaluateLiveRun(quotation, {
+      ...input,
+      finalText: 'The earlier answer was:\n> First line.\n> Last line.',
+    });
+    expect(full.passed).toBe(true);
+    expect(partial.checks).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ name: 'final-text-content', passed: true }),
+        expect.objectContaining({ name: 'final-full-quote', passed: false }),
+      ]),
+    );
+    expect(partial.passed).toBe(false);
+  });
+
   it('accepts concise output when the contract relies on explicit semantic evidence', () => {
     const { minFinalTextLength: minimum, ...semanticScenario } = scenario;
     expect(minimum).toBe(20);
@@ -1357,6 +1383,71 @@ describe('live E2E acceptance policy', () => {
       ]),
     );
     expect(contaminated.passed).toBe(false);
+    const summary = 'Earlier details are archived.';
+    const historyScenario: LiveScenario = {
+      ...scenario,
+      initialHistory: {
+        summary,
+        tasks: [
+          {
+            status: 'completed',
+            messages: [{ role: 'user', text: 'Earlier question.', status: 'complete' }],
+          },
+        ],
+      },
+    };
+    const summaryInput = {
+      position: 0,
+      type: 'message',
+      role: 'assistant',
+      textCharacters: summary.length,
+    };
+    const currentInput = {
+      position: 1,
+      type: 'message',
+      role: 'user',
+      matchesActiveUserRequest: true,
+    };
+    for (const [inputItems, passed] of [
+      [[summaryInput, currentInput], true],
+      [[summaryInput, currentInput, { ...summaryInput, position: 2 }], false],
+      [[{ ...summaryInput, textCharacters: summary.length + 1 }, currentInput], false],
+    ] as const) {
+      const historyCheck = evaluateLiveRun(historyScenario, {
+        ...input,
+        providerTrace: { ...providerTrace, requests: [{ ...request, inputItems }, secondRequest] },
+      });
+      expect(historyCheck.checks).toContainEqual(
+        expect.objectContaining({
+          name: 'initial-history-window',
+          passed,
+        }),
+      );
+    }
+    const requireCompaction = { ...scenario, requireNativeCompaction: true };
+    const trigger = {
+      ...request,
+      inputItems: [...request.inputItems, { position: 1, type: 'compaction_trigger' }],
+      response: { ...request.response, completed: true, compactionOutputCount: 1 },
+    };
+    const replay = {
+      ...secondRequest,
+      inputItems: [{ position: 0, type: 'compaction' }],
+      activeUserRequestOccurrences: 0,
+    };
+    for (const [requests, passed] of [
+      [[request, secondRequest], false],
+      [[trigger, secondRequest], false],
+      [[trigger, replay], true],
+    ] as const) {
+      const result = evaluateLiveRun(requireCompaction, {
+        ...input,
+        providerTrace: { ...providerTrace, requests },
+      });
+      expect(result.checks).toContainEqual(
+        expect.objectContaining({ name: 'required-native-compaction', passed }),
+      );
+    }
   });
 });
 

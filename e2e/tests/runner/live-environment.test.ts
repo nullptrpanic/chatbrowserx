@@ -154,7 +154,7 @@ describe('live target environment verification', () => {
         },
         async send() {
           return {
-            settings: { hasCodexToken: true },
+            settings: { hasAccessToken: true },
             tab: { id: 42, supported: true, hasPermission: true },
           };
         },
@@ -167,7 +167,7 @@ describe('live target environment verification', () => {
     expect(result.passed).toBe(true);
     expect(result.checks.map(({ name }) => name)).toEqual([
       'target-origin',
-      'codex-token',
+      'provider-credential',
       'extension-tab-access',
       'target:url_includes:1',
       'target:url_excludes:2',
@@ -199,7 +199,7 @@ describe('live target environment verification', () => {
         async send() {
           return {
             settings: {
-              hasCodexToken: true,
+              hasAccessToken: true,
               sandboxServer: '',
               hasSandboxToken: false,
             },
@@ -235,7 +235,7 @@ describe('live target environment verification', () => {
         },
         async send() {
           return {
-            settings: { hasCodexToken: true },
+            settings: { hasAccessToken: true },
             tab: { id: 42, supported: true, hasPermission: true },
           };
         },

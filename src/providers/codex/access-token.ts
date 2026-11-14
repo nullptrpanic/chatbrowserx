@@ -1,5 +1,5 @@
 import { z } from 'zod';
-import { providerErrorFromCode } from '../../agent/model/model-provider-error';
+import { providerErrorFromCode } from '../provider-error';
 
 const tokenPayloadSchema = z
   .object({

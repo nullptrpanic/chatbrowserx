@@ -1,22 +1,8 @@
-import type { CredentialStore } from '../src/persistence/credential-store';
-import { isProviderError } from '../src/agent/model/model-provider-error';
-import { CodexProvider } from '../src/providers/codex/codex-provider';
+import { isProviderError } from '../src/providers/provider-error';
+import { CodexProvider } from '../src/providers/codex/provider';
 import { CODEX_MODEL } from '../src/providers/codex/codex-constants';
 
 const accessToken = process.env.CHATBROWSERX_CODEX_ACCESS_TOKEN;
-
-/** Exposes one process-scoped token through the same trusted Provider boundary. */
-function environmentCredentialStore(token: string): CredentialStore {
-  return {
-    initialize: async () => undefined,
-    getCodexAccessToken: async () => token,
-    setCodexAccessToken: async () => undefined,
-    getTavilyKey: async () => undefined,
-    setTavilyKey: async () => undefined,
-    getSandboxToken: async () => undefined,
-    setSandboxToken: async () => undefined,
-  };
-}
 
 /** Runs the opt-in live contract check without printing credentials or response bodies. */
 async function main(): Promise<void> {
@@ -30,27 +16,27 @@ async function main(): Promise<void> {
   let text = '';
   let responseId = '';
   try {
-    const provider = new CodexProvider(environmentCredentialStore(accessToken));
-    for await (const event of provider.stream(
-      {
-        model: CODEX_MODEL,
-        reasoningEffort: 'low',
-        systemPrompt: 'Follow the user instruction exactly.',
-        input: [
-          {
-            type: 'message',
-            role: 'user',
-            content: [{ type: 'input_text', text: 'Reply with exactly OK.' }],
-          },
-        ],
-        tools: [],
-      },
-      new AbortController().signal,
-    )) {
-      if (event.type === 'text.delta') {
-        text += event.delta;
-      } else if (event.type === 'response.started') {
-        responseId = event.responseId;
+    const backend = new CodexProvider({ getAccessToken: async () => accessToken });
+    const model = await backend.getModel({ model: CODEX_MODEL, reasoningEffort: 'low' });
+    for await (const event of model.getStreamedResponse({
+      systemInstructions: 'Follow the user instruction exactly.',
+      input: [{ role: 'user', content: 'Reply with exactly OK.' }],
+      tools: [],
+      handoffs: [],
+      outputType: 'text',
+      tracing: false,
+      modelSettings: { store: false },
+      signal: AbortSignal.timeout(90_000),
+    })) {
+      if (event.type === 'response_done') {
+        responseId = event.response.id ?? '';
+        text = event.response.output
+          .flatMap((item) =>
+            item.type === 'message'
+              ? item.content.flatMap((part) => (part.type === 'output_text' ? [part.text] : []))
+              : [],
+          )
+          .join('');
       }
     }
   } catch (error) {

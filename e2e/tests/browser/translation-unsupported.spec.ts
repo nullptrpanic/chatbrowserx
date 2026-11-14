@@ -1,3 +1,4 @@
+import { codexFixtureEvents } from './helpers/codex-fixture';
 import { extensionTest, expect } from './fixtures/extension-test';
 import { sendExtensionMessage } from './helpers/extension-runtime';
 
@@ -31,7 +32,7 @@ for (const mode of [
           reasoningEffort: 'medium',
           language: 'zh-CN',
           systemPrompt: '',
-          codexAccessToken: `e30.${token}.`,
+          accessToken: `e30.${token}.`,
         },
       });
       const png = await panel.evaluate(() => {
@@ -81,11 +82,11 @@ for (const mode of [
           id: t.id,
           translation: '网页文字',
         }));
-        const events = [
+        const events = codexFixtureEvents([
           { type: 'response.created', response: { id: 'unsupported' } },
           { type: 'response.output_text.delta', delta: JSON.stringify({ blocks }) },
           { type: 'response.completed', response: { id: 'unsupported' } },
-        ];
+        ]);
         await route.fulfill({
           contentType: 'text/event-stream',
           body: events.map((e) => `event: ${e.type}\ndata: ${JSON.stringify(e)}\n\n`).join(''),

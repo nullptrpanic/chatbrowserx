@@ -137,6 +137,13 @@ function exactFinalInventory(text: string, requirement: LiveScenario['finalJsonI
   );
 }
 
+function normalizeQuote(text: string): string {
+  return text
+    .replace(/^(?:[ \t]*>[ \t]*)+/gmu, '')
+    .replace(/\*\*/gu, '')
+    .replace(/\s+/gu, '');
+}
+
 function markdownCells(line: string): readonly string[] | null {
   const trimmed = line.trim();
   if (!trimmed.includes('|')) return null;
@@ -511,6 +518,10 @@ export function evaluateLiveRun(scenario: LiveScenario, input: LiveRunInput): Li
     );
   });
   const maxAttachmentCount = scenario.maxAttachmentCount ?? 0;
+  const expectedQuote =
+    scenario.finalQuoteIncludes === undefined
+      ? undefined
+      : normalizeQuote(scenario.finalQuoteIncludes);
   const normalizeRequiredText = (value: string): string =>
     value.toLocaleLowerCase().replace(/\s+/gu, '');
   const normalizedRequiredFinalText = normalizeRequiredText(input.finalText);
@@ -556,7 +567,11 @@ export function evaluateLiveRun(scenario: LiveScenario, input: LiveRunInput): Li
       request.stream !== true ||
       request.parallelToolCalls !== false ||
       !request.includesEncryptedReasoning ||
-      request.activeUserRequestOccurrences !== 1 ||
+      (request.activeUserRequestOccurrences !== 1 &&
+        !(
+          request.activeUserRequestOccurrences === 0 &&
+          request.inputItems.some((item) => item.type === 'compaction')
+        )) ||
       request.orphanFunctionOutputCount !== 0 ||
       request.unpairedFunctionCallCount !== 0 ||
       request.duplicateFunctionCallIds,
@@ -681,6 +696,22 @@ export function evaluateLiveRun(scenario: LiveScenario, input: LiveRunInput): Li
       !inferredFailedRetryIndexes.has(index),
   );
   const compactionRequests = providerTrace?.compactionRequests ?? [];
+  const nativeCompactionContinuity = providerRequests.every(
+    (request, index) =>
+      (!request.inputItems.some((item) => item.type === 'compaction') ||
+        providerRequests
+          .slice(0, index)
+          .some((prior) => (prior.response.compactionOutputCount ?? 0) === 1)) &&
+      (!request.inputItems.some((item) => item.type === 'compaction_trigger') ||
+        (request.response.completed && request.response.compactionOutputCount === 1)),
+  );
+  const nativeCompactionObserved = providerRequests.some(
+    (request, index) =>
+      request.inputItems.some((item) => item.type === 'compaction_trigger') &&
+      request.response.completed &&
+      request.response.compactionOutputCount === 1 &&
+      providerRequests[index + 1]?.inputItems.some((item) => item.type === 'compaction'),
+  );
   const compactionTraceCountMatches =
     providerTrace === undefined ||
     (providerTrace.compactionRequestCount ?? 0) === compactionRequests.length;
@@ -689,6 +720,7 @@ export function evaluateLiveRun(scenario: LiveScenario, input: LiveRunInput): Li
     .filter(
       (request, index) =>
         request.response.encryptedReasoningOutputCount > 0 &&
+        !providerRequests[index + 1]?.inputItems.some((item) => item.type === 'compaction') &&
         (providerRequests[index + 1]?.encryptedReasoningInputCount ?? 0) === 0,
     );
 
@@ -855,6 +887,15 @@ export function evaluateLiveRun(scenario: LiveScenario, input: LiveRunInput): Li
         ? 'Final text includes every required phrase.'
         : `Missing: ${[...missingFinalText, ...missingFinalTextAlternatives].join(', ')}.`,
     ),
+    ...(expectedQuote === undefined
+      ? []
+      : [
+          check(
+            'final-full-quote',
+            expectedQuote.length > 0 && normalizeQuote(input.finalText).includes(expectedQuote),
+            'Final text must contain the complete expected passage, with only presentation markup or whitespace differences.',
+          ),
+        ]),
     check(
       'final-text-exclusions',
       presentExcludedFinalText.length === 0,
@@ -908,7 +949,8 @@ export function evaluateLiveRun(scenario: LiveScenario, input: LiveRunInput): Li
       'provider-request-chain',
       providerTrace === undefined ||
         (providerTrace.requestCount === providerRequests.length &&
-          providerTrace.requestCount >= input.toolResults.length + 1),
+          providerTrace.requestCount >=
+            input.toolResults.filter((result) => !result.providerHosted).length + 1),
       providerTrace === undefined
         ? 'No Provider trace supplied.'
         : `${String(providerTrace.requestCount)} Provider requests for ${String(input.toolResults.length)} completed tools.`,
@@ -922,6 +964,20 @@ export function evaluateLiveRun(scenario: LiveScenario, input: LiveRunInput): Li
           ? 'First provider request contains only the active user message.'
           : 'First provider request contains prior or unexpected context.',
     ),
+    ...(scenario.initialHistory?.summary !== undefined
+      ? [
+          check(
+            'initial-history-window',
+            firstProviderRequest !== undefined &&
+              firstProviderRequest.inputItems.length === 2 &&
+              firstProviderInput?.type === 'message' &&
+              firstProviderInput.role === 'assistant' &&
+              firstProviderInput.textCharacters === scenario.initialHistory.summary.length &&
+              firstProviderRequest.inputItems[1]?.matchesActiveUserRequest === true,
+            'The initial request must contain only the declared summary and active question, not archived answers.',
+          ),
+        ]
+      : []),
     check(
       'provider-request-contract',
       providerTrace === undefined || malformedProviderRequests.length === 0,
@@ -944,6 +1000,20 @@ export function evaluateLiveRun(scenario: LiveScenario, input: LiveRunInput): Li
         ? 'No Provider trace supplied.'
         : `${String(compactionRequests.length)} unsupported native compaction requests; countMatch=${String(compactionTraceCountMatches)}.`,
     ),
+    check(
+      'native-compaction-continuity',
+      nativeCompactionContinuity,
+      'Native compaction must return one verified opaque window before it is replayed.',
+    ),
+    ...(scenario.requireNativeCompaction
+      ? [
+          check(
+            'required-native-compaction',
+            nativeCompactionObserved,
+            'A Provider-produced compaction window must be replayed in the next request.',
+          ),
+        ]
+      : []),
     check(
       'encrypted-reasoning-continuation',
       providerTrace === undefined || missingReasoningContinuations.length === 0,

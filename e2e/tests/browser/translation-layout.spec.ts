@@ -1,3 +1,4 @@
+import { codexFixtureEvents } from './helpers/codex-fixture';
 import { extensionTest, expect } from './fixtures/extension-test';
 import { sendExtensionMessage } from './helpers/extension-runtime';
 
@@ -24,7 +25,7 @@ extensionTest(
         reasoningEffort: 'medium',
         language: 'zh-CN',
         systemPrompt: '',
-        codexAccessToken: `e30.${token}.`,
+        accessToken: `e30.${token}.`,
       },
     });
     await context.route('https://translation-navigation.test/', (r) =>
@@ -53,14 +54,14 @@ extensionTest(
         if (!translation) throw new Error(`Unexpected text: ${t.text}`);
         return { id: t.id, translation };
       });
-      const events = [
+      const events = codexFixtureEvents([
         { type: 'response.created', response: { id: 'navigation' } },
         {
           type: 'response.output_text.delta',
           delta: JSON.stringify({ blocks }),
         },
         { type: 'response.completed', response: { id: 'navigation' } },
-      ];
+      ]);
       return r.fulfill({
         contentType: 'text/event-stream',
         body: events.map((e) => `event: ${e.type}\ndata: ${JSON.stringify(e)}\n\n`).join(''),
@@ -225,7 +226,7 @@ extensionTest(
         reasoningEffort: 'medium',
         language: 'zh-CN',
         systemPrompt: '',
-        codexAccessToken: `e30.${token}.`,
+        accessToken: `e30.${token}.`,
       },
     });
     const source =
@@ -259,14 +260,14 @@ extensionTest(
             : translated
           : translatedSecond,
       }));
-      const events = [
+      const events = codexFixtureEvents([
         { type: 'response.created', response: { id: 'layout' } },
         {
           type: 'response.output_text.delta',
           delta: JSON.stringify({ blocks }),
         },
         { type: 'response.completed', response: { id: 'layout' } },
-      ];
+      ]);
       return route.fulfill({
         contentType: 'text/event-stream',
         body: events.map((e) => `event: ${e.type}\ndata: ${JSON.stringify(e)}\n\n`).join(''),

@@ -15,9 +15,10 @@ import type { Conversation } from '../tasks/conversation-types';
 import type { MessageRecord } from '../tasks/message-types';
 import type { Task, TaskEvent, TaskRun } from '../tasks/task-types';
 import type { ToolResult } from '../tasks/tool-result-types';
+import type { AgentSession } from '../tasks/agent-session-types';
 
 // Never lower this value: existing extension profiles may already have completed version 2.
-export const DATABASE_VERSION = 4;
+export const DATABASE_VERSION = 5;
 export const DEFAULT_DATABASE_NAME = 'chatbrowserx-v1';
 
 export const STORE_NAMES = {
@@ -30,9 +31,21 @@ export const STORE_NAMES = {
   checkpoints: 'checkpoints',
   attachments: 'attachments',
   attachmentReferences: 'attachment-references',
+  agentSessions: 'agent-sessions',
 } as const;
 
+/** The single-element key keeps one pre-task window beside the active conversation window. */
+export interface AgentSessionBackup {
+  readonly conversationId: [ConversationId];
+  readonly taskId: TaskId;
+  readonly session: AgentSession;
+}
+
 export interface ChatBrowserDatabase extends DBSchema {
+  'agent-sessions': {
+    key: ConversationId | [ConversationId];
+    value: AgentSession | AgentSessionBackup;
+  };
   conversations: {
     key: ConversationId;
     value: Conversation;

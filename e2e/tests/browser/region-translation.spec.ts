@@ -1,3 +1,4 @@
+import { codexFixtureEvents } from './helpers/codex-fixture';
 import { extensionTest, expect } from './fixtures/extension-test';
 import { sendExtensionMessage } from './helpers/extension-runtime';
 extensionTest.use({ extensionHeadless: true });
@@ -18,7 +19,7 @@ extensionTest(
         reasoningEffort: 'medium',
         systemPrompt: '',
         language: 'zh-CN',
-        codexAccessToken: `e30.${token}.`,
+        accessToken: `e30.${token}.`,
       },
     });
     await panel.reload();
@@ -43,7 +44,7 @@ extensionTest(
         await new Promise<void>((resolve) => {
           release = resolve;
         });
-      const events = [
+      const events = codexFixtureEvents([
         { type: 'response.created', response: { id: `translation_${count}` } },
         {
           type: 'response.output_text.delta',
@@ -55,7 +56,7 @@ extensionTest(
           }),
         },
         { type: 'response.completed', response: { id: `translation_${count}` } },
-      ];
+      ]);
       await route.fulfill({
         contentType: 'text/event-stream',
         body: events.map((e) => `event: ${e.type}\ndata: ${JSON.stringify(e)}\n\n`).join(''),
@@ -301,7 +302,7 @@ extensionTest(
         reasoningEffort: 'medium',
         systemPrompt: '',
         language: 'zh-CN',
-        codexAccessToken: `e30.${tokenPayload}.`,
+        accessToken: `e30.${tokenPayload}.`,
       },
     });
     await panel.setViewportSize({ width: 360, height: 800 });
@@ -317,7 +318,7 @@ extensionTest(
       const texts = JSON.parse(route.request().postDataJSON().input[0].content[0].text).texts as {
         id: string;
       }[];
-      const events = [
+      const events = codexFixtureEvents([
         { type: 'response.created', response: { id: 'translation_demo' } },
         {
           type: 'response.output_text.delta',
@@ -326,7 +327,7 @@ extensionTest(
           }),
         },
         { type: 'response.completed', response: { id: 'translation_demo' } },
-      ];
+      ]);
       await route.fulfill({
         contentType: 'text/event-stream',
         body: events.map((e) => `event: ${e.type}\ndata: ${JSON.stringify(e)}\n\n`).join(''),

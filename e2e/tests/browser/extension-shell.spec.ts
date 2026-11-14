@@ -1,3 +1,4 @@
+import { codexFixtureEvents } from './helpers/codex-fixture';
 import { extensionTest, expect } from './fixtures/extension-test';
 import { sendExtensionMessage } from './helpers/extension-runtime';
 
@@ -17,12 +18,12 @@ for (const reasoningEffort of ['low', 'max', 'ultra']) {
           reasoningEffort: 'low',
           systemPrompt: '',
           language: 'en',
-          codexAccessToken: `e30.${payload}.`,
+          accessToken: `e30.${payload}.`,
         },
       });
       await panel.reload();
       await panel.getByRole('button', { name: 'Settings', exact: true }).click();
-      await panel.getByRole('textbox', { name: 'Model', exact: true }).fill('custom/model:latest');
+      await panel.getByRole('combobox', { name: 'Model', exact: true }).fill('custom/model:latest');
       await panel
         .getByRole('combobox', { name: 'Reasoning effort', exact: true })
         .selectOption(reasoningEffort);
@@ -30,7 +31,7 @@ for (const reasoningEffort of ['low', 'max', 'ultra']) {
       await expect(panel.getByText('Settings saved', { exact: true })).toBeVisible();
       await panel.reload();
       await panel.getByRole('button', { name: 'Settings', exact: true }).click();
-      await expect(panel.getByRole('textbox', { name: 'Model', exact: true })).toHaveValue(
+      await expect(panel.getByRole('combobox', { name: 'Model', exact: true })).toHaveValue(
         'custom/model:latest',
       );
       await expect(
@@ -40,11 +41,11 @@ for (const reasoningEffort of ['low', 'max', 'ultra']) {
       const requests: unknown[] = [];
       await context.route('https://chatgpt.com/backend-api/codex/responses', async (route) => {
         requests.push(route.request().postDataJSON() as unknown);
-        const events = [
+        const events = codexFixtureEvents([
           { type: 'response.created', response: { id: 'resp_model_e2e' } },
           { type: 'response.output_text.delta', delta: 'Model setting verified.' },
           { type: 'response.completed', response: { id: 'resp_model_e2e' } },
-        ];
+        ]);
         await route.fulfill({
           status: 200,
           contentType: 'text/event-stream',

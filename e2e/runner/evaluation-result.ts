@@ -37,6 +37,7 @@ const batchSchema = z
 const toolResultSchema = z
   .object({
     toolName: nonEmptyString,
+    providerHosted: z.boolean().optional(),
     argumentsJson: z.string(),
     output: z.string(),
     attachmentIds: z.array(z.string()),

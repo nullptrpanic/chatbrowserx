@@ -250,6 +250,19 @@ describe('IndexedDbConversationRepository', () => {
     for (const event of records.events) await database.add('task-events', event);
     await database.add('tool-results', result);
     await database.add('checkpoints', records.checkpoint);
+    const session = {
+      conversationId: conversation.id,
+      taskId: records.task.id,
+      items: [],
+      admittedMessageIds: [],
+      lastInputTokens: null,
+    };
+    await database.put('agent-sessions', session);
+    await database.put('agent-sessions', {
+      conversationId: [conversation.id],
+      taskId: records.task.id,
+      session,
+    });
     await attachments.addReference('attachment_1', `message:${records.message.id}`);
     await attachments.addReference('attachment_2', result.id);
 
@@ -261,6 +274,7 @@ describe('IndexedDbConversationRepository', () => {
     await expect(tasks.listEvents(records.task.id)).resolves.toEqual([]);
     await expect(tasks.listToolResults(records.task.id)).resolves.toEqual([]);
     await expect(tasks.getCheckpoint(records.checkpoint.id)).resolves.toBeUndefined();
+    await expect(database.count('agent-sessions')).resolves.toBe(0);
     await expect(attachments.deleteUnreferenced(10)).resolves.toBe(2);
     database.close();
   });

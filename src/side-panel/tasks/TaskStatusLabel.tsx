@@ -13,6 +13,9 @@ const statusKeys: Readonly<Record<PanelTaskStatus, MessageKey>> = {
 };
 
 const eventKeys: Readonly<Record<string, MessageKey>> = {
+  context_compaction_started: 'taskCompacting',
+  'context.compacted': 'taskCompacted',
+  context_compaction_failed: 'taskCompactionFailed',
   'task.queued': 'taskQueued',
   'planning.started': 'taskPlanning',
   'planning.retrying': 'taskPlanning',

@@ -54,14 +54,18 @@ export interface PanelServiceDependencies {
   readonly settings: Pick<SettingsStore, 'get' | 'save'>;
   readonly credentials: Pick<
     CredentialStore,
-    | 'getCodexAccessToken'
-    | 'setCodexAccessToken'
-    | 'getTavilyKey'
-    | 'setTavilyKey'
-    | 'getSandboxToken'
-    | 'setSandboxToken'
+    'getTavilyKey' | 'setTavilyKey' | 'getSandboxToken' | 'setSandboxToken'
   >;
-  readonly agent: Pick<Agent, 'start' | 'supplement' | 'cancel'>;
+  readonly agent: Pick<
+    Agent,
+    | 'start'
+    | 'supplement'
+    | 'cancel'
+    | 'listModels'
+    | 'getProviderConfiguration'
+    | 'readProviderToken'
+    | 'saveProviderToken'
+  >;
   readonly tabs: {
     get(tabId: number): Promise<{
       readonly id?: number | undefined;
@@ -99,12 +103,15 @@ export interface SupplementPanelMessageInput {
 }
 
 export interface SavePanelSettingsInput {
+  readonly providerId?: string | undefined;
+  readonly credentialSource?: 'manual' | 'sandbox' | undefined;
+  readonly authPath?: string | undefined;
   readonly model?: string | undefined;
   readonly reasoningEffort: ReasoningEffort;
   readonly systemPrompt: string;
   readonly language: AppLanguage;
   readonly historyMessageLimit?: number | undefined;
-  readonly codexAccessToken?: string | undefined;
+  readonly accessToken?: string | undefined;
   readonly tavilyKey?: string | undefined;
   readonly sandboxServer?: string | undefined;
   readonly sandboxToken?: string | undefined;
@@ -649,15 +656,18 @@ export class PanelService {
     const sandboxServer = input.sandboxServer ?? currentSandboxServer;
     await this.#dependencies.settings.save({
       ...current,
+      providerId: input.providerId ?? current.providerId ?? '',
       model: input.model ?? current.model,
       reasoningEffort: input.reasoningEffort,
       systemPrompt: input.systemPrompt,
       language: input.language,
       historyMessageLimit: input.historyMessageLimit ?? current.historyMessageLimit,
       sandboxServer,
+      credentialSource: input.credentialSource ?? current.credentialSource ?? 'manual',
+      authPath: input.authPath ?? current.authPath ?? '',
     });
-    if (input.codexAccessToken !== undefined) {
-      await this.#dependencies.credentials.setCodexAccessToken(input.codexAccessToken);
+    if (input.accessToken !== undefined) {
+      await this.#dependencies.agent.saveProviderToken(input.accessToken);
     }
     if (input.tavilyKey !== undefined) {
       await this.#dependencies.credentials.setTavilyKey(input.tavilyKey);
@@ -671,16 +681,24 @@ export class PanelService {
 
   /** Reads editable settings, including credentials, only for the explicit trusted UI query. */
   async getSettings(): Promise<PanelEditableSettings> {
-    const [settings, codexAccessToken, tavilyKey, sandboxToken] = await Promise.all([
-      this.#dependencies.settings.get(),
-      this.#dependencies.credentials.getCodexAccessToken(),
-      this.#dependencies.credentials.getTavilyKey(),
-      this.#dependencies.credentials.getSandboxToken(),
-    ]);
+    const [settings, accessToken, tavilyKey, sandboxToken, catalog, configuration] =
+      await Promise.all([
+        this.#dependencies.settings.get(),
+        this.#dependencies.agent.readProviderToken(),
+        this.#dependencies.credentials.getTavilyKey(),
+        this.#dependencies.credentials.getSandboxToken(),
+        this.#dependencies.agent
+          .listModels(AbortSignal.timeout(15_000))
+          .then((models) => ({ models, modelDiscoveryFailed: false }))
+          .catch(() => ({ models: [], modelDiscoveryFailed: true })),
+        this.#dependencies.agent.getProviderConfiguration(),
+      ]);
     return {
       ...settings,
+      ...configuration,
+      ...catalog,
       sandboxServer: settings.sandboxServer ?? '',
-      codexAccessToken: codexAccessToken ?? '',
+      accessToken: accessToken ?? '',
       tavilyKey: tavilyKey ?? '',
       sandboxToken: sandboxToken ?? '',
     };
@@ -725,6 +743,13 @@ export class PanelService {
         event.type === 'supplement.queued' ? [[event.messageId, event.runId] as const] : [],
       ),
     );
+    const compaction = events.findLast(
+      (event) =>
+        event.runId === task.latestRunId &&
+        (event.type === 'context.compacted' ||
+          (event.type === 'status.changed' &&
+            ['context_compaction_started', 'context_compaction_failed'].includes(event.reason))),
+    );
     return {
       id: task.id,
       latestRunId: task.latestRunId,
@@ -744,6 +769,22 @@ export class PanelService {
               },
       })),
       detailLevel,
+      reasoningSummary:
+        events.findLast(
+          (event): event is Extract<TaskEvent, { type: 'reasoning.summary' }> =>
+            event.type === 'reasoning.summary' && event.runId === task.latestRunId,
+        )?.summary ?? '',
+      ...(compaction
+        ? {
+            contextCompaction:
+              compaction.type === 'context.compacted'
+                ? ('completed' as const)
+                : compaction.type === 'status.changed' &&
+                    compaction.reason === 'context_compaction_failed'
+                  ? ('failed' as const)
+                  : ('started' as const),
+          }
+        : {}),
       status: task.status,
       goal: task.goal,
       tabId: task.tabId,
@@ -817,16 +858,16 @@ export class PanelService {
 
   /** Reads persisted app settings plus credential-presence booleans without exposing their values. */
   async #readSettings(): Promise<PanelSettingsSnapshot> {
-    const [settings, codexToken, tavilyKey, sandboxToken] = await Promise.all([
+    const [settings, configuration, tavilyKey, sandboxToken] = await Promise.all([
       this.#dependencies.settings.get(),
-      this.#dependencies.credentials.getCodexAccessToken().catch(() => undefined),
+      this.#dependencies.agent.getProviderConfiguration(),
       this.#dependencies.credentials.getTavilyKey().catch(() => undefined),
       this.#dependencies.credentials.getSandboxToken().catch(() => undefined),
     ]);
     return {
       ...settings,
+      ...configuration,
       sandboxServer: settings.sandboxServer ?? '',
-      hasCodexToken: codexToken !== undefined,
       hasTavilyKey: tavilyKey !== undefined,
       hasSandboxToken: sandboxToken !== undefined,
     };

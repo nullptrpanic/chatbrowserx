@@ -76,7 +76,7 @@ extensionTest(
           systemPrompt: 'Use available browser tools.',
           language: 'en',
           historyMessageLimit: 50,
-          codexAccessToken: syntheticAccessToken(),
+          accessToken: syntheticAccessToken(),
         },
       });
       const runtime = createPlaywrightLiveRuntime(extensionSession);

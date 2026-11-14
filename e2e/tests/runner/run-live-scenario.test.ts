@@ -159,7 +159,7 @@ function panelSnapshot() {
     attachments: [],
     tasks: [],
     task: null,
-    settings: { hasCodexToken: true },
+    settings: { hasAccessToken: true },
   };
 }
 
@@ -279,6 +279,50 @@ async function runCompletedSnapshot(
 }
 
 describe('live scenario orchestration', () => {
+  it('submits in the isolated declared history conversation and fails before submission without a seeder', async () => {
+    const initialHistory: NonNullable<LiveScenario['initialHistory']> = {
+      summary: 'Earlier details are omitted.',
+      tasks: [
+        {
+          status: 'completed',
+          messages: [{ role: 'user', text: 'Earlier question.', status: 'complete' }],
+        },
+      ],
+    };
+    const runtime = liveRuntime((message) => {
+      switch (message.type) {
+        case 'panel.getSnapshot':
+          return panelSnapshot();
+        case 'chat.submit':
+          return taskSnapshot('completed', true);
+        case 'panel.getTaskDetails':
+          return panelTaskDetails(1);
+        default:
+          throw new Error('Unexpected request.');
+      }
+    });
+    const seedHistory = vi.fn(async () => 'history-fixture-owner');
+    runtime.seedHistory = seedHistory;
+    const dependencies = {
+      now: () => 10_000,
+      sleep: vi.fn(),
+      createRunId: () => 'fixture_attempt',
+    };
+    const report = await runLiveScenario(runtime, { ...scenario, initialHistory }, dependencies);
+    expect(report.harnessError).toBeNull();
+    expect(seedHistory).toHaveBeenCalledExactlyOnceWith(initialHistory, 'fixture_attempt', 42);
+    expect(runtime.messages).toContainEqual(
+      expect.objectContaining({
+        type: 'chat.submit',
+        payload: expect.objectContaining({ conversationId: 'history-fixture-owner' }),
+      }),
+    );
+    const noSeeder = liveRuntime(() => panelSnapshot());
+    const failed = await runLiveScenario(noSeeder, { ...scenario, initialHistory }, dependencies);
+    expect(failed.harnessError).toContain('cannot seed declared history');
+    expect(noSeeder.messages.some(({ type }) => type === 'chat.submit')).toBe(false);
+  });
+
   it('independently reads final page attributes after completion and fails closed without an adapter', async () => {
     const required = {
       ...scenario,
@@ -770,6 +814,41 @@ describe('live scenario orchestration', () => {
     expect(report.toolResults[0]?.auditOutputCharacters).toBe(55_000 + tail.length);
   });
 
+  it('preserves hosted results without requiring a local function-output round trip', async () => {
+    const original = taskSnapshot('completed', true);
+    const snapshot = {
+      ...original,
+      events: original.events
+        .filter((event) => event.id !== 'event_model_2')
+        .map((event) =>
+          event.type === 'tool.call' ? { ...event, name: 'web_search_call' } : event,
+        ),
+      toolResults: original.toolResults.map((result) => ({
+        ...result,
+        toolName: 'web_search_call',
+        providerHosted: true,
+      })),
+    };
+    const originalTrace = providerTrace(0, 1);
+    const trace = {
+      ...originalTrace,
+      requests: originalTrace.requests.map((request) => ({
+        ...request,
+        response: { ...request.response, hostedToolOutputCount: 1 },
+      })),
+    };
+
+    const report = await runCompletedSnapshot(snapshot, 1, trace, {
+      ...scenario,
+      requiredTools: ['web_search_call'],
+    });
+
+    expect(report.harnessError).toBeNull();
+    expect(report.acceptance.passed).toBe(true);
+    expect(report.toolResults[0]).toMatchObject({ providerHosted: true });
+    expect(report.executionMetrics.toolCounts).toEqual({ web_search_call: 1 });
+  });
+
   it('fails closed when Provider tool outputs have no local TaskSnapshot results', async () => {
     const snapshot = structuredClone(taskSnapshot('completed', true));
     snapshot.events = snapshot.events.filter(
@@ -1028,7 +1107,7 @@ describe('live scenario orchestration', () => {
       }
       return {
         ...panelSnapshot(),
-        settings: { hasCodexToken: false },
+        settings: { hasAccessToken: false },
       };
     });
 
@@ -1040,6 +1119,6 @@ describe('live scenario orchestration', () => {
 
     expect(runtime.messages.filter(({ type }) => type === 'chat.submit')).toHaveLength(0);
     expect(report.terminalStatus).toBe('preflight_failed');
-    expect(report.harnessError).toMatch(/access token/i);
+    expect(report.harnessError).toMatch(/no configured model credential/i);
   });
 });

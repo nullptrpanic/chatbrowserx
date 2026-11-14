@@ -10,6 +10,7 @@ import type {
 import type { AttachmentDraftClient } from '../chat/use-image-draft';
 import { isTerminalToolName, TerminalToolResult } from './TerminalToolResult';
 import { TaskStatusLabel, taskEventLabel, taskStatusLabel } from './TaskStatusLabel';
+import { RestrictedMarkdown } from '../chat/RestrictedMarkdown';
 import { TaskSupplement } from './TaskSupplement';
 import { ToolResult } from './ToolResult';
 import { toolResultEventLabel } from './browser-tool-label';
@@ -49,6 +50,19 @@ export function TaskProgressCard({
   const requestedDetailKey = useRef<string | null>(null);
   const latestEvent = task.detailLevel === 'full' ? undefined : task.events.at(-1);
   const detailItemCount = taskDetailItemCount(task);
+  const compaction = task.contextCompaction;
+  const compactionNotice =
+    compaction && (compaction !== 'started' || task.status === 'planning') ? (
+      <p className="task-current-step" role="status">
+        {t(
+          compaction === 'started'
+            ? 'taskCompacting'
+            : compaction === 'completed'
+              ? 'taskCompacted'
+              : 'taskCompactionFailed',
+        )}
+      </p>
+    ) : null;
 
   useEffect(() => {
     if (!expanded || task.detailLevel === 'full' || onLoadTaskDetails === undefined) return;
@@ -67,6 +81,7 @@ export function TaskProgressCard({
     });
     return (
       <section className="task-card is-embedded" aria-label={taskStatusLabelForAria(task, t)}>
+        {compactionNotice}
         <button
           type="button"
           className="task-summary-toggle"
@@ -110,6 +125,10 @@ export function TaskProgressCard({
 
   return (
     <section className="task-card" aria-label={taskStatusLabelForAria(task, t)}>
+      {compactionNotice}
+      {task.status === 'planning' && task.reasoningSummary ? (
+        <RestrictedMarkdown text={task.reasoningSummary} />
+      ) : null}
       <div className="task-card-header">
         <TaskStatusLabel status={task.status} t={t} />
         <span className="task-updated">

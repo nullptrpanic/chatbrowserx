@@ -2,18 +2,21 @@ import { describe, expect, it } from 'vitest';
 import { settingsTransferPayload } from '../../runner/settings-transfer';
 
 describe('live settings transfer', () => {
-  it.each(['max', 'ultra'])('preserves Codex effort %s for isolated builds', (reasoningEffort) => {
-    expect(
-      settingsTransferPayload({
-        reasoningEffort,
-        systemPrompt: '',
-        language: 'en',
-        historyMessageLimit: 50,
-        codexAccessToken: 'codex-test-token',
-        tavilyKey: '',
-      }),
-    ).toMatchObject({ reasoningEffort });
-  });
+  it.each(['max', 'ultra', 'provider-specific'])(
+    'preserves provider effort %s for isolated builds',
+    (reasoningEffort) => {
+      expect(
+        settingsTransferPayload({
+          reasoningEffort,
+          systemPrompt: '',
+          language: 'en',
+          historyMessageLimit: 50,
+          accessToken: 'codex-test-token',
+          tavilyKey: '',
+        }),
+      ).toMatchObject({ reasoningEffort });
+    },
+  );
 
   it('copies the execution settings and credentials needed by an isolated baseline build', () => {
     expect(
@@ -24,34 +27,65 @@ describe('live settings transfer', () => {
         language: 'zh-CN',
         historyMessageLimit: 42,
         sandboxServer: 'https://sandbox.example.test',
-        codexAccessToken: 'codex-test-token',
+        accessToken: 'codex-test-token',
         tavilyKey: 'tavily-test-key',
         sandboxToken: 'sandbox-test-token',
         ignored: 'not copied',
       }),
     ).toEqual({
+      model: 'gpt-5.6-terra',
       reasoningEffort: 'high',
       systemPrompt: 'Keep browser actions bounded.',
       language: 'zh-CN',
       historyMessageLimit: 42,
       sandboxServer: 'https://sandbox.example.test',
-      codexAccessToken: 'codex-test-token',
+      accessToken: 'codex-test-token',
       tavilyKey: 'tavily-test-key',
       sandboxToken: 'sandbox-test-token',
     });
   });
 
-  it('rejects a source extension without a Codex credential', () => {
+  it('rejects a source extension without a model credential', () => {
     expect(() =>
       settingsTransferPayload({
         reasoningEffort: 'medium',
         systemPrompt: '',
         language: 'system',
         historyMessageLimit: 50,
-        codexAccessToken: '',
+        accessToken: '',
         tavilyKey: '',
       }),
-    ).toThrow('Codex access token');
+    ).toThrow('model access token');
+  });
+
+  it('preserves Sandbox authentication without requiring a manual model token', () => {
+    expect(
+      settingsTransferPayload({
+        providerId: 'fixture',
+        model: 'fixture-model',
+        reasoningEffort: 'deep',
+        systemPrompt: '',
+        language: 'en',
+        historyMessageLimit: 50,
+        credentialSource: 'sandbox',
+        authPath: '/private/fixture.json',
+        sandboxServer: 'https://sandbox.example.test',
+        sandboxToken: 'fixture-sandbox-token',
+        accessToken: '',
+        tavilyKey: '',
+      }),
+    ).toEqual({
+      providerId: 'fixture',
+      model: 'fixture-model',
+      reasoningEffort: 'deep',
+      systemPrompt: '',
+      language: 'en',
+      historyMessageLimit: 50,
+      credentialSource: 'sandbox',
+      authPath: '/private/fixture.json',
+      sandboxServer: 'https://sandbox.example.test',
+      sandboxToken: 'fixture-sandbox-token',
+    });
   });
 
   it('omits empty optional credentials rejected by the settings protocol', () => {
@@ -62,7 +96,7 @@ describe('live settings transfer', () => {
         language: 'system',
         historyMessageLimit: 50,
         sandboxServer: '',
-        codexAccessToken: 'codex-test-token',
+        accessToken: 'codex-test-token',
         tavilyKey: '',
         sandboxToken: '',
       }),
@@ -72,7 +106,7 @@ describe('live settings transfer', () => {
       language: 'system',
       historyMessageLimit: 50,
       sandboxServer: '',
-      codexAccessToken: 'codex-test-token',
+      accessToken: 'codex-test-token',
     });
   });
 });

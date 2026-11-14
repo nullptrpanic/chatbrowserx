@@ -15,30 +15,39 @@ export interface SettingsViewProps {
   readonly onSave: (input: SavePanelSettingsInput) => Promise<unknown>;
 }
 
-/** Renders Codex settings plus the optional Sandbox connection. */
+/** Renders registered provider settings plus the optional Sandbox connection. */
 export function SettingsView({ settings, t, onLoad, onSave }: SettingsViewProps) {
+  const [providerId, setProviderId] = useState(settings.providerId ?? '');
+  const [providers, setProviders] = useState(settings.providers ?? []);
   const [activeTab, setActiveTab] = useState<'general' | 'sandbox'>('general');
   const [model, setModel] = useState(settings.model);
   const [reasoningEffort, setReasoningEffort] = useState(settings.reasoningEffort);
   const [systemPrompt, setSystemPrompt] = useState(settings.systemPrompt);
   const [language, setLanguage] = useState(settings.language);
-  const [historyMessageLimit, setHistoryMessageLimit] = useState(settings.historyMessageLimit);
-  const [codexAccessToken, setCodexAccessToken] = useState('');
-  const [tavilyKey, setTavilyKey] = useState('');
+  const [accessToken, setAccessToken] = useState('');
+  const [credentialSource, setCredentialSource] = useState(settings.credentialSource ?? 'manual');
+  const [authPath, setAuthPath] = useState(settings.authPath ?? '');
+  const [models, setModels] = useState<NonNullable<PanelEditableSettings['models']>>([]);
+  const [modelDiscoveryFailed, setModelDiscoveryFailed] = useState(false);
   const [sandboxServer, setSandboxServer] = useState(settings.sandboxServer ?? '');
   const [sandboxToken, setSandboxToken] = useState('');
   const [status, setStatus] = useState<'idle' | 'saving' | 'saved' | 'error'>('idle');
   const [loadFailed, setLoadFailed] = useState(false);
+  const supportedEfforts = models.find((item) => item.id === model)?.reasoningEfforts;
 
   useEffect(() => {
+    setProviderId(settings.providerId ?? '');
     setModel(settings.model);
     setReasoningEffort(settings.reasoningEffort);
     setSystemPrompt(settings.systemPrompt);
     setLanguage(settings.language);
-    setHistoryMessageLimit(settings.historyMessageLimit);
+    setCredentialSource(settings.credentialSource ?? 'manual');
+    setAuthPath(settings.authPath ?? '');
     setSandboxServer(settings.sandboxServer ?? '');
   }, [
-    settings.historyMessageLimit,
+    settings.providerId,
+    settings.credentialSource,
+    settings.authPath,
     settings.language,
     settings.model,
     settings.reasoningEffort,
@@ -52,13 +61,17 @@ export function SettingsView({ settings, t, onLoad, onSave }: SettingsViewProps)
       .then((loaded) => {
         if (!active) return;
         setLoadFailed(false);
+        setProviderId(loaded.providerId ?? '');
+        setProviders(loaded.providers ?? []);
         setModel(loaded.model);
         setReasoningEffort(loaded.reasoningEffort);
         setSystemPrompt(loaded.systemPrompt);
         setLanguage(loaded.language);
-        setHistoryMessageLimit(loaded.historyMessageLimit);
-        setCodexAccessToken(loaded.codexAccessToken);
-        setTavilyKey(loaded.tavilyKey);
+        setAccessToken(loaded.accessToken);
+        setCredentialSource(loaded.credentialSource ?? 'manual');
+        setAuthPath(loaded.authPath ?? '');
+        setModels(loaded.models ?? []);
+        setModelDiscoveryFailed(loaded.modelDiscoveryFailed ?? false);
         setSandboxServer(loaded.sandboxServer ?? '');
         setSandboxToken(loaded.sandboxToken ?? '');
       })
@@ -75,20 +88,24 @@ export function SettingsView({ settings, t, onLoad, onSave }: SettingsViewProps)
     setLoadFailed(false);
     setStatus('saving');
     const input: SavePanelSettingsInput = {
+      ...(providerId ? { providerId } : {}),
       model: model.trim(),
       reasoningEffort,
       systemPrompt,
       language,
-      historyMessageLimit,
+      credentialSource: credentialSource,
+      authPath: authPath.trim(),
       sandboxServer: sandboxServer.trim(),
-      ...(codexAccessToken.trim().length === 0
+      ...(credentialSource !== 'manual' || accessToken.trim().length === 0
         ? {}
-        : { codexAccessToken: codexAccessToken.trim() }),
-      ...(tavilyKey.trim().length === 0 ? {} : { tavilyKey: tavilyKey.trim() }),
+        : { accessToken: accessToken.trim() }),
       ...(sandboxToken.trim().length === 0 ? {} : { sandboxToken: sandboxToken.trim() }),
     };
     try {
       await onSave(input);
+      const loaded = await onLoad();
+      setModels(loaded.models ?? []);
+      setModelDiscoveryFailed(loaded.modelDiscoveryFailed ?? false);
       setStatus('saved');
     } catch {
       setStatus('error');
@@ -134,48 +151,135 @@ export function SettingsView({ settings, t, onLoad, onSave }: SettingsViewProps)
         </div>
         {activeTab === 'general' ? (
           <div id="general-settings-panel" className="settings-tab-panel" role="tabpanel">
-            <SecretField
-              id="codex-access-token"
-              label={t('codexToken')}
-              hint={settings.hasCodexToken ? t('tokenStored') : t('codexToken')}
-              value={codexAccessToken}
-              onChange={setCodexAccessToken}
-              t={t}
-            />
-            <SecretField
-              id="tavily-api-key"
-              label={t('tavilyKey')}
-              hint={settings.hasTavilyKey ? t('tokenStored') : t('tavilyKey')}
-              value={tavilyKey}
-              onChange={setTavilyKey}
-              t={t}
-            />
+            {providers.length > 1 ? (
+              <label className="form-field" htmlFor="model-provider">
+                <span>{t('modelProvider')}</span>
+                <select
+                  id="model-provider"
+                  value={providerId}
+                  onChange={(event) => {
+                    const selected = providers.find(
+                      (provider) => provider.id === event.target.value,
+                    );
+                    if (!selected) return;
+                    setProviderId(selected.id);
+                    setModel(selected.defaults.model);
+                    setReasoningEffort(selected.defaults.reasoningEffort);
+                    setAuthPath(selected.defaults.authPath);
+                    setCredentialSource('manual');
+                    setAccessToken('');
+                    setModels([]);
+                  }}
+                >
+                  {providers.map((provider) => (
+                    <option key={provider.id} value={provider.id}>
+                      {provider.name}
+                    </option>
+                  ))}
+                </select>
+              </label>
+            ) : null}
+            <fieldset className="form-field credential-source">
+              <legend>{t('credentialSource')}</legend>
+              <label>
+                <input
+                  type="radio"
+                  name="credential-source"
+                  checked={credentialSource === 'sandbox'}
+                  onChange={() => setCredentialSource('sandbox')}
+                />
+                {t('credentialSandbox')}
+              </label>
+              <label>
+                <input
+                  type="radio"
+                  name="credential-source"
+                  checked={credentialSource === 'manual'}
+                  onChange={() => setCredentialSource('manual')}
+                />
+                {t('credentialManual')}
+              </label>
+            </fieldset>
+            {credentialSource === 'sandbox' ? (
+              <label className="form-field" htmlFor="provider-auth-path">
+                <span>{t('credentialPath')}</span>
+                <input
+                  id="provider-auth-path"
+                  aria-label={t('credentialPath')}
+                  value={authPath}
+                  required
+                  maxLength={4096}
+                  spellCheck={false}
+                  onChange={(event) => setAuthPath(event.target.value)}
+                />
+                <small>{t('credentialSandboxHint')}</small>
+              </label>
+            ) : (
+              <SecretField
+                id="provider-access-token"
+                label={t('providerToken')}
+                hint={
+                  settings.hasAccessToken && providerId === (settings.providerId ?? '')
+                    ? t('tokenStored')
+                    : t('providerToken')
+                }
+                value={accessToken}
+                onChange={setAccessToken}
+                t={t}
+              />
+            )}
             <label className="form-field" htmlFor="model">
               <span>{t('model')}</span>
               <input
                 id="model"
+                aria-label={t('model')}
                 value={model}
                 required
                 maxLength={256}
-                onChange={(event) => setModel(event.target.value)}
+                list="backend-models"
+                onChange={(event) => {
+                  setModel(event.target.value);
+                  const selected = models.find((item) => item.id === event.target.value);
+                  if (selected) setReasoningEffort(selected.defaultReasoningEffort);
+                }}
               />
+              <datalist id="backend-models">
+                {models
+                  .filter((item) => !item.hidden)
+                  .map((item) => (
+                    <option key={item.id} value={item.id}>
+                      {item.name}
+                    </option>
+                  ))}
+              </datalist>
+              {modelDiscoveryFailed ? (
+                <small role="status">{t('modelDiscoveryFailed')}</small>
+              ) : null}
             </label>
             <label className="form-field" htmlFor="reasoning-effort">
               <span>{t('reasoningEffort')}</span>
-              <select
-                id="reasoning-effort"
-                value={reasoningEffort}
-                onChange={(event) =>
-                  setReasoningEffort(event.target.value as PanelSettingsSnapshot['reasoningEffort'])
-                }
-              >
-                <option value="low">Low</option>
-                <option value="medium">Medium</option>
-                <option value="high">High</option>
-                <option value="xhigh">XHigh</option>
-                <option value="max">Max</option>
-                <option value="ultra">Ultra</option>
-              </select>
+              {supportedEfforts?.length ? (
+                <select
+                  id="reasoning-effort"
+                  value={reasoningEffort}
+                  onChange={(event) => setReasoningEffort(event.target.value)}
+                >
+                  {[...new Set([...supportedEfforts, reasoningEffort])].map((effort) => (
+                    <option key={effort} value={effort}>
+                      {effort}
+                    </option>
+                  ))}
+                </select>
+              ) : (
+                <input
+                  id="reasoning-effort"
+                  value={reasoningEffort}
+                  required
+                  maxLength={64}
+                  spellCheck={false}
+                  onChange={(event) => setReasoningEffort(event.target.value)}
+                />
+              )}
             </label>
             <label className="form-field" htmlFor="system-prompt">
               <span>{t('systemPrompt')}</span>
@@ -201,20 +305,6 @@ export function SettingsView({ settings, t, onLoad, onSave }: SettingsViewProps)
                 <option value="en">{t('languageEnglish')}</option>
                 <option value="ja">{t('languageJapanese')}</option>
               </select>
-            </label>
-            <label className="form-field" htmlFor="history-message-limit">
-              <span>{t('historyMessageLimit')}</span>
-              <input
-                id="history-message-limit"
-                type="number"
-                min={1}
-                max={50}
-                step={1}
-                value={historyMessageLimit}
-                aria-label={t('historyMessageLimit')}
-                onChange={(event) => setHistoryMessageLimit(Number(event.target.value))}
-              />
-              <small>{t('historyMessageLimitHint')}</small>
             </label>
           </div>
         ) : (

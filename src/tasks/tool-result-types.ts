@@ -2,6 +2,8 @@ import type { AttachmentId, TaskId, TaskRunId, ToolResultId } from '../shared/id
 
 /** The only permanent copy of one completed tool's exact output. */
 export interface ToolResult {
+  /** Executed by the backend and retained in native model history, never redispatched locally. */
+  readonly providerHosted?: boolean;
   readonly id: ToolResultId;
   readonly taskId: TaskId;
   readonly runId: TaskRunId;

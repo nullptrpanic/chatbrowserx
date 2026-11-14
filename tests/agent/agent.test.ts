@@ -38,7 +38,27 @@ function buildFixture() {
     requestRecoveryScan: vi.fn(async () => undefined),
     handleBrowserStartup: vi.fn(async () => undefined),
   };
-  const agent = new AgentFacade({ submissions, commands, coordinator, recovery });
+  const agent = new AgentFacade({
+    submissions,
+    commands,
+    coordinator,
+    recovery,
+    providers: {
+      listModels: async () => [],
+      configuration: async () => ({
+        providerId: 'fixture',
+        model: 'fixture-model',
+        reasoningEffort: 'medium',
+        credentialSource: 'manual',
+        authPath: '',
+        hasAccessToken: true,
+        providers: [],
+      }),
+      readToken: async () => undefined,
+      saveToken: async () => {},
+    },
+    generation: { async *stream() {} },
+  });
   return { agent, commands, coordinator, order, recovery, snapshot, submissions };
 }
 

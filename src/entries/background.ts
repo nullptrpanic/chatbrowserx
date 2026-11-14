@@ -28,7 +28,6 @@ import {
   type BackgroundChromeApi,
   type RecoveryTriggerPort,
 } from '../platform/chrome/register-background';
-import { TavilyClient } from '../tools/tavily/client';
 import { SandboxClient } from '../sandbox/sandbox-client';
 import { SandboxToolExecutor } from '../sandbox/sandbox-tool-executor';
 import type { IdGenerator } from '../shared/ids';
@@ -75,7 +74,11 @@ async function createBackgroundServices(
   const repository = new IndexedDbTaskRepository(database, () => panelChanges.changed());
   const conversations = new IndexedDbConversationRepository(database, () => panelChanges.changed());
   const attachments = new IndexedDbAttachmentRepository(database);
-  const history = new TaskHistoryReader({ tasks: repository, conversations, attachments });
+  const history = new TaskHistoryReader({
+    tasks: repository,
+    conversations,
+    attachments,
+  });
   const attachmentService = new AttachmentService(attachments, {
     clock: systemClock,
     ids: cryptoIds,
@@ -96,22 +99,12 @@ async function createBackgroundServices(
       return { id: attachment.id };
     },
   });
-  const tavily = new TavilyClient(credentials);
   const debuggerTransport = new ChromeDebuggerTransport();
   const browserSessions = new TargetSessionRegistry(debuggerTransport);
   const translationPage = new ChromeTranslationPagePort({
     installer,
     tabs: chrome.tabs,
     ids: cryptoIds,
-  });
-  const translation = new TranslationController({
-    provider: new CodexProvider(credentials),
-    settings,
-    toggle: (tabId, options) => translationPage.toggle(tabId, options),
-    getSession: (tabId) => translationPage.getSession(tabId),
-    progress: async (tabId, value) => {
-      await chrome.tabs.sendMessage(tabId, value, { frameId: 0 });
-    },
   });
   const sandboxClient = new SandboxClient(settings, credentials);
   const sandbox = new SandboxToolExecutor(sandboxClient);
@@ -135,8 +128,14 @@ async function createBackgroundServices(
     sessions: browserSessions,
     transport: debuggerTransport,
     refs: browserRefs,
-    pointer: new ChromePointerPagePort({ installer, tabs: chrome.tabs, ids: cryptoIds }),
-    platform: { getOs: async () => (await chrome.runtime.getPlatformInfo()).os },
+    pointer: new ChromePointerPagePort({
+      installer,
+      tabs: chrome.tabs,
+      ids: cryptoIds,
+    }),
+    platform: {
+      getOs: async () => (await chrome.runtime.getPlatformInfo()).os,
+    },
     page: browserPage,
     attachments,
   });
@@ -160,12 +159,33 @@ async function createBackgroundServices(
     credentials,
     settings,
     browser,
-    tavily,
     sandbox,
     history,
     clock: systemClock,
     ids: cryptoIds,
     onExecutionError: reportTaskExecutionFailure,
+  });
+  const translation = new TranslationController({
+    provider: agent,
+    settings: {
+      get: async () => {
+        const [stored, configuration] = await Promise.all([
+          settings.get(),
+          agent.getProviderConfiguration(),
+        ]);
+        return {
+          ...stored,
+          providerId: configuration.providerId,
+          model: configuration.model,
+          reasoningEffort: configuration.reasoningEffort,
+        };
+      },
+    },
+    toggle: (tabId, options) => translationPage.toggle(tabId, options),
+    getSession: (tabId) => translationPage.getSession(tabId),
+    progress: async (tabId, value) => {
+      await chrome.tabs.sendMessage(tabId, value, { frameId: 0 });
+    },
   });
   const panel = new PanelService({
     conversations,

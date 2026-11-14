@@ -14,11 +14,28 @@ export async function createExtensionSession(
   browserArgs: readonly string[] = [],
 ): Promise<ExtensionSession> {
   const profilePath = await mkdtemp(join(tmpdir(), 'chatbrowserx-e2e-'));
-  return createLoadedExtensionSession({
+  const session = await createLoadedExtensionSession({
     profilePath,
     removeProfileOnClose: true,
     channel: process.env.PLAYWRIGHT_CHANNEL ?? 'chromium',
     headless,
     browserArgs,
   });
+  await session.context.route('https://chatgpt.com/backend-api/codex/models**', (route) =>
+    route.fulfill({
+      contentType: 'application/json',
+      body: JSON.stringify({
+        models: ['gpt-5.6-terra', 'custom/model:latest'].map((slug) => ({
+          slug,
+          display_name: slug,
+          default_reasoning_level: 'medium',
+          context_window: 272000,
+          supported_reasoning_levels: ['low', 'medium', 'high', 'xhigh', 'max', 'ultra'].map(
+            (effort) => ({ effort }),
+          ),
+        })),
+      }),
+    }),
+  );
+  return session;
 }

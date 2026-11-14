@@ -6,6 +6,7 @@ describe('built-in tool discovery', () => {
     const declarations = await discoverToolDeclarations();
 
     expect(declarations.map(({ name }) => name)).toEqual([
+      'load_tools',
       'task_progress',
       'browser_get_current_tab',
       'browser_list_tabs',
@@ -33,12 +34,9 @@ describe('built-in tool discovery', () => {
       'browser_network_list',
       'browser_network_get',
       'browser_network_stop',
-      'commit_context',
-      'tavily_search',
-      'tavily_extract',
-      'tavily_crawl',
       'sandbox_read',
       'sandbox_exec',
+      'history_search',
       'history_read',
       'history_detail_read',
       'result_read',

@@ -160,6 +160,47 @@ async function completeTask(
 }
 
 describe('IndexedDbTaskRepository', () => {
+  it('commits the model session with its task boundary and rejects stale replacement', async () => {
+    const database = await openChatBrowserDatabase(createTestDatabaseName('atomic-agent-session'));
+    const repository = new IndexedDbTaskRepository(database);
+    const fixture = submissionFixture('session');
+    const stored = await createSubmission(repository, fixture);
+    const session = {
+      conversationId: stored.conversationId,
+      taskId: stored.id,
+      items: [{ type: 'message' as const, role: 'user' as const, content: 'Remember this input' }],
+      admittedMessageIds: [fixture.message.id],
+      lastInputTokens: null,
+    };
+    const transition = {
+      task: { ...stored, status: 'planning' as const, lastEventSequence: 3, updatedAt: 101 },
+      run: { ...fixture.run, status: 'planning' as const },
+      checkpoint: fixture.checkpoint,
+      events: [
+        {
+          id: 'event_session_planning',
+          taskId: stored.id,
+          runId: fixture.run.id,
+          sequence: 3,
+          at: 101,
+          type: 'status.changed' as const,
+          taskStatus: 'planning' as const,
+          runStatus: 'planning' as const,
+          reason: 'model_request_started',
+          error: null,
+        },
+      ],
+      session,
+    };
+    await repository.saveTransition(transition);
+    expect(await repository.getAgentSession(stored.conversationId)).toEqual(session);
+    await expect(
+      repository.saveTransition({ ...transition, session: { ...session, items: [] } }),
+    ).rejects.toThrow();
+    expect(await repository.getAgentSession(stored.conversationId)).toEqual(session);
+    database.close();
+  });
+
   it('allocates the task ordinal in the submission transaction', async () => {
     const database = await openChatBrowserDatabase(createTestDatabaseName('task-ordinal'));
     const repository = new IndexedDbTaskRepository(database);

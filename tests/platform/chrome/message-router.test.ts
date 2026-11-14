@@ -7,7 +7,7 @@ import { createMessageRouter } from '../../../src/platform/chrome/message-router
 import { createTaskRecords } from '../../../src/tasks/task-factory';
 import { TranslationController } from '../../../src/translation/translation-controller';
 import { DEFAULT_APP_SETTINGS } from '../../../src/persistence/settings-store';
-import { ProviderError } from '../../../src/agent/model/model-provider-error';
+import { ProviderError } from '../../../src/providers/provider-error';
 import { ChromeTranslationPagePort } from '../../../src/platform/chrome/translation-page-port';
 import type { Checkpoint } from '../../../src/tasks/checkpoint-types';
 import type {
@@ -188,7 +188,7 @@ function buildPanel() {
     systemPrompt: '',
     language: 'system',
     historyMessageLimit: 50,
-    hasCodexToken: false,
+    hasAccessToken: false,
     hasTavilyKey: false,
   };
   const editableSettings: PanelEditableSettings = {
@@ -197,7 +197,7 @@ function buildPanel() {
     systemPrompt: settings.systemPrompt,
     language: settings.language,
     historyMessageLimit: settings.historyMessageLimit,
-    codexAccessToken: 'saved-token',
+    accessToken: 'saved-token',
     tavilyKey: 'saved-tavily-key',
   };
   const snapshot: PanelSnapshot = {
@@ -251,7 +251,7 @@ function buildPanel() {
     getSettings: vi.fn(async () => editableSettings),
     saveSettings: vi.fn(async () => ({
       ...settings,
-      hasCodexToken: true,
+      hasAccessToken: true,
       hasTavilyKey: true,
     })),
   };
@@ -468,7 +468,7 @@ describe('createMessageRouter', () => {
           reasoningEffort: 'medium',
           systemPrompt: '',
           language: 'zh-CN',
-          codexAccessToken: 'must-not-be-stored',
+          accessToken: 'must-not-be-stored',
           tavilyKey: 'must-not-be-stored',
         },
       },

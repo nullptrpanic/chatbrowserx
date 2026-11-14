@@ -218,7 +218,7 @@ export function evaluateConfiguredLiveEnvironment(
   const snapshot = jsonRecord(snapshotValue);
   const settings = jsonRecord(snapshot?.settings);
   const tab = jsonRecord(snapshot?.tab);
-  const hasCodexToken = settings?.hasCodexToken === true;
+  const hasAccessToken = settings?.hasAccessToken === true;
   const requiresSandbox =
     scenario.requiredTools?.some((name) => name.startsWith('sandbox_')) ?? false;
   const sandboxConfigured =
@@ -235,10 +235,10 @@ export function evaluateConfiguredLiveEnvironment(
       'The target origin does not match the sample contract.',
     ),
     configuredCheck(
-      'codex-token',
-      hasCodexToken,
-      'The extension has a configured Codex access token.',
-      'The extension has no configured Codex access token.',
+      'provider-credential',
+      settings?.credentialSource === 'sandbox' ? sandboxConfigured : hasAccessToken,
+      'The extension has a configured model credential.',
+      'The extension has no configured model credential.',
     ),
     configuredCheck(
       'extension-tab-access',

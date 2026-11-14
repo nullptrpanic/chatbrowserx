@@ -9,13 +9,20 @@ import type {
   TaskSubmissionPort,
 } from '../tasks/task-command-service';
 import type { TaskCoordinator } from '../tasks/task-coordinator';
+import type { ProviderModel } from '../providers/provider';
+import type { ProviderConfiguration, ProviderRegistry } from '../providers/registry';
+import type { ModelProviderPort, ModelRequest } from './model/model-provider';
 
 export type AgentStartInput =
   | { readonly kind: 'create'; readonly submission: CreateTaskSubmissionInput }
   | { readonly kind: 'continue'; readonly submission: ContinueTaskSubmissionInput };
 
 /** Public task lifecycle boundary used by every production adapter outside Agent composition. */
-export interface Agent {
+export interface Agent extends ModelProviderPort {
+  listModels(signal: AbortSignal): Promise<readonly ProviderModel[]>;
+  getProviderConfiguration(): Promise<ProviderConfiguration>;
+  readProviderToken(): Promise<string | undefined>;
+  saveProviderToken(token: string): Promise<void>;
   start(input: AgentStartInput): Promise<TaskSnapshot>;
   supplement(message: MessageRecord): Promise<void>;
   getSnapshot(taskId: TaskId): Promise<TaskSnapshot>;
@@ -30,6 +37,11 @@ export interface Agent {
 }
 
 export interface AgentFacadeDependencies {
+  readonly generation: ModelProviderPort;
+  readonly providers: Pick<
+    ProviderRegistry,
+    'listModels' | 'configuration' | 'readToken' | 'saveToken'
+  >;
   readonly submissions: TaskSubmissionPort;
   readonly commands: Pick<TaskCommandPort, 'getSnapshot' | 'clearContext'>;
   readonly coordinator: Pick<
@@ -45,6 +57,26 @@ export class AgentFacade implements Agent {
 
   constructor(dependencies: AgentFacadeDependencies) {
     this.#dependencies = dependencies;
+  }
+
+  listModels(signal: AbortSignal): Promise<readonly ProviderModel[]> {
+    return this.#dependencies.providers.listModels(signal);
+  }
+
+  getProviderConfiguration(): Promise<ProviderConfiguration> {
+    return this.#dependencies.providers.configuration();
+  }
+
+  readProviderToken(): Promise<string | undefined> {
+    return this.#dependencies.providers.readToken();
+  }
+
+  saveProviderToken(token: string): Promise<void> {
+    return this.#dependencies.providers.saveToken(token);
+  }
+
+  stream(request: ModelRequest, signal: AbortSignal) {
+    return this.#dependencies.generation.stream(request, signal);
   }
 
   /** Persists the complete submission before starting detached execution. */

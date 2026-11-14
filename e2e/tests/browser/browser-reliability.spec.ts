@@ -1,3 +1,4 @@
+import { codexFixtureEvents } from './helpers/codex-fixture';
 import { createServer, type Server } from 'node:http';
 import { extensionTest, expect } from './fixtures/extension-test';
 import { sendExtensionMessage } from './helpers/extension-runtime';
@@ -13,8 +14,10 @@ function syntheticAccessToken(): string {
 }
 
 function sse(events: readonly { readonly event: string; readonly data: unknown }[]): string {
-  return `${events
-    .map(({ event, data }) => `event: ${event}\ndata: ${JSON.stringify(data)}\n\n`)
+  return `${codexFixtureEvents(
+    events.map(({ data }) => data as { type: string; [key: string]: unknown }),
+  )
+    .map((data) => `event: ${data.type}\ndata: ${JSON.stringify(data)}\n\n`)
     .join('')}data: [DONE]\n\n`;
 }
 
@@ -114,7 +117,7 @@ async function runFixtureTask(session: ExtensionSession, tabId: number, text: st
       systemPrompt: 'Use browser tools.',
       language: 'en',
       historyMessageLimit: 50,
-      codexAccessToken: syntheticAccessToken(),
+      accessToken: syntheticAccessToken(),
     },
   });
   const submitted = await sendExtensionMessage<{ task: { id: string } }>(session.sidePanelPage, {
@@ -812,7 +815,7 @@ for (const delegated of [false, true]) {
             systemPrompt: 'Use browser tools.',
             language: 'en',
             historyMessageLimit: 50,
-            codexAccessToken: syntheticAccessToken(),
+            accessToken: syntheticAccessToken(),
           },
         });
         const submitted = await sendExtensionMessage<{ task: { id: string } }>(
@@ -961,7 +964,7 @@ extensionTest(
           systemPrompt: 'Use the available browser tools to complete the requested page action.',
           language: 'en',
           historyMessageLimit: 50,
-          codexAccessToken: syntheticAccessToken(),
+          accessToken: syntheticAccessToken(),
         },
       });
       const submitted = await sendExtensionMessage<{
@@ -1351,7 +1354,7 @@ extensionTest(
           systemPrompt: 'Use the available browser tools to complete the requested page action.',
           language: 'en',
           historyMessageLimit: 50,
-          codexAccessToken: syntheticAccessToken(),
+          accessToken: syntheticAccessToken(),
         },
       });
       const submitted = await sendExtensionMessage<{

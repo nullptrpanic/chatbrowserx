@@ -16,6 +16,27 @@ async function createSampleRoot(value: unknown = sample): Promise<string> {
 }
 
 describe('self-contained E2E samples', () => {
+  it('materializes portable history and rejects an unfinished fixture owner', async () => {
+    const initialHistory = {
+      summary: 'Earlier details are omitted.',
+      tasks: [
+        {
+          status: 'completed',
+          messages: [{ role: 'user', text: 'Earlier question.', status: 'complete' }],
+        },
+      ],
+    };
+    const root = await createSampleRoot({ ...sample, initialHistory });
+    expect((await loadEvaluationSample(root, sample.id)).scenario.initialHistory).toEqual(
+      initialHistory,
+    );
+    const last = initialHistory.tasks[0];
+    if (!last) throw new Error('Missing fixture task.');
+    last.status = 'cancelled';
+    const invalid = await createSampleRoot({ ...sample, initialHistory });
+    await expect(loadEvaluationSample(invalid, sample.id)).rejects.toThrow('completed task');
+  });
+
   it('reconstructs the complete live scenario from sample.json', async () => {
     const root = await createSampleRoot();
 
@@ -57,6 +78,43 @@ describe('self-contained E2E samples', () => {
       minFinalTextLength: 40,
       allowRemoteMutation: false,
     });
+  });
+
+  it('loads an uncompressed archive with a required native compaction check', async () => {
+    const initialHistory = {
+      tasks: [
+        {
+          status: 'completed',
+          messages: [{ role: 'user', text: 'Earlier question.', status: 'complete' }],
+        },
+      ],
+    };
+    const root = await createSampleRoot({
+      ...sample,
+      initialHistory,
+      evaluation: {
+        ...sample.evaluation,
+        policy: { ...sample.evaluation.policy, requireNativeCompaction: true },
+      },
+    });
+    expect((await loadEvaluationSample(root, sample.id)).scenario).toMatchObject({
+      initialHistory,
+      requireNativeCompaction: true,
+    });
+  });
+
+  it('materializes a complete quoted passage as an independent acceptance condition', async () => {
+    const finalQuoteIncludes = 'First line.\nAn important qualification.\nLast line.';
+    const root = await createSampleRoot({
+      ...sample,
+      evaluation: {
+        ...sample.evaluation,
+        policy: { ...sample.evaluation.policy, finalQuoteIncludes },
+      },
+    });
+    expect((await loadEvaluationSample(root, sample.id)).scenario.finalQuoteIncludes).toBe(
+      finalQuoteIncludes,
+    );
   });
 
   it('allows a sample to rely on explicit semantic checks without a text-length proxy', async () => {

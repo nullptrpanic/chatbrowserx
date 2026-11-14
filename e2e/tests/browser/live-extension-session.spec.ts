@@ -35,7 +35,7 @@ test('reuses extension storage from one dedicated persistent profile', async () 
         systemPrompt: 'Use available browser tools.',
         language: 'en',
         historyMessageLimit: 50,
-        codexAccessToken: syntheticAccessToken(),
+        accessToken: syntheticAccessToken(),
       },
     });
     await firstSession.close();
@@ -51,7 +51,7 @@ test('reuses extension storage from one dedicated persistent profile', async () 
     const tabId = tabs.find((tab) => typeof tab.id === 'number')?.id;
     if (typeof tabId !== 'number') throw new Error('Persistent smoke tab unavailable.');
     const snapshot = await sendExtensionMessage<{
-      readonly settings: { readonly hasCodexToken: boolean };
+      readonly settings: { readonly hasAccessToken: boolean };
     }>(secondSession.sidePanelPage, {
       version: 1,
       requestId: 'live_smoke_snapshot',
@@ -59,7 +59,7 @@ test('reuses extension storage from one dedicated persistent profile', async () 
       payload: { tabId },
     });
 
-    expect(snapshot.settings.hasCodexToken).toBe(true);
+    expect(snapshot.settings.hasAccessToken).toBe(true);
   } finally {
     await firstSession?.close().catch(() => undefined);
     await secondSession?.close().catch(() => undefined);

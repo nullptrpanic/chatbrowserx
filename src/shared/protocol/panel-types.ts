@@ -1,4 +1,6 @@
 import type { ReasoningEffort } from '../reasoning-effort';
+import type { ProviderModel } from '../../providers/provider';
+import type { ProviderDescriptor } from '../../providers/registry';
 
 export type PanelTaskStatus =
   'queued' | 'planning' | 'waiting_for_auth' | 'paused' | 'completed' | 'failed' | 'cancelled';
@@ -116,6 +118,9 @@ export interface PanelTaskRun {
 }
 
 export interface PanelTask {
+  /** Public provider summary only; hidden reasoning is never exposed. */
+  readonly reasoningSummary?: string;
+  readonly contextCompaction?: 'started' | 'completed' | 'failed' | undefined;
   readonly id: string;
   /** Latest execution attempt; used to attach live state to only that attempt's answer. */
   readonly latestRunId: string | null;
@@ -142,26 +147,37 @@ export interface PanelTask {
 }
 
 export interface PanelSettingsSnapshot {
+  readonly providerId?: string;
+  readonly providers?: readonly ProviderDescriptor[];
+  readonly credentialSource?: 'manual' | 'sandbox';
+  readonly authPath?: string;
   readonly model: string;
   readonly reasoningEffort: ReasoningEffort;
   readonly systemPrompt: string;
   readonly language: 'system' | 'zh-CN' | 'en' | 'ja';
   readonly historyMessageLimit: number;
   readonly sandboxServer?: string;
-  readonly hasCodexToken: boolean;
+  readonly hasAccessToken: boolean;
   readonly hasTavilyKey: boolean;
   readonly hasSandboxToken?: boolean;
 }
 
 /** Settings returned only to the trusted settings screen after an explicit request. */
 export interface PanelEditableSettings {
+  readonly providerId?: string;
+  readonly providers?: readonly ProviderDescriptor[];
+  readonly hasAccessToken?: boolean | undefined;
+  readonly credentialSource?: 'manual' | 'sandbox';
+  readonly authPath?: string;
+  readonly models?: readonly ProviderModel[];
+  readonly modelDiscoveryFailed?: boolean;
   readonly model: string;
   readonly reasoningEffort: ReasoningEffort;
   readonly systemPrompt: string;
   readonly language: 'system' | 'zh-CN' | 'en' | 'ja';
   readonly historyMessageLimit: number;
   readonly sandboxServer?: string;
-  readonly codexAccessToken: string;
+  readonly accessToken: string;
   readonly tavilyKey: string;
   readonly sandboxToken?: string;
 }

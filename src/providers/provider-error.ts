@@ -1,5 +1,14 @@
+import type { ModelUsage } from './model-events';
+
 export type ProviderErrorCode =
-  'AUTH' | 'RATE_LIMIT' | 'TRANSIENT' | 'INVALID_RESPONSE' | 'ABORTED';
+  | 'AUTH'
+  | 'FORBIDDEN'
+  | 'CONTEXT_LIMIT'
+  | 'PROVIDER_MISMATCH'
+  | 'RATE_LIMIT'
+  | 'TRANSIENT'
+  | 'INVALID_RESPONSE'
+  | 'ABORTED';
 
 export type ProviderInvalidResponseStage =
   | 'request_contract'
@@ -11,6 +20,8 @@ export type ProviderInvalidResponseStage =
   | 'compaction_schema';
 
 export interface ProviderErrorOptions {
+  readonly usage?: ModelUsage | null;
+  readonly credentialSource?: 'sandbox';
   readonly status?: number | null;
   readonly retryAfterMs?: number | null;
   readonly invalidResponseStage?: ProviderInvalidResponseStage | null;
@@ -26,7 +37,14 @@ export interface ProviderErrorOptions {
 const ERROR_METADATA: Readonly<
   Record<ProviderErrorCode, { readonly message: string; readonly retryable: boolean }>
 > = Object.freeze({
+  PROVIDER_MISMATCH: {
+    message:
+      'This conversation belongs to another model provider. Start a new conversation to switch providers.',
+    retryable: false,
+  },
   AUTH: { message: 'Provider authentication failed.', retryable: false },
+  FORBIDDEN: { message: 'The provider denied access to this request.', retryable: false },
+  CONTEXT_LIMIT: { message: 'The model context limit was exceeded.', retryable: false },
   RATE_LIMIT: {
     message: 'The model provider rate limit was reached.',
     retryable: true,
@@ -43,6 +61,7 @@ const ERROR_METADATA: Readonly<
 });
 
 export class ProviderError extends Error {
+  readonly usage: ModelUsage | null;
   readonly code: ProviderErrorCode;
   readonly retryable: boolean;
   readonly status: number | null;
@@ -53,8 +72,13 @@ export class ProviderError extends Error {
   /** Creates a provider-safe error whose public text cannot include upstream credentials. */
   constructor(code: ProviderErrorCode, options: ProviderErrorOptions = {}) {
     const metadata = ERROR_METADATA[code];
-    super(metadata.message);
+    super(
+      code === 'AUTH' && options.credentialSource === 'sandbox'
+        ? 'Sandbox credential sync failed. Check the authentication file or select manual authentication in Settings.'
+        : metadata.message,
+    );
     this.name = 'ProviderError';
+    this.usage = options.usage ?? null;
     this.code = code;
     this.retryable = metadata.retryable;
     this.status = options.status ?? null;

@@ -4,7 +4,7 @@ import {
   isProviderError,
   providerErrorFromCode,
   type ProviderError,
-} from './model/model-provider-error';
+} from '../providers/provider-error';
 import type { IdGenerator, TaskId, TaskRunId } from '../shared/ids';
 import type { Clock } from '../shared/time';
 import type { Checkpoint } from '../tasks/checkpoint-types';
@@ -17,8 +17,10 @@ import { transitionTask, type TaskTransitionType } from '../tasks/task-transitio
 import type { Task, TaskEvent, TaskModelTurnMetrics, TaskRun } from '../tasks/task-types';
 import type { MaterializedToolResult, ToolResult } from '../tasks/tool-result-types';
 import { pendingTaskSupplementIds, selectPendingTaskSupplements } from '../tasks/task-supplements';
-import type { AgentEvent, AgentModelTurn, AgentPlanner } from './execution-types';
+import type { AgentEvent, AgentModelTurn, AgentRuntimePort } from './execution-types';
 import type { ToolExecutionPolicy, ToolRuntimePort, ValidatedToolCall } from '../tools/types';
+import type { AgentSession } from '../tasks/agent-session-types';
+import { sessionToolResult } from './context/agent-session';
 import { isModelInputPreparationError } from './model/model-input-preparation-error';
 
 export type TaskExecutorErrorCode =
@@ -41,7 +43,7 @@ export class TaskExecutorError extends Error {
 export interface TaskExecutorDependencies {
   readonly repository: TaskRepository;
   readonly conversations: Pick<ConversationRepository, 'listTaskMessages' | 'updateMessage'>;
-  readonly planner: AgentPlanner;
+  readonly runtime: AgentRuntimePort;
   readonly tools: ToolRuntimePort;
   readonly clock: Clock;
   readonly ids: IdGenerator;
@@ -49,6 +51,8 @@ export interface TaskExecutorDependencies {
 }
 
 interface BoundaryInput {
+  readonly session?: AgentSession;
+  readonly hostedTool?: MaterializedToolResult;
   readonly type: TaskTransitionType;
   readonly reason: string;
   readonly error?: TaskError;
@@ -67,36 +71,13 @@ interface ActiveTaskSnapshot extends TaskSnapshot {
   readonly checkpoint: Checkpoint;
 }
 
-type AgentOutcome = Exclude<AgentEvent, { readonly type: 'reasoning.summary' }>;
-
 const runnableStatuses = new Set<TaskRun['status']>(['queued', 'planning']);
-/** Number of retries after the initial request for transient Provider failures. */
-const MODEL_TRANSIENT_RETRY_LIMIT = 3;
-const MODEL_TRANSIENT_RETRY_DELAYS_MS = Object.freeze([500, 1_500, 3_000] as const);
-/** Number of retries after invalid model responses within one planning attempt. */
-const MODEL_INVALID_RESPONSE_RETRY_LIMIT = 3;
-
 function throwIfAborted(signal: AbortSignal): void {
   if (signal.aborted) throw new DOMException('Task execution was aborted.', 'AbortError');
 }
 
 function isAbortError(error: unknown): boolean {
   return error instanceof Error && error.name === 'AbortError';
-}
-
-function sleepWithAbort(milliseconds: number, signal: AbortSignal): Promise<void> {
-  throwIfAborted(signal);
-  return new Promise((resolve, reject) => {
-    const onAbort = (): void => {
-      globalThis.clearTimeout(timer);
-      reject(new DOMException('Task execution was aborted.', 'AbortError'));
-    };
-    const timer = globalThis.setTimeout(() => {
-      signal.removeEventListener('abort', onAbort);
-      resolve();
-    }, milliseconds);
-    signal.addEventListener('abort', onAbort, { once: true });
-  });
 }
 
 function invalidPlannerResultError(): TaskError {
@@ -139,12 +120,22 @@ function toolCallLimitError(family: string): TaskError {
 
 function taskErrorFromProvider(error: ProviderError): TaskError {
   switch (error.code) {
+    case 'PROVIDER_MISMATCH':
+    case 'FORBIDDEN':
+    case 'CONTEXT_LIMIT':
+      return {
+        code: 'TaskInputError',
+        retryable: false,
+        recoveryAction: 'review_task_input',
+        userMessage: error.message,
+        evidenceRef: `provider:${error.code.toLowerCase()}`,
+      };
     case 'AUTH':
       return {
         code: 'AuthError',
         retryable: false,
         recoveryAction: 'update_credentials',
-        userMessage: 'Provider authentication is required.',
+        userMessage: error.message,
         evidenceRef: null,
       };
     case 'RATE_LIMIT':
@@ -185,20 +176,6 @@ function taskErrorFromProvider(error: ProviderError): TaskError {
   }
 }
 
-/** Counts consecutive automatic invalid-response retries since the latest valid model turn. */
-function invalidModelResponseRetryCount(events: readonly TaskEvent[]): number {
-  let count = 0;
-  for (let index = events.length - 1; index >= 0; index -= 1) {
-    const event = events[index];
-    if (event?.type === 'model.turn') break;
-    if (event?.type === 'status.changed') {
-      if (event.reason === 'model_request_started') break;
-      if (event.reason.startsWith('invalid_model_response_retry:')) count += 1;
-    }
-  }
-  return count;
-}
-
 /** Bound repeated final answers without intervening work; ordinary tool budgets still apply. */
 function completionReviewRetryCount(
   events: readonly TaskEvent[],
@@ -219,6 +196,7 @@ function completionReviewRetryCount(
 function taskModelTurnMetrics(turn: AgentModelTurn): TaskModelTurnMetrics {
   const usage = turn.usage;
   return {
+    ...(turn.kind === undefined ? {} : { kind: turn.kind }),
     inputItemCount: turn.inputItemCount,
     elapsedMs: turn.elapsedMs,
     firstEventMs: turn.firstEventMs,
@@ -242,7 +220,7 @@ function taskModelTurnMetrics(turn: AgentModelTurn): TaskModelTurnMetrics {
   };
 }
 
-/** Runs a durable sequential Tavily/model loop with checkpointed results. */
+/** Hosts durable task boundaries and external effects for the framework runtime. */
 export class TaskExecutor {
   readonly #dependencies: TaskExecutorDependencies;
   readonly #leases: TaskLeaseManager;
@@ -255,215 +233,49 @@ export class TaskExecutor {
   async run(taskId: TaskId, signal: AbortSignal, expectedRunId?: TaskRunId): Promise<TaskSnapshot> {
     throwIfAborted(signal);
     const ownerId = this.#createId('runner');
-    const acquired = await this.#leases.acquire(taskId, ownerId, this.#dependencies.clock.now());
-    if (!acquired) throw new TaskExecutorError('TASK_BUSY', 'Task is already running.');
-
+    if (!(await this.#leases.acquire(taskId, ownerId, this.#dependencies.clock.now()))) {
+      throw new TaskExecutorError('TASK_BUSY', 'Task is already running.');
+    }
+    let snapshot: TaskSnapshot;
+    const active = (): ActiveTaskSnapshot => {
+      if (!snapshot.checkpoint)
+        throw new TaskExecutorError('CHECKPOINT_NOT_FOUND', 'Task checkpoint is missing.');
+      return { ...snapshot, checkpoint: snapshot.checkpoint };
+    };
     try {
-      let snapshot = await this.#loadSnapshot(taskId);
+      snapshot = await this.#loadSnapshot(taskId);
       if (expectedRunId !== undefined && snapshot.run.id !== expectedRunId) return snapshot;
       if (!runnableStatuses.has(snapshot.task.status)) return snapshot;
-      if (snapshot.task.status !== 'planning') {
-        snapshot = await this.#saveBoundary(snapshot, ownerId, signal, {
+      if (snapshot.task.status !== 'planning')
+        snapshot = await this.#saveBoundary(active(), ownerId, signal, {
           type: 'planning.started',
           reason: 'model_request_started',
         });
+      if (active().checkpoint.pendingToolCall) {
+        snapshot = await this.#executePendingTool(active(), ownerId, signal);
+        if (!runnableStatuses.has(snapshot.task.status)) return snapshot;
       }
-
-      let transientModelRetryCount = 0;
-      while (true) {
-        throwIfAborted(signal);
-        if (snapshot.checkpoint.pendingToolCall !== null) {
-          snapshot = await this.#executePendingTool(snapshot, ownerId, signal);
-          if (!runnableStatuses.has(snapshot.task.status)) return snapshot;
-          continue;
-        }
-        snapshot = await this.#applySupplements(snapshot, ownerId, signal);
-        if (!runnableStatuses.has(snapshot.task.status)) return snapshot;
-        let result: AgentOutcome;
-        try {
-          result = await this.#planOne(snapshot, signal, async (reasoningSummary) => {
-            snapshot = await this.#refreshCurrentAttempt(snapshot);
-            if (!runnableStatuses.has(snapshot.task.status)) return;
-            snapshot = await this.#saveBoundary(snapshot, ownerId, signal, {
-              type: 'reasoning.summary-recorded',
-              reason: 'model_reasoning_summary_recorded',
-              reasoningSummary,
-            });
-          });
-        } catch (error) {
-          if (
-            isProviderError(error) &&
-            error.code === 'TRANSIENT' &&
-            transientModelRetryCount < MODEL_TRANSIENT_RETRY_LIMIT
-          ) {
-            const retryDelay =
-              MODEL_TRANSIENT_RETRY_DELAYS_MS[transientModelRetryCount] ??
-              MODEL_TRANSIENT_RETRY_DELAYS_MS.at(-1) ??
-              3_000;
-            transientModelRetryCount += 1;
-            snapshot = await this.#saveBoundary(snapshot, ownerId, signal, {
-              type: 'planning.retrying',
-              reason: `transient_model_retry:${error.transientStage ?? 'upstream_failure'}`,
-            });
-            await (this.#dependencies.sleep ?? sleepWithAbort)(retryDelay, signal);
-            continue;
-          }
-          if (
-            isProviderError(error) &&
-            error.code === 'INVALID_RESPONSE' &&
-            invalidModelResponseRetryCount(snapshot.events) < MODEL_INVALID_RESPONSE_RETRY_LIMIT
-          ) {
-            snapshot = await this.#saveBoundary(snapshot, ownerId, signal, {
-              type: 'planning.retrying',
-              reason: `invalid_model_response_retry:${error.invalidResponseStage ?? 'unknown'}`,
-            });
-            continue;
-          }
-          return await this.#handleFailure(snapshot, ownerId, signal, error, 'model');
-        }
-        snapshot = await this.#refreshCurrentAttempt(snapshot);
-        if (!runnableStatuses.has(snapshot.task.status)) return snapshot;
-        transientModelRetryCount = 0;
-
-        if (result.type === 'task.completed') {
-          const completionContext = {
-            task: snapshot.task,
-            checkpoint: snapshot.checkpoint,
-            toolResults: snapshot.toolResults,
-            events: snapshot.events,
-          };
-          const continuationItems = snapshot.checkpoint.continuationItems.some(
-            (item) => item.type === 'message_ref' && item.messageId === result.messageId,
-          )
-            ? snapshot.checkpoint.continuationItems
-            : [
-                ...snapshot.checkpoint.continuationItems,
-                { type: 'message_ref' as const, messageId: result.messageId },
-              ];
-          const review = await this.#dependencies.tools.reviewCompletion?.(completionContext);
-          const exhausted =
-            review?.type === 'continue' &&
-            completionReviewRetryCount(snapshot.events, snapshot.run.id, review.toolName) >= 2;
-          if (review?.type === 'continue' && !exhausted) {
-            await this.#interruptReply(snapshot.task, result.messageId);
-            snapshot = await this.#saveBoundary(snapshot, ownerId, signal, {
-              type: 'planning.retrying',
-              reason: `completion_review:${review.toolName}`,
-              ...(result.modelTurn === undefined
-                ? {}
-                : { modelTurn: taskModelTurnMetrics(result.modelTurn) }),
-            });
-            continue;
-          }
-          try {
-            return await this.#saveBoundary(snapshot, ownerId, signal, {
-              type: review ? 'task.paused' : 'task.completed',
-              reason: review ? 'completion_review_blocked' : result.reason,
-              ...(review
-                ? {
-                    error: {
-                      code: 'TaskInputError' as const,
-                      retryable: true,
-                      recoveryAction: 'resume_task',
-                      userMessage:
-                        review.type === 'blocked'
-                          ? review.reason
-                          : 'The task still has unresolved progress, but repeated final answers did not advance it. Review the remaining work before resuming.',
-                      evidenceRef: null,
-                    },
-                  }
-                : {}),
-              continuationItems,
-              pendingToolCall: null,
-              ...(result.modelTurn === undefined
-                ? {}
-                : { modelTurn: taskModelTurnMetrics(result.modelTurn) }),
-            });
-          } catch (error) {
-            if (!(error instanceof TaskRepositoryConflictError)) throw error;
-            await this.#interruptReply(snapshot.task, result.messageId);
-            continue;
-          }
-        }
-
-        // Planner-provided native compaction uses the same durable boundary as automatic compaction.
-        if (result.type === 'context.compacted') {
-          await this.#dependencies.tools.contextCompacted();
-          snapshot = await this.#saveBoundary(snapshot, ownerId, signal, {
-            type: 'task.context-compacted',
-            reason: 'native_context_compacted',
-            continuationItems: result.continuationItems,
-            pendingToolCall: null,
-            lastModelInputTokens: null,
-          });
-          continue;
-        }
-
-        const call = result.call;
-        if (snapshot.toolResults.some((completed) => completed.callId === call.callId)) {
-          return this.#saveBoundary(snapshot, ownerId, signal, {
-            type: 'task.failed',
-            reason: 'duplicate_tool_call_id',
-            error: invalidPlannerResultError(),
-          });
-        }
-        if (result.type === 'tool.call') {
-          const policy = this.#dependencies.tools.policyFor(result.call.name);
-          if (policy === null) {
-            return this.#saveBoundary(snapshot, ownerId, signal, {
-              type: 'task.failed',
-              reason: 'unregistered_tool_call',
-              error: invalidPlannerResultError(),
-            });
-          }
-          const completedGroupCalls = this.#dependencies.tools.callsUsed(result.call.name, {
-            checkpoint: snapshot.checkpoint,
-            toolResults: snapshot.toolResults,
-          });
-          if (completedGroupCalls >= policy.maxCalls) {
-            return this.#saveBoundary(snapshot, ownerId, signal, {
-              type: 'task.failed',
-              reason: `${policy.budgetGroup}_tool_call_limit_reached`,
-              error: toolCallLimitError(policy.budgetLabel ?? policy.budgetGroup),
-            });
-          }
-        }
-
-        const toolName = result.call.name;
-
-        snapshot = await this.#saveBoundary(snapshot, ownerId, signal, {
-          type: 'tool.call-recorded',
-          reason: `${toolName}_call_recorded`,
-          continuationItems: [
-            ...snapshot.checkpoint.continuationItems,
-            {
-              type: 'function_call',
-              callId: call.callId,
-              name: toolName,
-              argumentsJson: call.argumentsJson,
-              ...(result.modelOutputItems === undefined || result.modelOutputItems.length === 0
-                ? {}
-                : { modelOutputItems: result.modelOutputItems }),
+      try {
+        await this.#dependencies.runtime.run(
+          {
+            prepare: async () => {
+              snapshot = await this.#applySupplements(active(), ownerId, signal);
+              return active();
             },
-          ],
-          pendingToolCall: {
-            callId: call.callId,
-            name: toolName,
-            argumentsJson: call.argumentsJson,
-            executionState: 'recorded',
-            ...(this.#dependencies.tools.policyFor(toolName)?.executionIdPrefix === undefined
-              ? {}
-              : {
-                  executionId: this.#createId(
-                    this.#dependencies.tools.policyFor(toolName)?.executionIdPrefix ?? 'execution',
-                  ),
-                }),
+            observe: async (event) => {
+              snapshot = await this.#acceptEvent(active(), ownerId, signal, event);
+              return snapshot;
+            },
           },
-          ...(result.modelTurn === undefined
-            ? {}
-            : { modelTurn: taskModelTurnMetrics(result.modelTurn) }),
-        });
+          signal,
+        );
+      } catch (error) {
+        if (!runnableStatuses.has(snapshot.task.status)) return snapshot;
+        // Framework errors retain their underlying tool/model error for the host taxonomy.
+        const cause = error && typeof error === 'object' && 'error' in error ? error.error : error;
+        snapshot = await this.#handleFailure(active(), ownerId, signal, cause, 'model');
       }
+      return snapshot;
     } finally {
       try {
         await this.#dependencies.tools.release(ownerId);
@@ -471,6 +283,163 @@ export class TaskExecutor {
         await this.#leases.release(taskId, ownerId);
       }
     }
+  }
+
+  async #acceptEvent(
+    snapshot: ActiveTaskSnapshot,
+    ownerId: string,
+    signal: AbortSignal,
+    result: AgentEvent,
+  ): Promise<TaskSnapshot> {
+    snapshot = await this.#refreshCurrentAttempt(snapshot);
+    if (!runnableStatuses.has(snapshot.task.status)) return snapshot;
+    if (result.type === 'tool.hosted') {
+      const callId = result.item.id;
+      if (!callId) throw new Error('Hosted tool result has no identity.');
+      if (snapshot.toolResults.some((item) => item.callId === callId)) return snapshot;
+      return this.#saveBoundary(snapshot, ownerId, signal, {
+        type: 'planning.retrying',
+        reason: 'hosted_tool_recorded',
+        session: result.session,
+        hostedTool: {
+          id: this.#createId('toolResult'),
+          taskId: snapshot.task.id,
+          runId: snapshot.run.id,
+          callId,
+          toolName: result.item.name,
+          providerHosted: true,
+          argumentsJson: JSON.stringify(result.item.providerData ?? {}),
+          output: JSON.stringify(result.item),
+          attachmentIds: [],
+          createdAt: this.#dependencies.clock.now(),
+        },
+      });
+    }
+    if (result.type === 'reasoning.summary')
+      return this.#saveBoundary(snapshot, ownerId, signal, {
+        type: 'reasoning.summary-recorded',
+        reason: 'model_reasoning_summary_recorded',
+        reasoningSummary: result.text,
+      });
+    if (result.type === 'session.updated')
+      return this.#saveBoundary(snapshot, ownerId, signal, {
+        type: 'planning.retrying',
+        reason: result.reason,
+        session: result.session,
+        ...(result.modelTurn ? { modelTurn: taskModelTurnMetrics(result.modelTurn) } : {}),
+      });
+    if (result.type === 'context.compaction') {
+      if (result.phase === 'completed') await this.#dependencies.tools.contextCompacted();
+      return this.#saveBoundary(snapshot, ownerId, signal, {
+        type: result.phase === 'completed' ? 'task.context-compacted' : 'planning.retrying',
+        reason: `context_compaction_${result.phase}`,
+        session: result.session,
+        ...(result.modelTurn ? { modelTurn: taskModelTurnMetrics(result.modelTurn) } : {}),
+        ...(result.phase === 'completed' ? { lastModelInputTokens: null } : {}),
+      });
+    }
+    const metadata = {
+      ...(result.session ? { session: result.session } : {}),
+      ...(result.modelTurn ? { modelTurn: taskModelTurnMetrics(result.modelTurn) } : {}),
+    };
+    if (result.type === 'task.completed') {
+      const review = await this.#dependencies.tools.reviewCompletion?.({ ...snapshot });
+      const exhausted =
+        review?.type === 'continue' &&
+        completionReviewRetryCount(snapshot.events, snapshot.run.id, review.toolName) >= 2;
+      if (review?.type === 'continue' && !exhausted) {
+        await this.#interruptReply(snapshot.task, result.messageId);
+        return this.#saveBoundary(snapshot, ownerId, signal, {
+          type: 'planning.retrying',
+          reason: `completion_review:${review.toolName}`,
+          ...metadata,
+        });
+      }
+      const continuationItems = snapshot.checkpoint.continuationItems.some(
+        (item) => item.type === 'message_ref' && item.messageId === result.messageId,
+      )
+        ? snapshot.checkpoint.continuationItems
+        : [
+            ...snapshot.checkpoint.continuationItems,
+            { type: 'message_ref' as const, messageId: result.messageId },
+          ];
+      try {
+        return await this.#saveBoundary(snapshot, ownerId, signal, {
+          type: review ? 'task.paused' : 'task.completed',
+          reason: review ? 'completion_review_blocked' : result.reason,
+          ...(review
+            ? {
+                error: {
+                  code: 'TaskInputError' as const,
+                  retryable: true,
+                  recoveryAction: 'resume_task',
+                  userMessage:
+                    review.type === 'blocked'
+                      ? review.reason
+                      : 'The task still has unresolved progress. Review the remaining work before resuming.',
+                  evidenceRef: null,
+                },
+              }
+            : {}),
+          continuationItems,
+          pendingToolCall: null,
+          ...metadata,
+        });
+      } catch (error) {
+        if (!(error instanceof TaskRepositoryConflictError)) throw error;
+        await this.#interruptReply(snapshot.task, result.messageId);
+        return this.#saveBoundary(await this.#refreshCurrentAttempt(snapshot), ownerId, signal, {
+          type: 'planning.retrying',
+          reason: 'completion_deferred_for_supplement',
+          ...metadata,
+        });
+      }
+    }
+    const call = result.call;
+    if (snapshot.toolResults.some((completed) => completed.callId === call.callId))
+      return this.#saveBoundary(snapshot, ownerId, signal, {
+        type: 'task.failed',
+        reason: 'duplicate_tool_call_id',
+        error: invalidPlannerResultError(),
+      });
+    const policy = this.#dependencies.tools.policyFor(call.name);
+    if (!policy)
+      return this.#saveBoundary(snapshot, ownerId, signal, {
+        type: 'task.failed',
+        reason: 'unregistered_tool_call',
+        error: invalidPlannerResultError(),
+      });
+    if (this.#dependencies.tools.callsUsed(call.name, { ...snapshot }) >= policy.maxCalls)
+      return this.#saveBoundary(snapshot, ownerId, signal, {
+        type: 'task.failed',
+        reason: `${policy.budgetGroup}_tool_call_limit_reached`,
+        error: toolCallLimitError(policy.budgetLabel ?? policy.budgetGroup),
+      });
+    snapshot = await this.#saveBoundary(snapshot, ownerId, signal, {
+      type: 'tool.call-recorded',
+      reason: `${call.name}_call_recorded`,
+      continuationItems: [
+        ...snapshot.checkpoint.continuationItems,
+        {
+          type: 'function_call',
+          callId: call.callId,
+          name: call.name,
+          argumentsJson: call.argumentsJson,
+          ...(result.modelOutputItems ? { modelOutputItems: result.modelOutputItems } : {}),
+        },
+      ],
+      pendingToolCall: {
+        callId: call.callId,
+        name: call.name,
+        argumentsJson: call.argumentsJson,
+        executionState: 'recorded',
+        ...(policy.executionIdPrefix
+          ? { executionId: this.#createId(policy.executionIdPrefix) }
+          : {}),
+      },
+      ...metadata,
+    });
+    return this.#executePendingTool(snapshot, ownerId, signal);
   }
 
   /** Executes a durably recorded tool and prevents ambiguous browser mutations from replaying. */
@@ -811,7 +780,21 @@ export class TaskExecutor {
       attachmentIds: durableAttachmentIds,
       createdAt: this.#dependencies.clock.now(),
     };
+    const session = await this.#dependencies.repository.getAgentSession(
+      snapshot.task.conversationId,
+    );
+    const nextSession =
+      session?.taskId === snapshot.task.id
+        ? {
+            ...session,
+            items: [
+              ...session.items,
+              sessionToolResult({ ...completedResult, attachmentIds: continuationAttachmentIds }),
+            ],
+          }
+        : undefined;
     return this.#saveBoundary(snapshot, ownerId, signal, {
+      ...(nextSession ? { session: nextSession } : {}),
       type: 'tool.result-recorded',
       reason: `${pending.name}_result_recorded`,
       toolResults: [...snapshot.toolResults, completedResult],
@@ -923,48 +906,7 @@ export class TaskExecutor {
     });
   }
 
-  /** Persists progress events while collecting exactly one outcome for one model response. */
-  async #planOne(
-    snapshot: ActiveTaskSnapshot,
-    signal: AbortSignal,
-    onReasoningSummary: (summary: string) => Promise<void>,
-  ): Promise<AgentOutcome> {
-    let result: AgentOutcome | null = null;
-    for await (const event of this.#dependencies.planner.plan(
-      {
-        task: snapshot.task,
-        events: snapshot.events,
-        checkpoint: snapshot.checkpoint,
-        toolResults: snapshot.toolResults,
-      },
-      signal,
-    )) {
-      throwIfAborted(signal);
-      if (event.type === 'reasoning.summary') {
-        if (result !== null) {
-          throw new TaskExecutorError(
-            'PLANNER_RESULT_INVALID',
-            'Planner returned progress after its outcome.',
-          );
-        }
-        await onReasoningSummary(event.text);
-        continue;
-      }
-      if (result !== null) {
-        throw new TaskExecutorError(
-          'PLANNER_RESULT_INVALID',
-          'Planner returned more than one result.',
-        );
-      }
-      result = event;
-    }
-    if (result === null) {
-      throw new TaskExecutorError('PLANNER_RESULT_INVALID', 'Planner returned no result.');
-    }
-    return result;
-  }
-
-  /** Converts one safe model or Tavily failure into its durable task boundary. */
+  /** Converts one safe model failure into its durable task boundary. */
   async #handleFailure(
     snapshot: ActiveTaskSnapshot,
     ownerId: string,
@@ -1098,7 +1040,9 @@ export class TaskExecutor {
       reason: input.reason,
       ...(input.error === undefined ? {} : { error: input.error }),
     });
-    const nextToolResults = input.toolResults ?? current.toolResults;
+    const nextToolResults = input.hostedTool
+      ? [...current.toolResults, input.hostedTool]
+      : (input.toolResults ?? current.toolResults);
     const previousResultIds = new Set(current.toolResults.map((result) => result.id));
     const newResults = nextToolResults.filter((result) => !previousResultIds.has(result.id));
     const canonicalResults: ToolResult[] = newResults.map((result) => ({
@@ -1111,6 +1055,7 @@ export class TaskExecutor {
       ...(result.modelOutput === undefined ? {} : { modelOutput: result.modelOutput }),
       attachmentIds: result.attachmentIds,
       createdAt: result.createdAt,
+      ...(result.providerHosted ? { providerHosted: true } : {}),
     }));
 
     let sequence = currentTask.lastEventSequence;
@@ -1122,6 +1067,21 @@ export class TaskExecutor {
       at: now,
     });
     const events: TaskEvent[] = [];
+    if (input.hostedTool) {
+      events.push({
+        ...eventBase(),
+        type: 'tool.call',
+        callId: input.hostedTool.callId,
+        name: input.hostedTool.toolName,
+        argumentsJson: input.hostedTool.argumentsJson,
+      });
+      events.push({
+        ...eventBase(),
+        type: 'tool.result',
+        callId: input.hostedTool.callId,
+        resultId: input.hostedTool.id,
+      });
+    }
     if (input.modelTurn !== undefined) {
       events.push({
         ...eventBase(),
@@ -1229,6 +1189,7 @@ export class TaskExecutor {
       run,
       events,
       checkpoint,
+      ...(input.session ? { session: input.session } : {}),
       ...(completed
         ? {
             deleteCheckpoint: true,

@@ -52,6 +52,9 @@ describe('ChromeSettingsStore', () => {
       language: 'zh-CN',
       historyMessageLimit: 42,
       sandboxServer: 'https://sandbox.test/base',
+      credentialSource: 'manual',
+      providerId: '',
+      authPath: '',
     });
   });
 
@@ -99,15 +102,15 @@ describe('ChromeSettingsStore', () => {
 
   it('rejects invalid settings and resets without deleting credentials', async () => {
     const storage = new MemoryStorageArea();
-    storage.values['credentials.codexAccessToken'] = 'keep-me';
+    storage.values['credentials.accessToken'] = 'keep-me';
     const store = new ChromeSettingsStore(storage);
 
     await expect(
-      store.save({ ...DEFAULT_APP_SETTINGS, reasoningEffort: 'utral' as never }),
+      store.save({ ...DEFAULT_APP_SETTINGS, reasoningEffort: 'x'.repeat(65) }),
     ).rejects.toThrow(/invalid app settings/i);
     await store.reset();
 
-    expect(storage.values['credentials.codexAccessToken']).toBe('keep-me');
+    expect(storage.values['credentials.accessToken']).toBe('keep-me');
     await expect(store.get()).resolves.toEqual(DEFAULT_APP_SETTINGS);
   });
 

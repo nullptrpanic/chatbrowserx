@@ -1,3 +1,4 @@
+import { codexFixtureEvents } from './helpers/codex-fixture';
 import { extensionTest, expect } from './fixtures/extension-test';
 import { sendExtensionMessage } from './helpers/extension-runtime';
 import { clickTranslationAction } from './helpers/translation-action';
@@ -22,7 +23,7 @@ extensionTest(
         reasoningEffort: 'medium',
         systemPrompt: '',
         language: 'zh-CN',
-        codexAccessToken: `e30.${token}.`,
+        accessToken: `e30.${token}.`,
       },
     });
     await context.route('https://translation-error.test/', (route) =>
@@ -56,11 +57,11 @@ extensionTest(
                 translation: t.text === 'Static title' ? '静态标题' : '重试成功',
               })),
             });
-      const events = [
+      const events = codexFixtureEvents([
         { type: 'response.created', response: { id: 'translation' } },
         { type: 'response.output_text.delta', delta: output },
         { type: 'response.completed', response: { id: 'translation' } },
-      ];
+      ]);
       await route.fulfill({
         contentType: 'text/event-stream',
         body: events.map((e) => `event: ${e.type}\ndata: ${JSON.stringify(e)}\n\n`).join(''),

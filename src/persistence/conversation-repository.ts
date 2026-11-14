@@ -165,6 +165,7 @@ export class IndexedDbConversationRepository implements ConversationRepository {
         'tool-results',
         'checkpoints',
         'attachment-references',
+        'agent-sessions',
       ],
       'readwrite',
     );
@@ -233,6 +234,8 @@ export class IndexedDbConversationRepository implements ConversationRepository {
     }
 
     await transaction.objectStore('conversations').delete(conversationId);
+    await transaction.objectStore('agent-sessions').delete(conversationId);
+    await transaction.objectStore('agent-sessions').delete([conversationId]);
     await transaction.done;
     this.#onMutation();
   }

@@ -16,13 +16,13 @@ describe('parseExtensionMessage', () => {
     ).toMatchObject({ payload: { reasoningEffort } });
   });
 
-  it('rejects a misspelled reasoning effort', () => {
+  it('rejects an empty reasoning effort while allowing backend-defined names', () => {
     expect(() =>
       parseExtensionMessage({
         version: 1,
         requestId: 'req_reasoning',
         type: 'settings.save',
-        payload: { reasoningEffort: 'utral', systemPrompt: '', language: 'en' },
+        payload: { reasoningEffort: ' ', systemPrompt: '', language: 'en' },
       }),
     ).toThrow(/invalid extension message/i);
   });

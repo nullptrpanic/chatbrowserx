@@ -1,6 +1,6 @@
 import type { ReasoningEffort } from '../../shared/reasoning-effort';
 import type { ModelToolChoice, ModelToolDefinition } from '../../tools/model-tool';
-import type { ModelStreamEvent } from './model-stream-event';
+import type { ModelStreamEvent } from '../../providers/model-events';
 
 export type { ModelToolChoice, ModelToolDefinition } from '../../tools/model-tool';
 

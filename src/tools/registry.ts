@@ -106,6 +106,7 @@ export function bindToolRuntime(
     async contract(context, signal = new AbortController().signal): Promise<ModelToolContract> {
       const available = new Map<string, ErasedDeclaration>();
       const definitions = [];
+      const additionalTools = [];
       const forced: string[] = [];
       const toolSystemPrompts: string[] = [];
       let preparedContext = context;
@@ -123,6 +124,7 @@ export function bindToolRuntime(
           if (exposure === null) continue;
           available.set(declaration.name, declaration);
           definitions.push(exposure.definition);
+          additionalTools.push(...(exposure.additionalTools ?? []));
           if (exposure.force === true) forced.push(declaration.name);
         }
         if (group.runtime?.system_prompt !== undefined) {
@@ -137,6 +139,7 @@ export function bindToolRuntime(
 
       return Object.freeze({
         definitions: Object.freeze(definitions),
+        additionalTools: Object.freeze(additionalTools),
         ...(forced[0] === undefined
           ? {}
           : { toolChoice: { type: 'function' as const, name: forced[0] } }),

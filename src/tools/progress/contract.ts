@@ -30,10 +30,9 @@ export type ProgressInput = z.infer<typeof progressSchema>;
 export const progressDefinition = strictFunctionTool(
   TASK_PROGRESS_TOOL,
   [
-    'Track multi-item work; do not use for simple single-step requests.',
-    'Record the authorized scope, observed items and exclusions before mutations. Update observed outcomes, in batches when useful; follow review.next for remaining work.',
-    'For uncertain outcomes, read back before further writes; do not repeat an uncertain mutation. Partial or virtualized results cannot prove absence: inspect or scroll the relevant scope.',
-    'Pending/uncertain items or incomplete inventory prevent completion. Finish only when review.completion is ready; actual blockers pause, and user stop/runtime limits take priority.',
+    'Optional ledger for multiple independent deliverables or actions across a collection. Do not use for a single deliverable, even if it takes several tool calls; execution steps are not separate deliverables.',
+    'Only after choosing to track such a task: record its authorized scope, observed items and exclusions before mutations; update outcomes in batches and follow review.next until review.completion is ready.',
+    'In a tracked task, read back uncertain outcomes before further writes. Partial or virtualized lists cannot establish complete inventory. Actual blockers pause; user stop/runtime limits take priority.',
   ].join('\n'),
   {
     update: {

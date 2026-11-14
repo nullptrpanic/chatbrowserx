@@ -159,6 +159,26 @@
 .form-field > span {
   font-weight: 500;
 }
+.credential-source {
+  margin: 0;
+  padding: 10px 12px;
+  border: 1px solid var(--cbx-divider);
+  border-radius: 8px;
+  gap: 10px;
+}
+.credential-source label {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.credential-source input[type='radio'] {
+  width: 16px;
+  min-height: 16px;
+  height: 16px;
+  margin: 0;
+  padding: 0;
+  accent-color: var(--cbx-accent);
+}
 .form-field small {
   color: var(--cbx-muted);
   font-size: 10px;

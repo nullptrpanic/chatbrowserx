@@ -132,6 +132,7 @@ function reader(
       get: async (taskId) => allTasks.find(({ id }) => id === taskId),
     },
     conversations: {
+      listMessages: async () => [...(input.messages ?? messages)],
       listTaskMessages: async (taskId) =>
         (input.messages ?? messages).filter((message) => message.taskId === taskId),
     },

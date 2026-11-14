@@ -1,14 +1,17 @@
 import type { IDBPDatabase } from 'idb';
 import type { ConversationId, TaskId, TaskRunId, ToolResultId } from '../shared/ids';
+import { compactionItemSchema } from '../shared/protocol/compaction-item';
 import { orderedTaskEvents } from '../tasks/task-history-order';
 import type { Checkpoint } from '../tasks/checkpoint-types';
 import type { Conversation } from '../tasks/conversation-types';
 import type { MessageRecord } from '../tasks/message-types';
 import type { Task, TaskEvent, TaskLease, TaskRun, TaskStatus } from '../tasks/task-types';
 import type { MaterializedToolResult, ToolResult } from '../tasks/tool-result-types';
-import type { ChatBrowserDatabase } from './database-schema';
+import type { AgentSessionBackup, ChatBrowserDatabase } from './database-schema';
+import type { AgentSession } from '../tasks/agent-session-types';
 
 export interface SaveTransitionInput {
+  readonly session?: AgentSession;
   readonly task: Task;
   readonly run: TaskRun;
   readonly events: readonly TaskEvent[];
@@ -93,6 +96,7 @@ export class TaskRepositoryBusyError extends Error {
 }
 
 export interface TaskRepository {
+  getAgentSession(conversationId: ConversationId): Promise<AgentSession | undefined>;
   createSubmission(input: CreateSubmissionInput): Promise<Task>;
   appendTaskMessage(input: AppendTaskMessageInput): Promise<TaskEvent>;
   startRun(task: Task, run: TaskRun, event: TaskEvent, checkpoint: Checkpoint): Promise<void>;
@@ -142,6 +146,22 @@ function taskEventTypeRange(taskId: TaskId, type: TaskEvent['type']): IDBKeyRang
 
 function hasUnfinishedTask(tasks: readonly Task[]): boolean {
   return tasks.some((task) => !terminalStatuses.has(task.status));
+}
+
+function replayableSession(
+  record: AgentSession | AgentSessionBackup | undefined,
+): AgentSession | undefined {
+  // A damaged compressed prefix cannot be dropped independently of the model window that uses it.
+  // Returning no window lets the runtime reconstruct it from permanent messages and receipts.
+  if (
+    record &&
+    'items' in record &&
+    record.items.every(
+      (item) => item.type !== 'compaction' || compactionItemSchema.safeParse(item).success,
+    )
+  )
+    return record;
+  return undefined;
 }
 
 function assertCheckpoint(task: Task, run: TaskRun, checkpoint: Checkpoint): void {
@@ -312,6 +332,10 @@ export class IndexedDbTaskRepository implements TaskRepository {
     this.#onMutation = onMutation;
   }
 
+  async getAgentSession(conversationId: ConversationId): Promise<AgentSession | undefined> {
+    return replayableSession(await this.#database.get('agent-sessions', conversationId));
+  }
+
   /** Atomically stores a user message and starts either a new task or another run. */
   async createSubmission(input: CreateSubmissionInput): Promise<Task> {
     assertCheckpoint(input.task, input.run, input.checkpoint);
@@ -364,6 +388,7 @@ export class IndexedDbTaskRepository implements TaskRepository {
         'checkpoints',
         'attachments',
         'attachment-references',
+        'agent-sessions',
       ],
       'readwrite',
     );
@@ -399,6 +424,17 @@ export class IndexedDbTaskRepository implements TaskRepository {
           ...input.task,
           ordinal: Math.max(0, ...conversationTasks.map(({ ordinal }) => ordinal)) + 1,
         };
+        const sessions = transaction.objectStore('agent-sessions');
+        const previous = replayableSession(await sessions.get(conversation.id));
+        if (previous) {
+          await sessions.put({
+            conversationId: [conversation.id],
+            taskId: storedTask.id,
+            session: previous,
+          });
+        } else {
+          await sessions.delete([conversation.id]);
+        }
       } else {
         if (
           input.continuationSourceTaskId !== input.task.id ||
@@ -881,6 +917,13 @@ export class IndexedDbTaskRepository implements TaskRepository {
 
   /** Saves exactly one process event plus any canonical payload and current recovery state. */
   async saveTransition(input: SaveTransitionInput): Promise<void> {
+    if (
+      input.session &&
+      (input.session.conversationId !== input.task.conversationId ||
+        input.session.taskId !== input.task.id)
+    ) {
+      throw new Error('Model session does not belong to the task boundary.');
+    }
     const firstEvent = input.events[0];
     const lastEvent = input.events.at(-1);
     if (
@@ -914,6 +957,7 @@ export class IndexedDbTaskRepository implements TaskRepository {
         'messages',
         'attachments',
         'attachment-references',
+        'agent-sessions',
       ],
       'readwrite',
     );
@@ -1040,6 +1084,30 @@ export class IndexedDbTaskRepository implements TaskRepository {
       }
       await transaction.objectStore('tasks').put(input.task);
       await transaction.objectStore('task-runs').put(input.run);
+      const sessions = transaction.objectStore('agent-sessions');
+      const conversationId = input.task.conversationId;
+      if (input.events.some((event) => event.type === 'context.cleared')) {
+        const [current, backup] = await Promise.all([
+          sessions.get(conversationId),
+          sessions.get([conversationId]),
+        ]);
+        const ownBackup = backup?.taskId === input.task.id && 'session' in backup ? backup : null;
+        if (current?.taskId === input.task.id) {
+          const previous = ownBackup?.session;
+          const previousWasCleared =
+            previous !== undefined &&
+            (await transaction
+              .objectStore('task-events')
+              .index('by-task-type-sequence')
+              .getKey(taskEventTypeRange(previous.taskId, 'context.cleared'))) !== undefined;
+          if (previous && !previousWasCleared) await sessions.put(previous);
+          else await sessions.delete(conversationId);
+        }
+        if (ownBackup) await sessions.delete([conversationId]);
+      } else if (input.session) {
+        await sessions.put(input.session);
+      }
+      if (completionEvent) await sessions.delete([conversationId]);
       for (const event of input.events) {
         await transaction.objectStore('task-events').add(event);
       }

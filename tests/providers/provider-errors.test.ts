@@ -3,7 +3,7 @@ import {
   ProviderError,
   isProviderError,
   providerErrorFromCode,
-} from '../../src/agent/model/model-provider-error';
+} from '../../src/providers/provider-error';
 
 describe('ProviderError', () => {
   it.each([

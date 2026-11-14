@@ -5,6 +5,28 @@ import { openChatBrowserDatabase } from '../../src/persistence/open-database';
 import { createTestDatabaseName } from './test-helpers';
 
 describe('openChatBrowserDatabase', () => {
+  it('adds the session store without deleting version-four conversations or tool evidence', async () => {
+    const name = createTestDatabaseName('upgrade-agent-sessions');
+    const previous = await openDB(name, 4, {
+      upgrade(database) {
+        database
+          .createObjectStore('conversations', { keyPath: 'id' })
+          .add({ id: 'kept-conversation' });
+        database
+          .createObjectStore('tool-results', { keyPath: 'id' })
+          .add({ id: 'kept-result', output: 'confirmed effect' });
+      },
+    });
+    previous.close();
+    const database = await openChatBrowserDatabase(name);
+    expect(await database.get('conversations', 'kept-conversation')).toBeDefined();
+    expect(await database.get('tool-results', 'kept-result')).toMatchObject({
+      output: 'confirmed effect',
+    });
+    expect(database.objectStoreNames.contains('agent-sessions')).toBe(true);
+    database.close();
+  });
+
   it('clears version-two task history and creates the canonical schema', async () => {
     const name = createTestDatabaseName('reset-task-history-schema');
     const upgraded = await openDB(name, 2, {
@@ -18,7 +40,7 @@ describe('openChatBrowserDatabase', () => {
 
     const database = await openChatBrowserDatabase(name);
 
-    expect(database.version).toBe(4);
+    expect(database.version).toBe(5);
     expect(Array.from(database.objectStoreNames, String)).toEqual(
       expect.arrayContaining(['tasks', 'task-runs', 'task-events', 'tool-results', 'checkpoints']),
     );
@@ -47,7 +69,7 @@ describe('openChatBrowserDatabase', () => {
     versionThree.close();
 
     const database = await openChatBrowserDatabase(name);
-    expect(database.version).toBe(4);
+    expect(database.version).toBe(5);
     expect(await database.get('task-events', 'event_existing')).toBeDefined();
     expect(Array.from(database.transaction('task-events').store.indexNames, String)).toContain(
       'by-task-type-sequence',

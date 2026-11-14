@@ -1,5 +1,4 @@
 import { z } from 'zod';
-import { REASONING_EFFORTS } from '../../shared/reasoning-effort';
 import type {
   PanelEditableSettings,
   PanelSettingsSnapshot,
@@ -35,28 +34,62 @@ const messageSourcePageSchema = z
     favIconUrl: z.string().max(8_192).nullable(),
   })
   .strict();
+const providerDescriptorSchema = z
+  .object({
+    id: z.string().min(1).max(128),
+    name: z.string().min(1).max(128),
+    defaults: z
+      .object({ model: z.string(), reasoningEffort: z.string(), authPath: z.string() })
+      .strict(),
+  })
+  .strict();
 const settingsSchema = z
   .object({
-    model: z.string().min(1).max(256),
-    reasoningEffort: z.enum(REASONING_EFFORTS),
+    model: z.string().max(256),
+    reasoningEffort: z.string().max(64),
+    providerId: z.string().max(128).default(''),
+    providers: z.array(providerDescriptorSchema).default([]),
+    credentialSource: z.enum(['manual', 'sandbox']).default('manual'),
+    authPath: z.string().max(4096).default(''),
     systemPrompt: z.string().max(20_000),
     language: z.enum(['system', 'zh-CN', 'en', 'ja']),
     historyMessageLimit: z.number().int().min(1).max(50).default(50),
     sandboxServer: z.string().max(2_048).default(''),
-    hasCodexToken: z.boolean(),
+    hasAccessToken: z.boolean(),
     hasTavilyKey: z.boolean().default(false),
     hasSandboxToken: z.boolean().default(false),
   })
   .strict();
 const editableSettingsSchema = z
   .object({
-    model: z.string().min(1).max(256),
-    reasoningEffort: z.enum(REASONING_EFFORTS),
+    model: z.string().max(256),
+    reasoningEffort: z.string().max(64),
+    providerId: z.string().max(128).default(''),
+    providers: z.array(providerDescriptorSchema).default([]),
+    credentialSource: z.enum(['manual', 'sandbox']).default('manual'),
+    authPath: z.string().max(4096).default(''),
+    models: z
+      .array(
+        z
+          .object({
+            id: z.string(),
+            name: z.string(),
+            hidden: z.boolean().optional(),
+            defaultReasoningEffort: z.string(),
+            reasoningEfforts: z.array(z.string()),
+            contextWindow: z.number().positive(),
+          })
+          .strict(),
+      )
+      .max(512)
+      .default([]),
+    modelDiscoveryFailed: z.boolean().default(false),
     systemPrompt: z.string().max(20_000),
     language: z.enum(['system', 'zh-CN', 'en', 'ja']),
     historyMessageLimit: z.number().int().min(1).max(50).default(50),
     sandboxServer: z.string().max(2_048).default(''),
-    codexAccessToken: z.string().max(20_000),
+    hasAccessToken: z.boolean().optional(),
+    accessToken: z.string().max(20_000),
     tavilyKey: z.string().max(20_000),
     sandboxToken: z.string().max(20_000).default(''),
   })
@@ -85,6 +118,8 @@ const taskSupplementSchema = z
   .strict();
 const panelTaskSchema = z
   .object({
+    reasoningSummary: z.string().max(20_000).default(''),
+    contextCompaction: z.enum(['started', 'completed', 'failed']).optional(),
     id: idSchema,
     latestRunId: idSchema.nullable(),
     runs: z

@@ -61,7 +61,7 @@ function snapshot(sequence = 1): PanelSnapshot {
       systemPrompt: '',
       language: 'system',
       historyMessageLimit: 50,
-      hasCodexToken: true,
+      hasAccessToken: true,
       hasTavilyKey: true,
     },
   };
@@ -607,7 +607,7 @@ describe('PanelClient', () => {
         reasoningEffort: 'medium',
         systemPrompt: '',
         language: 'zh-CN',
-        hasCodexToken: true,
+        hasAccessToken: true,
         hasTavilyKey: false,
       }),
     ).toMatchObject({ historyMessageLimit: 50 });
@@ -620,8 +620,18 @@ describe('PanelClient', () => {
       systemPrompt: 'Be precise',
       language: 'zh-CN' as const,
       historyMessageLimit: 50,
-      codexAccessToken: 'saved-token',
+      accessToken: 'saved-token',
       tavilyKey: 'saved-tavily-key',
+      models: [
+        {
+          id: 'hidden-model',
+          name: 'Hidden model',
+          hidden: true,
+          defaultReasoningEffort: 'medium',
+          reasoningEfforts: ['medium'],
+          contextWindow: 100000,
+        },
+      ],
     };
     const send = vi.fn<RuntimePort['send']>(async (message) => ({
       version: 1,
@@ -641,6 +651,11 @@ describe('PanelClient', () => {
       ...editableSettings,
       sandboxServer: '',
       sandboxToken: '',
+      credentialSource: 'manual',
+      providerId: '',
+      providers: [],
+      authPath: '',
+      modelDiscoveryFailed: false,
     });
     expect(send).toHaveBeenCalledWith(
       expect.objectContaining({ type: 'settings.get', payload: {} }),
