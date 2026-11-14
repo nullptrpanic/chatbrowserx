@@ -218,8 +218,10 @@ export function toggleTranslationLens(
       doc.hidden
     )
       return;
-    const texts = dom.missing(blockedTexts());
-    if (!texts.length) return;
+    const rect = bounds();
+    updateDom(rect);
+    const texts = dom.missing(blockedTexts(), rect);
+    if (!texts.length) return scheduleRead(rect);
     texts.forEach(({ id }) => textPending.add(id));
     textRequests++;
     const requestGeneration = generation;
@@ -277,7 +279,7 @@ export function toggleTranslationLens(
     };
     textPreviews.add(cleanup);
     try {
-      scheduleRead(bounds());
+      scheduleRead(rect);
       const response = await runtime.send({
         version: 1,
         requestId,

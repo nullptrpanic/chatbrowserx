@@ -468,6 +468,26 @@ it('starts a coalesced text request while the lens keeps moving over the same pa
   expect(lens.shadow.textContent).toContain('持续移动时显示译文');
 });
 
+it('prioritizes the moved lens when buffered text could fill the first batch', async () => {
+  const buffered = Array.from({ length: 32 }, (_, i) => `<p data-y="95">Buffered ${i}.</p>`);
+  const lens = setup(
+    buffered.join('') +
+      '<p data-y="138">Previously visible.</p>' +
+      '<p data-y="410">Visible paragraph.</p><p data-y="435">Partly visible paragraph.</p>',
+  );
+  await vi.advanceTimersByTimeAsync(50);
+  move(320);
+  await vi.advanceTimersByTimeAsync(250);
+
+  const batch = lens.reads[0]?.message.payload.texts.map(({ text }) => text);
+  expect(batch).toHaveLength(32);
+  expect(batch?.slice(0, 3)).toEqual([
+    'Visible paragraph.',
+    'Partly visible paragraph.',
+    'Buffered 0.',
+  ]);
+});
+
 afterEach(() => {
   closeTranslationLens();
   vi.useRealTimers();

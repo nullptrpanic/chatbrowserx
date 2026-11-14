@@ -713,21 +713,29 @@ export class TranslationDom {
     }
   }
 
-  missing(pending?: ReadonlySet<string>): TranslationTexts['texts'] {
+  missing(pending?: ReadonlySet<string>, observation?: TranslationRect): TranslationTexts['texts'] {
+    let candidates = this.visible.filter(
+      (entry) => (entry.translation === undefined || entry.refreshing) && !pending?.has(entry.id),
+    );
+    if (observation) {
+      const inLens: TextEntry[] = [];
+      const buffered: TextEntry[] = [];
+      for (const entry of candidates) {
+        const target = entry.lines.some((line) => intersectRegions(line, observation));
+        (target ? inLens : buffered).push(entry);
+      }
+      candidates = inLens.concat(buffered);
+    }
+
+    const texts: TranslationTexts['texts'] = [];
     let size = 0;
-    return this.visible
-      .filter((entry) => {
-        if (
-          (entry.translation !== undefined && !entry.refreshing) ||
-          pending?.has(entry.id) ||
-          size + entry.text.length > MAX_TRANSLATION_BATCH_CHARS
-        )
-          return false;
-        size += entry.text.length;
-        return true;
-      })
-      .slice(0, MAX_TRANSLATION_TEXT_BLOCKS)
-      .map(({ id, text }) => ({ id, text }));
+    for (const { id, text } of candidates) {
+      if (size + text.length > MAX_TRANSLATION_BATCH_CHARS) continue;
+      texts.push({ id, text });
+      size += text.length;
+      if (texts.length === MAX_TRANSLATION_TEXT_BLOCKS) break;
+    }
+    return texts;
   }
 
   /** Local, text-free attribution. A model response is not proof of visible translation. */
