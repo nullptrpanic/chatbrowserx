@@ -1,4 +1,5 @@
 import type { IdGenerator } from '../../shared/ids';
+import { compactRef } from '../compact-ref';
 
 export interface ViewportRect {
   readonly x: number;
@@ -62,22 +63,6 @@ export class ElementRefStoreError extends Error {
 interface StoredElementRef extends ResolvedElementRef {
   readonly ref: string;
   readonly name: string;
-}
-
-const MAX_PASSTHROUGH_REF_CHARACTERS = 16;
-const FNV_64_OFFSET = 0xcbf29ce484222325n;
-const FNV_64_PRIME = 0x100000001b3n;
-
-function compactRef(value: string): string {
-  if (value.length <= MAX_PASSTHROUGH_REF_CHARACTERS && /^[a-z0-9_-]+$/i.test(value)) {
-    return value;
-  }
-  let hash = FNV_64_OFFSET;
-  for (let index = 0; index < value.length; index += 1) {
-    hash ^= BigInt(value.charCodeAt(index));
-    hash = BigInt.asUintN(64, hash * FNV_64_PRIME);
-  }
-  return `e${hash.toString(36)}`;
 }
 
 function targetKey(
@@ -326,7 +311,7 @@ export class ElementRefStore {
     for (let attempt = 0; attempt < 5; attempt += 1) {
       const source = this.#ids.create('element').trim();
       if (source.length === 0 || source.length > 128) continue;
-      const ref = compactRef(source);
+      const ref = compactRef(source, 'e');
       if (ref.length > 128 || this.#issuedRefs.has(ref)) continue;
       this.#issuedRefs.add(ref);
       return ref;

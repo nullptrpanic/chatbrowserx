@@ -1,6 +1,7 @@
 import type { Protocol } from 'devtools-protocol';
 import type { IdGenerator } from '../../shared/ids';
 import type { Clock } from '../../shared/time';
+import { compactRef } from '../compact-ref';
 import type { DebuggerSession, DebuggerTransport } from '../debugger/debugger-transport';
 import type {
   BrowserSessionSnapshot,
@@ -427,7 +428,7 @@ function endpointSignature(record: CapturedRequest): string {
 
 function summary(record: CapturedRequest): NetworkRequestSummary {
   return {
-    requestId: record.opaqueId,
+    requestId: compactRef(record.opaqueId, 'n'),
     url: record.url,
     method: record.method,
     resourceType: record.resourceType,
@@ -635,10 +636,11 @@ export class NetworkCaptureRegistry implements NetworkCapturePort {
     const seen = new Set<string>();
     const results: NetworkGetResult[] = [];
     for (const input of requests.slice(0, MAX_GET_REQUESTS)) {
-      if (seen.has(input.requestId)) continue;
-      seen.add(input.requestId);
       const record = state.byOpaqueId.get(input.requestId);
-      if (!record || !state.listedRequestIds.has(input.requestId)) {
+      const key = record?.opaqueId ?? input.requestId;
+      if (seen.has(key)) continue;
+      seen.add(key);
+      if (!record || !state.listedRequestIds.has(compactRef(record.opaqueId, 'n'))) {
         results.push({
           ok: false,
           requestId: input.requestId,
@@ -658,6 +660,7 @@ export class NetworkCaptureRegistry implements NetworkCapturePort {
         requestId: input.requestId,
         request: {
           ...withoutRequestBodyPreview(summary(record)),
+          requestId: input.requestId,
           requestHeaders: record.requestHeaders,
           responseHeaders: record.responseHeaders,
           protocol: record.protocol,
@@ -915,11 +918,13 @@ export class NetworkCaptureRegistry implements NetworkCapturePort {
     };
     state.records.push(record);
     state.byOpaqueId.set(opaqueId, record);
+    state.byOpaqueId.set(compactRef(opaqueId, 'n'), record);
     while (state.records.length > MAX_CAPTURED_REQUESTS) {
       const removed = state.records.shift();
       if (!removed) break;
       state.droppedCount += 1;
       state.byOpaqueId.delete(removed.opaqueId);
+      state.byOpaqueId.delete(compactRef(removed.opaqueId, 'n'));
       const key = requestKey(removed.session, removed.cdpRequestId);
       if (state.activeByCdpId.get(key) === removed) state.activeByCdpId.delete(key);
     }
@@ -1130,7 +1135,13 @@ export class NetworkCaptureRegistry implements NetworkCapturePort {
   #opaqueId(state: CaptureState): string | null {
     for (let attempt = 0; attempt < 3; attempt += 1) {
       const id = this.#dependencies.ids.create('networkRequest').trim();
-      if (id.length > 0 && id.length <= 512 && !state.byOpaqueId.has(id)) return id;
+      if (
+        id.length > 0 &&
+        id.length <= 512 &&
+        !state.byOpaqueId.has(id) &&
+        !state.byOpaqueId.has(compactRef(id, 'n'))
+      )
+        return id;
     }
     return null;
   }

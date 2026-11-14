@@ -169,7 +169,7 @@ function bindScrollableTargets(
   };
 }
 
-function bindNetworkTab(
+function bindNetworkCapture(
   definition: ModelToolDefinition,
   network: NetworkCapabilityState,
 ): ModelToolDefinition {
@@ -807,7 +807,7 @@ function availableBrowserToolDefinitions(
   if (assetIds.length > 0) enabled.add('browser_paste_image');
   return BROWSER_TOOL_DEFINITIONS.filter(({ name }) => enabled.has(name as BrowserToolName)).map(
     (definition) =>
-      bindNetworkTab(
+      bindNetworkCapture(
         bindScrollableTargets(bindAvailableAssets(definition, assetIds), state.scrollableRefs),
         state.network,
       ),

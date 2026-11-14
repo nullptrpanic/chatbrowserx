@@ -579,6 +579,61 @@ describe('browserToolDefinitionsForCheckpoint', () => {
     expect(list?.parameters).toMatchObject({ properties: { tabId: { enum: [19] } } });
   });
 
+  it('keeps network read definitions stable as a capture discloses up to 500 IDs', () => {
+    const started = pair(
+      'start',
+      'browser_network_start',
+      {},
+      {
+        ok: true,
+        tabId: 7,
+        data: { generation: 3 },
+      },
+    );
+    const stopped = pair(
+      'stop',
+      'browser_network_stop',
+      {},
+      {
+        ok: true,
+        tabId: 7,
+        data: { startedAt: 1, stopped: true },
+      },
+    );
+    const history = [...started, ...stopped];
+    let first: unknown;
+    for (let page = 0; page < 5; page++) {
+      history.push(
+        ...pair(
+          `list-${page}`,
+          'browser_network_list',
+          {},
+          {
+            ok: true,
+            tabId: 7,
+            data: {
+              requests: Array.from({ length: 100 }, (_, index) => ({
+                requestId: `networkRequest_00000000-0000-4000-8000-${String(page * 100 + index).padStart(12, '0')}`,
+              })),
+            },
+          },
+        ),
+      );
+      const reader = browserToolDefinitionsForCheckpoint(checkpoint(history)).find(
+        ({ name }) => name === 'browser_network_get',
+      );
+      expect(reader).toBeDefined();
+      expect(reader?.parameters).toMatchObject({ properties: { tabId: { enum: [7] } } });
+      expect(reader?.parameters).not.toMatchObject({
+        properties: {
+          requests: { items: { properties: { requestId: { enum: expect.any(Array) } } } },
+        },
+      });
+      first ??= reader;
+      expect(reader).toEqual(first);
+    }
+  });
+
   it('does not bind network tools to a previous run capture when resuming', () => {
     const previousRunStarted = pair(
       'previous-start',

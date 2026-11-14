@@ -79,13 +79,16 @@ function snapshot(): BrowserSessionSnapshot {
   };
 }
 
-function registry(debuggerTransport: ReturnType<typeof transport>) {
+function registry(
+  debuggerTransport: ReturnType<typeof transport>,
+  create?: (prefix: string) => string,
+) {
   let id = 0;
   let now = 1_000;
   return new NetworkCaptureRegistry({
     sessions: { ensure: vi.fn(async () => snapshot()) },
     transport: debuggerTransport.api,
-    ids: { create: (prefix: string) => `${prefix}_${String(++id)}` },
+    ids: { create: create ?? ((prefix: string) => `${prefix}_${String(++id)}`) },
     clock: { now: () => ++now },
   });
 }
@@ -177,6 +180,85 @@ describe('NetworkCaptureRegistry', () => {
       expect.objectContaining({ ok: true, requestId: 'networkRequest_1' }),
     ]);
     await expect(capture.get(8, [input])).rejects.toMatchObject({ code: 'NETWORK_CAPTURE_LOST' });
+  });
+
+  it('uses compact references with exact legacy lookup and never repairs a mistyped ID', async () => {
+    const raw = 'networkRequest_3d63fed4-abb5-4519-85a8-00d51f8870f8';
+    const debuggerTransport = transport();
+    const capture = registry(debuggerTransport, () => raw);
+    await capture.start(7, new AbortController().signal);
+    request(debuggerTransport, 'cdp_1', 'https://api.test/one');
+    await capture.stop(7);
+    const input = (requestId: string) => ({
+      requestId,
+      includeRequestBody: false,
+      includeResponseBody: false,
+    });
+    await expect(capture.get(7, [input(raw)])).resolves.toMatchObject([{ ok: false }]);
+    const page = await capture.list(7, '', 10, 'recent', '');
+    const ref = page.requests[0]?.requestId;
+    if (!ref) throw new Error('Expected a listed request.');
+    expect(ref.length).toBeLessThanOrEqual(16);
+    expect(ref).not.toBe(raw);
+    await expect(capture.get(7, [input(ref), input(raw)])).resolves.toMatchObject([
+      { ok: true, requestId: ref, request: { requestId: ref, url: 'https://api.test/one' } },
+    ]);
+    await expect(capture.get(7, [input(raw)])).resolves.toMatchObject([
+      { ok: true, requestId: raw, request: { requestId: raw } },
+    ]);
+    await expect(
+      capture.get(7, [input(raw.replace('4519', '451f')), input(ref + 'x')]),
+    ).resolves.toMatchObject([{ ok: false }, { ok: false }]);
+    await expect(capture.get(8, [input(ref)])).rejects.toMatchObject({
+      code: 'NETWORK_CAPTURE_LOST',
+    });
+  });
+
+  it('keeps compact references distinct across paginated captures and evicts both aliases', async () => {
+    let sequence = 0;
+    const rawIds: string[] = [];
+    const debuggerTransport = transport();
+    const capture = registry(debuggerTransport, (prefix) => {
+      const id = `${prefix}_00000000-0000-4000-8000-${String(++sequence).padStart(12, '0')}`;
+      if (prefix === 'networkRequest') rawIds.push(id);
+      return id;
+    });
+    const input = (requestId: string) => ({
+      requestId,
+      includeRequestBody: false,
+      includeResponseBody: false,
+    });
+    await capture.start(7, new AbortController().signal);
+    for (let i = 0; i < 501; i++) request(debuggerTransport, `cdp_${i}`, `https://api.test/${i}`);
+    await capture.stop(7);
+    let page = await capture.list(7, '', 100, 'recent', '');
+    const refs: string[] = [];
+    for (;;) {
+      refs.push(...page.requests.map((item) => item.requestId));
+      const ref = page.requests[0]?.requestId;
+      if (!ref) throw new Error('Expected a listed request.');
+      await expect(capture.get(7, [input(ref)])).resolves.toMatchObject([{ ok: true }]);
+      if (!page.nextCursor) break;
+      page = await capture.list(7, '', 100, 'recent', page.nextCursor);
+    }
+    expect(refs).toHaveLength(500);
+    expect(new Set(refs).size).toBe(500);
+    expect(refs.every((ref) => ref.length <= 16)).toBe(true);
+    const [evicted, retained] = rawIds;
+    const firstRef = refs[0];
+    const previousRaw = rawIds[500];
+    if (!evicted || !retained || !firstRef || !previousRaw) throw new Error('Missing request IDs.');
+    await expect(capture.get(7, [input(evicted)])).resolves.toMatchObject([{ ok: false }]);
+    await expect(capture.get(7, [input(retained)])).resolves.toMatchObject([{ ok: true }]);
+    await capture.start(7, new AbortController().signal);
+    request(debuggerTransport, 'new_cdp', 'https://api.test/new');
+    await capture.stop(7);
+    const next = await capture.list(7, '', 100, 'recent', '');
+    expect(refs).not.toContain(next.requests[0]?.requestId);
+    await expect(capture.get(7, [input(firstRef), input(previousRaw)])).resolves.toMatchObject([
+      { ok: false },
+      { ok: false },
+    ]);
   });
 
   it('does not advertise frozen readers when no capture is available to stop', async () => {

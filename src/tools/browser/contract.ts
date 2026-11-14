@@ -481,7 +481,12 @@ export const BROWSER_TOOL_SPECS = [
     browserNetworkListSchema,
     'Page through one frozen capture after browser_network_stop. Counts distinguish captured, retained, matched, total result, and current-page requests; follow nextCursor until hasMore=false. Small sanitized structured request bodies may be included as bounded previews. Use recent for complete retained metadata or endpoint_sample for a compact newest-per-endpoint sample. After the first successful list, inspect selected IDs with browser_network_get.',
     {
-      urlPattern: { type: 'string', maxLength: 500 },
+      urlPattern: {
+        type: 'string',
+        maxLength: 500,
+        description:
+          'Case-insensitive literal URL substring, without escaping; empty matches all captured URLs.',
+      },
       limit: { type: 'integer', minimum: 1, maximum: 100 },
       mode: { type: 'string', enum: ['recent', 'endpoint_sample'] },
       cursor: { type: 'string', maxLength: 512 },
