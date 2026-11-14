@@ -14,7 +14,16 @@ async function bundleFixture(script = 'const ready = true;'): Promise<string> {
   await writeFile(
     join(root, 'manifest.json'),
     JSON.stringify({
-      permissions: ['activeTab', 'alarms', 'debugger', 'scripting', 'sidePanel', 'storage', 'tabs'],
+      permissions: [
+        'activeTab',
+        'alarms',
+        'contextMenus',
+        'debugger',
+        'scripting',
+        'sidePanel',
+        'storage',
+        'tabs',
+      ],
       host_permissions: ['<all_urls>'],
     }),
   );
@@ -96,6 +105,7 @@ describe('production bundle audit', () => {
         permissions: [
           'activeTab',
           'alarms',
+          'contextMenus',
           'debugger',
           'scripting',
           'sidePanel',

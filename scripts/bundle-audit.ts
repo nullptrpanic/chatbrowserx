@@ -4,6 +4,7 @@ import { extname, join, relative } from 'node:path';
 const APPROVED_PERMISSIONS = [
   'activeTab',
   'alarms',
+  'contextMenus',
   'debugger',
   'scripting',
   'sidePanel',

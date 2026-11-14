@@ -3,6 +3,7 @@ import type {
   TranslationLensOptions,
 } from '../../translation/region-translation';
 import type { ReasoningEffort } from '../reasoning-effort';
+import type { SelectionTranslationPageOptions } from '../../translation/selection-translation';
 
 export const PROTOCOL_VERSION = 1 as const;
 
@@ -90,6 +91,7 @@ export type PageCommand =
   | Message<'page.overlays.setHidden', { hidden: boolean }>
   | Message<'page.imagePreview.open', { src: string; alt: string }>
   | Message<'page.translation.toggle', TranslationLensOptions>
+  | Message<'page.translation.selection.open', SelectionTranslationPageOptions>
   | Message<'page.translation.getState', Record<string, never>>;
 
 export interface ExtensionError {

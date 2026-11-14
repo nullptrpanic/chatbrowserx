@@ -1,4 +1,10 @@
-# Region translation — DOM text only
+# Page translation
+
+Select text on a web page and choose **Translate selected text** from Chrome's context menu.
+The bubble opens below the selection and uses the configured model and target language.
+Only the selected text goes to the model. Click outside the bubble or press Escape to dismiss it.
+
+## Region translation
 
 Build with `npm run build`, reload the unpacked extension, and refresh existing pages after an
 update. Click **区域翻译** beside Screenshot. The lens uses the configured model, reasoning effort,
@@ -406,6 +412,8 @@ model; that does not guarantee every term will be interpreted correctly.
 - Overflow backing follows actual painted structure, not a container's full `scrollWidth` or
   transparent interaction gutters. It must not cover neighboring navigation or annotations.
 - Requests: two slots, 32 blocks / 16,000 source characters per batch; 120-second text deadline.
+  At dispatch, blocks intersecting the lens go before buffered blocks. The model is asked to
+  return results in that order so visible text can appear in the first previews.
 - Context traversal: bounded before/current/after scans, at most 2,048 nodes across 32 anchors.
 - Completed results are keyed by source identity/text and model/effort/language. Previews and
   invalid output never enter the completed cache. Stale/disconnected source results are ignored.

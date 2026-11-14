@@ -82,7 +82,7 @@ describe('ChromeTranslationPagePort', () => {
     });
     expect(await port.toggle(7, options)).toBe(true);
     expect(calls.map((m) => m.payload)).toEqual([options, options]);
-    expect(ensureInstalled).toHaveBeenLastCalledWith(7, 'https://example.test/', true);
+    expect(ensureInstalled).toHaveBeenLastCalledWith(7, 'https://example.test/', true, 0);
   });
 
   it('never retries an ambiguous toggle, and rejects uncorrelated success responses', async () => {

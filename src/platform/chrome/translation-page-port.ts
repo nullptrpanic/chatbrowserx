@@ -3,6 +3,7 @@ import type { TranslationLensOptions } from '../../translation/region-translatio
 import type { PageCommand } from '../../shared/protocol/message-types';
 import type { ScreenshotPagePortDependencies } from './screenshot-page-port';
 import { TranslationStateError } from '../../translation/translation-state-error';
+import type { SelectionTranslationPageOptions } from '../../translation/selection-translation';
 
 interface TranslationPagePortDependencies {
   readonly installer: ScreenshotPagePortDependencies['installer'];
@@ -21,12 +22,13 @@ const responseSchema = z.object({
 });
 const sessionSchema = z.object({ sessionId: z.string().min(1).max(128).nullable() });
 const activeSchema = z.object({ active: z.boolean() });
+const selectionSchema = z.object({ opened: z.boolean() });
 const unsupportedSchema = z.object({
   ok: z.literal(false),
   error: z.object({ code: z.literal('INVALID_PAGE_COMMAND') }),
 });
 
-/** Top-frame translation commands, with bounded replies and no installation during status probes. */
+/** Sends bounded translation commands to the document that owns the lens or selection. */
 export class ChromeTranslationPagePort {
   constructor(readonly dependencies: TranslationPagePortDependencies) {}
 
@@ -77,27 +79,47 @@ export class ChromeTranslationPagePort {
     }
   }
 
+  async openSelection(
+    tabId: number,
+    frameId: number,
+    options: SelectionTranslationPageOptions,
+  ): Promise<boolean> {
+    const { tabs, installer } = this.dependencies;
+    if (!(await tabs.get(tabId)).active) return false;
+    const installation = await installer.ensureInstalled(tabId, options.url, false, frameId);
+    if (!['installed', 'already_installed'].includes(installation.status)) return false;
+    const reply = await this.#send(
+      tabId,
+      { type: 'page.translation.selection.open', payload: options },
+      options.url,
+      frameId,
+    );
+    return selectionSchema.parse(reply).opened;
+  }
+
   async #send(
     tabId: number,
     command:
       | { type: 'page.translation.getState'; payload: Record<string, never> }
-      | { type: 'page.translation.toggle'; payload: TranslationLensOptions },
+      | { type: 'page.translation.toggle'; payload: TranslationLensOptions }
+      | { type: 'page.translation.selection.open'; payload: SelectionTranslationPageOptions },
     reinstallUrl?: string,
+    frameId = 0,
   ): Promise<unknown> {
     const requestId = this.dependencies.ids.create('translation');
     const message: PageCommand = { version: 1, requestId, ...command };
     let timer: ReturnType<typeof setTimeout> | undefined;
     try {
       const reply = await Promise.race([
-        this.dependencies.tabs.sendMessage(tabId, message, { frameId: 0 }),
+        this.dependencies.tabs.sendMessage(tabId, message, { frameId }),
         new Promise<never>((_resolve, reject) => {
           timer = setTimeout(() => reject(new Error('Translation page timed out.')), 3000);
         }),
       ]);
       // An unsupported command did not toggle anything. Never retry a timeout or ambiguous reply.
       if (reinstallUrl !== undefined && unsupportedSchema.safeParse(reply).success) {
-        await this.dependencies.installer.ensureInstalled(tabId, reinstallUrl, true);
-        return this.#send(tabId, command);
+        await this.dependencies.installer.ensureInstalled(tabId, reinstallUrl, true, frameId);
+        return this.#send(tabId, command, undefined, frameId);
       }
       const result = responseSchema.parse(reply);
       if (result.requestId !== requestId) throw new Error('Translation response mismatch.');

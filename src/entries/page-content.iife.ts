@@ -1,5 +1,6 @@
 import { handlePageCommand } from '../page/browser-command-handler';
 import { closeTranslationLens } from '../page/translation/mount-translation-lens';
+import { closeSelectionTranslation } from '../page/translation/mount-selection-translation';
 
 interface PageContentGlobal {
   __chatBrowserXPageCommandsV1__?:
@@ -45,5 +46,6 @@ const listener: Parameters<typeof chrome.runtime.onMessage.addListener>[0] = (
 chrome.runtime.onMessage.addListener(listener);
 pageGlobal.__chatBrowserXPageCommandsV1__ = {
   listener,
+  disposeSelection: () => closeSelectionTranslation(),
   disposeTranslation: () => closeTranslationLens(),
 };

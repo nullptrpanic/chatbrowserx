@@ -11,6 +11,7 @@ import { selectScreenshotRegion } from './screenshot/mount-screenshot-overlay';
 import { showVirtualPointer } from './browser/mount-virtual-pointer';
 import { performPageAction } from './browser/page-action-performer';
 import { toggleTranslationLens, getTranslationSession } from './translation/mount-translation-lens';
+import { openSelectionTranslation } from './translation/mount-selection-translation';
 
 export interface PageCommandEnvironment {
   readonly document: Document;
@@ -69,6 +70,17 @@ export async function handlePageCommand(
       requestId: command.requestId,
       ok: true,
       data: { sessionId: getTranslationSession(environment.document) },
+    };
+  }
+
+  if (command?.type === 'page.translation.selection.open') {
+    return {
+      version: PROTOCOL_VERSION,
+      requestId: command.requestId,
+      ok: true,
+      data: {
+        opened: openSelectionTranslation(command.payload, environment.document, environment.window),
+      },
     };
   }
 

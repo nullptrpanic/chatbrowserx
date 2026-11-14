@@ -2,6 +2,7 @@ import type { ModelProviderPort } from '../agent/model/model-provider';
 import type { AppSettings, SettingsStore } from '../persistence/settings-store';
 import { createTranslator, resolveLanguage } from '../shared/i18n/i18n';
 import { TranslationStateError } from './translation-state-error';
+import { translateSelection } from './selection-translation';
 import {
   translateTexts,
   MAX_TRANSLATION_TEXT_REQUESTS,
@@ -27,6 +28,12 @@ const cacheKey = (settings: AppSettings) =>
     settings.reasoningEffort,
     resolveLanguage(settings.language, navigator.language),
   ]);
+
+const languageLabels = {
+  'zh-CN': 'languageChinese',
+  en: 'languageEnglish',
+  ja: 'languageJapanese',
+} as const;
 
 /** The page owns lens state; the worker owns only cancellable, bounded translation requests. */
 export class TranslationController {
@@ -64,6 +71,23 @@ export class TranslationController {
     return {
       active:
         sessionId !== null && (expectedSessionId === undefined || sessionId === expectedSessionId),
+    };
+  }
+
+  async readSelection(text: string, signal: AbortSignal) {
+    const settings = await this.ports.settings.get();
+    const language = resolveLanguage(settings.language, navigator.language);
+    return {
+      text: await translateSelection(
+        this.ports.provider,
+        text,
+        settings.model,
+        settings.reasoningEffort,
+        language,
+        signal,
+      ),
+      language,
+      languageName: createTranslator(language)(languageLabels[language]),
     };
   }
 

@@ -18,7 +18,9 @@ export interface ContentScriptInstallerDependencies {
   };
   readonly scripting: {
     executeScript(options: {
-      readonly target: { readonly tabId: number; readonly allFrames: boolean };
+      readonly target:
+        | { readonly tabId: number; readonly allFrames: false }
+        | { readonly tabId: number; readonly frameIds: readonly number[] };
       readonly files: readonly string[];
     }): Promise<unknown>;
   };
@@ -91,11 +93,12 @@ export class ContentScriptInstaller {
     tabId: number,
     origin: string,
     replaceExisting = false,
+    frameId = 0,
   ): Promise<ContentScriptInstallation> {
-    const key = `${tabId}:${origin}:${replaceExisting}`;
+    const key = `${tabId}:${frameId}:${origin}:${replaceExisting}`;
     const pending = this.#installations.get(key);
     if (pending) return pending;
-    const operation = this.#install(tabId, origin, replaceExisting).finally(() =>
+    const operation = this.#install(tabId, origin, replaceExisting, frameId).finally(() =>
       this.#installations.delete(key),
     );
     this.#installations.set(key, operation);
@@ -106,6 +109,7 @@ export class ContentScriptInstaller {
     tabId: number,
     origin: string,
     replaceExisting: boolean,
+    frameId: number,
   ): Promise<ContentScriptInstallation> {
     const originPattern = toOriginPattern(origin);
     if (originPattern === null) {
@@ -127,7 +131,7 @@ export class ContentScriptInstaller {
         payload: {},
       };
       try {
-        const response = await this.#dependencies.tabs.sendMessage(tabId, ping, { frameId: 0 });
+        const response = await this.#dependencies.tabs.sendMessage(tabId, ping, { frameId });
         if (isInstalledResponse(response, requestId)) {
           return { status: 'already_installed', originPattern };
         }
@@ -137,7 +141,7 @@ export class ContentScriptInstaller {
     }
 
     await this.#dependencies.scripting.executeScript({
-      target: { tabId, allFrames: false },
+      target: frameId === 0 ? { tabId, allFrames: false } : { tabId, frameIds: [frameId] },
       files: [this.#dependencies.scriptFile],
     });
     return {

@@ -10,6 +10,7 @@ describe('extension manifest', () => {
     expect(manifest.permissions).toEqual([
       'activeTab',
       'alarms',
+      'contextMenus',
       'debugger',
       'scripting',
       'sidePanel',

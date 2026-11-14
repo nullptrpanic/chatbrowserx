@@ -4,6 +4,7 @@ import {
   translationTextsSchema,
   translationLensOptionsSchema,
 } from '../../translation/region-translation';
+import { selectionTranslationPageOptionsSchema } from '../../translation/selection-translation';
 
 const requestIdSchema = z.string().trim().min(1).max(128);
 const identifierSchema = z.string().trim().min(1).max(256);
@@ -399,6 +400,14 @@ export const pageCommandSchema: z.ZodType<PageCommand> = z.discriminatedUnion('t
       requestId: requestIdSchema,
       type: z.literal('page.translation.toggle'),
       payload: translationLensOptionsSchema,
+    })
+    .strict(),
+  z
+    .object({
+      version: z.literal(PROTOCOL_VERSION),
+      requestId: requestIdSchema,
+      type: z.literal('page.translation.selection.open'),
+      payload: selectionTranslationPageOptionsSchema,
     })
     .strict(),
   z

@@ -24,6 +24,10 @@ import { createMessageRouter, type MessageRouter } from '../platform/chrome/mess
 import { ChromeScreenshotPagePort } from '../platform/chrome/screenshot-page-port';
 import { ChromeTranslationPagePort } from '../platform/chrome/translation-page-port';
 import {
+  registerSelectionTranslationMenu,
+  serveSelectionTranslation,
+} from '../platform/chrome/selection-translation-menu';
+import {
   registerBackground,
   type BackgroundChromeApi,
   type RecoveryTriggerPort,
@@ -31,18 +35,24 @@ import {
 import { SandboxClient } from '../sandbox/sandbox-client';
 import { SandboxToolExecutor } from '../sandbox/sandbox-tool-executor';
 import type { IdGenerator } from '../shared/ids';
+import { createTranslator, resolveLanguage } from '../shared/i18n/i18n';
 import type { Clock } from '../shared/time';
 import { PanelService } from '../tasks/panel-service';
 import { PanelChangeNotifier } from '../tasks/panel-change-notifier';
 import { ScreenshotController } from '../tasks/screenshot-controller';
 import { TaskHistoryReader } from '../tasks/task-history-reader';
 import { TranslationController } from '../translation/translation-controller';
-import { CodexProvider } from '../providers/codex/codex-provider';
+import type { SelectionTranslationOptions } from '../translation/selection-translation';
 
 interface BackgroundServices {
   readonly router: MessageRouter;
   readonly agent: Pick<Agent, 'recover' | 'handleBrowserStartup'>;
   readonly translation: TranslationController;
+  openSelection(
+    tabId: number,
+    frameId: number,
+    options: SelectionTranslationOptions,
+  ): Promise<boolean>;
 }
 
 const systemClock: Clock = {
@@ -222,11 +232,38 @@ async function createBackgroundServices(
       },
     },
   });
-  return { router, agent, translation };
+  return {
+    router,
+    agent,
+    translation,
+    async openSelection(tabId, frameId, options) {
+      const { language } = await settings.get();
+      const t = createTranslator(resolveLanguage(language, navigator.language));
+      return translationPage.openSelection(tabId, frameId, {
+        ...options,
+        title: t('translationSelection'),
+        loadingText: t('translationLoading'),
+        errorText: t('translationSelectionFailed'),
+        closeText: t('close'),
+        tooLongText: t('translationSelectionTooLong'),
+      });
+    },
+  };
 }
 
 const credentialStore = new ChromeCredentialStore();
 const services = createBackgroundServices(credentialStore);
+registerSelectionTranslationMenu({
+  contextMenus: chrome.contextMenus,
+  runtime: chrome.runtime,
+  language: navigator.language,
+  open: async (tabId, frameId, options) => (await services).openSelection(tabId, frameId, options),
+});
+chrome.runtime.onConnect.addListener((port) => {
+  serveSelectionTranslation(port, async (text, signal) =>
+    (await services).translation.readSelection(text, signal),
+  );
+});
 const lazyRouter: MessageRouter = async (value, context) => (await services).router(value, context);
 const lazyRecovery: RecoveryTriggerPort = {
   requestRecoveryScan: async () => (await services).agent.recover(),
