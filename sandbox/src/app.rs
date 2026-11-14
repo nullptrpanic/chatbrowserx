@@ -121,14 +121,33 @@ async fn run_exec(State(state): State<AppState>, headers: HeaderMap, body: Bytes
             }
         }
     }
-    let _permit = match state.commands.try_acquire_owned() {
+    let permit = match state.commands.try_acquire_owned() {
         Ok(permit) => permit,
         Err(_) => return error(StatusCode::TOO_MANY_REQUESTS, "command capacity is full"),
     };
+    // A disconnected HTTP caller must not drop execution supervision or release capacity.
+    // The detached task retains the deadline, process cleanup, and terminal receipt.
+    tokio::spawn(async move {
+        let _permit = permit;
+        execute_request(state.executor, request).await
+    })
+    .await
+    .unwrap_or_else(|execution_error| {
+        crate::logger::error!(
+            entry = LoggerEntry::new().with_error(execution_error),
+            "bash execution task failed"
+        );
+        error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "command execution failed",
+        )
+    })
+}
+
+async fn execute_request(executor: ExecutionService, request: BashRequest) -> Response {
     let started = Instant::now();
     let execution_id = request.execution_id.clone();
-    let output = match state
-        .executor
+    let output = match executor
         .execute_once(request.into(), execution_id.as_deref())
         .await
     {

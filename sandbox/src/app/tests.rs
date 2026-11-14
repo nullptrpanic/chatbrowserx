@@ -166,6 +166,147 @@ async fn deduplicates_execution_ids_and_returns_a_terminal_receipt() {
 }
 
 #[tokio::test]
+async fn completes_once_and_holds_capacity_after_request_disconnects() {
+    let directory = tempfile::tempdir().unwrap();
+    let app = router_with_limits(
+        TEST_SECRET.to_string(),
+        Duration::from_secs(5),
+        1,
+        1024,
+        1024,
+    );
+    let execution_id = "sandboxExecution_disconnected";
+    let body = serde_json::json!({
+        "command": "printf ready > started; while [ ! -f release ]; do sleep 0.01; done; printf x >> effect; printf done; printf diagnostic >&2",
+        "cwd": directory.path(),
+        "execution_id": execution_id
+    });
+    let request = tokio::spawn(app.clone().oneshot(exec_request(&body)));
+    wait_for_file(&directory.path().join("started")).await;
+
+    request.abort();
+    assert!(request.await.unwrap_err().is_cancelled());
+    let duplicate = app.clone().oneshot(exec_request(&body)).await.unwrap();
+    let other = serde_json::json!({"command": "true", "execution_id": "sandboxExecution_other"});
+    let saturated = app.clone().oneshot(exec_request(&other)).await.unwrap();
+    std::fs::write(directory.path().join("release"), "").unwrap();
+
+    let receipt = wait_for_finished_receipt(&app, execution_id).await;
+    assert_eq!(duplicate.status(), StatusCode::ACCEPTED);
+    assert_eq!(saturated.status(), StatusCode::TOO_MANY_REQUESTS);
+    assert_eq!(receipt["outcome"], "succeeded");
+    assert_eq!(receipt["exit_code"], 0);
+    assert_eq!(receipt["stdout"], "done");
+    assert_eq!(receipt["stderr"], "diagnostic");
+    let replay = app.clone().oneshot(exec_request(&body)).await.unwrap();
+    assert_eq!(replay.status(), StatusCode::OK);
+    assert_eq!(
+        std::fs::read_to_string(directory.path().join("effect")).unwrap(),
+        "x"
+    );
+    assert_eq!(
+        app.oneshot(exec_request(&other)).await.unwrap().status(),
+        StatusCode::OK
+    );
+}
+
+#[tokio::test]
+async fn enforces_timeout_after_request_disconnects() {
+    let directory = tempfile::tempdir().unwrap();
+    let app = router(TEST_SECRET.to_string(), Duration::from_secs(2));
+    let execution_id = "sandboxExecution_disconnected_timeout";
+    let body = serde_json::json!({
+        "command": "sleep 8 & printf '%s' \"$!\" > child-pid; printf before-timeout; wait",
+        "cwd": directory.path(),
+        "execution_id": execution_id
+    });
+    let request = tokio::spawn(app.clone().oneshot(exec_request(&body)));
+    let pid_file = directory.path().join("child-pid");
+    wait_for_file(&pid_file).await;
+    let child_pid: i32 = std::fs::read_to_string(pid_file).unwrap().parse().unwrap();
+
+    request.abort();
+    assert!(request.await.unwrap_err().is_cancelled());
+
+    let receipt = wait_for_finished_receipt(&app, execution_id).await;
+    assert_eq!(receipt["outcome"], "timed_out");
+    assert_eq!(receipt["stdout"], "before-timeout");
+    assert!(receipt["exit_code"].is_null());
+    #[cfg(unix)]
+    tokio::time::timeout(Duration::from_secs(2), async {
+        while unsafe { libc::kill(child_pid, 0) } == 0 {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("timed-out execution must terminate its background child");
+}
+
+#[tokio::test]
+async fn enforces_output_limit_after_request_disconnects() {
+    let directory = tempfile::tempdir().unwrap();
+    let app = router_with_limits(TEST_SECRET.to_string(), Duration::from_secs(5), 1, 4, 1024);
+    let execution_id = "sandboxExecution_disconnected_output";
+    let body = serde_json::json!({
+        "command": "printf ready > started; while [ ! -f release ]; do sleep 0.01; done; printf 12345; sleep 8",
+        "cwd": directory.path(),
+        "execution_id": execution_id
+    });
+    let request = tokio::spawn(app.clone().oneshot(exec_request(&body)));
+    wait_for_file(&directory.path().join("started")).await;
+
+    request.abort();
+    assert!(request.await.unwrap_err().is_cancelled());
+    std::fs::write(directory.path().join("release"), "").unwrap();
+
+    let receipt = wait_for_finished_receipt(&app, execution_id).await;
+    assert_eq!(receipt["outcome"], "output_limit");
+    assert_eq!(receipt["stdout"], "1234");
+    assert_eq!(receipt["stdout_truncated"], true);
+}
+
+fn exec_request(body: &Value) -> Request<Body> {
+    Request::post("/exec")
+        .header("authorization", format!("Bearer {TEST_TOKEN}"))
+        .header("content-type", "application/json")
+        .body(Body::from(body.to_string()))
+        .unwrap()
+}
+
+async fn wait_for_file(path: &std::path::Path) {
+    tokio::time::timeout(Duration::from_secs(2), async {
+        while !std::fs::metadata(path).is_ok_and(|metadata| metadata.len() > 0) {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("command must reach the synchronization point");
+}
+
+async fn wait_for_finished_receipt(app: &axum::Router, execution_id: &str) -> Value {
+    tokio::time::timeout(Duration::from_secs(4), async {
+        loop {
+            let request = Request::get(format!("/exec/{execution_id}"))
+                .header("authorization", format!("Bearer {TEST_TOKEN}"))
+                .body(Body::empty())
+                .unwrap();
+            let response = app.clone().oneshot(request).await.unwrap();
+            assert_eq!(response.status(), StatusCode::OK);
+            let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+                .await
+                .unwrap();
+            let receipt: Value = serde_json::from_slice(&body).unwrap();
+            if receipt["status"] == "finished" {
+                return receipt;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("disconnected execution must reach a terminal receipt")
+}
+
+#[tokio::test]
 async fn reports_unknown_execution_receipts_without_dispatching() {
     let app = router(TEST_SECRET.to_string(), Duration::from_secs(1));
     let request = Request::get("/exec/sandboxExecution_missing")
