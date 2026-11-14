@@ -24,6 +24,35 @@ function createClient(
 }
 
 describe('SandboxClient configuration', () => {
+  it('uses the private credential endpoint rather than auditable exec and exposes only the access token', async () => {
+    const fetch = vi.fn<SandboxFetchPort>(async () =>
+      jsonResponse({ value: 'private-access-token' }),
+    );
+    const client = createClient(fetch);
+    await expect(
+      client.readCredential('~/provider/auth.json', ['tokens', 'access_token'], SIGNAL),
+    ).resolves.toBe('private-access-token');
+    expect(fetch).toHaveBeenCalledExactlyOnceWith(
+      'https://sandbox.example.com/root/credentials/read',
+      expect.objectContaining({
+        method: 'POST',
+        cache: 'no-store',
+        body: '{"path":"~/provider/auth.json","fieldPath":["tokens","access_token"]}',
+        headers: expect.objectContaining({ Authorization: 'Bearer sandbox-token' }),
+      }),
+    );
+  });
+
+  it('does not leak failed credential responses to callers', async () => {
+    const client = createClient(
+      vi.fn(async () => new Response('private file content', { status: 422 })),
+    );
+    await expect(client.readCredential('/missing', ['token'], SIGNAL)).rejects.toMatchObject({
+      code: 'AUTH',
+      dispatchState: 'definitely_not_dispatched',
+    });
+  });
+
   it.each([
     ['', 'sandbox-token'],
     ['https://sandbox.example.com', null],

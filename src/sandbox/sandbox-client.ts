@@ -259,6 +259,40 @@ export class SandboxClient implements SandboxClientPort, SandboxConsoleClientPor
     return parsed.data.url;
   }
 
+  /** Trusted settings/backend path; never exposed through Sandbox tool execution or receipts. */
+  async readCredential(
+    path: string,
+    fieldPath: readonly string[],
+    signal: AbortSignal,
+  ): Promise<string> {
+    const { server, token } = await this.#getConnection();
+    try {
+      const response = await this.#fetch(`${server.replace(/\/+$/, '')}/credentials/read`, {
+        method: 'POST',
+        headers: {
+          Authorization: `Bearer ${token}`,
+          'Content-Type': 'application/json',
+          Accept: 'application/json',
+        },
+        body: JSON.stringify({ path, fieldPath }),
+        cache: 'no-store',
+        signal,
+      });
+      if (!response.ok) {
+        await discardResponse(response);
+        throw clientError('AUTH', 'definitely_not_dispatched');
+      }
+      const parsed = z
+        .object({ value: z.string().trim().min(1).max(20_000) })
+        .strict()
+        .safeParse(await readBoundedJson(response, signal, 'definitely_not_dispatched'));
+      if (!parsed.success) throw clientError('AUTH', 'definitely_not_dispatched');
+      return parsed.data.value;
+    } catch {
+      throw clientError(signal.aborted ? 'ABORTED' : 'AUTH', 'definitely_not_dispatched');
+    }
+  }
+
   async execute(request: SandboxExecRequest, signal: AbortSignal): Promise<SandboxExecResponse> {
     if (signal.aborted) throw clientError('ABORTED', 'definitely_not_dispatched');
     const { server, token } = await this.#getConnection();

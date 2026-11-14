@@ -82,6 +82,7 @@ pub(crate) fn router_with_service(
         .route("/exec", post(run_exec))
         .route("/exec/{execution_id}", get(get_exec))
         .route("/console", get(get_console))
+        .route("/credentials/read", post(credentials::read_credential))
         .layer(DefaultBodyLimit::max(MAX_REQUEST_BODY_BYTES))
         .with_state(AppState {
             secret,
@@ -357,5 +358,6 @@ fn error(status: StatusCode, message: &'static str) -> Response {
     (status, Json(ErrorResponse { code: 1, message })).into_response()
 }
 
+mod credentials;
 #[cfg(test)]
 mod tests;
