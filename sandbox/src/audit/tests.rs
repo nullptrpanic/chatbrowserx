@@ -13,6 +13,51 @@ fn successful_finish() -> ExecutionFinish {
 }
 
 #[test]
+fn interleaved_events_and_completion_preserve_execution_order_and_ownership() {
+    let log = AuditLog::in_memory();
+    let ids = ["first", "middle", "latest"].map(|name| log.start_execution(name, None).unwrap());
+    for id in [ids[2], ids[0], ids[2], ids[1]] {
+        log.record_event(
+            id,
+            1,
+            AuditEventData::File {
+                event: "open".into(),
+                pid: 123,
+                ppid: Some(1),
+                executable: "/bin/bash".into(),
+                path: "/tmp/example.txt".into(),
+                access: Some("read".into()),
+            },
+        )
+        .unwrap();
+    }
+    log.finish_execution(ids[2], successful_finish()).unwrap();
+
+    let snapshot = log.snapshot();
+    assert_eq!(snapshot.executions.len(), 3);
+    for (index, execution) in snapshot.executions.iter().enumerate() {
+        assert_eq!(execution.id, ids[index]);
+        assert_eq!(execution.file_events, [1, 1, 2][index]);
+        assert_eq!(
+            execution.status,
+            if index == 2 {
+                ExecutionStatus::Succeeded
+            } else {
+                ExecutionStatus::Running
+            }
+        );
+    }
+    assert_eq!(
+        snapshot
+            .events
+            .iter()
+            .map(|event| event.execution_id)
+            .collect::<Vec<_>>(),
+        [ids[2], ids[0], ids[2], ids[1]]
+    );
+}
+
+#[test]
 fn clearing_a_running_command_only_hides_it_and_preserves_its_final_receipt() {
     let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join("audit.jsonl");

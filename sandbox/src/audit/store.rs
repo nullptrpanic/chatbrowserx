@@ -27,6 +27,7 @@ pub(crate) struct AuditLog {
 struct State {
     file: Option<File>,
     path: Option<PathBuf>,
+    // Creation order; recent commands dominate live lookups.
     executions: VecDeque<ExecutionRecord>,
     receipts: HashMap<String, ExecutionId>,
     events: VecDeque<AuditEvent>,
@@ -205,7 +206,7 @@ impl AuditLog {
             let Some(position) = state
                 .executions
                 .iter()
-                .position(|item| item.id == execution_id)
+                .rposition(|item| item.id == execution_id)
             else {
                 if state.hidden_executions.contains_key(&execution_id) {
                     let event = AuditEvent {
@@ -284,6 +285,7 @@ impl State {
     fn execution(&self, id: ExecutionId) -> Option<&ExecutionRecord> {
         self.executions
             .iter()
+            .rev()
             .find(|execution| execution.id == id)
             .or_else(|| self.hidden_executions.get(&id))
     }
@@ -330,7 +332,7 @@ impl State {
         } else if let Some(position) = self
             .executions
             .iter()
-            .position(|item| item.id == execution.id)
+            .rposition(|item| item.id == execution.id)
         {
             self.executions[position] = execution;
         } else {
