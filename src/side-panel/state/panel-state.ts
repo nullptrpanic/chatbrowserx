@@ -43,6 +43,7 @@ const providerDescriptorSchema = z
       .strict(),
   })
   .strict();
+export const credentialSyncStatusSchema = z.enum(['idle', 'synced', 'failed']);
 const settingsSchema = z
   .object({
     model: z.string().max(256),
@@ -50,6 +51,7 @@ const settingsSchema = z
     providerId: z.string().max(128).default(''),
     providers: z.array(providerDescriptorSchema).default([]),
     credentialSource: z.enum(['manual', 'sandbox']).default('manual'),
+    credentialSyncStatus: credentialSyncStatusSchema.optional(),
     authPath: z.string().max(4096).default(''),
     systemPrompt: z.string().max(20_000),
     language: z.enum(['system', 'zh-CN', 'en', 'ja']),
@@ -67,6 +69,7 @@ const editableSettingsSchema = z
     providerId: z.string().max(128).default(''),
     providers: z.array(providerDescriptorSchema).default([]),
     credentialSource: z.enum(['manual', 'sandbox']).default('manual'),
+    credentialSyncStatus: credentialSyncStatusSchema.optional(),
     authPath: z.string().max(4096).default(''),
     models: z
       .array(

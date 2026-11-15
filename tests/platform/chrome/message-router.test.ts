@@ -249,6 +249,7 @@ function buildPanel() {
     openImagePreview: vi.fn(async () => ({ opened: true as const })),
     clearConversation: vi.fn(async () => ({ deletedAttachments: 0 })),
     getSettings: vi.fn(async () => editableSettings),
+    syncProviderToken: vi.fn(async () => 'synced' as const),
     saveSettings: vi.fn(async () => ({
       ...settings,
       hasAccessToken: true,
@@ -474,6 +475,15 @@ describe('createMessageRouter', () => {
       },
       { senderTabId: 7 },
     );
+    const syncResponse = await router(
+      {
+        version: PROTOCOL_VERSION,
+        requestId: 'req_settings_sync',
+        type: 'settings.syncProviderToken',
+        payload: { authPath: '/fixture/auth.json' },
+      },
+      { senderTabId: 7 },
+    );
 
     expect(readResponse).toMatchObject({
       ok: false,
@@ -483,9 +493,11 @@ describe('createMessageRouter', () => {
       ok: false,
       error: { code: 'INVALID_CONTEXT' },
     });
+    expect(syncResponse).toMatchObject({ ok: false, error: { code: 'INVALID_CONTEXT' } });
     expect(JSON.stringify([readResponse, saveResponse])).not.toContain('must-not-be-stored');
     expect(panel.getSettings).not.toHaveBeenCalled();
     expect(panel.saveSettings).not.toHaveBeenCalled();
+    expect(panel.syncProviderToken).not.toHaveBeenCalled();
   });
 
   it('delegates every task lifecycle command through the Agent boundary', async () => {

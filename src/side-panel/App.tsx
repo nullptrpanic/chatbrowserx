@@ -194,6 +194,7 @@ export function App({ runtimePort, environment, panelClient, attachmentClient }:
           t={t}
           onLoad={loadSettings}
           onSave={(input) => client.saveSettings(input)}
+          onSyncToken={(selection) => client.syncProviderToken(selection)}
         />
       ) : null}
     </AppShell>

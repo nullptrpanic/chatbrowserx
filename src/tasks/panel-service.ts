@@ -21,6 +21,7 @@ import type { IdGenerator } from '../shared/ids';
 import { bytesToBase64 } from '../shared/base64';
 import type { Clock } from '../shared/time';
 import type { Agent } from '../agent/agent';
+import type { CredentialSyncSelection } from '../providers/provider';
 import type { MessageRecord, MessageSourcePage, TaskMessageDraft } from './message-types';
 import type { TaskSnapshot } from './task-command-service';
 import type { Task, TaskEvent } from './task-types';
@@ -65,6 +66,7 @@ export interface PanelServiceDependencies {
     | 'getProviderConfiguration'
     | 'readProviderToken'
     | 'saveProviderToken'
+    | 'syncProviderToken'
   >;
   readonly tabs: {
     get(tabId: number): Promise<{
@@ -681,18 +683,18 @@ export class PanelService {
 
   /** Reads editable settings, including credentials, only for the explicit trusted UI query. */
   async getSettings(): Promise<PanelEditableSettings> {
-    const [settings, accessToken, tavilyKey, sandboxToken, catalog, configuration] =
-      await Promise.all([
-        this.#dependencies.settings.get(),
-        this.#dependencies.agent.readProviderToken(),
-        this.#dependencies.credentials.getTavilyKey(),
-        this.#dependencies.credentials.getSandboxToken(),
-        this.#dependencies.agent
-          .listModels(AbortSignal.timeout(15_000))
-          .then((models) => ({ models, modelDiscoveryFailed: false }))
-          .catch(() => ({ models: [], modelDiscoveryFailed: true })),
-        this.#dependencies.agent.getProviderConfiguration(),
-      ]);
+    const [settings, accessToken, tavilyKey, sandboxToken, catalog] = await Promise.all([
+      this.#dependencies.settings.get(),
+      this.#dependencies.agent.readProviderToken(),
+      this.#dependencies.credentials.getTavilyKey(),
+      this.#dependencies.credentials.getSandboxToken(),
+      this.#dependencies.agent
+        .listModels(AbortSignal.timeout(15_000))
+        .then((models) => ({ models, modelDiscoveryFailed: false }))
+        .catch(() => ({ models: [], modelDiscoveryFailed: true })),
+    ]);
+    const configuration = await this.#dependencies.agent.getProviderConfiguration();
+    if (configuration.credentialSource === 'sandbox') this.#dependencies.stateVersion.changed();
     return {
       ...settings,
       ...configuration,
@@ -702,6 +704,13 @@ export class PanelService {
       tavilyKey: tavilyKey ?? '',
       sandboxToken: sandboxToken ?? '',
     };
+  }
+
+  /** Reuses the agent's credential path for both trusted UI requests and background ticks. */
+  async syncProviderToken(selection?: CredentialSyncSelection) {
+    const status = await this.#dependencies.agent.syncProviderToken(selection);
+    if (status !== 'idle') this.#dependencies.stateVersion.changed();
+    return status;
   }
 
   /** Projects permanent task facts without reading or inferring from a runtime Checkpoint. */

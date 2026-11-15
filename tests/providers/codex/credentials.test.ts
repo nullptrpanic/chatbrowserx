@@ -3,7 +3,7 @@ import { CodexCredentials } from '../../../src/providers/codex/credentials';
 import { DEFAULT_APP_SETTINGS } from '../../../src/persistence/settings-store';
 
 const token = `${btoa('{}').replace(/=+$/, '')}.${btoa(JSON.stringify({ chatgpt_account_id: 'fixture' })).replace(/=+$/, '')}.`;
-const signal = new AbortController().signal;
+const nextToken = `${token}next`;
 
 describe('trusted Codex credentials', () => {
   it('keeps manual mode independent of Sandbox', async () => {
@@ -17,7 +17,7 @@ describe('trusted Codex credentials', () => {
     expect(sandbox.configurationKey).not.toHaveBeenCalled();
   });
 
-  it('reads the configured file and shares only concurrent reads, never persisting the token', async () => {
+  it('shares concurrent syncs, uses the synced token, and refreshes it on demand', async () => {
     const configuration = {};
     const manual = { getAccessToken: vi.fn(async () => 'manual') };
     const sandbox = {
@@ -45,20 +45,66 @@ describe('trusted Codex credentials', () => {
       expect.any(AbortSignal),
     ]);
     expect(manual.getAccessToken).not.toHaveBeenCalled();
-    await credentials.getAccessToken();
+    expect(await credentials.getAccessToken()).toBe(token);
+    expect(sandbox.readCredential).toHaveBeenCalledOnce();
+    sandbox.readCredential.mockResolvedValue(nextToken);
+    expect(await credentials.credentialSync.refresh()).toBe('synced');
+    expect(await credentials.getAccessToken()).toBe(nextToken);
     expect(sandbox.readCredential).toHaveBeenCalledTimes(2);
+  });
+
+  it('discards old tokens after a failed refresh or a Sandbox connection change', async () => {
+    let configuration = {};
+    const readCredential = vi.fn(async () => token);
+    const credentials = new CodexCredentials(
+      { getAccessToken: async () => 'manual' },
+      { get: async () => ({ ...DEFAULT_APP_SETTINGS, credentialSource: 'sandbox' }) },
+      { configurationKey: async () => configuration, readCredential },
+    );
+    expect(await credentials.credentialSync.refresh()).toBe('synced');
+    readCredential.mockRejectedValue(new Error('secret upstream response'));
+    expect(await credentials.credentialSync.refresh()).toBe('failed');
+    expect(await credentials.credentialSync.getStatus()).toBe('failed');
+    await expect(credentials.getAccessToken()).rejects.toMatchObject({ code: 'AUTH' });
+    configuration = {};
+    expect(await credentials.credentialSync.getStatus()).toBe('idle');
+    readCredential.mockResolvedValue(nextToken);
+    expect(await credentials.getAccessToken()).toBe(nextToken);
+  });
+
+  it('refreshes on use when the background alarm is delayed', async () => {
+    const configuration = {};
+    const readCredential = vi
+      .fn(async () => token)
+      .mockResolvedValueOnce(token)
+      .mockResolvedValueOnce(nextToken);
+    const credentials = new CodexCredentials(
+      { getAccessToken: async () => undefined },
+      { get: async () => ({ ...DEFAULT_APP_SETTINGS, credentialSource: 'sandbox' }) },
+      { configurationKey: async () => configuration, readCredential },
+    );
+    const now = vi.spyOn(Date, 'now').mockReturnValue(0);
+    try {
+      expect(await credentials.getAccessToken()).toBe(token);
+      now.mockReturnValue(60_001);
+      expect(await credentials.getAccessToken()).toBe(nextToken);
+      expect(readCredential).toHaveBeenCalledTimes(2);
+    } finally {
+      now.mockRestore();
+    }
   });
 
   it.each(['unavailable', 'invalid', 'missing'])(
     'redacts %s sync failures and offers manual authentication',
     async (mode) => {
+      const configuration = {};
       const credentials = new CodexCredentials(
         { getAccessToken: async () => token },
         {
           get: async () => ({ ...DEFAULT_APP_SETTINGS, credentialSource: 'sandbox' }),
         },
         {
-          configurationKey: async () => (mode === 'missing' ? null : {}),
+          configurationKey: async () => (mode === 'missing' ? null : configuration),
           readCredential: async () => {
             if (mode === 'unavailable') throw new Error('secret upstream response');
             return 'secret invalid token';
@@ -70,7 +116,7 @@ describe('trusted Codex credentials', () => {
         message: expect.stringContaining('manual authentication'),
       });
       await expect(credentials.getAccessToken()).rejects.not.toThrow('secret');
-      expect(signal.aborted).toBe(false);
+      expect(await credentials.credentialSync.getStatus()).toBe('failed');
     },
   );
 });

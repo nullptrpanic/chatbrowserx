@@ -170,6 +170,7 @@ function buildFixture() {
       })),
       readProviderToken: vi.fn(async () => 'secret-token'),
       saveProviderToken: vi.fn(async () => undefined),
+      syncProviderToken: vi.fn(async () => 'idle' as const),
       listModels: vi.fn(async () => []),
       start: vi.fn(async () => ({
         task,

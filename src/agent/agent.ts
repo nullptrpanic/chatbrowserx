@@ -9,7 +9,11 @@ import type {
   TaskSubmissionPort,
 } from '../tasks/task-command-service';
 import type { TaskCoordinator } from '../tasks/task-coordinator';
-import type { ProviderModel } from '../providers/provider';
+import type {
+  CredentialSyncSelection,
+  CredentialSyncStatus,
+  ProviderModel,
+} from '../providers/provider';
 import type { ProviderConfiguration, ProviderRegistry } from '../providers/registry';
 import type { ModelProviderPort, ModelRequest } from './model/model-provider';
 
@@ -23,6 +27,7 @@ export interface Agent extends ModelProviderPort {
   getProviderConfiguration(): Promise<ProviderConfiguration>;
   readProviderToken(): Promise<string | undefined>;
   saveProviderToken(token: string): Promise<void>;
+  syncProviderToken(selection?: CredentialSyncSelection): Promise<CredentialSyncStatus>;
   start(input: AgentStartInput): Promise<TaskSnapshot>;
   supplement(message: MessageRecord): Promise<void>;
   getSnapshot(taskId: TaskId): Promise<TaskSnapshot>;
@@ -40,7 +45,7 @@ export interface AgentFacadeDependencies {
   readonly generation: ModelProviderPort;
   readonly providers: Pick<
     ProviderRegistry,
-    'listModels' | 'configuration' | 'readToken' | 'saveToken'
+    'listModels' | 'configuration' | 'readToken' | 'saveToken' | 'syncToken'
   >;
   readonly submissions: TaskSubmissionPort;
   readonly commands: Pick<TaskCommandPort, 'getSnapshot' | 'clearContext'>;
@@ -73,6 +78,10 @@ export class AgentFacade implements Agent {
 
   saveProviderToken(token: string): Promise<void> {
     return this.#dependencies.providers.saveToken(token);
+  }
+
+  syncProviderToken(selection?: CredentialSyncSelection): Promise<CredentialSyncStatus> {
+    return this.#dependencies.providers.syncToken(selection);
   }
 
   stream(request: ModelRequest, signal: AbortSignal) {

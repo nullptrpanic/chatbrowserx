@@ -39,6 +39,7 @@ export interface MessageRouterDependencies {
     | 'openImagePreview'
     | 'clearConversation'
     | 'getSettings'
+    | 'syncProviderToken'
     | 'saveSettings'
   >;
   readonly screenshots: {
@@ -199,6 +200,14 @@ async function routeMessage(
         return errorResponse(message.requestId, 'INVALID_CONTEXT', 'Settings context is invalid.');
       }
       return successResponse(message.requestId, await dependencies.panel.getSettings());
+    case 'settings.syncProviderToken':
+      if (context.senderTabId !== null) {
+        return errorResponse(message.requestId, 'INVALID_CONTEXT', 'Settings context is invalid.');
+      }
+      return successResponse(
+        message.requestId,
+        await dependencies.panel.syncProviderToken(message.payload),
+      );
     case 'settings.save':
       if (context.senderTabId !== null) {
         return errorResponse(message.requestId, 'INVALID_CONTEXT', 'Settings context is invalid.');

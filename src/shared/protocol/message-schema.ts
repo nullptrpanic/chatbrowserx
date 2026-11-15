@@ -239,6 +239,19 @@ export const extensionMessageSchema: z.ZodType<ExtensionMessage> = z.discriminat
   conversationClearSchema,
   sandboxGetConsoleSchema,
   settingsGetSchema,
+  z
+    .object({
+      version: z.literal(PROTOCOL_VERSION),
+      requestId: requestIdSchema,
+      type: z.literal('settings.syncProviderToken'),
+      payload: z
+        .object({
+          providerId: z.string().min(1).max(128).optional(),
+          authPath: z.string().trim().max(4096),
+        })
+        .strict(),
+    })
+    .strict(),
   settingsSaveSchema,
   taskSnapshotSchema,
   taskPauseSchema,

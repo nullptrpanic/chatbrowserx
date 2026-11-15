@@ -1,4 +1,5 @@
 import type { RuntimePort } from '../../platform/chrome/runtime-port';
+import type { CredentialSyncSelection } from '../../providers/provider';
 import type {
   PanelEditableSettings,
   PanelMessageSourcePage,
@@ -8,6 +9,7 @@ import type {
 import { PROTOCOL_VERSION, type ExtensionMessage } from '../../shared/protocol/message-types';
 import type { SavePanelSettingsInput } from '../../tasks/panel-service';
 import {
+  credentialSyncStatusSchema,
   parsePanelEditableSettings,
   parsePanelSettings,
   parsePanelSnapshot,
@@ -444,6 +446,16 @@ export class PanelClient {
       payload: {},
     });
     return parsePanelEditableSettings(data);
+  }
+
+  async syncProviderToken(selection: CredentialSyncSelection) {
+    const data = await this.#send({
+      version: PROTOCOL_VERSION,
+      requestId: requestId(),
+      type: 'settings.syncProviderToken',
+      payload: selection,
+    });
+    return credentialSyncStatusSchema.parse(data);
   }
 
   /** Persists trusted settings fields and refreshes the sanitized settings projection. */

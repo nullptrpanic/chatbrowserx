@@ -2,7 +2,7 @@ import type { CredentialStore } from '../persistence/credential-store';
 import type { AppSettings, SettingsStore } from '../persistence/settings-store';
 import type { StorageAreaPort } from '../persistence/storage-area';
 import type { SandboxClient } from '../sandbox/sandbox-client';
-import type { Provider } from './provider';
+import type { CredentialSyncSelection, CredentialSyncStatus, Provider } from './provider';
 
 export interface ProviderDescriptor {
   readonly id: string;
@@ -45,14 +45,22 @@ export interface ProviderConfiguration {
   readonly model: string;
   readonly reasoningEffort: string;
   readonly credentialSource: 'manual' | 'sandbox';
+  readonly credentialSyncStatus?: CredentialSyncStatus | undefined;
   readonly authPath: string;
   readonly hasAccessToken: boolean;
   readonly providers: readonly ProviderDescriptor[];
 }
 
+interface ProviderInstance {
+  readonly id: string;
+  readonly identity: string;
+  readonly provider: Provider;
+}
+
 /** Resolves registered implementations and configuration without inspecting their wire protocol. */
 export class ProviderRegistry {
-  private readonly instances = new Map<string, { identity: string; provider: Provider }>();
+  private readonly instances = new Map<string, ProviderInstance>();
+  private preview: ProviderInstance | undefined;
   private readonly defaultProvider: ProviderRegistration;
 
   constructor(
@@ -72,12 +80,34 @@ export class ProviderRegistry {
     for (const definition of this.definitions) await definition.initialize?.(this.host.storage);
   }
 
-  async resolve(): Promise<{
+  async resolve() {
+    return this.resolveSettings(await this.host.settings.get());
+  }
+
+  /** Refreshes saved Sandbox credentials, or tests settings before they are saved. */
+  async syncToken(selection?: CredentialSyncSelection): Promise<CredentialSyncStatus> {
+    const settings = await this.host.settings.get();
+    const selected = selection
+      ? {
+          ...settings,
+          providerId: selection.providerId ?? settings.providerId ?? '',
+          credentialSource: 'sandbox' as const,
+          authPath: selection.authPath,
+        }
+      : settings;
+    if (selected.credentialSource !== 'sandbox') return 'idle';
+    const { provider } = this.resolveSettings(selected, selection !== undefined);
+    return (await provider.credentialSync?.refresh()) ?? 'failed';
+  }
+
+  private resolveSettings(
+    settings: AppSettings,
+    preview = false,
+  ): {
     provider: Provider;
     settings: AppSettings;
     providerId: string;
-  }> {
-    const settings = await this.host.settings.get();
+  } {
     const definition = this.definition(settings.providerId);
     const resolved: AppSettings = {
       ...settings,
@@ -90,14 +120,23 @@ export class ProviderRegistry {
     const identity = JSON.stringify([resolved.credentialSource, resolved.authPath]);
     let cached = this.instances.get(definition.id);
     if (cached?.identity !== identity) {
-      cached = {
+      const draft =
+        this.preview?.id === definition.id && this.preview.identity === identity
+          ? this.preview
+          : undefined;
+      cached = draft ?? {
+        id: definition.id,
         identity,
         provider: definition.create({
           ...this.host,
           settings: { get: async () => resolved },
         }),
       };
-      this.instances.set(definition.id, cached);
+      if (preview) this.preview = cached;
+      else {
+        this.instances.set(definition.id, cached);
+        if (draft) this.preview = undefined;
+      }
     }
     return {
       provider: cached.provider,
@@ -107,12 +146,17 @@ export class ProviderRegistry {
   }
 
   async configuration(): Promise<ProviderConfiguration> {
-    const { settings, providerId } = await this.resolve();
+    const { provider, settings, providerId } = await this.resolve();
     return {
       providerId,
       model: settings.model,
       reasoningEffort: settings.reasoningEffort,
       credentialSource: settings.credentialSource ?? 'manual',
+      ...(settings.credentialSource === 'sandbox'
+        ? {
+            credentialSyncStatus: (await provider.credentialSync?.getStatus()) ?? 'failed',
+          }
+        : {}),
       authPath: settings.authPath ?? '',
       hasAccessToken:
         (await this.host.credentials

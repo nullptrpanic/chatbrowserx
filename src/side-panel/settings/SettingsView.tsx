@@ -1,5 +1,6 @@
 import { Save } from 'lucide-react';
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
+import type { CredentialSyncSelection, CredentialSyncStatus } from '../../providers/provider';
 import type { Translator } from '../../shared/i18n/i18n';
 import type {
   PanelEditableSettings,
@@ -13,14 +14,16 @@ export interface SettingsViewProps {
   readonly t: Translator;
   readonly onLoad: () => Promise<PanelEditableSettings>;
   readonly onSave: (input: SavePanelSettingsInput) => Promise<unknown>;
+  readonly onSyncToken: (selection: CredentialSyncSelection) => Promise<CredentialSyncStatus>;
 }
 
 /** Renders registered provider settings plus the optional Sandbox connection. */
-export function SettingsView({ settings, t, onLoad, onSave }: SettingsViewProps) {
+export function SettingsView({ settings, t, onLoad, onSave, onSyncToken }: SettingsViewProps) {
   const [providerId, setProviderId] = useState(settings.providerId ?? '');
-  const [providers, setProviders] = useState(settings.providers ?? []);
+  const providers = settings.providers ?? [];
   const [activeTab, setActiveTab] = useState<'general' | 'sandbox'>('general');
   const [model, setModel] = useState(settings.model);
+  const [editingCustomModel, setEditingCustomModel] = useState(false);
   const [reasoningEffort, setReasoningEffort] = useState(settings.reasoningEffort);
   const [systemPrompt, setSystemPrompt] = useState(settings.systemPrompt);
   const [language, setLanguage] = useState(settings.language);
@@ -33,11 +36,29 @@ export function SettingsView({ settings, t, onLoad, onSave }: SettingsViewProps)
   const [sandboxToken, setSandboxToken] = useState('');
   const [status, setStatus] = useState<'idle' | 'saving' | 'saved' | 'error'>('idle');
   const [loadFailed, setLoadFailed] = useState(false);
+  const [syncResult, setSyncResult] = useState<{
+    readonly status: CredentialSyncStatus | 'syncing';
+    readonly snapshot?: PanelSettingsSnapshot;
+  } | null>(null);
+  const syncRequest = useRef(0);
+  const visibleModelIds = [
+    ...new Set(models.filter((item) => !item.hidden).map((item) => item.id)),
+  ];
+  const customModel = editingCustomModel || !visibleModelIds.includes(model);
   const supportedEfforts = models.find((item) => item.id === model)?.reasoningEfforts;
+  const savedCredential =
+    settings.credentialSource === 'sandbox' &&
+    providerId === (settings.providerId ?? '') &&
+    authPath.trim() === (settings.authPath ?? '');
+  const localSyncStatus =
+    !syncResult?.snapshot || syncResult.snapshot === settings ? syncResult?.status : undefined;
+  const syncStatus =
+    localSyncStatus ?? (savedCredential ? settings.credentialSyncStatus : undefined) ?? 'idle';
 
   useEffect(() => {
     setProviderId(settings.providerId ?? '');
     setModel(settings.model);
+    setEditingCustomModel(false);
     setReasoningEffort(settings.reasoningEffort);
     setSystemPrompt(settings.systemPrompt);
     setLanguage(settings.language);
@@ -61,18 +82,9 @@ export function SettingsView({ settings, t, onLoad, onSave }: SettingsViewProps)
       .then((loaded) => {
         if (!active) return;
         setLoadFailed(false);
-        setProviderId(loaded.providerId ?? '');
-        setProviders(loaded.providers ?? []);
-        setModel(loaded.model);
-        setReasoningEffort(loaded.reasoningEffort);
-        setSystemPrompt(loaded.systemPrompt);
-        setLanguage(loaded.language);
         setAccessToken(loaded.accessToken);
-        setCredentialSource(loaded.credentialSource ?? 'manual');
-        setAuthPath(loaded.authPath ?? '');
         setModels(loaded.models ?? []);
         setModelDiscoveryFailed(loaded.modelDiscoveryFailed ?? false);
-        setSandboxServer(loaded.sandboxServer ?? '');
         setSandboxToken(loaded.sandboxToken ?? '');
       })
       .catch(() => {
@@ -82,6 +94,30 @@ export function SettingsView({ settings, t, onLoad, onSave }: SettingsViewProps)
       active = false;
     };
   }, [onLoad]);
+
+  function clearSyncResult(): void {
+    syncRequest.current++;
+    setSyncResult(null);
+  }
+
+  function selectModel(value: string): void {
+    setModel(value);
+    const selected = models.find((item) => item.id === value);
+    if (selected) setReasoningEffort(selected.defaultReasoningEffort);
+  }
+
+  async function syncToken(): Promise<void> {
+    const request = ++syncRequest.current;
+    setSyncResult({ status: 'syncing' });
+    const result = await onSyncToken({
+      ...(providerId ? { providerId } : {}),
+      authPath: authPath.trim(),
+    }).catch(() => 'failed' as const);
+    if (request === syncRequest.current) {
+      // For saved settings, subsequent background snapshots own the latest status.
+      setSyncResult({ status: result, ...(savedCredential ? { snapshot: settings } : {}) });
+    }
+  }
 
   /** Saves the visible settings while omitting credential fields the user leaves blank. */
   async function save(): Promise<void> {
@@ -106,6 +142,7 @@ export function SettingsView({ settings, t, onLoad, onSave }: SettingsViewProps)
       const loaded = await onLoad();
       setModels(loaded.models ?? []);
       setModelDiscoveryFailed(loaded.modelDiscoveryFailed ?? false);
+      clearSyncResult();
       setStatus('saved');
     } catch {
       setStatus('error');
@@ -164,11 +201,13 @@ export function SettingsView({ settings, t, onLoad, onSave }: SettingsViewProps)
                     if (!selected) return;
                     setProviderId(selected.id);
                     setModel(selected.defaults.model);
+                    setEditingCustomModel(false);
                     setReasoningEffort(selected.defaults.reasoningEffort);
                     setAuthPath(selected.defaults.authPath);
                     setCredentialSource('manual');
                     setAccessToken('');
                     setModels([]);
+                    clearSyncResult();
                   }}
                 >
                   {providers.map((provider) => (
@@ -186,7 +225,10 @@ export function SettingsView({ settings, t, onLoad, onSave }: SettingsViewProps)
                   type="radio"
                   name="credential-source"
                   checked={credentialSource === 'sandbox'}
-                  onChange={() => setCredentialSource('sandbox')}
+                  onChange={() => {
+                    setCredentialSource('sandbox');
+                    void syncToken();
+                  }}
                 />
                 {t('credentialSandbox')}
               </label>
@@ -195,25 +237,52 @@ export function SettingsView({ settings, t, onLoad, onSave }: SettingsViewProps)
                   type="radio"
                   name="credential-source"
                   checked={credentialSource === 'manual'}
-                  onChange={() => setCredentialSource('manual')}
+                  onChange={() => {
+                    setCredentialSource('manual');
+                    clearSyncResult();
+                  }}
                 />
                 {t('credentialManual')}
               </label>
             </fieldset>
             {credentialSource === 'sandbox' ? (
-              <label className="form-field" htmlFor="provider-auth-path">
-                <span>{t('credentialPath')}</span>
-                <input
-                  id="provider-auth-path"
-                  aria-label={t('credentialPath')}
-                  value={authPath}
-                  required
-                  maxLength={4096}
-                  spellCheck={false}
-                  onChange={(event) => setAuthPath(event.target.value)}
-                />
-                <small>{t('credentialSandboxHint')}</small>
-              </label>
+              <div className="form-field">
+                <label className="form-field" htmlFor="provider-auth-path">
+                  <span>{t('credentialPath')}</span>
+                  <input
+                    id="provider-auth-path"
+                    aria-label={t('credentialPath')}
+                    value={authPath}
+                    required
+                    maxLength={4096}
+                    spellCheck={false}
+                    onChange={(event) => {
+                      setAuthPath(event.target.value);
+                      clearSyncResult();
+                    }}
+                  />
+                  <small>{t('credentialSandboxHint')}</small>
+                </label>
+                <div className="credential-sync-actions">
+                  <button
+                    type="button"
+                    className="secondary-button"
+                    disabled={syncStatus === 'syncing' || status === 'saving'}
+                    onClick={() => void syncToken()}
+                  >
+                    {t('credentialSyncToken')}
+                  </button>
+                  <small className={`credential-sync-status is-${syncStatus}`} role="status">
+                    {syncStatus === 'syncing'
+                      ? t('credentialSyncing')
+                      : syncStatus === 'synced'
+                        ? t('credentialSynced')
+                        : syncStatus === 'failed'
+                          ? t('credentialSyncFailed')
+                          : ''}
+                  </small>
+                </div>
+              </div>
             ) : (
               <SecretField
                 id="provider-access-token"
@@ -228,34 +297,48 @@ export function SettingsView({ settings, t, onLoad, onSave }: SettingsViewProps)
                 t={t}
               />
             )}
-            <label className="form-field" htmlFor="model">
-              <span>{t('model')}</span>
-              <input
-                id="model"
-                aria-label={t('model')}
-                value={model}
-                required
-                maxLength={256}
-                list="backend-models"
-                onChange={(event) => {
-                  setModel(event.target.value);
-                  const selected = models.find((item) => item.id === event.target.value);
-                  if (selected) setReasoningEffort(selected.defaultReasoningEffort);
-                }}
-              />
-              <datalist id="backend-models">
-                {models
-                  .filter((item) => !item.hidden)
-                  .map((item) => (
-                    <option key={item.id} value={item.id}>
-                      {item.name}
+            {visibleModelIds.length > 0 ? (
+              <label className="form-field" htmlFor="model">
+                <span>{t('model')}</span>
+                <select
+                  id="model"
+                  value={customModel ? '' : model}
+                  onChange={(event) => {
+                    const value = event.target.value;
+                    setEditingCustomModel(value === '');
+                    if (value) selectModel(value);
+                  }}
+                >
+                  {visibleModelIds.map((id) => (
+                    <option key={id} value={id}>
+                      {id}
                     </option>
                   ))}
-              </datalist>
-              {modelDiscoveryFailed ? (
+                  <option value="">{t('customModelOption')}</option>
+                </select>
+              </label>
+            ) : null}
+            {visibleModelIds.length === 0 || customModel ? (
+              <label className="form-field" htmlFor="custom-model">
+                <span>{t(visibleModelIds.length === 0 ? 'model' : 'customModel')}</span>
+                <input
+                  id="custom-model"
+                  value={model}
+                  required
+                  maxLength={256}
+                  spellCheck={false}
+                  onChange={(event) => {
+                    setEditingCustomModel(true);
+                    selectModel(event.target.value);
+                  }}
+                />
+              </label>
+            ) : null}
+            {modelDiscoveryFailed ? (
+              <div className="form-field">
                 <small role="status">{t('modelDiscoveryFailed')}</small>
-              ) : null}
-            </label>
+              </div>
+            ) : null}
             <label className="form-field" htmlFor="reasoning-effort">
               <span>{t('reasoningEffort')}</span>
               {supportedEfforts?.length ? (

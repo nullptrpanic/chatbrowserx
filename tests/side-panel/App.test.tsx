@@ -189,7 +189,7 @@ describe('App background connection', () => {
     render(<App runtimePort={{ send }} environment={environment} attachmentClient={attachments} />);
     await user.click(await screen.findByRole('button', { name: '设置' }));
     expect(screen.queryByRole('spinbutton', { name: '历史消息条数' })).not.toBeInTheDocument();
-    const model = screen.getByRole('combobox', { name: '模型' });
+    const model = screen.getByRole('textbox', { name: '模型' });
     await user.clear(model);
     await user.type(model, 'custom-model-id');
     await user.click(screen.getByRole('button', { name: '保存设置' }));

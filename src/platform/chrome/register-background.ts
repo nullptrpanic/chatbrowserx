@@ -31,6 +31,7 @@ export interface BackgroundChromeApi {
   };
   readonly alarms: {
     create(name: string, alarmInfo: { readonly periodInMinutes: number }): void | Promise<void>;
+    get(name: string): Promise<{ readonly periodInMinutes?: number } | undefined>;
     readonly onAlarm: ChromeListenerRegistry<BackgroundAlarmListener>;
   };
   readonly tabs: {
@@ -56,6 +57,7 @@ export interface RegisterBackgroundDependencies {
   readonly router: MessageRouter;
   readonly recovery: RecoveryTriggerPort;
   readonly credentialStore: CredentialInitializationPort;
+  readonly syncProviderToken?: () => Promise<unknown>;
   readonly onTabInvalidated?: (tabId: number) => Promise<void>;
   readonly onError?: (error: unknown) => void;
 }
@@ -117,15 +119,18 @@ export function registerBackground(
   const { api, router, recovery, credentialStore } = dependencies;
   const onError = dependencies.onError ?? reportBackgroundError;
 
-  const createRecoveryAlarm = async (): Promise<void> => {
-    await api.alarms.create(RECOVERY_ALARM_NAME, { periodInMinutes: 1 });
+  const ensureRecoveryAlarm = async (): Promise<void> => {
+    const alarm = await api.alarms.get(RECOVERY_ALARM_NAME);
+    if (alarm?.periodInMinutes !== 1) {
+      await api.alarms.create(RECOVERY_ALARM_NAME, { periodInMinutes: 1 });
+    }
   };
 
   api.runtime.onInstalled.addListener(() => {
     observeOperation(
       Promise.all([
         api.sidePanel.setPanelBehavior({ openPanelOnActionClick: true }),
-        createRecoveryAlarm(),
+        ensureRecoveryAlarm(),
       ]),
       onError,
     );
@@ -136,6 +141,8 @@ export function registerBackground(
   api.alarms.onAlarm.addListener((alarm) => {
     if (alarm.name === RECOVERY_ALARM_NAME) {
       observeOperation(recovery.requestRecoveryScan(), onError);
+      if (dependencies.syncProviderToken)
+        observeOperation(dependencies.syncProviderToken(), onError);
     }
   });
   api.runtime.onMessage.addListener((message, sender, sendResponse) => {
@@ -174,7 +181,7 @@ export function registerBackground(
     observeOperation(recovery.requestRecoveryScan(), onError);
   });
 
-  const ready = Promise.all([credentialStore.initialize(), createRecoveryAlarm()])
+  const ready = Promise.all([credentialStore.initialize(), ensureRecoveryAlarm()])
     .then(() => undefined)
     .catch((error: unknown) => {
       onError(error);

@@ -6,7 +6,14 @@ export const en = {
   credentialManual: 'Enter manually',
   credentialPath: 'Sandbox authentication file',
   credentialSandboxHint:
-    'Read the access token from the Sandbox host. If the file is unavailable, switch to manual entry.',
+    'Reads credentials from the saved Sandbox connection. Save settings to sync every minute.',
+  credentialSyncToken: 'Sync Token',
+  credentialSyncing: 'Syncing token…',
+  credentialSynced: 'Token synced',
+  credentialSyncFailed:
+    'Token sync failed. Check the Sandbox connection and authentication file path.',
+  customModel: 'Custom model',
+  customModelOption: 'Custom model…',
   modelDiscoveryFailed:
     'Model discovery failed; current settings are preserved. Check authentication and save again.',
   taskCompacting: 'Compacting context…',

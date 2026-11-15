@@ -6,7 +6,14 @@ export const ja = {
   credentialManual: '手動入力',
   credentialPath: 'Sandbox 認証ファイル',
   credentialSandboxHint:
-    'Sandbox ホストから Access Token を取得します。ファイルを取得できない場合は手動入力に切り替えてください。',
+    '保存済みの Sandbox 接続から認証情報を取得します。設定を保存すると 1 分ごとに同期します。',
+  credentialSyncToken: 'トークンを同期',
+  credentialSyncing: 'トークンを同期中…',
+  credentialSynced: 'トークンを同期しました',
+  credentialSyncFailed:
+    'トークンの同期に失敗しました。Sandbox 接続と認証ファイルのパスを確認してください。',
+  customModel: 'カスタムモデル',
+  customModelOption: 'カスタムモデル…',
   modelDiscoveryFailed:
     'モデル一覧を取得できませんでした。現在の設定は保持されています。認証を確認して再保存してください。',
   taskCompacting: 'コンテキストを圧縮中…',

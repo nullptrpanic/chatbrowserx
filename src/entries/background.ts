@@ -48,6 +48,7 @@ interface BackgroundServices {
   readonly router: MessageRouter;
   readonly agent: Pick<Agent, 'recover' | 'handleBrowserStartup'>;
   readonly translation: TranslationController;
+  readonly syncProviderToken: () => Promise<unknown>;
   openSelection(
     tabId: number,
     frameId: number,
@@ -236,6 +237,7 @@ async function createBackgroundServices(
     router,
     agent,
     translation,
+    syncProviderToken: () => panel.syncProviderToken(),
     async openSelection(tabId, frameId, options) {
       const { language } = await settings.get();
       const t = createTranslator(resolveLanguage(language, navigator.language));
@@ -275,6 +277,7 @@ const registration = registerBackground({
   router: lazyRouter,
   recovery: lazyRecovery,
   credentialStore,
+  syncProviderToken: async () => (await services).syncProviderToken(),
   onTabInvalidated: async (tabId) => (await services).translation.cancelTab(tabId),
 });
 

@@ -16,8 +16,21 @@ export interface ModelSelection {
   readonly reasoningEffort: string;
 }
 
+export type CredentialSyncStatus = 'idle' | 'synced' | 'failed';
+
+export interface CredentialSyncSelection {
+  readonly providerId?: string | undefined;
+  readonly authPath: string;
+}
+
+export interface ProviderCredentialSync {
+  getStatus(): Promise<CredentialSyncStatus>;
+  refresh(): Promise<CredentialSyncStatus>;
+}
+
 /** The host depends on capabilities; wire formats and authentication belong to the backend. */
 export interface Provider {
+  readonly credentialSync?: ProviderCredentialSync | undefined;
   readonly hostedTools?: readonly Tool[];
   /** Model streams expose public summary deltas and canonical ModelUsage in rawUsage when reported. */
   getModel(selection: ModelSelection, sessionId?: string): Promise<Model>;

@@ -1,5 +1,5 @@
 import type { ReasoningEffort } from '../reasoning-effort';
-import type { ProviderModel } from '../../providers/provider';
+import type { CredentialSyncStatus, ProviderModel } from '../../providers/provider';
 import type { ProviderDescriptor } from '../../providers/registry';
 
 export type PanelTaskStatus =
@@ -150,6 +150,7 @@ export interface PanelSettingsSnapshot {
   readonly providerId?: string;
   readonly providers?: readonly ProviderDescriptor[];
   readonly credentialSource?: 'manual' | 'sandbox';
+  readonly credentialSyncStatus?: CredentialSyncStatus | undefined;
   readonly authPath?: string;
   readonly model: string;
   readonly reasoningEffort: ReasoningEffort;
@@ -168,6 +169,7 @@ export interface PanelEditableSettings {
   readonly providers?: readonly ProviderDescriptor[];
   readonly hasAccessToken?: boolean | undefined;
   readonly credentialSource?: 'manual' | 'sandbox';
+  readonly credentialSyncStatus?: CredentialSyncStatus | undefined;
   readonly authPath?: string;
   readonly models?: readonly ProviderModel[];
   readonly modelDiscoveryFailed?: boolean;

@@ -13,7 +13,7 @@ import type {
   ResponseStreamEvent as ModelStreamEvent,
 } from '@openai/agents-core';
 import { z } from 'zod';
-import type { Provider, ProviderModel, ModelSelection } from '../provider';
+import type { Provider, ProviderCredentialSync, ProviderModel, ModelSelection } from '../provider';
 import type { ModelUsage } from '../model-events';
 import { isProviderError, providerErrorFromCode } from '../provider-error';
 import { retryAfterMs } from '../../shared/net/http-failure';
@@ -274,9 +274,16 @@ export class CodexProvider implements Provider {
   readonly hostedTools = [webSearchTool()];
   private catalog: { token: string; at: number; models: readonly ProviderModel[] } | null = null;
   constructor(
-    private readonly credentials: { getAccessToken(): Promise<string | undefined> },
+    private readonly credentials: {
+      getAccessToken(): Promise<string | undefined>;
+      readonly credentialSync?: ProviderCredentialSync;
+    },
     private readonly fetchPort: FetchPort = (input, init) => globalThis.fetch(input, init),
   ) {}
+
+  get credentialSync(): ProviderCredentialSync | undefined {
+    return this.credentials.credentialSync;
+  }
 
   private async client(accessToken?: string, sessionId?: string): Promise<OpenAI> {
     const token = accessToken ?? (await this.credentials.getAccessToken());

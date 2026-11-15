@@ -4,6 +4,7 @@ import type {
 } from '../../translation/region-translation';
 import type { ReasoningEffort } from '../reasoning-effort';
 import type { SelectionTranslationPageOptions } from '../../translation/selection-translation';
+import type { CredentialSyncSelection } from '../../providers/provider';
 
 export const PROTOCOL_VERSION = 1 as const;
 
@@ -33,6 +34,7 @@ export type ExtensionMessage =
   | Message<'conversation.clear', { conversationId: string }>
   | Message<'sandbox.getConsole', Record<string, never>>
   | Message<'settings.get', Record<string, never>>
+  | Message<'settings.syncProviderToken', CredentialSyncSelection>
   | Message<
       'settings.save',
       {

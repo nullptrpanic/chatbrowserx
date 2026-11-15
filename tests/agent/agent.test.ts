@@ -56,6 +56,7 @@ function buildFixture() {
       }),
       readToken: async () => undefined,
       saveToken: async () => {},
+      syncToken: async () => 'idle',
     },
     generation: { async *stream() {} },
   });

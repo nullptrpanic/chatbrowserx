@@ -39,6 +39,7 @@ function buildChromeApi() {
     updated: new TestChromeEvent<UpdatedListener>(),
   };
   const createAlarm = vi.fn();
+  const getAlarm = vi.fn<BackgroundChromeApi['alarms']['get']>(async () => undefined);
   const setPanelBehavior = vi.fn(async () => undefined);
   const api: BackgroundChromeApi = {
     runtime: {
@@ -47,12 +48,12 @@ function buildChromeApi() {
       onStartup: events.startup,
       onMessage: events.message,
     },
-    alarms: { create: createAlarm, onAlarm: events.alarm },
+    alarms: { create: createAlarm, get: getAlarm, onAlarm: events.alarm },
     tabs: { onRemoved: events.removed, onUpdated: events.updated },
     sidePanel: { setPanelBehavior },
   };
 
-  return { api, events, createAlarm, setPanelBehavior };
+  return { api, events, createAlarm, getAlarm, setPanelBehavior };
 }
 
 describe('registerBackground', () => {
@@ -116,6 +117,7 @@ describe('registerBackground', () => {
     const requestRecoveryScan = vi.fn(async () => undefined);
     const handleBrowserStartup = vi.fn(async () => undefined);
     const initialize = vi.fn(async () => undefined);
+    const syncProviderToken = vi.fn(async () => undefined);
     const routerResponse: ExtensionResponse = {
       version: 1,
       requestId: 'req_1',
@@ -130,6 +132,7 @@ describe('registerBackground', () => {
       router,
       recovery: { requestRecoveryScan, handleBrowserStartup },
       credentialStore: { initialize },
+      syncProviderToken,
       onError,
     });
     await registration.ready;
@@ -159,6 +162,7 @@ describe('registerBackground', () => {
     await vi.waitFor(() => {
       expect(handleBrowserStartup).toHaveBeenCalledTimes(1);
       expect(requestRecoveryScan).toHaveBeenCalledTimes(3);
+      expect(syncProviderToken).toHaveBeenCalledOnce();
       expect(sendResponse).toHaveBeenCalledWith(routerResponse);
     });
 
@@ -168,6 +172,21 @@ describe('registerBackground', () => {
       { senderTabId: 7, senderFrameId: null },
     );
     expect(onError).not.toHaveBeenCalled();
+  });
+
+  it('preserves the scheduled one-minute tick when the worker wakes again', async () => {
+    const chromeApi = buildChromeApi();
+    chromeApi.getAlarm.mockResolvedValue({ periodInMinutes: 1 });
+    await registerBackground({
+      api: chromeApi.api,
+      router: vi.fn(),
+      recovery: {
+        requestRecoveryScan: async () => undefined,
+        handleBrowserStartup: async () => undefined,
+      },
+      credentialStore: { initialize: async () => undefined },
+    }).ready;
+    expect(chromeApi.createAlarm).not.toHaveBeenCalled();
   });
 
   it('configures toolbar Side Panel behavior after installation', async () => {
