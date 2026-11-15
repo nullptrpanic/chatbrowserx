@@ -6,7 +6,7 @@ export const en = {
   credentialManual: 'Enter manually',
   credentialPath: 'Sandbox authentication file',
   credentialSandboxHint:
-    'Reads credentials from the saved Sandbox connection. Save settings to sync every minute.',
+    'After saving, syncs credentials from Sandbox only for provider requests and caches them for 5 minutes. No idle syncing. Click Sync Token to refresh immediately.',
   credentialSyncToken: 'Sync Token',
   credentialSyncing: 'Syncing token…',
   credentialSynced: 'Token synced',

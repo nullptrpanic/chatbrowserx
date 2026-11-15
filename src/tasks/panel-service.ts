@@ -736,7 +736,7 @@ export class PanelService {
     };
   }
 
-  /** Reuses the agent's credential path for both trusted UI requests and background ticks. */
+  /** Refreshes credentials through the agent for trusted UI requests. */
   async syncProviderToken(selection?: CredentialSyncSelection) {
     const status = await this.#dependencies.agent.syncProviderToken(selection);
     if (status !== 'idle') this.#dependencies.stateVersion.changed();

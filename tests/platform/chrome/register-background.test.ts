@@ -117,7 +117,6 @@ describe('registerBackground', () => {
     const requestRecoveryScan = vi.fn(async () => undefined);
     const handleBrowserStartup = vi.fn(async () => undefined);
     const initialize = vi.fn(async () => undefined);
-    const syncProviderToken = vi.fn(async () => undefined);
     const routerResponse: ExtensionResponse = {
       version: 1,
       requestId: 'req_1',
@@ -132,7 +131,6 @@ describe('registerBackground', () => {
       router,
       recovery: { requestRecoveryScan, handleBrowserStartup },
       credentialStore: { initialize },
-      syncProviderToken,
       onError,
     });
     await registration.ready;
@@ -162,7 +160,6 @@ describe('registerBackground', () => {
     await vi.waitFor(() => {
       expect(handleBrowserStartup).toHaveBeenCalledTimes(1);
       expect(requestRecoveryScan).toHaveBeenCalledTimes(3);
-      expect(syncProviderToken).toHaveBeenCalledOnce();
       expect(sendResponse).toHaveBeenCalledWith(routerResponse);
     });
 

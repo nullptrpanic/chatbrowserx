@@ -96,6 +96,30 @@ function discoveryOutput(description: string) {
 }
 
 describe('Sandbox Skill loader', () => {
+  it('does not scan an idle Sandbox and refreshes an expired catalog only when used', async () => {
+    vi.useFakeTimers();
+    const execute = vi.fn<SandboxExecutionPort['execute']>(async () => discoveryOutput('first'));
+    const runtime = bindToolRuntime(
+      [{ declaration: sandboxReadTool, runtime: sandboxRuntime }],
+      discoveryServices(execute),
+    );
+    try {
+      await vi.advanceTimersByTimeAsync(3_600_000);
+      expect(execute).not.toHaveBeenCalled();
+      expect((await runtime.contract({})).systemPrompt).toContain('first');
+      execute.mockResolvedValue(discoveryOutput('updated'));
+      await vi.advanceTimersByTimeAsync(599_999);
+      expect((await runtime.contract({})).systemPrompt).toContain('first');
+      expect(execute).toHaveBeenCalledOnce();
+      await vi.advanceTimersByTimeAsync(3_600_000);
+      expect(execute).toHaveBeenCalledOnce();
+      expect((await runtime.contract({})).systemPrompt).toContain('updated');
+      expect(execute).toHaveBeenCalledTimes(2);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it('bounds cold discovery, keeps Sandbox tools available and recovers after a failed scan', async () => {
     vi.useFakeTimers();
     let scanSignal: AbortSignal | undefined;
@@ -189,7 +213,7 @@ describe('Sandbox Skill loader', () => {
         'cached catalog',
       );
       execute.mockImplementation(() => new Promise(() => {}));
-      await vi.advanceTimersByTimeAsync(5 * 60_000);
+      await vi.advanceTimersByTimeAsync(10 * 60_000);
       expect(await loadSandboxSkillPrompt(services, new AbortController().signal)).toContain(
         'cached catalog',
       );
@@ -380,7 +404,7 @@ describe('Sandbox Skill loader', () => {
     });
   });
 
-  it('reuses a snapshot for five minutes and refreshes it on the next load after expiry', async () => {
+  it('reuses a snapshot for ten minutes and refreshes it on the next load after expiry', async () => {
     await withSandboxHome(async (home) => {
       const now = vi.spyOn(Date, 'now').mockReturnValue(10_000);
       const services = new ToolServiceResolver();
@@ -400,12 +424,12 @@ describe('Sandbox Skill loader', () => {
           'cached-skill',
           'name: cached-skill\ndescription: refreshed-description',
         );
-        now.mockReturnValue(309_999);
+        now.mockReturnValue(609_999);
         const cached = await loadSandboxSkillPrompt(services, new AbortController().signal);
         expect(cached).toContain('first-description');
         expect(cached).not.toContain('refreshed-description');
 
-        now.mockReturnValue(310_000);
+        now.mockReturnValue(610_000);
         const stale = await loadSandboxSkillPrompt(services, new AbortController().signal);
         expect(stale).toContain('first-description');
         await vi.waitFor(async () => {

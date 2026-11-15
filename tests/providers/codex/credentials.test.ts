@@ -72,7 +72,7 @@ describe('trusted Codex credentials', () => {
     expect(await credentials.getAccessToken()).toBe(nextToken);
   });
 
-  it('refreshes on use when the background alarm is delayed', async () => {
+  it('keeps a token for five minutes and refreshes only on use after idle time', async () => {
     const configuration = {};
     const readCredential = vi
       .fn(async () => token)
@@ -83,14 +83,25 @@ describe('trusted Codex credentials', () => {
       { get: async () => ({ ...DEFAULT_APP_SETTINGS, credentialSource: 'sandbox' }) },
       { configurationKey: async () => configuration, readCredential },
     );
-    const now = vi.spyOn(Date, 'now').mockReturnValue(0);
+    vi.useFakeTimers({ now: 0 });
     try {
+      await vi.advanceTimersByTimeAsync(3_600_000);
+      expect(readCredential).not.toHaveBeenCalled();
       expect(await credentials.getAccessToken()).toBe(token);
-      now.mockReturnValue(60_001);
-      expect(await credentials.getAccessToken()).toBe(nextToken);
+      await vi.advanceTimersByTimeAsync(60_001);
+      expect(await credentials.getAccessToken()).toBe(token);
+      await vi.advanceTimersByTimeAsync(239_998);
+      expect(await credentials.getAccessToken()).toBe(token);
+      expect(readCredential).toHaveBeenCalledOnce();
+      await vi.advanceTimersByTimeAsync(3_600_000);
+      expect(await credentials.credentialSync.getStatus()).toBe('synced');
+      expect(readCredential).toHaveBeenCalledOnce();
+      expect(
+        await Promise.all([credentials.getAccessToken(), credentials.getAccessToken()]),
+      ).toEqual([nextToken, nextToken]);
       expect(readCredential).toHaveBeenCalledTimes(2);
     } finally {
-      now.mockRestore();
+      vi.useRealTimers();
     }
   });
 

@@ -112,6 +112,7 @@ const catalogSchema = z.object({
 
 function normalizeError(error: unknown): never {
   if (isProviderError(error)) throw error;
+  if (error instanceof OpenAI.OpenAIError && isProviderError(error.cause)) throw error.cause;
   if (error instanceof OpenAI.APIUserAbortError) throw providerErrorFromCode('ABORTED');
   if (error instanceof OpenAI.APIError) {
     const status = error.status ?? null;
@@ -332,25 +333,35 @@ export class CodexProvider implements Provider {
     return this.credentials.credentialSync;
   }
 
-  private async client(accessToken?: string, sessionId?: string): Promise<OpenAI> {
-    const token = accessToken ?? (await this.credentials.getAccessToken());
-    if (!token) throw providerErrorFromCode('AUTH');
+  private client(accessToken?: string, sessionId?: string): OpenAI {
     return new OpenAI({
-      apiKey: token,
-      baseURL: CODEX_RESPONSES_URL.replace(/\/responses$/, ''),
-      defaultHeaders: {
-        'ChatGPT-Account-ID': extractChatGptAccountId(token),
-        ...(sessionId ? { 'session-id': sessionId } : {}),
+      apiKey: async () => {
+        const token = accessToken ?? (await this.credentials.getAccessToken());
+        if (!token) throw providerErrorFromCode('AUTH');
+        return token;
       },
+      baseURL: CODEX_RESPONSES_URL.replace(/\/responses$/, ''),
+      defaultHeaders: sessionId ? { 'session-id': sessionId } : {},
       dangerouslyAllowBrowser: true,
       maxRetries: 0,
       timeout: 90_000,
-      fetch: (input, init) => this.fetchPort(input, init),
+      fetch: (input, init) => {
+        const headers = new Headers(init?.headers);
+        // Derive the account from this request's resolved token, including concurrent refreshes.
+        const authorization = headers.get('Authorization') ?? '';
+        headers.set(
+          'ChatGPT-Account-ID',
+          extractChatGptAccountId(
+            authorization.startsWith('Bearer ') ? authorization.slice(7) : '',
+          ),
+        );
+        return this.fetchPort(input, { ...init, headers });
+      },
     });
   }
 
   async getModel(selection: ModelSelection, sessionId?: string): Promise<CodexResponsesModel> {
-    return new CodexResponsesModel(await this.client(undefined, sessionId), selection);
+    return new CodexResponsesModel(this.client(undefined, sessionId), selection);
   }
 
   async listModels(signal: AbortSignal): Promise<readonly ProviderModel[]> {
@@ -359,9 +370,7 @@ export class CodexProvider implements Provider {
       const token = await this.credentials.getAccessToken();
       if (token && this.catalog?.token === token && Date.now() - this.catalog.at < 300_000)
         return this.catalog.models;
-      const data = await (
-        await this.client(token)
-      ).get<unknown>('/models', {
+      const data = await this.client(token).get<unknown>('/models', {
         query: { client_version: CODEX_CATALOG_CLIENT_VERSION },
         signal,
       });

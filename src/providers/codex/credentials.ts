@@ -4,7 +4,7 @@ import type { CredentialSyncStatus, ProviderCredentialSync } from '../provider';
 import { providerErrorFromCode } from '../provider-error';
 import { extractChatGptAccountId } from './access-token';
 
-const TOKEN_CACHE_MS = 60_000;
+const TOKEN_CACHE_MS = 5 * 60_000;
 
 interface SandboxCredential {
   readonly path: string;

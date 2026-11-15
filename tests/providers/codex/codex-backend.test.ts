@@ -1,6 +1,8 @@
 import { describe, expect, it, vi } from 'vitest';
 import type { ModelRequest } from '@openai/agents-core';
 import { CodexProvider } from '../../../src/providers/codex/provider';
+import { CodexCredentials } from '../../../src/providers/codex/credentials';
+import { DEFAULT_APP_SETTINGS } from '../../../src/persistence/settings-store';
 
 const token = `${btoa('{}')}.${btoa(JSON.stringify({ 'https://api.openai.com/auth': { chatgpt_account_id: 'test-account' } }))}.`;
 const request: ModelRequest = {
@@ -56,6 +58,121 @@ function response(items: object[] = output, terminalOutput: object[] = []): Resp
 }
 
 describe('Codex backend SDK boundary', () => {
+  it('lazily refreshes credentials for an existing model and pairs each token with its account', async () => {
+    const nextToken = `${btoa('{}')}.${btoa(JSON.stringify({ chatgpt_account_id: 'next-account' })).replace(/=+$/, '')}.`;
+    const readCredential = vi.fn(async () => token);
+    const configuration = {};
+    const credentials = new CodexCredentials(
+      { getAccessToken: async () => undefined },
+      { get: async () => ({ ...DEFAULT_APP_SETTINGS, credentialSource: 'sandbox' }) },
+      { configurationKey: async () => configuration, readCredential },
+    );
+    const sent: Headers[] = [];
+    const backend = new CodexProvider(credentials, async (_url, init) => {
+      sent.push(new Headers(init?.headers));
+      return response();
+    });
+    const now = vi.spyOn(Date, 'now').mockReturnValue(0);
+    try {
+      const model = await backend.getModel({ model: 'fixture', reasoningEffort: 'low' }, 'chat');
+      expect(readCredential).not.toHaveBeenCalled();
+      const generate = async () => {
+        const events = [];
+        for await (const event of model.getStreamedResponse(request)) events.push(event);
+        expect(events.some((event) => event.type === 'response_done')).toBe(true);
+      };
+      await generate();
+      readCredential.mockResolvedValue(nextToken);
+      now.mockReturnValue(120_000);
+      await generate();
+      expect(readCredential).toHaveBeenCalledOnce();
+      now.mockReturnValue(300_000);
+      await Promise.all([generate(), generate()]);
+      expect(readCredential).toHaveBeenCalledTimes(2);
+      expect(
+        sent.map((headers) => [headers.get('Authorization'), headers.get('ChatGPT-Account-ID')]),
+      ).toEqual([
+        [`Bearer ${token}`, 'test-account'],
+        [`Bearer ${token}`, 'test-account'],
+        [`Bearer ${nextToken}`, 'next-account'],
+        [`Bearer ${nextToken}`, 'next-account'],
+      ]);
+      expect(sent.every((headers) => headers.get('session-id') === 'chat')).toBe(true);
+    } finally {
+      now.mockRestore();
+    }
+  });
+
+  it('reports a request-time credential failure as authentication failure without dispatching', async () => {
+    const configuration = {};
+    const credentials = new CodexCredentials(
+      { getAccessToken: async () => undefined },
+      { get: async () => ({ ...DEFAULT_APP_SETTINGS, credentialSource: 'sandbox' }) },
+      {
+        configurationKey: async () => configuration,
+        readCredential: async () => {
+          throw new Error('private credential failure');
+        },
+      },
+    );
+    const fetch = vi.fn(async () => response());
+    const model = await new CodexProvider(credentials, fetch).getModel({
+      model: 'fixture',
+      reasoningEffort: 'low',
+    });
+    await expect(model.getStreamedResponse(request).next()).rejects.toMatchObject({ code: 'AUTH' });
+    expect(await credentials.credentialSync.getStatus()).toBe('failed');
+    expect(fetch).not.toHaveBeenCalled();
+  });
+
+  it.each([undefined, 'invalid-token'])(
+    'rejects a missing or invalid manual token before dispatching: %s',
+    async (accessToken) => {
+      const fetch = vi.fn(async () => response());
+      const backend = new CodexProvider({ getAccessToken: async () => accessToken }, fetch);
+      const model = await backend.getModel({ model: 'fixture', reasoningEffort: 'low' });
+      await expect(model.getStreamedResponse(request).next()).rejects.toMatchObject({
+        code: 'AUTH',
+      });
+      expect(fetch).not.toHaveBeenCalled();
+    },
+  );
+
+  it('does not dispatch a cancelled request or interrupt another waiter for the shared refresh', async () => {
+    let finishRead!: (token: string) => void;
+    const pendingToken = new Promise<string>((resolve) => {
+      finishRead = resolve;
+    });
+    const readCredential = vi.fn(() => pendingToken);
+    const configuration = {};
+    const credentials = new CodexCredentials(
+      { getAccessToken: async () => undefined },
+      { get: async () => ({ ...DEFAULT_APP_SETTINGS, credentialSource: 'sandbox' }) },
+      { configurationKey: async () => configuration, readCredential },
+    );
+    const fetch = vi.fn(async () => response());
+    const model = await new CodexProvider(credentials, fetch).getModel({
+      model: 'fixture',
+      reasoningEffort: 'low',
+    });
+    const controller = new AbortController();
+    const cancelled = expect(
+      model.getStreamedResponse({ ...request, signal: controller.signal }).next(),
+    ).rejects.toMatchObject({ code: 'ABORTED' });
+    const active = (async () => {
+      const events = [];
+      for await (const event of model.getStreamedResponse(request)) events.push(event);
+      return events;
+    })();
+    await vi.waitFor(() => expect(readCredential).toHaveBeenCalledOnce());
+    controller.abort();
+    finishRead(token);
+    await cancelled;
+    expect((await active).some((event) => event.type === 'response_done')).toBe(true);
+    expect(readCredential).toHaveBeenCalledOnce();
+    expect(fetch).toHaveBeenCalledOnce();
+  });
+
   it.each([false, true])(
     'round-trips application namespaces with terminal output present=%s',
     async (terminalOutput) => {

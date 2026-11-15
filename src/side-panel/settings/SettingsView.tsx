@@ -114,7 +114,7 @@ export function SettingsView({ settings, t, onLoad, onSave, onSyncToken }: Setti
       authPath: authPath.trim(),
     }).catch(() => 'failed' as const);
     if (request === syncRequest.current) {
-      // For saved settings, subsequent background snapshots own the latest status.
+      // For saved settings, subsequent settings snapshots own the latest status.
       setSyncResult({ status: result, ...(savedCredential ? { snapshot: settings } : {}) });
     }
   }
@@ -227,7 +227,7 @@ export function SettingsView({ settings, t, onLoad, onSave, onSyncToken }: Setti
                   checked={credentialSource === 'sandbox'}
                   onChange={() => {
                     setCredentialSource('sandbox');
-                    void syncToken();
+                    clearSyncResult();
                   }}
                 />
                 {t('credentialSandbox')}

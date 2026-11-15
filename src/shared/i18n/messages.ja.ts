@@ -6,7 +6,7 @@ export const ja = {
   credentialManual: '手動入力',
   credentialPath: 'Sandbox 認証ファイル',
   credentialSandboxHint:
-    '保存済みの Sandbox 接続から認証情報を取得します。設定を保存すると 1 分ごとに同期します。',
+    '保存後、モデルサービスへのリクエスト時にのみ Sandbox から認証情報を同期し、5 分間キャッシュします。待機中は同期しません。「トークンを同期」で即時更新できます。',
   credentialSyncToken: 'トークンを同期',
   credentialSyncing: 'トークンを同期中…',
   credentialSynced: 'トークンを同期しました',

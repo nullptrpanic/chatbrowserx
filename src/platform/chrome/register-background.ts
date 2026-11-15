@@ -57,7 +57,6 @@ export interface RegisterBackgroundDependencies {
   readonly router: MessageRouter;
   readonly recovery: RecoveryTriggerPort;
   readonly credentialStore: CredentialInitializationPort;
-  readonly syncProviderToken?: () => Promise<unknown>;
   readonly onTabInvalidated?: (tabId: number) => Promise<void>;
   readonly onError?: (error: unknown) => void;
 }
@@ -141,8 +140,6 @@ export function registerBackground(
   api.alarms.onAlarm.addListener((alarm) => {
     if (alarm.name === RECOVERY_ALARM_NAME) {
       observeOperation(recovery.requestRecoveryScan(), onError);
-      if (dependencies.syncProviderToken)
-        observeOperation(dependencies.syncProviderToken(), onError);
     }
   });
   api.runtime.onMessage.addListener((message, sender, sendResponse) => {

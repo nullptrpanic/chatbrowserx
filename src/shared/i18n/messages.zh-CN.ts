@@ -3,7 +3,8 @@ export const zhCN = {
   credentialSandbox: 'Sandbox 自动同步',
   credentialManual: '手动填写',
   credentialPath: 'Sandbox 认证文件路径',
-  credentialSandboxHint: '从已保存的 Sandbox 连接读取凭证。保存设置后，每分钟自动同步。',
+  credentialSandboxHint:
+    '保存设置后，仅在请求模型服务时从 Sandbox 同步凭证，缓存 5 分钟；空闲时不同步。可点击“同步 Token”立即刷新。',
   credentialSyncToken: '同步 Token',
   credentialSyncing: '正在同步 Token…',
   credentialSynced: 'Token 已同步',

@@ -211,7 +211,7 @@ describe('backend-driven settings', () => {
     expect(onSave.mock.calls[0]?.[0]).not.toHaveProperty('accessToken');
   });
 
-  it('syncs immediately on selection, shows a failure, and retries the edited path without saving', async () => {
+  it('defers automatic sync until use and supports manual sync and retry without saving', async () => {
     const user = userEvent.setup();
     const onSave = vi.fn(async () => undefined);
     const onSyncToken = vi
@@ -228,6 +228,9 @@ describe('backend-driven settings', () => {
     );
     await screen.findByDisplayValue('manual-secret');
     await user.click(screen.getByRole('radio', { name: 'Sync from Sandbox' }));
+    expect(onSyncToken).not.toHaveBeenCalled();
+    expect(screen.queryByText(/Token sync failed/)).not.toBeInTheDocument();
+    await user.click(screen.getByRole('button', { name: 'Sync Token' }));
     expect(await screen.findByText(/Token sync failed/)).toBeVisible();
     expect(onSyncToken).toHaveBeenCalledWith({ authPath: '/fixture/auth.json' });
     const path = screen.getByLabelText('Sandbox authentication file');
@@ -239,7 +242,7 @@ describe('backend-driven settings', () => {
     expect(onSave).not.toHaveBeenCalled();
   });
 
-  it('shows a newer background failure after a successful manual sync of saved settings', async () => {
+  it('shows a newer request-time failure after a successful manual sync of saved settings', async () => {
     const user = userEvent.setup();
     const onLoad = async () => loaded;
     const saved = {
