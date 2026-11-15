@@ -199,21 +199,21 @@ export class IndexedDbConversationRepository implements ConversationRepository {
         transaction.objectStore('task-events').delete(key),
       );
 
-      const toolResults = await transaction
+      const toolCallKeys = await transaction
         .objectStore('tool-results')
         .index('by-task')
-        .getAll(task.id);
-      for (const result of toolResults) {
+        .getAllKeys(task.id);
+      for (const toolCallKey of toolCallKeys) {
         const references = await transaction
           .objectStore('attachment-references')
           .index('by-reference')
-          .getAll(result.id);
+          .getAll(toolCallKey);
         for (const reference of references) {
           await transaction
             .objectStore('attachment-references')
             .delete([reference.attachmentId, reference.referenceId]);
         }
-        await transaction.objectStore('tool-results').delete(result.id);
+        await transaction.objectStore('tool-results').delete(toolCallKey);
       }
 
       const runKeys = await transaction

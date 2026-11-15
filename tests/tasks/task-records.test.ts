@@ -33,7 +33,6 @@ describe('durable task records', () => {
 
   it('keeps exact tool output outside the runtime checkpoint', () => {
     const result: ToolResult = {
-      id: 'result_1',
       taskId: 'task_1',
       runId: 'run_1',
       callId: 'call_1',
@@ -53,7 +52,7 @@ describe('durable task records', () => {
           name: 'tavily_search',
           argumentsJson: '{"query":"browser reliability"}',
         },
-        { type: 'function_call_output_ref', callId: 'call_1', resultId: 'result_1' },
+        { type: 'function_call_output_ref', callId: 'call_1' },
       ],
       pendingToolCall: null,
       browserToolCallsInAttempt: 0,
@@ -72,7 +71,6 @@ describe('durable task records', () => {
     const removedShape = {
       type: 'function_call_output',
       callId: 'call_legacy',
-      resultId: 'result_legacy',
       output: '{"ok":true}',
     } as unknown as ContinuationItem;
 

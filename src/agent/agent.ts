@@ -98,8 +98,9 @@ export class AgentFacade implements Agent {
     return snapshot;
   }
 
-  supplement(message: MessageRecord): Promise<void> {
-    return this.#dependencies.submissions.appendSupplement(message);
+  async supplement(message: MessageRecord): Promise<void> {
+    const followUp = await this.#dependencies.submissions.appendSupplement(message);
+    if (followUp) this.#dependencies.coordinator.schedule(followUp.taskId, followUp.runId);
   }
 
   getSnapshot(taskId: TaskId): Promise<TaskSnapshot> {

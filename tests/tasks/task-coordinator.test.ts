@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from 'vitest';
-import { TaskCoordinator } from '../../src/tasks/task-coordinator';
+import { TaskCoordinator, type CoordinatedTaskResult } from '../../src/tasks/task-coordinator';
 import type { TaskSnapshot } from '../../src/tasks/task-command-service';
 
 /** Builds coordinator collaborators whose runner remains active until aborted or resolved. */
@@ -7,9 +7,9 @@ function buildFixture() {
   let resolveRun: (() => void) | undefined;
   const run = vi.fn(
     (_taskId: string, signal: AbortSignal) =>
-      new Promise<void>((resolve) => {
-        resolveRun = resolve;
-        signal.addEventListener('abort', () => resolve(), { once: true });
+      new Promise<CoordinatedTaskResult>((resolve) => {
+        resolveRun = () => resolve({});
+        signal.addEventListener('abort', () => resolve({}), { once: true });
       }),
   );
   const snapshot = { task: { id: 'task_1' }, run: { id: 'run_1' } } as TaskSnapshot;
@@ -81,13 +81,13 @@ describe('TaskCoordinator', () => {
     const order: string[] = [];
     const run = vi.fn(
       (_taskId: string, signal: AbortSignal) =>
-        new Promise<void>((resolve) => {
+        new Promise<CoordinatedTaskResult>((resolve) => {
           signal.addEventListener(
             'abort',
             () => {
               queueMicrotask(() => {
                 order.push('executor.settled');
-                resolve();
+                resolve({});
               });
             },
             { once: true },
@@ -170,8 +170,8 @@ describe('TaskCoordinator', () => {
     const finishes = new Map<string, () => void>();
     const run = vi.fn(
       (taskId: string) =>
-        new Promise<void>((resolve) => {
-          finishes.set(taskId, resolve);
+        new Promise<CoordinatedTaskResult>((resolve) => {
+          finishes.set(taskId, () => resolve({}));
         }),
     );
     const onExecutionError = vi.fn();
@@ -204,8 +204,8 @@ describe('TaskCoordinator', () => {
     let finish: (() => void) | undefined;
     const run = vi.fn(
       (_taskId: string, signal: AbortSignal) =>
-        new Promise<void>((resolve) => {
-          finish = resolve;
+        new Promise<CoordinatedTaskResult>((resolve) => {
+          finish = () => resolve({});
           signal.addEventListener('abort', () => undefined, { once: true });
         }),
     );
@@ -240,8 +240,8 @@ describe('TaskCoordinator', () => {
     let finish: (() => void) | undefined;
     const run = vi.fn(
       () =>
-        new Promise<void>((resolve) => {
-          finish = resolve;
+        new Promise<CoordinatedTaskResult>((resolve) => {
+          finish = () => resolve({});
         }),
     );
     const commands = {
@@ -268,8 +268,8 @@ describe('TaskCoordinator', () => {
     let finish: (() => void) | undefined;
     const run = vi.fn(
       (_taskId: string, signal: AbortSignal) =>
-        new Promise<void>((resolve) => {
-          finish = resolve;
+        new Promise<CoordinatedTaskResult>((resolve) => {
+          finish = () => resolve({});
           signal.addEventListener('abort', () => undefined, { once: true });
         }),
     );

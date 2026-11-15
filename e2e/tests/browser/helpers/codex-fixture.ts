@@ -1,4 +1,11 @@
+import { toolNameParts } from '../../../../src/tools/model-tool';
+
 type FixtureEvent = { type: string; [key: string]: unknown };
+
+export function codexFixtureToolName(qualifiedName: string) {
+  const { name, namespace } = toolNameParts(qualifiedName);
+  return namespace ? { name, namespace: `chatbrowserx_${namespace}` } : { name };
+}
 
 /** Builds complete Responses envelopes for synthetic browser fixtures, including final output. */
 export function codexFixtureEvents<T extends FixtureEvent>(events: readonly T[]): T[] {

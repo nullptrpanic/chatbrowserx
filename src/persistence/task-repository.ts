@@ -1,7 +1,13 @@
-import type { IDBPDatabase } from 'idb';
-import type { ConversationId, TaskId, TaskRunId, ToolResultId } from '../shared/ids';
+import type { IDBPDatabase, IDBPTransaction } from 'idb';
+import type { ConversationId, TaskId, TaskRunId, ToolCallKey } from '../shared/ids';
 import { compactionItemSchema } from '../shared/protocol/compaction-item';
 import { orderedTaskEvents } from '../tasks/task-history-order';
+import {
+  createInitialSubmission,
+  taskGoal,
+  type TaskFactoryDependencies,
+} from '../tasks/task-factory';
+import { pendingTaskSupplementIds } from '../tasks/task-supplements';
 import type { Checkpoint } from '../tasks/checkpoint-types';
 import type { Conversation } from '../tasks/conversation-types';
 import type { MessageRecord } from '../tasks/message-types';
@@ -18,6 +24,17 @@ export interface SaveTransitionInput {
   readonly checkpoint: Checkpoint | null;
   readonly deleteCheckpoint?: boolean;
   readonly toolResults?: readonly ToolResult[];
+  readonly followUpFactory?: TaskFactoryDependencies;
+}
+
+export interface QueuedTask {
+  readonly taskId: TaskId;
+  readonly runId: TaskRunId;
+}
+
+interface SavedFollowUp {
+  readonly nextTask: QueuedTask;
+  readonly sourceEvents: readonly TaskEvent[];
 }
 
 export interface CreateSubmissionInput {
@@ -36,6 +53,10 @@ export interface AppendTaskMessageInput {
   readonly message: MessageRecord;
   readonly eventId: string;
   readonly at: number;
+}
+
+interface AppendSupplementInput extends AppendTaskMessageInput {
+  readonly followUpFactory: TaskFactoryDependencies;
 }
 
 export interface AcquireLeaseInput {
@@ -98,6 +119,7 @@ export class TaskRepositoryBusyError extends Error {
 export interface TaskRepository {
   getAgentSession(conversationId: ConversationId): Promise<AgentSession | undefined>;
   createSubmission(input: CreateSubmissionInput): Promise<Task>;
+  appendTaskMessage(input: AppendSupplementInput): Promise<TaskEvent | QueuedTask>;
   appendTaskMessage(input: AppendTaskMessageInput): Promise<TaskEvent>;
   startRun(task: Task, run: TaskRun, event: TaskEvent, checkpoint: Checkpoint): Promise<void>;
   get(taskId: TaskId): Promise<Task | undefined>;
@@ -118,9 +140,9 @@ export interface TaskRepository {
   listEvents(taskId: TaskId, afterSequence?: number): Promise<TaskEvent[]>;
   readTaskMessageEvents(taskIds: readonly TaskId[]): Promise<TaskEvent[]>;
   listToolResults(taskId: TaskId): Promise<ToolResult[]>;
-  getToolResult(resultId: ToolResultId): Promise<ToolResult | undefined>;
+  getToolResult(taskId: TaskId, callId: string): Promise<ToolResult | undefined>;
   getCheckpoint(checkpointId: string): Promise<Checkpoint | undefined>;
-  saveTransition(input: SaveTransitionInput): Promise<void>;
+  saveTransition(input: SaveTransitionInput): Promise<SavedFollowUp | undefined>;
   listRecoverable(now: number): Promise<Task[]>;
   tryAcquireLease(input: AcquireLeaseInput): Promise<TaskLease | null>;
   releaseLease(taskId: TaskId, ownerId: string, generation: number): Promise<void>;
@@ -128,6 +150,99 @@ export interface TaskRepository {
 
 const terminalStatuses = new Set<TaskStatus>(['completed', 'failed', 'cancelled']);
 const automaticallyRecoverableStatuses = new Set<TaskStatus>(['queued', 'planning']);
+const submissionStores = [
+  'conversations',
+  'messages',
+  'tasks',
+  'task-runs',
+  'task-events',
+  'checkpoints',
+  'attachments',
+  'attachment-references',
+  'agent-sessions',
+] as const;
+const transitionStores = [...submissionStores, 'tool-results'] as const;
+type SubmissionTransaction = IDBPTransaction<
+  ChatBrowserDatabase,
+  typeof submissionStores | typeof transitionStores,
+  'readwrite'
+>;
+
+async function writeTaskMessage(
+  transaction: SubmissionTransaction,
+  conversation: Conversation,
+  message: MessageRecord,
+): Promise<void> {
+  for (const attachmentId of message.attachmentIds) {
+    if (!(await transaction.objectStore('attachments').get(attachmentId))) {
+      throw new Error('Attachment does not exist.');
+    }
+    await transaction.objectStore('attachment-references').put({
+      attachmentId,
+      referenceId: `message:${message.id}`,
+    });
+  }
+  await transaction.objectStore('messages').add(message);
+  await transaction.objectStore('conversations').put({
+    ...conversation,
+    updatedAt: Math.max(conversation.updatedAt, message.updatedAt),
+  });
+}
+
+async function saveSessionBackup(
+  transaction: SubmissionTransaction,
+  conversationId: ConversationId,
+  taskId: TaskId,
+): Promise<void> {
+  const sessions = transaction.objectStore('agent-sessions');
+  const previous = replayableSession(await sessions.get(conversationId));
+  if (previous) await sessions.put({ conversationId: [conversationId], taskId, session: previous });
+  else await sessions.delete([conversationId]);
+}
+
+/** Creates a queued successor inside the transaction that owns the available task slot. */
+async function queueFollowUp(
+  transaction: SubmissionTransaction,
+  conversation: Conversation,
+  sourceTask: Task,
+  supplements: readonly MessageRecord[],
+  factory: TaskFactoryDependencies,
+  forward: boolean,
+  browserTabId?: number | null,
+): Promise<QueuedTask> {
+  const first = supplements[0];
+  const tabId = browserTabId ?? sourceTask.tabId ?? conversation.tabId;
+  if (!first || tabId === null) throw new Error('Follow-up conversation is unavailable.');
+  const messages = supplements.map((original): MessageRecord => ({
+    ...original,
+    id: forward ? factory.ids.create('message') : original.id,
+    kind: 'conversation',
+    ...(forward ? { forwardedFromSupplementId: original.id } : {}),
+  }));
+  const initial = createInitialSubmission(
+    {
+      conversationId: conversation.id,
+      tabId,
+      goal: taskGoal(first.text),
+      ordinal: sourceTask.ordinal + 1,
+    },
+    messages.map(({ id }) => id),
+    factory,
+  );
+  for (const message of messages) {
+    await writeTaskMessage(transaction, conversation, {
+      ...message,
+      taskId: initial.task.id,
+      createdAt: initial.task.createdAt,
+      updatedAt: initial.task.createdAt,
+    });
+  }
+  await transaction.objectStore('tasks').add(initial.task);
+  await transaction.objectStore('task-runs').add(initial.run);
+  await transaction.objectStore('checkpoints').add(initial.checkpoint);
+  for (const event of initial.events) await transaction.objectStore('task-events').add(event);
+  return { taskId: initial.task.id, runId: initial.run.id };
+}
 
 function taskSequenceRange(taskId: TaskId, afterSequence = -1): IDBKeyRange {
   return IDBKeyRange.bound(
@@ -261,13 +376,10 @@ function validateEventRuns(events: readonly TaskEvent[], runs: readonly TaskRun[
 function materializedResults(
   events: readonly TaskEvent[],
   storedResults: readonly ToolResult[],
-  selectedResultIds?: ReadonlySet<ToolResultId>,
+  selectedCallIds?: ReadonlySet<string>,
 ): MaterializedToolResult[] {
   const calls = new Map<string, Extract<TaskEvent, { readonly type: 'tool.call' }>>();
-  const resultEvents = new Map<
-    ToolResultId,
-    Extract<TaskEvent, { readonly type: 'tool.result' }>
-  >();
+  const resultEvents = new Map<string, Extract<TaskEvent, { readonly type: 'tool.result' }>>();
   for (const event of events) {
     if (event.type === 'tool.call') {
       if (calls.has(event.callId)) {
@@ -276,51 +388,40 @@ function materializedResults(
       calls.set(event.callId, event);
     }
     if (event.type === 'tool.result') {
-      if (resultEvents.has(event.resultId)) {
+      if (resultEvents.has(event.callId)) {
         throw new Error('Task tool-result records are inconsistent.');
       }
-      resultEvents.set(event.resultId, event);
+      resultEvents.set(event.callId, event);
     }
   }
   const selectedEvents =
-    selectedResultIds === undefined
+    selectedCallIds === undefined
       ? [...resultEvents.values()]
-      : [...resultEvents.values()].filter(({ resultId }) => selectedResultIds.has(resultId));
-  const storedById = new Map(storedResults.map((result) => [result.id, result]));
+      : [...resultEvents.values()].filter(({ callId }) => selectedCallIds.has(callId));
+  const storedByCall = new Map(storedResults.map((result) => [result.callId, result]));
   if (
-    storedById.size !== storedResults.length ||
+    storedByCall.size !== storedResults.length ||
     selectedEvents.length !== storedResults.length ||
-    (selectedResultIds === undefined && resultEvents.size !== storedResults.length) ||
-    (selectedResultIds !== undefined &&
-      (selectedResultIds.size !== storedResults.length ||
-        storedResults.some(({ id }) => !selectedResultIds.has(id))))
+    (selectedCallIds !== undefined && selectedCallIds.size !== selectedEvents.length)
   ) {
     throw new Error('Task tool-result records are inconsistent.');
   }
-  return selectedEvents
-    .map((resultEvent): MaterializedToolResult => {
-      const result = storedById.get(resultEvent.resultId);
-      const call = calls.get(resultEvent.callId);
-      if (
-        result === undefined ||
-        call === undefined ||
-        result.callId !== resultEvent.callId ||
-        result.taskId !== resultEvent.taskId ||
-        result.runId !== resultEvent.runId ||
-        call.taskId !== resultEvent.taskId ||
-        call.name !== result.toolName ||
-        call.sequence >= resultEvent.sequence
-      ) {
-        throw new Error('Task tool-result records are inconsistent.');
-      }
-      return { ...result, argumentsJson: call.argumentsJson };
-    })
-    .sort(
-      (left, right) =>
-        (resultEvents.get(left.id)?.sequence ?? Number.MAX_SAFE_INTEGER) -
-          (resultEvents.get(right.id)?.sequence ?? Number.MAX_SAFE_INTEGER) ||
-        left.id.localeCompare(right.id),
-    );
+  return selectedEvents.map((resultEvent): MaterializedToolResult => {
+    const result = storedByCall.get(resultEvent.callId);
+    const call = calls.get(resultEvent.callId);
+    if (
+      result === undefined ||
+      call === undefined ||
+      result.taskId !== resultEvent.taskId ||
+      result.runId !== resultEvent.runId ||
+      call.taskId !== resultEvent.taskId ||
+      call.name !== result.toolName ||
+      call.sequence >= resultEvent.sequence
+    ) {
+      throw new Error('Task tool-result records are inconsistent.');
+    }
+    return { ...result, argumentsJson: call.argumentsJson };
+  });
 }
 
 export class IndexedDbTaskRepository implements TaskRepository {
@@ -378,20 +479,7 @@ export class IndexedDbTaskRepository implements TaskRepository {
       throw new Error('Submission records do not describe the same user task boundary.');
     }
 
-    const transaction = this.#database.transaction(
-      [
-        'conversations',
-        'messages',
-        'tasks',
-        'task-runs',
-        'task-events',
-        'checkpoints',
-        'attachments',
-        'attachment-references',
-        'agent-sessions',
-      ],
-      'readwrite',
-    );
+    const transaction = this.#database.transaction(submissionStores, 'readwrite');
     try {
       const storedTasks = await transaction.objectStore('tasks').getAll();
       if (hasUnfinishedTask(storedTasks)) throw new TaskRepositoryBusyError();
@@ -424,17 +512,7 @@ export class IndexedDbTaskRepository implements TaskRepository {
           ...input.task,
           ordinal: Math.max(0, ...conversationTasks.map(({ ordinal }) => ordinal)) + 1,
         };
-        const sessions = transaction.objectStore('agent-sessions');
-        const previous = replayableSession(await sessions.get(conversation.id));
-        if (previous) {
-          await sessions.put({
-            conversationId: [conversation.id],
-            taskId: storedTask.id,
-            session: previous,
-          });
-        } else {
-          await sessions.delete([conversation.id]);
-        }
+        await saveSessionBackup(transaction, conversation.id, storedTask.id);
       } else {
         if (
           input.continuationSourceTaskId !== input.task.id ||
@@ -477,22 +555,7 @@ export class IndexedDbTaskRepository implements TaskRepository {
         }
       }
 
-      for (const attachmentId of input.message.attachmentIds) {
-        if ((await transaction.objectStore('attachments').get(attachmentId)) === undefined) {
-          throw new Error('Attachment does not exist.');
-        }
-      }
-      await transaction.objectStore('messages').add(input.message);
-      for (const attachmentId of input.message.attachmentIds) {
-        await transaction.objectStore('attachment-references').put({
-          attachmentId,
-          referenceId: `message:${input.message.id}`,
-        });
-      }
-      await transaction.objectStore('conversations').put({
-        ...conversation,
-        updatedAt: Math.max(conversation.updatedAt, input.message.updatedAt),
-      });
+      await writeTaskMessage(transaction, conversation, input.message);
       if (existingTask === undefined) await transaction.objectStore('tasks').add(storedTask);
       else await transaction.objectStore('tasks').put(storedTask);
       await transaction.objectStore('task-runs').add(input.run);
@@ -515,7 +578,11 @@ export class IndexedDbTaskRepository implements TaskRepository {
   }
 
   /** Atomically records one Task-owned message at its exact permanent sequence. */
-  async appendTaskMessage(input: AppendTaskMessageInput): Promise<TaskEvent> {
+  async appendTaskMessage(input: AppendSupplementInput): Promise<TaskEvent | QueuedTask>;
+  async appendTaskMessage(input: AppendTaskMessageInput): Promise<TaskEvent>;
+  async appendTaskMessage(
+    input: AppendTaskMessageInput | AppendSupplementInput,
+  ): Promise<TaskEvent | QueuedTask> {
     if (
       (input.message.kind === 'supplement'
         ? input.message.role !== 'user' || input.message.status !== 'complete'
@@ -526,32 +593,42 @@ export class IndexedDbTaskRepository implements TaskRepository {
     ) {
       throw new Error('Task message is invalid.');
     }
-    const transaction = this.#database.transaction(
-      [
-        'tasks',
-        'task-runs',
-        'task-events',
-        'conversations',
-        'messages',
-        'attachments',
-        'attachment-references',
-      ],
-      'readwrite',
-    );
+    const transaction = this.#database.transaction(submissionStores, 'readwrite');
     try {
-      const taskId = input.message.taskId;
+      const { message } = input;
+      const followUpFactory = 'followUpFactory' in input ? input.followUpFactory : undefined;
       const [storedTask, conversation] = await Promise.all([
-        transaction.objectStore('tasks').get(taskId),
-        transaction.objectStore('conversations').get(input.message.conversationId),
+        transaction.objectStore('tasks').get(message.taskId),
+        transaction.objectStore('conversations').get(message.conversationId),
       ]);
       if (
         storedTask === undefined ||
         conversation === undefined ||
         storedTask.latestRunId === null ||
-        storedTask.conversationId !== input.message.conversationId ||
-        (input.message.kind === 'supplement' && !['queued', 'planning'].includes(storedTask.status))
+        storedTask.conversationId !== message.conversationId
       ) {
         throw new Error('Task message requires its current durable task.');
+      }
+      // A UI that still shows the running task may send just after its completion commit.
+      if (message.kind === 'supplement' && storedTask.status === 'completed' && followUpFactory) {
+        const all = await transaction.objectStore('tasks').getAll();
+        const latest = orderedTasks(
+          all.filter((task) => task.conversationId === message.conversationId),
+        ).at(-1);
+        if (!latest || hasUnfinishedTask(all)) throw new TaskRepositoryBusyError();
+        const next = await queueFollowUp(
+          transaction,
+          conversation,
+          latest,
+          [message],
+          followUpFactory,
+          false,
+          storedTask.tabId,
+        );
+        await saveSessionBackup(transaction, conversation.id, next.taskId);
+        await transaction.done;
+        this.#onMutation();
+        return next;
       }
       const run = await transaction.objectStore('task-runs').get(storedTask.latestRunId);
       if (
@@ -560,18 +637,7 @@ export class IndexedDbTaskRepository implements TaskRepository {
       ) {
         throw new Error('Task message requires its current task attempt.');
       }
-      for (const attachmentId of input.message.attachmentIds) {
-        if ((await transaction.objectStore('attachments').get(attachmentId)) === undefined) {
-          throw new Error('Attachment does not exist.');
-        }
-      }
-      await transaction.objectStore('messages').add(input.message);
-      for (const attachmentId of input.message.attachmentIds) {
-        await transaction.objectStore('attachment-references').put({
-          attachmentId,
-          referenceId: `message:${input.message.id}`,
-        });
-      }
+      await writeTaskMessage(transaction, conversation, message);
       const event: TaskEvent =
         input.message.kind === 'supplement'
           ? {
@@ -597,10 +663,6 @@ export class IndexedDbTaskRepository implements TaskRepository {
         ...storedTask,
         lastEventSequence: event.sequence,
         updatedAt: Math.max(storedTask.updatedAt, input.message.updatedAt, input.at),
-      });
-      await transaction.objectStore('conversations').put({
-        ...conversation,
-        updatedAt: Math.max(conversation.updatedAt, input.message.updatedAt),
       });
       await transaction.done;
       this.#onMutation();
@@ -830,15 +892,15 @@ export class IndexedDbTaskRepository implements TaskRepository {
     const runs = validatedRuns(task, storedRuns);
     const events = orderedTaskEvents(task, storedEvents);
     validateEventRuns(events, runs);
-    const selectedResultIds = new Set(
+    const selectedCallIds = new Set(
       events
         .filter((event) => event.type === 'tool.result' || event.type === 'supplement.queued')
         .slice(-maxDetailEvents)
-        .flatMap((event) => (event.type === 'tool.result' ? [event.resultId] : [])),
+        .flatMap((event) => (event.type === 'tool.result' ? [event.callId] : [])),
     );
     const results = await Promise.all(
-      [...selectedResultIds].map((resultId) =>
-        transaction.objectStore('tool-results').get(resultId),
+      [...selectedCallIds].map((callId) =>
+        transaction.objectStore('tool-results').get([taskId, callId]),
       ),
     );
     if (results.some((result) => result === undefined)) {
@@ -853,7 +915,7 @@ export class IndexedDbTaskRepository implements TaskRepository {
       toolResults: materializedResults(
         events,
         results.flatMap((result) => (result === undefined ? [] : [result])),
-        selectedResultIds,
+        selectedCallIds,
       ),
     };
   }
@@ -903,20 +965,20 @@ export class IndexedDbTaskRepository implements TaskRepository {
 
   async listToolResults(taskId: TaskId): Promise<ToolResult[]> {
     return (await this.#database.getAllFromIndex('tool-results', 'by-task', taskId)).sort(
-      (left, right) => left.createdAt - right.createdAt || left.id.localeCompare(right.id),
+      (left, right) => left.createdAt - right.createdAt || left.callId.localeCompare(right.callId),
     );
   }
 
-  async getToolResult(resultId: ToolResultId): Promise<ToolResult | undefined> {
-    return this.#database.get('tool-results', resultId);
+  async getToolResult(taskId: TaskId, callId: string): Promise<ToolResult | undefined> {
+    return this.#database.get('tool-results', [taskId, callId]);
   }
 
   async getCheckpoint(checkpointId: string): Promise<Checkpoint | undefined> {
     return this.#database.get('checkpoints', checkpointId);
   }
 
-  /** Saves exactly one process event plus any canonical payload and current recovery state. */
-  async saveTransition(input: SaveTransitionInput): Promise<void> {
+  /** Commits the task boundary and any follow-up together. */
+  async saveTransition(input: SaveTransitionInput): Promise<SavedFollowUp | undefined> {
     if (
       input.session &&
       (input.session.conversationId !== input.task.conversationId ||
@@ -947,20 +1009,7 @@ export class IndexedDbTaskRepository implements TaskRepository {
       throw new Error('Task transition records do not describe the same durable boundary.');
     }
 
-    const transaction = this.#database.transaction(
-      [
-        'tasks',
-        'task-runs',
-        'task-events',
-        'tool-results',
-        'checkpoints',
-        'messages',
-        'attachments',
-        'attachment-references',
-        'agent-sessions',
-      ],
-      'readwrite',
-    );
+    const transaction = this.#database.transaction(transitionStores, 'readwrite');
     try {
       const [existingTask, existingRun] = await Promise.all([
         transaction.objectStore('tasks').get(input.task.id),
@@ -1006,37 +1055,54 @@ export class IndexedDbTaskRepository implements TaskRepository {
               .objectStore('task-events')
               .index('by-task-sequence')
               .getAll(taskSequenceRange(input.task.id));
-      if (completionEvent !== undefined) {
-        const queuedSupplements = new Set<string>();
-        const appliedSupplements = new Set<string>();
-        for (const event of [...existingEvents, ...input.events]) {
-          if (event.type === 'supplement.queued') {
-            if (queuedSupplements.has(event.messageId)) {
-              throw new Error('Task supplement event association is invalid.');
-            }
-            queuedSupplements.add(event.messageId);
-          } else if (event.type === 'supplement.applied') {
-            if (
-              !queuedSupplements.has(event.messageId) ||
-              appliedSupplements.has(event.messageId)
-            ) {
-              throw new Error('Task supplement event association is invalid.');
-            }
-            appliedSupplements.add(event.messageId);
+      const pendingIds = completionEvent
+        ? [...pendingTaskSupplementIds([...existingEvents, ...input.events], input.task.id)]
+        : [];
+      if (pendingIds.length && !input.followUpFactory) throw new TaskRepositoryConflictError();
+
+      let followUp: QueuedTask | undefined;
+      const forwardedEvents: TaskEvent[] = [];
+      if (pendingIds.length && input.followUpFactory) {
+        const factory = input.followUpFactory;
+        const conversation = await transaction
+          .objectStore('conversations')
+          .get(input.task.conversationId);
+        const messages = transaction.objectStore('messages');
+        const originals = await Promise.all(pendingIds.map((messageId) => messages.get(messageId)));
+        if (!conversation) throw new Error('Follow-up conversation is unavailable.');
+        const supplements = originals.map((original) => {
+          if (!original || original.kind !== 'supplement' || original.taskId !== input.task.id) {
+            throw new Error('Forwarded supplement does not belong to the completed task.');
           }
-        }
-        if ([...queuedSupplements].some((messageId) => !appliedSupplements.has(messageId))) {
-          throw new TaskRepositoryConflictError();
+          return original;
+        });
+        followUp = await queueFollowUp(
+          transaction,
+          conversation,
+          input.task,
+          supplements,
+          factory,
+          true,
+          input.checkpoint?.browserTargetTabId,
+        );
+        for (const [index, original] of supplements.entries()) {
+          forwardedEvents.push({
+            id: factory.ids.create('event'),
+            type: 'supplement.forwarded',
+            messageId: original.id,
+            nextTaskId: followUp.taskId,
+            taskId: input.task.id,
+            runId: input.run.id,
+            sequence: input.task.lastEventSequence + index + 1,
+            at: input.task.updatedAt,
+          });
         }
       }
 
       if (
         newResultEvents.length !== newResults.length ||
         newResultEvents.some(
-          (event) =>
-            !newResults.some(
-              (result) => result.id === event.resultId && result.callId === event.callId,
-            ),
+          (event) => !newResults.some((result) => result.callId === event.callId),
         )
       ) {
         throw new Error('Tool result events and canonical results must be committed together.');
@@ -1056,7 +1122,7 @@ export class IndexedDbTaskRepository implements TaskRepository {
         }
         const transitionCall = transitionCalls.get(result.callId);
         const pendingCall = existingCheckpoint?.pendingToolCall;
-        const resultEvent = newResultEvents.find((event) => event.resultId === result.id);
+        const resultEvent = newResultEvents.find((event) => event.callId === result.callId);
         if (
           resultEvent === undefined ||
           (transitionCall === undefined &&
@@ -1071,18 +1137,22 @@ export class IndexedDbTaskRepository implements TaskRepository {
         ) {
           throw new Error('Tool result does not reference its recorded tool call.');
         }
+        const toolCallKey: ToolCallKey = [result.taskId, result.callId];
         for (const attachmentId of result.attachmentIds) {
           if ((await transaction.objectStore('attachments').get(attachmentId)) === undefined) {
             throw new Error('Tool result attachment does not exist.');
           }
           await transaction.objectStore('attachment-references').put({
             attachmentId,
-            referenceId: result.id,
+            referenceId: toolCallKey,
           });
         }
         await transaction.objectStore('tool-results').add(result);
       }
-      await transaction.objectStore('tasks').put(input.task);
+      await transaction.objectStore('tasks').put({
+        ...input.task,
+        lastEventSequence: input.task.lastEventSequence + forwardedEvents.length,
+      });
       await transaction.objectStore('task-runs').put(input.run);
       const sessions = transaction.objectStore('agent-sessions');
       const conversationId = input.task.conversationId;
@@ -1107,8 +1177,12 @@ export class IndexedDbTaskRepository implements TaskRepository {
       } else if (input.session) {
         await sessions.put(input.session);
       }
-      if (completionEvent) await sessions.delete([conversationId]);
-      for (const event of input.events) {
+      if (followUp) {
+        await saveSessionBackup(transaction, conversationId, followUp.taskId);
+      } else if (completionEvent) {
+        await sessions.delete([conversationId]);
+      }
+      for (const event of [...input.events, ...forwardedEvents]) {
         await transaction.objectStore('task-events').add(event);
       }
       if (input.checkpoint === null || input.deleteCheckpoint === true) {
@@ -1120,6 +1194,7 @@ export class IndexedDbTaskRepository implements TaskRepository {
       }
       await transaction.done;
       this.#onMutation();
+      return followUp ? { nextTask: followUp, sourceEvents: forwardedEvents } : undefined;
     } catch (error) {
       try {
         transaction.abort();

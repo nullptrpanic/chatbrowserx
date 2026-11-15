@@ -5,7 +5,6 @@ import type {
   TaskEventId,
   TaskId,
   TaskRunId,
-  ToolResultId,
 } from '../shared/ids';
 import type { TaskError } from './task-errors';
 
@@ -60,7 +59,23 @@ export type TaskEvent =
       readonly type: 'supplement.queued' | 'supplement.applied';
       readonly messageId: MessageId;
     })
+  | (TaskEventBase & {
+      readonly type: 'supplement.forwarded';
+      readonly messageId: MessageId;
+      readonly nextTaskId: TaskId;
+    })
   | (TaskEventBase & { readonly type: 'reasoning.summary'; readonly summary: string })
+  | (TaskEventBase & {
+      readonly type: 'assistant.commentary';
+      readonly text: string;
+      readonly itemId?: string;
+      readonly callId?: string;
+    })
+  | (TaskEventBase & {
+      readonly type: 'assistant.commentary-linked';
+      readonly itemId: string;
+      readonly callId: string;
+    })
   | (TaskEventBase & { readonly type: 'model.turn'; readonly metrics: TaskModelTurnMetrics })
   | (TaskEventBase & {
       readonly type: 'tool.call';
@@ -71,7 +86,6 @@ export type TaskEvent =
   | (TaskEventBase & {
       readonly type: 'tool.result';
       readonly callId: string;
-      readonly resultId: ToolResultId;
     })
   | (TaskEventBase & {
       readonly type: 'tool.dispatched';

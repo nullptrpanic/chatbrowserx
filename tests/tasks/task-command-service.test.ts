@@ -109,6 +109,52 @@ async function markFailed(
 }
 
 describe('TaskCommandService', () => {
+  it('turns a supplement received after the completion commit into a user message in the same conversation', async () => {
+    const f = await setup('command-supplement-after-completion');
+    try {
+      const original = await createSubmission(f);
+      const at = f.clock.now();
+      const sequence = original.task.lastEventSequence + 1;
+      await f.repository.saveTransition({
+        task: { ...original.task, status: 'completed', lastEventSequence: sequence, updatedAt: at },
+        run: { ...original.run, status: 'completed', endedAt: at, checkpointId: null },
+        checkpoint: original.checkpoint,
+        deleteCheckpoint: true,
+        events: [
+          {
+            id: f.ids.create('event'),
+            taskId: original.task.id,
+            runId: original.run.id,
+            sequence,
+            at,
+            type: 'status.changed',
+            taskStatus: 'completed',
+            runStatus: 'completed',
+            reason: 'model_response_completed',
+            error: null,
+          },
+        ],
+      });
+      const nextTask = await f.commands.appendSupplement({
+        ...userMessage(original.task.conversationId, 'late_supplement'),
+        taskId: original.task.id,
+        kind: 'supplement',
+        text: 'Add tomorrow too.',
+      });
+      expect(nextTask).toBeDefined();
+      if (!nextTask) throw new Error('Expected the next task to be queued.');
+      expect(await f.repository.get(nextTask.taskId)).toMatchObject({
+        status: 'queued',
+        ordinal: 2,
+      });
+      expect(await f.conversations.listTaskMessages(nextTask.taskId)).toMatchObject([
+        { id: 'late_supplement', kind: 'conversation', role: 'user', text: 'Add tomorrow too.' },
+      ]);
+    } finally {
+      f.database.close();
+    }
+  });
+
   it('creates one stable task, first run, message event, and runtime checkpoint', async () => {
     const fixture = await setup('command-create');
     const created = await createSubmission(fixture);

@@ -85,7 +85,6 @@ function taskSnapshot(status: string, includeEvidence = false) {
             type: 'tool.result',
             at: 1_300,
             callId: 'call_1',
-            resultId: 'result_1',
           },
           {
             id: 'event_model_2',
@@ -112,7 +111,6 @@ function taskSnapshot(status: string, includeEvidence = false) {
     toolResults: includeEvidence
       ? [
           {
-            id: 'result_1',
             taskId: 'task_live',
             runId: 'run_task_live',
             callId: 'call_1',
@@ -169,7 +167,7 @@ function panelTaskDetails(completedToolCallCount: number) {
     detailLevel: 'full',
     completedToolCallCount,
     toolResults: Array.from({ length: completedToolCallCount }, (_, index) => ({
-      resultId: `result_${String(index + 1)}`,
+      callId: `call_${String(index + 1)}`,
     })),
   };
 }
@@ -414,11 +412,9 @@ describe('live scenario orchestration', () => {
         type: 'tool.result',
         at: 1_600,
         callId: 'call_2',
-        resultId: 'result_2',
       },
     );
     snapshot.toolResults.push({
-      id: 'result_2',
       taskId: 'task_live',
       runId: 'run_task_live',
       callId: 'call_2',
@@ -757,7 +753,7 @@ describe('live scenario orchestration', () => {
             id: 'task_live',
             detailLevel: 'full',
             completedToolCallCount: 1,
-            toolResults: [{ resultId: 'result_1' }],
+            toolResults: [{ callId: 'call_1' }],
           };
         default:
           throw new Error('Unexpected message: ' + message.type);
@@ -921,7 +917,7 @@ describe('live scenario orchestration', () => {
     const snapshot = structuredClone(taskSnapshot('completed', true));
     const original = snapshot.toolResults[0];
     if (original === undefined) throw new Error('Missing tool-result fixture.');
-    snapshot.toolResults.push({ ...original, id: 'result_2' });
+    snapshot.toolResults.push({ ...original });
     snapshot.events.push({
       id: 'event_result_2',
       taskId: 'task_live',
@@ -930,7 +926,6 @@ describe('live scenario orchestration', () => {
       type: 'tool.result',
       at: 1_500,
       callId: 'call_1',
-      resultId: 'result_2',
     });
 
     const report = await runCompletedSnapshot(snapshot, 2);

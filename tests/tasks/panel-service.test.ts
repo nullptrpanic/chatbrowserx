@@ -235,12 +235,10 @@ function useArchive(
 function panelResult(
   fixture: PanelFixture,
   input: Pick<MaterializedToolResult, 'callId' | 'toolName' | 'argumentsJson' | 'output'> & {
-    readonly resultId: string;
     readonly attachmentIds?: readonly string[];
   },
 ): MaterializedToolResult {
   return {
-    id: input.resultId,
     taskId: fixture.task.id,
     runId: fixture.run.id,
     callId: input.callId,
@@ -941,6 +939,9 @@ describe('PanelService', () => {
     const details = await service.getTaskDetails(runningTask.id);
 
     expect(snapshot.task?.supplements).toEqual([]);
+    expect(snapshot.task?.liveSupplements).toEqual([
+      { id: 'supplement_pending', text: 'Use Go instead.', attachmentIds: [] },
+    ]);
     expect(details.supplements).toEqual([
       expect.objectContaining({
         id: 'supplement_pending',
@@ -956,14 +957,12 @@ describe('PanelService', () => {
       toolName: 'browser_inspect',
       argumentsJson: '{}',
       output: '{"ok":true}',
-      resultId: 'result_1',
     });
     const second = panelResult(fixture, {
       callId: 'call_2',
       toolName: 'browser_click',
       argumentsJson: '{"ref":"e2"}',
       output: '{"ok":true}',
-      resultId: 'result_2',
     });
     const events: TaskEvent[] = [
       {
@@ -973,7 +972,6 @@ describe('PanelService', () => {
         sequence: 1,
         type: 'tool.result',
         callId: first.callId,
-        resultId: first.id,
         at: 1_100,
       },
       {
@@ -992,7 +990,6 @@ describe('PanelService', () => {
         sequence: 3,
         type: 'tool.result',
         callId: second.callId,
-        resultId: second.id,
         at: 1_300,
       },
     ];
@@ -1090,14 +1087,12 @@ describe('PanelService', () => {
     const longArguments = `{"cmd":"${'a'.repeat(20_100)}"}`;
     const longOutput = 'o'.repeat(100_100);
     const toolResults: MaterializedToolResult[] = Array.from({ length: 22 }, (_, index) => ({
-      id: `result_${index}`,
       taskId: secondTask.id,
       runId: secondRun.id,
       callId: `call_${index}`,
       toolName: index === 21 ? 'bash' : 'lookup',
       argumentsJson: index === 21 ? longArguments : '{}',
       output: index === 21 ? longOutput : `output_${index}`,
-      resultId: `result_${index}`,
       attachmentIds: index === 21 ? ['attachment_tool'] : [],
       createdAt: 1_200 + index,
     }));
@@ -1109,7 +1104,6 @@ describe('PanelService', () => {
         sequence: index + 1,
         type: 'tool.result',
         callId: result.callId,
-        resultId: result.id,
         at: 1_200 + index,
       })),
       {
@@ -1244,7 +1238,6 @@ describe('PanelService', () => {
       toolName: 'browser_inspect',
       argumentsJson: '{}',
       output: 'old output',
-      resultId: 'result_without_event',
     });
     useArchive(fixture, {
       task: { ...fixture.task, lastEventSequence: 442 },
@@ -1264,14 +1257,12 @@ describe('PanelService', () => {
   it('returns the latest 100 tool results even when audit events surround every call', async () => {
     const fixture = buildFixture();
     const toolResults: MaterializedToolResult[] = Array.from({ length: 120 }, (_, index) => ({
-      id: `result_${index + 1}`,
       taskId: fixture.task.id,
       runId: fixture.run.id,
       callId: `call_${index + 1}`,
       toolName: 'browser_inspect',
       argumentsJson: '{}',
       output: `output_${index + 1}`,
-      resultId: `result_${index + 1}`,
       attachmentIds: [],
       createdAt: 1_000 + index * 4 + 3,
     }));
@@ -1312,7 +1303,6 @@ describe('PanelService', () => {
         sequence: index * 4 + 4,
         type: 'tool.result',
         callId: result.callId,
-        resultId: result.id,
         at: 1_000 + index * 4 + 3,
       },
     ]);

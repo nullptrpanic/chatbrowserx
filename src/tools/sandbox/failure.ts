@@ -23,7 +23,8 @@ export function sandboxFailure(
   }
   if (
     context.phase === 'recover' ||
-    (call.name === 'sandbox_exec' && error.dispatchState === 'may_have_dispatched')
+    ((call.name === 'sandbox.exec' || call.name === 'sandbox_exec') &&
+      error.dispatchState === 'may_have_dispatched')
   ) {
     return recoveryPending;
   }

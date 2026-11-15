@@ -1,7 +1,9 @@
 import type { BrowserContext, CDPSession } from '@playwright/test';
 import { createHash } from 'node:crypto';
 import { CODEX_RESPONSES_URL } from '../../src/providers/codex/codex-constants';
+import { decodeCodexToolName } from '../../src/providers/codex/tool-namespace';
 import { RUNTIME_SUPPLEMENT_PREFIX } from '../../src/agent/context/agent-context';
+import { qualifiedToolName } from '../../src/tools/model-tool';
 import { jsonRecord } from './json-contract';
 import { summarizeProviderSse } from './provider-sse';
 import type {
@@ -68,10 +70,13 @@ function inputItemSummary(
   const type = stringValue(item.type) ?? (typeof item.role === 'string' ? 'message' : 'unknown');
   if (type === 'message') return messageItemSummary(item, position, activeUserText);
   if (type === 'function_call') {
+    const namespace = typeof item.namespace === 'string' ? item.namespace || undefined : undefined;
     return {
       position,
       type,
-      ...(typeof item.name === 'string' ? { toolName: item.name } : {}),
+      ...(typeof item.name === 'string'
+        ? { toolName: decodeCodexToolName(qualifiedToolName(item.name, namespace)) }
+        : {}),
       argumentCharacters: serializedCharacters(item.arguments),
     };
   }
@@ -163,7 +168,15 @@ export function summarizeResponsesRequestBody(
   const toolDefinitions = Array.isArray(request.tools) ? request.tools : [];
   const tools = toolDefinitions.flatMap((candidate) => {
     const tool = jsonRecord(candidate);
-    return typeof tool?.name === 'string' ? [tool.name] : [];
+    if (typeof tool?.name !== 'string') return [];
+    const name = tool.name;
+    if (tool.type !== 'namespace' || !Array.isArray(tool.tools)) return [name];
+    return tool.tools.flatMap((member) => {
+      const memberName = jsonRecord(member)?.name;
+      return typeof memberName === 'string'
+        ? [qualifiedToolName(memberName, decodeCodexToolName(name))]
+        : [];
+    });
   });
   const choice = jsonRecord(request.tool_choice);
 
@@ -191,7 +204,7 @@ export function summarizeResponsesRequestBody(
       typeof request.tool_choice === 'string'
         ? request.tool_choice
         : typeof choice?.name === 'string'
-          ? choice.name
+          ? decodeCodexToolName(choice.name)
           : null,
     inputItems,
     activeUserRequestOccurrences: messageTexts.filter((text) => text === activeUserText).length,

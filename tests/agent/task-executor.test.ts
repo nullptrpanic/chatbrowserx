@@ -553,7 +553,7 @@ describe('TaskExecutor', () => {
         searchHistory: vi.fn(),
         readAttachments: vi.fn(async () => null),
         readHistory,
-        readDetail: vi.fn(),
+        readMessage: vi.fn(),
         readResult: vi.fn(),
       },
       clock: dependencies.clock,
@@ -1773,10 +1773,13 @@ describe('TaskExecutor', () => {
       attachmentIds: ['attachment_screenshot'],
     });
     expect(
-      await database.get('attachment-references', ['attachment_screenshot', completed?.id ?? '']),
+      await database.get('attachment-references', [
+        'attachment_screenshot',
+        [created.task.id, 'call_screenshot'],
+      ]),
     ).toEqual({
       attachmentId: 'attachment_screenshot',
-      referenceId: completed?.id,
+      referenceId: [created.task.id, 'call_screenshot'],
     });
     expect(release).toHaveBeenCalledOnce();
     expect(release).toHaveBeenCalledWith(expect.stringMatching(/^runner_/));
@@ -1941,10 +1944,13 @@ describe('TaskExecutor', () => {
       attachmentIds: [],
     });
     expect(
-      await database.get('attachment-references', ['attachment_capture', completed?.id ?? '']),
+      await database.get('attachment-references', [
+        'attachment_capture',
+        [created.task.id, 'call_capture'],
+      ]),
     ).toEqual({
       attachmentId: 'attachment_capture',
-      referenceId: completed?.id,
+      referenceId: [created.task.id, 'call_capture'],
     });
     expect(executeBrowser).toHaveBeenNthCalledWith(
       2,
@@ -2953,7 +2959,6 @@ describe('TaskExecutor', () => {
       callId: 'call_extract',
       toolName: 'fixture_extract',
     });
-    expect(result.toolResults.every(({ id }) => id.length > 0)).toBe(true);
     expect(fixture.search).toHaveBeenCalledOnce();
     expect(fixture.extract).toHaveBeenCalledOnce();
     database.close();
@@ -3218,156 +3223,164 @@ describe('TaskExecutor', () => {
     database.close();
   });
 
-  it.each(['completion'] as const)(
-    'preserves the previous answer in model context when a supplement follows %s',
-    async (boundary) => {
-      const database = await openChatBrowserDatabase(
-        createTestDatabaseName('completion-supplement'),
-      );
-      const repository = new IndexedDbTaskRepository(database);
-      const conversations = new IndexedDbConversationRepository(database);
-      const dependencies = sources();
-      const conversation = {
-        id: 'conversation_1',
-        tabId: 7,
-        title: 'Answer this',
-        createdAt: 1_000,
-        updatedAt: 1_000,
-      } as const;
-      const userMessage: TaskMessageDraft = {
-        id: 'message_user',
-        kind: 'conversation',
+  it('atomically forwards pending supplements and their attachments into a recoverable task', async () => {
+    const database = await openChatBrowserDatabase(createTestDatabaseName('completion-supplement'));
+    const repository = new IndexedDbTaskRepository(database);
+    const conversations = new IndexedDbConversationRepository(database);
+    const dependencies = sources();
+    const conversation = {
+      id: 'conversation_1',
+      tabId: 7,
+      title: 'Answer this',
+      createdAt: 1_000,
+      updatedAt: 1_000,
+    } as const;
+    const userMessage: TaskMessageDraft = {
+      id: 'message_user',
+      kind: 'conversation',
+      conversationId: 'conversation_1',
+      role: 'user',
+      status: 'complete',
+      text: 'Answer this',
+      attachmentIds: [],
+      createdAt: 1_000,
+      updatedAt: 1_000,
+    };
+    const commands = new TaskCommandService(
+      repository,
+      dependencies.clock,
+      dependencies.ids,
+      conversations,
+    );
+    const created = await commands.createSubmission({
+      conversationId: 'conversation_1',
+      tabId: 7,
+      goal: 'Answer this',
+      conversation,
+      createConversation: true,
+      message: userMessage,
+    });
+    await database.put('attachments', {
+      id: 'image_supplement',
+      blob: new Blob(['image'], { type: 'image/png' }),
+      mimeType: 'image/png',
+      byteSize: 5,
+      width: null,
+      height: null,
+      source: 'file',
+      createdAt: 1_000,
+    });
+    let addedAtCompletion = false;
+    const save = repository.saveTransition.bind(repository);
+    vi.spyOn(repository, 'saveTransition').mockImplementation(async (input) => {
+      if (!addedAtCompletion && input.task.status === 'completed') {
+        addedAtCompletion = true;
+        const at = dependencies.clock.now();
+        await commands.appendSupplement({
+          id: 'supplement_during_commit',
+          kind: 'supplement',
+          conversationId: conversation.id,
+          taskId: created.task.id,
+          role: 'user',
+          status: 'complete',
+          text: '',
+          attachmentIds: ['image_supplement'],
+          createdAt: at,
+          updatedAt: at,
+        });
+      }
+      return save(input);
+    });
+    const plan = vi.fn(async function* () {
+      const replyAt = dependencies.clock.now();
+      await repository.appendTaskMessage({
+        eventId: dependencies.ids.create('event'),
+        at: replyAt,
+        message: {
+          id: 'message_answer',
+          kind: 'conversation',
+          conversationId: 'conversation_1',
+          taskId: created.task.id,
+          role: 'assistant',
+          status: 'complete',
+          text: 'First answer',
+          attachmentIds: [],
+          createdAt: replyAt,
+          updatedAt: replyAt,
+        },
+      });
+      const supplementAt = dependencies.clock.now();
+      await commands.appendSupplement({
+        id: 'supplement_during_model',
+        kind: 'supplement',
         conversationId: 'conversation_1',
+        taskId: created.task.id,
         role: 'user',
         status: 'complete',
-        text: 'Answer this',
+        text: 'Add the missing detail.',
         attachmentIds: [],
-        createdAt: 1_000,
-        updatedAt: 1_000,
-      };
-      const commands = new TaskCommandService(
-        repository,
-        dependencies.clock,
-        dependencies.ids,
-        conversations,
-      );
-      const created = await commands.createSubmission({
-        conversationId: 'conversation_1',
-        tabId: 7,
-        goal: 'Answer this',
-        conversation,
-        createConversation: true,
-        message: userMessage,
+        createdAt: supplementAt,
+        updatedAt: supplementAt,
       });
-      let turn = 0;
-      const plan = vi.fn<(input: AgentPlanInput) => AsyncGenerator<AgentEvent>>((input) => {
-        turn += 1;
-        return (async function* () {
-          const existing = (await conversations.listMessages('conversation_1')).find(
-            ({ id }) => id === 'message_answer',
-          );
-          if (turn === 1) {
-            const replyAt = dependencies.clock.now();
-            await repository.appendTaskMessage({
-              eventId: dependencies.ids.create('event'),
-              at: replyAt,
-              message: {
-                id: 'message_answer',
-                kind: 'conversation',
-                conversationId: 'conversation_1',
-                taskId: created.task.id,
-                role: 'assistant',
-                status: boundary === 'completion' ? 'complete' : 'streaming',
-                text: 'First answer',
-                attachmentIds: [],
-                createdAt: replyAt,
-                updatedAt: replyAt,
-              },
-            });
-            const supplementAt = dependencies.clock.now();
-            await commands.appendSupplement({
-              id: 'supplement_during_model',
-              kind: 'supplement',
-              conversationId: 'conversation_1',
-              taskId: created.task.id,
-              role: 'user',
-              status: 'complete',
-              text: 'Add the missing detail.',
-              attachmentIds: [],
-              createdAt: supplementAt,
-              updatedAt: supplementAt,
-            });
-          } else {
-            expect(input.checkpoint.continuationItems.slice(-2)).toEqual([
-              { type: 'message_ref', messageId: 'message_answer' },
-              { type: 'message_ref', messageId: 'supplement_during_model' },
-            ]);
-            expect(existing).toMatchObject({
-              status: 'interrupted',
-              text: 'First answer',
-            });
-            if (existing === undefined) throw new Error('Assistant message fixture is missing.');
-            const at = dependencies.clock.now();
-            await repository.appendTaskMessage({
-              eventId: dependencies.ids.create('event'),
-              at,
-              message: {
-                ...existing,
-                id: 'message_continuation',
-                status: 'complete',
-                text: 'Continuation with the missing detail.',
-                createdAt: at,
-                updatedAt: at,
-              },
-            });
-          }
-          yield {
-            type: 'task.completed',
-            reason: 'model_response_completed',
-            messageId: turn === 1 ? 'message_answer' : 'message_continuation',
-          };
-        })();
-      });
-      const executor = new TaskExecutor({
-        repository,
-        conversations,
-        planner: { plan },
-        fixture: fixturePort(),
-        browser: browserPort(),
-        clock: dependencies.clock,
-        ids: dependencies.ids,
-      });
+      yield {
+        type: 'task.completed',
+        reason: 'model_response_completed',
+        messageId: 'message_answer',
+      } satisfies AgentEvent;
+    });
+    const executor = new TaskExecutor({
+      repository,
+      conversations,
+      planner: { plan },
+      fixture: fixturePort(),
+      browser: browserPort(),
+      clock: dependencies.clock,
+      ids: dependencies.ids,
+    });
 
-      const result = await executor.run(created.task.id, new AbortController().signal);
-      const assistantMessages = (await conversations.listMessages('conversation_1')).filter(
-        ({ role }) => role === 'assistant',
-      );
+    const result = await executor.run(created.task.id, new AbortController().signal);
+    const assistantMessages = (await conversations.listMessages('conversation_1')).filter(
+      ({ role }) => role === 'assistant',
+    );
 
-      expect(result.task.status).toBe('completed');
-      expect(result.events.map(({ type }) => type)).toEqual(
-        expect.arrayContaining([
-          'message.recorded',
-          'supplement.queued',
-          'supplement.applied',
-          'status.changed',
-        ]),
-      );
-      expect(plan).toHaveBeenCalledTimes(2);
-      expect(assistantMessages).toEqual([
-        expect.objectContaining({
-          id: 'message_answer',
-          status: 'interrupted',
-          text: 'First answer',
-        }),
-        expect.objectContaining({
-          id: 'message_continuation',
-          status: 'complete',
-          text: 'Continuation with the missing detail.',
-        }),
-      ]);
-      database.close();
-    },
-  );
+    expect(result.task.status).toBe('completed');
+    expect(result.events.map(({ type }) => type)).toEqual(
+      expect.arrayContaining([
+        'message.recorded',
+        'supplement.queued',
+        'supplement.forwarded',
+        'status.changed',
+      ]),
+    );
+    expect(plan).toHaveBeenCalledTimes(1);
+    expect(assistantMessages).toEqual([
+      expect.objectContaining({
+        id: 'message_answer',
+        status: 'complete',
+        text: 'First answer',
+      }),
+    ]);
+    if (!result.nextTask) throw new Error('Expected a queued follow-up.');
+    const { taskId, runId } = result.nextTask;
+    const [recoverable] = await repository.listRecoverable(dependencies.clock.now());
+    expect(recoverable).toMatchObject({
+      id: taskId,
+      latestRunId: runId,
+      status: 'queued',
+      ordinal: 2,
+    });
+    const followUp = await commands.getSnapshot(taskId);
+    const messages = await conversations.listTaskMessages(taskId);
+    expect(
+      followUp.events
+        .filter((event) => event.type === 'message.recorded')
+        .map((event) => messages.find((message) => message.id === event.messageId)),
+    ).toMatchObject([
+      { role: 'user', text: 'Add the missing detail.', attachmentIds: [] },
+      { role: 'user', text: '', attachmentIds: ['image_supplement'] },
+    ]);
+    database.close();
+  });
 
   it('fails safely when the model repeats an already completed call ID', async () => {
     const database = await openChatBrowserDatabase(createTestDatabaseName('duplicate-tool-call'));
@@ -3487,7 +3500,7 @@ describe('TaskExecutor', () => {
     const plan = () =>
       (async function* () {
         turn += 1;
-        yield browserCall(`call_browser_${String(turn)}`, 'browser_get_current_tab', {});
+        yield browserCall(`call_browser_${String(turn)}`, 'browser_list_tabs', {});
       })();
     let browserResult = 0;
     const browser = browserPort({
@@ -3575,12 +3588,12 @@ describe('TaskExecutor', () => {
     const plan = () =>
       (async function* () {
         if (mode === 'exhausted') {
-          yield browserCall('call_over_budget', 'browser_get_current_tab', {});
+          yield browserCall('call_over_budget', 'browser_list_tabs', {});
           return;
         }
         retryTurn += 1;
         if (retryTurn === 1) {
-          yield browserCall('call_after_retry', 'browser_get_current_tab', {});
+          yield browserCall('call_after_retry', 'browser_list_tabs', {});
           return;
         }
         yield {

@@ -55,6 +55,8 @@ export function MessageItem({
   const [faviconFailed, setFaviconFailed] = useState(false);
   const [confirmingContextClear, setConfirmingContextClear] = useState(false);
   const [clearingContext, setClearingContext] = useState(false);
+  const displayedAt =
+    message.role === 'assistant' ? (run?.startedAt ?? message.createdAt) : message.createdAt;
   const sourcePage = message.role === 'user' ? message.sourcePage : undefined;
   const cancelledRun = task?.status === 'cancelled' || run?.status === 'cancelled';
   const failedRun = task?.status === 'failed' || run?.status === 'failed';
@@ -66,26 +68,36 @@ export function MessageItem({
         : message.role === 'assistant' && message.status === 'interrupted' && cancelledRun
           ? t('cancelledResponse')
           : '';
-  // Turn completion can still be a tool-use acknowledgement. Only the owning run's
-  // completion replaces all process replies and supplement quotes, including on copy.
-  const finalOnly = message.role === 'assistant' && (run?.status ?? task?.status) === 'completed';
-  const answers = finalOnly ? [{ ...message, replySegment: undefined }] : (segments ?? [message]);
-  const quotedIds = new Set(
-    answers.flatMap(
-      (answer) => answer.replySegment?.supplements.map((supplement) => supplement.id) ?? [],
-    ),
-  );
+  const runStatus = run?.status ?? task?.status;
+  const finalOnly =
+    message.role === 'assistant' && (message.phase === 'final_answer' || runStatus === 'completed');
+  const generating =
+    message.role === 'assistant' &&
+    (runStatus === 'queued' ||
+      runStatus === 'planning' ||
+      (runStatus === undefined && message.status === 'streaming'));
+  const quotedIds = new Set<string>();
+  const answers = (finalOnly ? [message] : (segments ?? [message])).map((answer) => {
+    const supplements = (finalOnly ? [] : (answer.replySegment?.supplements ?? [])).filter(
+      ({ id }) => !quotedIds.has(id),
+    );
+    for (const { id } of supplements) quotedIds.add(id);
+    return { answer, supplements };
+  });
   const trailingSupplements =
     message.role === 'assistant' && !finalOnly
-      ? (task?.supplements.filter(
-          (s) =>
-            !quotedIds.has(s.id) && (s.runId === undefined || run === null || s.runId === run.id),
-        ) ?? [])
+      ? (
+          task?.liveSupplements ??
+          task?.supplements.filter(
+            (s) => s.runId === undefined || run === null || s.runId === run.id,
+          ) ??
+          []
+        ).filter(({ id }) => !quotedIds.has(id))
       : [];
   const copyText = answers
-    .map((answer) =>
+    .map(({ answer, supplements }) =>
       [
-        ...(answer.replySegment?.supplements ?? []).map((s) =>
+        ...supplements.map((s) =>
           s.text
             .split('\n')
             .map((line) => `> ${line}`)
@@ -99,9 +111,9 @@ export function MessageItem({
     .join('\n\n');
   const answerAttachmentIds = [
     ...new Set(
-      answers.flatMap((answer) => [
+      answers.flatMap(({ answer, supplements }) => [
         ...answer.attachmentIds,
-        ...(answer.replySegment?.supplements.flatMap((s) => s.attachmentIds) ?? []),
+        ...supplements.flatMap((s) => s.attachmentIds),
       ]),
     ),
   ];
@@ -148,11 +160,11 @@ export function MessageItem({
               <ExternalLink className="message-source-external" size={11} aria-hidden="true" />
             </button>
           )}
-          <time dateTime={new Date(message.createdAt).toISOString()}>
+          <time dateTime={new Date(displayedAt).toISOString()}>
             {new Intl.DateTimeFormat(undefined, {
               hour: '2-digit',
               minute: '2-digit',
-            }).format(message.createdAt)}
+            }).format(displayedAt)}
           </time>
         </header>
         {message.replyTo === undefined ? null : (
@@ -174,14 +186,9 @@ export function MessageItem({
             ) : null}
           </div>
         )}
-        {message.role === 'assistant' &&
-        (run?.status ?? task?.status) === 'planning' &&
-        task?.reasoningSummary ? (
-          <RestrictedMarkdown text={task.reasoningSummary} />
-        ) : null}
-        {answers.map((answer) => (
-          <div className="message-answer-segment" key={answer.replySegment?.id ?? 'original'}>
-            {answer.replySegment?.supplements.map((supplement) => (
+        {answers.map(({ answer, supplements }) => (
+          <div className="message-answer-segment" key={answer.id}>
+            {supplements.map((supplement) => (
               <blockquote className="message-supplement-quote" key={supplement.id}>
                 <p>{supplement.text}</p>
                 <MessageImages
@@ -212,7 +219,7 @@ export function MessageItem({
             />
           </blockquote>
         ))}
-        {message.status === 'streaming' ? (
+        {generating && task === null ? (
           <span className="streaming-label" role="status">
             <span className="typing-dots" aria-hidden="true">
               <i /> <i /> <i />

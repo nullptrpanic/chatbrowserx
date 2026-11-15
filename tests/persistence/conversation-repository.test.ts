@@ -222,7 +222,6 @@ describe('IndexedDbConversationRepository', () => {
     const attachments = new IndexedDbAttachmentRepository(database);
     const records = durableRecords('completed');
     const result: ToolResult = {
-      id: 'result_1',
       taskId: records.task.id,
       runId: records.run.id,
       callId: 'call_1',
@@ -264,7 +263,7 @@ describe('IndexedDbConversationRepository', () => {
       session,
     });
     await attachments.addReference('attachment_1', `message:${records.message.id}`);
-    await attachments.addReference('attachment_2', result.id);
+    await attachments.addReference('attachment_2', [result.taskId, result.callId]);
 
     await conversations.clearConversation(conversation.id);
 

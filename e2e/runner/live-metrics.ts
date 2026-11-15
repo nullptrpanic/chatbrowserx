@@ -1,6 +1,7 @@
 import type { LiveExecutionMetrics, LiveProviderTrace, LiveToolResult } from './live-types';
 import { jsonRecord } from './json-contract';
 import { readTraversalSegments } from './live-scroll-metrics';
+import { browserHistoryCall, isBrowserTool } from '../../src/tools/browser/public-contract';
 
 interface LiveExecutionMetricInput {
   readonly modelTurns: number;
@@ -72,7 +73,11 @@ export function deriveLiveExecutionMetrics(input: LiveExecutionMetricInput): Liv
       fingerprintCounts.set(fingerprint, (fingerprintCounts.get(fingerprint) ?? 0) + 1);
     }
 
-    const argumentsValue = parseRecord(result.argumentsJson);
+    const browser = browserHistoryCall({
+      name: result.toolName,
+      argumentsJson: result.argumentsJson,
+    });
+    const argumentsValue = parseRecord(browser.argumentsJson);
     const output = parseRecord(result.output);
     const data = jsonRecord(output?.data);
     const auditCharacters = result.auditOutputCharacters ?? result.output.length;
@@ -95,14 +100,14 @@ export function deriveLiveExecutionMetrics(input: LiveExecutionMetricInput): Liv
       enabledToolsets.add(output.toolset);
     }
     if (output?.code === 'NO_PROGRESS') noProgressBlocks += 1;
-    if (result.toolName === 'history_read') exactReads += 1;
-    if (result.toolName === 'browser_inspect' && argumentsValue?.mode === 'interactive') {
+    if (result.toolName === 'history_read' || result.toolName === 'history.read') exactReads += 1;
+    if (browser.name === 'browser_inspect' && argumentsValue?.mode === 'interactive') {
       fullInteractiveObservations += 1;
     }
-    if (result.toolName === 'browser_scroll') {
+    if (browser.name === 'browser_scroll') {
       traversalSegments += readTraversalSegments(data) ?? 0;
     }
-    if (result.toolName === 'browser_inspect' && argumentsValue?.mode === 'screenshot') {
+    if (browser.name === 'browser_inspect' && argumentsValue?.mode === 'screenshot') {
       screenshotFallbacks += 1;
       if (typeof data?.fallbackReason === 'string') {
         screenshotFallbackReasons.set(
@@ -114,7 +119,7 @@ export function deriveLiveExecutionMetrics(input: LiveExecutionMetricInput): Liv
     if (output?.code === 'STALE_REF') staleRefs += 1;
     if (output?.code === 'ACTION_STATE_MISMATCH') stateMismatches += 1;
     if (
-      result.toolName.startsWith('browser_') &&
+      isBrowserTool(result.toolName) &&
       (data?.verified === true || data?.reconciliation === 'verified')
     ) {
       verifiedMutations += 1;

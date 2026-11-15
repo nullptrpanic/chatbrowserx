@@ -1,12 +1,5 @@
 import { browserService } from './service';
-import {
-  SAFE_TO_REPLAY_BROWSER_TOOLS,
-  browserOperationForName,
-  type BrowserToolInput,
-  type BrowserToolName,
-  type BrowserToolSpec,
-  type ParsedBrowserToolCall,
-} from './contract';
+import { SAFE_TO_REPLAY_BROWSER_TOOLS } from './contract';
 import type { ModelToolDefinition } from '../model-tool';
 import type { ToolCompletionReview, ToolDeclaration, ToolRuntimeContext } from '../types';
 import {
@@ -16,10 +9,15 @@ import {
   type BrowserToolState,
 } from './availability';
 import { browserCheckpointAfterExecution } from './lifecycle';
+import { browserEngineCall, type BrowserCommand, type BrowserPublicTool } from './public-contract';
 
 const contractCache = new WeakMap<
   object,
-  { toolResults: unknown; contract: BrowserToolContract }
+  {
+    toolResults: unknown;
+    definitions: ReadonlyMap<string, ModelToolDefinition>;
+    choice: BrowserToolContract['toolChoice'];
+  }
 >();
 
 function browserState(context: ToolRuntimeContext): BrowserToolState | null {
@@ -27,62 +25,48 @@ function browserState(context: ToolRuntimeContext): BrowserToolState | null {
   return { checkpoint: context.checkpoint, toolResults: context.toolResults };
 }
 
-function browserContract(context: ToolRuntimeContext): BrowserToolContract | null {
+function browserContract(context: ToolRuntimeContext) {
   const state = browserState(context);
   if (state === null) return null;
   const cached = contractCache.get(state.checkpoint);
-  if (cached?.toolResults === state.toolResults) return cached.contract;
+  if (cached?.toolResults === state.toolResults) return cached;
   const contract = browserToolContractForCheckpoint(state);
-  contractCache.set(state.checkpoint, {
+  const next = {
     toolResults: state.toolResults,
-    contract,
-  });
-  return contract;
-}
-
-function browserDefinition(
-  context: ToolRuntimeContext,
-  name: BrowserToolName,
-): ModelToolDefinition | null {
-  const definitions = browserContract(context)?.tools;
-  if (definitions === undefined) return null;
-  return (
-    definitions.find(
-      (definition): definition is ModelToolDefinition =>
-        typeof definition === 'object' &&
-        definition !== null &&
-        'name' in definition &&
-        definition.name === name,
-    ) ?? null
-  );
+    definitions: new Map(contract.tools.map((definition) => [definition.name, definition])),
+    choice: contract.toolChoice,
+  };
+  contractCache.set(state.checkpoint, next);
+  return next;
 }
 
 /** Builds one independently registered browser call over the shared browser state machine. */
 export function browserTool(
-  spec: BrowserToolSpec,
+  spec: BrowserPublicTool,
   order: number,
-): ToolDeclaration<BrowserToolInput> {
-  const { name } = spec;
+): ToolDeclaration<BrowserCommand> {
   return {
-    name,
+    name: spec.definition.name,
     definition: spec.definition,
     schema: spec.schema,
+    recordedSchemas: spec.recordedSchemas,
     order,
     policy: {
       budgetGroup: 'browser',
       maxCalls: 256,
-      mutation: !SAFE_TO_REPLAY_BROWSER_TOOLS.has(name),
       errorSource: 'browser',
       ambiguousMessage:
         'The previous browser action may already have run. Inspect the current page before choosing the next action.',
     },
+    mutates: (call) => !SAFE_TO_REPLAY_BROWSER_TOOLS.has(call.arguments.name),
     model(context) {
-      const definition = browserDefinition(context, name);
-      if (definition === null) return null;
-      const choice = browserContract(context)?.toolChoice;
+      const contract = browserContract(context);
+      const definition = contract && spec.model(contract.definitions);
+      if (!definition) return null;
+      const choice = contract.choice;
       return {
         definition,
-        ...(typeof choice === 'object' && choice.type === 'function' && choice.name === name
+        ...(typeof choice === 'object' && spec.recordedSchemas.has(choice.name)
           ? { force: true }
           : {}),
       };
@@ -95,11 +79,11 @@ export function browserTool(
             if (!continuation) return null;
             return {
               type: 'continue',
-              toolName: 'browser_scroll',
+              toolName: 'browser.scroll',
               feedback: JSON.stringify({
                 completion: 'continue',
                 reason: 'unfinished_scroll',
-                next: { ...continuation, action: `browser_${continuation.next}` },
+                next: { ...continuation, action: `browser.${continuation.next}` },
               }),
             };
           },
@@ -108,26 +92,19 @@ export function browserTool(
     callsUsed(context) {
       return context.checkpoint?.browserToolCallsInAttempt ?? 0;
     },
-    createCall: (call) => ({
-      ...call,
-      operation: browserOperationForName(name),
-    }),
     async execute(call, context, services, signal) {
       const currentTabId = context.currentTabId ?? null;
-      const result = await services
-        .get(browserService)
-        .execute(call as ParsedBrowserToolCall, signal, {
-          currentTabId,
-          ...(context.sessionOwnerId === undefined
-            ? {}
-            : { sessionOwnerId: context.sessionOwnerId }),
-          ...(context.availableAssetIds === undefined
-            ? {}
-            : { availableAssetIds: context.availableAssetIds }),
-        });
+      const parsed = browserEngineCall(call);
+      const result = await services.get(browserService).execute(parsed, signal, {
+        currentTabId,
+        ...(context.sessionOwnerId === undefined ? {} : { sessionOwnerId: context.sessionOwnerId }),
+        ...(context.availableAssetIds === undefined
+          ? {}
+          : { availableAssetIds: context.availableAssetIds }),
+      });
       return {
         ...result,
-        checkpoint: browserCheckpointAfterExecution(call, context, result.output),
+        checkpoint: browserCheckpointAfterExecution(parsed, context, result.output),
       };
     },
   };

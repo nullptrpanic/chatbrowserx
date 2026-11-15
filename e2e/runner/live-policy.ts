@@ -5,6 +5,25 @@ import type {
   LiveScenario,
 } from './live-types';
 import { readTraversalSegments } from './live-scroll-metrics';
+import { BROWSER_PUBLIC_TOOLS, browserHistoryCall } from '../../src/tools/browser/public-contract';
+
+const browserPublicNames = new Map(
+  BROWSER_PUBLIC_TOOLS.flatMap(({ definition, recordedSchemas }) =>
+    [...recordedSchemas.keys()].map((name) => [name, definition.name] as const),
+  ),
+);
+
+function toolEvidenceNames(name: string, argumentsJson: string) {
+  const browser = browserHistoryCall({ name, argumentsJson });
+  const grouped = browserPublicNames.get(browser.name);
+  const names = new Set([name, browser.name]);
+  if (grouped) names.add(grouped);
+  if (/^(history|sandbox|task|attachment)[._]/u.test(name)) {
+    names.add(name.replace('.', '_'));
+    names.add(name.replace('_', '.'));
+  }
+  return { browser, names };
+}
 
 const SECRET_KEY = /authorization|cookie|password|secret|access[\s_-]?token|api[\s_-]?key/i;
 const BEARER_TOKEN = /Bearer\s+[A-Za-z0-9._~+/=-]+/gi;
@@ -269,14 +288,18 @@ export function sanitizeToolPayload(value: string, maxCharacters: number): strin
 
 /** Evaluates one live run without consulting mutable page state or provider payloads. */
 export function evaluateLiveRun(scenario: LiveScenario, input: LiveRunInput): LiveAcceptanceResult {
-  const toolNames = input.toolResults.map(({ toolName }) => toolName);
-  const parsedCalls = input.toolResults.map((result) => ({
-    result,
-    arguments_: readArguments(result.argumentsJson),
-    output: readOutput(result.output),
-  }));
-  const missingTools = scenario.requiredTools.filter((name) => !toolNames.includes(name));
-  const usedForbiddenTools = scenario.forbiddenTools.filter((name) => toolNames.includes(name));
+  const parsedCalls = input.toolResults.map((result) => {
+    const { browser, names } = toolEvidenceNames(result.toolName, result.argumentsJson);
+    return {
+      names,
+      result: { ...result, toolName: browser.name },
+      arguments_: readArguments(browser.argumentsJson),
+      output: readOutput(result.output),
+    };
+  });
+  const countTool = (name: string) => parsedCalls.filter(({ names }) => names.has(name)).length;
+  const missingTools = scenario.requiredTools.filter((name) => countTool(name) === 0);
+  const usedForbiddenTools = scenario.forbiddenTools.filter((name) => countTool(name) > 0);
   const screenshotCalls = parsedCalls.filter(
     ({ result, arguments_ }) =>
       result.toolName === 'browser_inspect' && arguments_?.mode === 'screenshot',
@@ -421,7 +444,7 @@ export function evaluateLiveRun(scenario: LiveScenario, input: LiveRunInput): Li
   );
   const expectedToolCounts = Object.entries(scenario.expectedToolCounts ?? {});
   const mismatchedToolCounts = expectedToolCounts.filter(
-    ([name, expected]) => toolNames.filter((candidate) => candidate === name).length !== expected,
+    ([name, expected]) => countTool(name) !== expected,
   );
   const scrollCalls = parsedCalls
     .map((call, index) => ({ ...call, index }))
@@ -502,7 +525,7 @@ export function evaluateLiveRun(scenario: LiveScenario, input: LiveRunInput): Li
     bottomBoundaryEvidence.some((bottom) => top.index <= bottom.index),
   );
   const unverifiedRequiredTools = (scenario.requiredVerifiedTools ?? []).filter((name) => {
-    const calls = parsedCalls.filter(({ result }) => result.toolName === name);
+    const calls = parsedCalls.filter(({ names }) => names.has(name));
     return (
       calls.length === 0 ||
       calls.some(({ output }) => {
@@ -783,7 +806,7 @@ export function evaluateLiveRun(scenario: LiveScenario, input: LiveRunInput): Li
         : `Mismatched: ${mismatchedToolCounts
             .map(
               ([name, expected]) =>
-                `${name}=${String(toolNames.filter((candidate) => candidate === name).length)} (expected ${String(expected)})`,
+                `${name}=${String(countTool(name))} (expected ${String(expected)})`,
             )
             .join(', ')}.`,
     ),

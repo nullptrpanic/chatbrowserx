@@ -5,6 +5,7 @@ import type {
   PanelMessageSourcePage,
   PanelSnapshot,
   PanelSettingsSnapshot,
+  PanelTask,
 } from '../../shared/protocol/panel-types';
 import { PROTOCOL_VERSION, type ExtensionMessage } from '../../shared/protocol/message-types';
 import type { SavePanelSettingsInput } from '../../tasks/panel-service';
@@ -43,6 +44,20 @@ type PanelListener = () => void;
 
 function snapshotVersion(snapshot: PanelSnapshot | null): number {
   return snapshot?.stateVersion ?? -1;
+}
+
+function mergeTaskDetails(summary: PanelTask, details: PanelTask): PanelTask {
+  // A detail-only read can see completion before the matching final message is in the panel.
+  const latest =
+    details.sequence > summary.sequence && details.status !== 'completed' ? details : summary;
+  return {
+    ...latest,
+    liveSupplements: summary.liveSupplements,
+    detailLevel: details.sequence >= summary.sequence ? 'full' : 'summary',
+    events: details.events,
+    toolResults: details.toolResults,
+    supplements: details.supplements,
+  };
 }
 
 function readStateVersion(value: unknown): number | null {
@@ -357,8 +372,6 @@ export class PanelClient {
       payload: { taskId, text, attachmentIds },
     });
     await this.refresh();
-    // The input was accepted; a detail-read failure must not invite duplicate submission.
-    await this.loadTaskDetails(taskId).catch(() => undefined);
   }
 
   /** Toggles only the currently visible page, without touching the chat draft or task state. */
@@ -675,13 +688,14 @@ export class PanelClient {
       return;
     }
     this.#detailedTasks.set(taskId, detailedTask);
-    const tasks = snapshot.tasks.map((task) => (task.id === taskId ? detailedTask : task));
+    const taskWithDetails = mergeTaskDetails(current, detailedTask);
+    const tasks = snapshot.tasks.map((task) => (task.id === taskId ? taskWithDetails : task));
     this.#setState({
       ...this.#state,
       snapshot: {
         ...snapshot,
         tasks,
-        task: snapshot.task?.id === taskId ? detailedTask : snapshot.task,
+        task: snapshot.task?.id === taskId ? taskWithDetails : snapshot.task,
       },
     });
   }
@@ -695,18 +709,12 @@ export class PanelClient {
     const tasks = snapshot.tasks.map((task) => {
       const detailed = this.#detailedTasks.get(task.id);
       if (detailed === undefined) return task;
-      if (detailed.sequence > task.sequence) return detailed;
       if (task.detailLevel === 'full') {
+        if (detailed.sequence > task.sequence) return mergeTaskDetails(task, detailed);
         this.#detailedTasks.set(task.id, task);
         return task;
       }
-      return {
-        ...task,
-        detailLevel: detailed.sequence === task.sequence ? ('full' as const) : ('summary' as const),
-        events: detailed.events,
-        toolResults: detailed.toolResults,
-        supplements: detailed.supplements,
-      };
+      return mergeTaskDetails(task, detailed);
     });
     const task =
       snapshot.task === null

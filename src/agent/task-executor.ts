@@ -17,10 +17,15 @@ import { transitionTask, type TaskTransitionType } from '../tasks/task-transitio
 import type { Task, TaskEvent, TaskModelTurnMetrics, TaskRun } from '../tasks/task-types';
 import type { MaterializedToolResult, ToolResult } from '../tasks/tool-result-types';
 import { pendingTaskSupplementIds, selectPendingTaskSupplements } from '../tasks/task-supplements';
-import type { AgentEvent, AgentModelTurn, AgentRuntimePort } from './execution-types';
+import type {
+  AgentEvent,
+  AgentModelTurn,
+  AgentRuntimePort,
+  AssistantCommentary,
+} from './execution-types';
 import type { ToolExecutionPolicy, ToolRuntimePort, ValidatedToolCall } from '../tools/types';
 import type { AgentSession } from '../tasks/agent-session-types';
-import { sessionToolResult } from './context/agent-session';
+import { retiredToolOutput, sessionToolResult } from './context/agent-session';
 import { isModelInputPreparationError } from './model/model-input-preparation-error';
 
 export type TaskExecutorErrorCode =
@@ -60,6 +65,7 @@ interface BoundaryInput {
   readonly continuationItems?: readonly ContinuationItem[];
   readonly pendingToolCall?: PendingToolCall | null;
   readonly reasoningSummary?: string;
+  readonly commentary?: readonly AssistantCommentary[];
   readonly modelTurn?: TaskModelTurnMetrics;
   readonly browserToolCallsInAttempt?: number;
   readonly browserTargetTabId?: number | null;
@@ -183,10 +189,15 @@ function completionReviewRetryCount(
   toolName: string,
 ): number {
   let count = 0;
+  const previousName = toolName.replace('.', '_');
   for (const event of [...events].reverse()) {
     if (event.runId !== runId) break;
-    if (event.type === 'tool.call' && event.name !== toolName) break;
-    if (event.type === 'status.changed' && event.reason === `completion_review:${toolName}`)
+    if (event.type === 'tool.call' && event.name !== toolName && event.name !== previousName) break;
+    if (
+      event.type === 'status.changed' &&
+      (event.reason === `completion_review:${toolName}` ||
+        event.reason === `completion_review:${previousName}`)
+    )
       count += 1;
   }
   return count;
@@ -297,12 +308,12 @@ export class TaskExecutor {
       const callId = result.item.id;
       if (!callId) throw new Error('Hosted tool result has no identity.');
       if (snapshot.toolResults.some((item) => item.callId === callId)) return snapshot;
-      return this.#saveBoundary(snapshot, ownerId, signal, {
+      return this.#saveProgress(snapshot, ownerId, signal, {
         type: 'planning.retrying',
         reason: 'hosted_tool_recorded',
-        session: result.session,
+        ...(result.session ? { session: result.session } : {}),
+        ...(result.commentary?.length ? { commentary: result.commentary } : {}),
         hostedTool: {
-          id: this.#createId('toolResult'),
           taskId: snapshot.task.id,
           runId: snapshot.run.id,
           callId,
@@ -315,8 +326,14 @@ export class TaskExecutor {
         },
       });
     }
+    if (result.type === 'assistant.commentary')
+      return this.#saveProgress(snapshot, ownerId, signal, {
+        type: 'assistant.commentary-recorded',
+        reason: 'assistant_commentary_recorded',
+        commentary: [result.item],
+      });
     if (result.type === 'reasoning.summary')
-      return this.#saveBoundary(snapshot, ownerId, signal, {
+      return this.#saveProgress(snapshot, ownerId, signal, {
         type: 'reasoning.summary-recorded',
         reason: 'model_reasoning_summary_recorded',
         reasoningSummary: result.text,
@@ -341,6 +358,7 @@ export class TaskExecutor {
     const metadata = {
       ...(result.session ? { session: result.session } : {}),
       ...(result.modelTurn ? { modelTurn: taskModelTurnMetrics(result.modelTurn) } : {}),
+      ...(result.commentary?.length ? { commentary: result.commentary } : {}),
     };
     if (result.type === 'task.completed') {
       const review = await this.#dependencies.tools.reviewCompletion?.({ ...snapshot });
@@ -363,37 +381,32 @@ export class TaskExecutor {
             ...snapshot.checkpoint.continuationItems,
             { type: 'message_ref' as const, messageId: result.messageId },
           ];
-      try {
-        return await this.#saveBoundary(snapshot, ownerId, signal, {
-          type: review ? 'task.paused' : 'task.completed',
-          reason: review ? 'completion_review_blocked' : result.reason,
-          ...(review
-            ? {
-                error: {
-                  code: 'TaskInputError' as const,
-                  retryable: true,
-                  recoveryAction: 'resume_task',
-                  userMessage:
-                    review.type === 'blocked'
-                      ? review.reason
-                      : 'The task still has unresolved progress. Review the remaining work before resuming.',
-                  evidenceRef: null,
-                },
-              }
-            : {}),
+      if (review) {
+        return this.#saveProgress(snapshot, ownerId, signal, {
+          type: 'task.paused',
+          reason: 'completion_review_blocked',
+          error: {
+            code: 'TaskInputError',
+            retryable: true,
+            recoveryAction: 'resume_task',
+            userMessage:
+              review.type === 'blocked'
+                ? review.reason
+                : 'The task still has unresolved progress. Review the remaining work before resuming.',
+            evidenceRef: null,
+          },
           continuationItems,
           pendingToolCall: null,
           ...metadata,
         });
-      } catch (error) {
-        if (!(error instanceof TaskRepositoryConflictError)) throw error;
-        await this.#interruptReply(snapshot.task, result.messageId);
-        return this.#saveBoundary(await this.#refreshCurrentAttempt(snapshot), ownerId, signal, {
-          type: 'planning.retrying',
-          reason: 'completion_deferred_for_supplement',
-          ...metadata,
-        });
       }
+      return this.#saveProgress(snapshot, ownerId, signal, {
+        type: 'task.completed',
+        reason: result.reason,
+        continuationItems,
+        pendingToolCall: null,
+        ...metadata,
+      });
     }
     const call = result.call;
     if (snapshot.toolResults.some((completed) => completed.callId === call.callId))
@@ -402,7 +415,7 @@ export class TaskExecutor {
         reason: 'duplicate_tool_call_id',
         error: invalidPlannerResultError(),
       });
-    const policy = this.#dependencies.tools.policyFor(call.name);
+    const policy = this.#dependencies.tools.policyFor(call.name, call);
     if (!policy)
       return this.#saveBoundary(snapshot, ownerId, signal, {
         type: 'task.failed',
@@ -454,6 +467,10 @@ export class TaskExecutor {
     if (this.#dependencies.tools.policyFor(pending.name) !== null) {
       return this.#executePendingRegisteredTool(snapshot, ownerId, signal, pending);
     }
+    const retiredOutput = retiredToolOutput(pending.name);
+    if (retiredOutput !== undefined) {
+      return this.#recordToolResult(snapshot, ownerId, signal, pending, retiredOutput);
+    }
     return this.#handleFailure(
       snapshot,
       ownerId,
@@ -471,8 +488,8 @@ export class TaskExecutor {
     signal: AbortSignal,
     pending: PendingToolCall,
   ): Promise<ActiveTaskSnapshot> {
-    const policy = this.#dependencies.tools.policyFor(pending.name);
-    if (policy === null) {
+    const defaultPolicy = this.#dependencies.tools.policyFor(pending.name);
+    if (defaultPolicy === null) {
       return this.#handleFailure(
         snapshot,
         ownerId,
@@ -483,8 +500,6 @@ export class TaskExecutor {
         'model',
       );
     }
-    const source = policy.errorSource ?? 'model';
-    const resultId = this.#createId('toolResult');
     let call;
     try {
       call = this.#dependencies.tools.parseRecorded(pending);
@@ -496,16 +511,16 @@ export class TaskExecutor {
         providerErrorFromCode('INVALID_RESPONSE', {
           invalidResponseStage: 'tool_call',
         }),
-        source,
+        defaultPolicy.errorSource ?? 'model',
       );
     }
+    const policy = this.#dependencies.tools.policyFor(pending.name, call) ?? defaultPolicy;
     const executionContext = {
       task: snapshot.task,
       checkpoint: snapshot.checkpoint,
       toolResults: snapshot.toolResults,
       events: snapshot.events,
       executionState: pending.executionState,
-      resultId,
       currentTabId: snapshot.checkpoint.browserTargetTabId,
       sessionOwnerId: ownerId,
       availableAssetIds: [
@@ -516,14 +531,7 @@ export class TaskExecutor {
     try {
       const preflight = await this.#dependencies.tools.preflight(call, executionContext, signal);
       if (preflight !== null) {
-        return this.#recordRegisteredToolResult(
-          snapshot,
-          ownerId,
-          signal,
-          pending,
-          preflight,
-          resultId,
-        );
+        return this.#recordRegisteredToolResult(snapshot, ownerId, signal, pending, preflight);
       }
     } catch (error) {
       return this.#handleRegisteredToolFailure(
@@ -579,7 +587,6 @@ export class TaskExecutor {
             signal,
             pending,
             recovery.result,
-            resultId,
           );
         }
         if (recovery.status === 'running') {
@@ -615,7 +622,7 @@ export class TaskExecutor {
     }
     try {
       const result = await this.#dependencies.tools.execute(call, executionContext, signal);
-      return this.#recordRegisteredToolResult(snapshot, ownerId, signal, pending, result, resultId);
+      return this.#recordRegisteredToolResult(snapshot, ownerId, signal, pending, result);
     } catch (error) {
       return this.#handleRegisteredToolFailure(
         snapshot,
@@ -636,7 +643,6 @@ export class TaskExecutor {
     signal: AbortSignal,
     pending: PendingToolCall,
     result: Awaited<ReturnType<ToolRuntimePort['execute']>>,
-    resultId: string,
   ): Promise<ActiveTaskSnapshot> {
     if (result.contextCompacted === true) {
       await this.#dependencies.tools.contextCompacted();
@@ -652,7 +658,6 @@ export class TaskExecutor {
       result.modelOutput,
       result.checkpoint,
       result.continuationItems,
-      resultId,
     );
   }
 
@@ -753,7 +758,6 @@ export class TaskExecutor {
     modelOutput: string | undefined = undefined,
     checkpointEffect: Awaited<ReturnType<ToolRuntimePort['execute']>>['checkpoint'] = undefined,
     replacementContinuationItems: readonly ContinuationItem[] | undefined = undefined,
-    requestedResultId: string | undefined = undefined,
   ): Promise<ActiveTaskSnapshot> {
     const durableAttachmentIds = [...new Set(attachmentIds)];
     const continuationAttachmentIds = [...new Set(modelAttachmentIds ?? durableAttachmentIds)];
@@ -767,9 +771,7 @@ export class TaskExecutor {
     ) {
       throw new Error('Browser tool attachment references are invalid.');
     }
-    const resultId = requestedResultId ?? this.#createId('toolResult');
     const completedResult: MaterializedToolResult = {
-      id: resultId,
       taskId: snapshot.task.id,
       runId: snapshot.run.id,
       callId: pending.callId,
@@ -803,7 +805,6 @@ export class TaskExecutor {
         {
           type: 'function_call_output_ref',
           callId: pending.callId,
-          resultId: completedResult.id,
           attachmentIds: continuationAttachmentIds,
         },
       ],
@@ -1000,6 +1001,37 @@ export class TaskExecutor {
     };
   }
 
+  /** A supplement can advance the event sequence while a streamed item is being recorded. */
+  async #saveProgress(
+    snapshot: ActiveTaskSnapshot,
+    ownerId: string,
+    signal: AbortSignal,
+    input: BoundaryInput & { readonly type: 'task.completed' },
+  ): Promise<TaskSnapshot>;
+  async #saveProgress(
+    snapshot: ActiveTaskSnapshot,
+    ownerId: string,
+    signal: AbortSignal,
+    input: BoundaryInput,
+  ): Promise<ActiveTaskSnapshot>;
+  async #saveProgress(
+    snapshot: ActiveTaskSnapshot,
+    ownerId: string,
+    signal: AbortSignal,
+    input: BoundaryInput,
+  ): Promise<TaskSnapshot> {
+    for (;;) {
+      try {
+        return await this.#saveBoundary(snapshot, ownerId, signal, input);
+      } catch (error) {
+        if (!(error instanceof TaskRepositoryConflictError) || error.code !== 'STALE_BOUNDARY')
+          throw error;
+        snapshot = await this.#refreshCurrentAttempt(snapshot);
+        if (!runnableStatuses.has(snapshot.task.status)) return snapshot;
+      }
+    }
+  }
+
   async #saveBoundary(
     snapshot: ActiveTaskSnapshot,
     ownerId: string,
@@ -1043,10 +1075,9 @@ export class TaskExecutor {
     const nextToolResults = input.hostedTool
       ? [...current.toolResults, input.hostedTool]
       : (input.toolResults ?? current.toolResults);
-    const previousResultIds = new Set(current.toolResults.map((result) => result.id));
-    const newResults = nextToolResults.filter((result) => !previousResultIds.has(result.id));
+    const completedCallIds = new Set(current.toolResults.map((result) => result.callId));
+    const newResults = nextToolResults.filter((result) => !completedCallIds.has(result.callId));
     const canonicalResults: ToolResult[] = newResults.map((result) => ({
-      id: result.id,
       taskId: result.taskId,
       runId: result.runId,
       callId: result.callId,
@@ -1066,7 +1097,11 @@ export class TaskExecutor {
       sequence: (sequence += 1),
       at: now,
     });
-    const events: TaskEvent[] = [];
+    const events: TaskEvent[] = (input.commentary ?? []).map((item) =>
+      'text' in item
+        ? { ...eventBase(), type: 'assistant.commentary', ...item }
+        : { ...eventBase(), type: 'assistant.commentary-linked', ...item },
+    );
     if (input.hostedTool) {
       events.push({
         ...eventBase(),
@@ -1079,7 +1114,6 @@ export class TaskExecutor {
         ...eventBase(),
         type: 'tool.result',
         callId: input.hostedTool.callId,
-        resultId: input.hostedTool.id,
       });
     }
     if (input.modelTurn !== undefined) {
@@ -1129,7 +1163,6 @@ export class TaskExecutor {
         ...eventBase(),
         type: 'tool.result',
         callId: result.callId,
-        resultId: result.id,
       });
     } else if (input.type === 'task.supplements-applied') {
       for (const messageId of input.supplementIds ?? []) {
@@ -1142,7 +1175,7 @@ export class TaskExecutor {
         releasedTextCharacters: 0,
         releasedImages: 0,
       });
-    } else {
+    } else if (input.type !== 'assistant.commentary-recorded') {
       events.push({
         ...eventBase(),
         type: 'status.changed',
@@ -1184,7 +1217,7 @@ export class TaskExecutor {
       ...transitioned.run,
       checkpointId: completed ? null : checkpoint.id,
     };
-    await this.#dependencies.repository.saveTransition({
+    const saved = await this.#dependencies.repository.saveTransition({
       task,
       run,
       events,
@@ -1193,16 +1226,18 @@ export class TaskExecutor {
       ...(completed
         ? {
             deleteCheckpoint: true,
+            followUpFactory: { ids: this.#dependencies.ids, clock: this.#dependencies.clock },
           }
         : {}),
       ...(canonicalResults.length === 0 ? {} : { toolResults: canonicalResults }),
     });
     return {
-      task,
+      task: saved ? { ...task, lastEventSequence: sequence + saved.sourceEvents.length } : task,
       run,
       checkpoint: completed ? null : checkpoint,
-      events: [...current.events, ...events],
+      events: [...current.events, ...events, ...(saved?.sourceEvents ?? [])],
       toolResults: nextToolResults,
+      ...(saved ? { nextTask: saved.nextTask } : {}),
     };
   }
 

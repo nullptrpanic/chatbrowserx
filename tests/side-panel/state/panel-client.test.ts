@@ -79,7 +79,7 @@ afterEach(() => {
 });
 
 describe('PanelClient', () => {
-  it('keeps old supplements visible during submission and adds pending details before application', async () => {
+  it('shows a new supplement from the snapshot while retaining loaded execution details', async () => {
     let sequence = 1;
     const supplements = [
       {
@@ -104,15 +104,24 @@ describe('PanelClient', () => {
           detailIndex: 2,
         });
       }
+      const current = snapshot(sequence);
+      const currentTask = current.tasks[0];
+      if (!currentTask) throw new Error('Task fixture is missing.');
+      const liveTask = {
+        ...currentTask,
+        liveSupplements: supplements.flatMap(({ id, text, attachmentIds, applicationState }) =>
+          applicationState === 'pending' ? [{ id, text, attachmentIds }] : [],
+        ),
+      };
       return {
         version: 1,
         requestId: message.requestId,
         ok: true,
         data:
           message.type === 'panel.getSnapshot'
-            ? snapshot(sequence)
+            ? { ...current, tasks: [liveTask], task: liveTask }
             : message.type === 'panel.getTaskDetails'
-              ? { ...snapshot(sequence).task, detailLevel: 'full', supplements: [...supplements] }
+              ? { ...currentTask, detailLevel: 'full', supplements: [...supplements] }
               : { accepted: true, id: 'supplement_b' },
       };
     };
@@ -126,6 +135,13 @@ describe('PanelClient', () => {
       await client.supplement('Second detail', []);
       expect(observed.length).toBeGreaterThan(0);
       expect(observed.every((ids) => ids.includes('supplement_a'))).toBe(true);
+      expect(client.getSnapshot().snapshot?.task?.liveSupplements).toMatchObject([
+        { id: 'supplement_b' },
+      ]);
+      await client.loadTaskDetails('task_1');
+      expect(client.getSnapshot().snapshot?.task?.liveSupplements).toMatchObject([
+        { id: 'supplement_b' },
+      ]);
       expect(client.getSnapshot().snapshot?.task?.supplements).toMatchObject([
         { id: 'supplement_a', applicationState: 'applied' },
         { id: 'supplement_b', applicationState: 'pending' },
@@ -715,7 +731,6 @@ describe('PanelClient', () => {
         toolName: 'browser_inspect',
         argumentsJson: '{}',
         output: `output_${index}`,
-        resultId: `result_${index}`,
         detailIndex: 1,
         attachmentIds: [],
       })),
@@ -779,7 +794,6 @@ describe('PanelClient', () => {
           toolName: 'browser_inspect',
           argumentsJson: '{"tabId":7}',
           output: '{"ok":true}',
-          resultId: 'result_1',
           detailIndex: 1,
           attachmentIds: [],
         },
@@ -841,7 +855,6 @@ describe('PanelClient', () => {
           toolName: 'browser_click',
           argumentsJson: '{"tabId":7,"ref":"e2"}',
           output: '{"ok":true}',
-          resultId: 'result_2',
           detailIndex: 1,
           attachmentIds: [],
         },
@@ -884,7 +897,6 @@ describe('PanelClient', () => {
               toolName: 'browser_inspect',
               argumentsJson: '{}',
               output: '{"ok":true}',
-              resultId: `result_${String(index + 1)}`,
               detailIndex: 1,
               attachmentIds: [],
             })),
@@ -1065,9 +1077,7 @@ describe('PanelClient', () => {
             ? snapshot()
             : message.type === 'chat.supplement'
               ? { accepted: true, id: 'supplement_1' }
-              : message.type === 'panel.getTaskDetails'
-                ? { ...snapshot().task, detailLevel: 'full' }
-                : {},
+              : {},
       };
     });
     const client = new PanelClient(
@@ -1090,30 +1100,8 @@ describe('PanelClient', () => {
         },
       }),
     );
-    expect(sentTypes).toEqual(['chat.supplement', 'panel.getSnapshot', 'panel.getTaskDetails']);
+    expect(sentTypes).toEqual(['chat.supplement', 'panel.getSnapshot']);
     client.dispose();
-  });
-
-  it('does not reject an accepted supplement when fetching its details fails', async () => {
-    const send = vi.fn<RuntimePort['send']>(async (message) => {
-      if (message.type === 'panel.getTaskDetails') throw new Error('Temporary detail failure');
-      return {
-        version: 1,
-        requestId: message.requestId,
-        ok: true,
-        data: message.type === 'panel.getSnapshot' ? snapshot() : { accepted: true },
-      };
-    });
-    const client = new PanelClient({ send }, { getActiveTab: async () => snapshot().tab });
-    try {
-      await client.connect();
-      await expect(client.supplement('Accepted detail', [])).resolves.toBeUndefined();
-      expect(
-        send.mock.calls.filter(([message]) => message.type === 'chat.supplement'),
-      ).toHaveLength(1);
-    } finally {
-      client.dispose();
-    }
   });
 
   it('requests a page-wide preview for one persisted attachment', async () => {

@@ -23,7 +23,11 @@ for (const reasoningEffort of ['low', 'max', 'ultra']) {
       });
       await panel.reload();
       await panel.getByRole('button', { name: 'Settings', exact: true }).click();
-      await panel.getByRole('combobox', { name: 'Model', exact: true }).fill('custom/model:latest');
+      const modelPicker = panel.getByRole('combobox', { name: 'Model', exact: true });
+      await modelPicker.selectOption({ label: 'Custom model…' });
+      await panel
+        .getByRole('textbox', { name: 'Custom model', exact: true })
+        .fill('custom/model:latest');
       await panel
         .getByRole('combobox', { name: 'Reasoning effort', exact: true })
         .selectOption(reasoningEffort);
@@ -68,6 +72,68 @@ for (const reasoningEffort of ['low', 'max', 'ultra']) {
     },
   );
 }
+
+extensionTest(
+  'syncs Sandbox credentials immediately, on retry, and in the background',
+  async ({ extensionSession }) => {
+    const { sidePanelPage: panel, context, serviceWorker } = extensionSession;
+    const authPath = '/fixture/auth.json';
+    const token = `e30.${Buffer.from(JSON.stringify({ chatgpt_account_id: 'acct_sync_e2e' })).toString('base64url')}.`;
+    const reads: unknown[] = [];
+    let syncAvailable = false;
+    await context.route('https://sandbox.example.test/credentials/read', async (route) => {
+      reads.push(route.request().postDataJSON() as unknown);
+      await route.fulfill({
+        status: syncAvailable ? 200 : 503,
+        json: syncAvailable ? { value: token } : {},
+      });
+    });
+    await sendExtensionMessage(panel, {
+      version: 1,
+      requestId: 'sandbox_sync_settings_setup',
+      type: 'settings.save',
+      payload: {
+        reasoningEffort: 'medium',
+        systemPrompt: '',
+        language: 'en',
+        accessToken: token,
+        sandboxServer: 'https://sandbox.example.test',
+        sandboxToken: 'fixture-sandbox-token',
+        authPath,
+      },
+    });
+    await panel.reload();
+    await panel.getByRole('button', { name: 'Settings', exact: true }).click();
+    const select = panel.getByRole('combobox', { name: 'Model', exact: true });
+    await expect(select.locator('option[value="gpt-5.6-terra"]')).toHaveCount(1);
+    await expect(select.locator('option[value="gpt-5.6-terra"]')).toHaveText('gpt-5.6-terra');
+    await panel.getByRole('radio', { name: 'Sync from Sandbox' }).check();
+    await expect(panel.getByText(/Token sync failed/)).toBeVisible();
+    expect(reads).toEqual([{ path: authPath, fieldPath: ['tokens', 'access_token'] }]);
+    syncAvailable = true;
+    await panel.getByRole('button', { name: 'Sync Token' }).click();
+    await expect(panel.getByText('Token synced', { exact: true })).toBeVisible();
+    expect(reads).toHaveLength(2);
+    await panel.getByRole('button', { name: 'Save settings', exact: true }).click();
+    await expect(panel.getByText('Settings saved', { exact: true })).toBeVisible();
+    await expect(panel.getByText('Token synced', { exact: true })).toBeVisible();
+    expect(reads).toHaveLength(2);
+
+    const alarm = await serviceWorker.evaluate(() => chrome.alarms.get('task-recovery-scan'));
+    expect(alarm?.periodInMinutes).toBe(1);
+    syncAvailable = false;
+    await panel.close();
+    // Deliver the registered background event without waiting for a real minute.
+    await serviceWorker.evaluate(() =>
+      chrome.alarms.create('task-recovery-scan', { when: Date.now() + 50, periodInMinutes: 1 }),
+    );
+    await expect.poll(() => reads.length, { timeout: 10_000 }).toBe(3);
+    const reopened = await context.newPage();
+    await reopened.goto(panel.url());
+    await reopened.getByRole('button', { name: 'Settings', exact: true }).click();
+    await expect(reopened.getByText(/Token sync failed/)).toBeVisible();
+  },
+);
 
 extensionTest(
   'loads the real production MV3 worker and Side Panel document',

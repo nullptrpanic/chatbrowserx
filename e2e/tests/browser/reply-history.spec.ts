@@ -1,6 +1,8 @@
-import { codexFixtureEvents } from './helpers/codex-fixture';
+import { createServer, type ServerResponse } from 'node:http';
+import { codexFixtureEvents, codexFixtureToolName } from './helpers/codex-fixture';
 import { extensionTest, expect } from './fixtures/extension-test';
 import { sendExtensionMessage } from './helpers/extension-runtime';
+import { closeHttpFixtureServer } from './helpers/http-server';
 import { DEFAULT_DATABASE_NAME } from '../../../src/persistence/database-schema';
 import type { TaskSnapshot } from '../../../src/tasks/task-command-service';
 import type { PanelSnapshot } from '../../../src/shared/protocol/panel-types';
@@ -8,7 +10,7 @@ import type { PanelSnapshot } from '../../../src/shared/protocol/panel-types';
 extensionTest.beforeEach(async ({ extensionSession }) => {
   // These history tests need an ordinary tab, not a response from the public Internet.
   await extensionSession.context.route(
-    /^https:\/\/example\.com\/(?:reply-history|failed-run-history|cancelled-run-history)$/,
+    /^https:\/\/example\.com\/(?:reply-history|failed-run-history|cancelled-run-history|reply-card)$/,
     (route) => route.fulfill({ contentType: 'text/html', body: '<title>History fixture</title>' }),
   );
 });
@@ -81,7 +83,7 @@ function toolResponse(
     id: itemId,
     type: 'function_call',
     call_id: callId,
-    name,
+    ...codexFixtureToolName(name),
     arguments: JSON.stringify(arguments_),
   };
   return sse([
@@ -204,6 +206,339 @@ async function waitForTaskStatus(
 }
 
 extensionTest(
+  'updates the same reply card through two supplements and a phased final answer',
+  async ({ extensionSession }) => {
+    const { context, sidePanelPage: panel } = extensionSession;
+    const page = await context.newPage();
+    await page.goto('https://example.com/reply-card');
+    await panel.emulateMedia({ colorScheme: 'light' });
+    const preambles = [
+      'Checking editions.',
+      'Checking PS5 editions.',
+      'Checking regional stores.',
+    ] as const;
+    const finalAnswer = 'The requested PS5 editions are available.';
+    const releases: (() => void)[] = [];
+    await context.route('https://chatgpt.com/backend-api/codex/responses', async (route) => {
+      const turn = releases.length;
+      await new Promise<void>((resolve) => releases.push(resolve));
+      const id = `turn_${turn}`;
+      const message = (text: string, phase: 'commentary' | 'final_answer') => ({
+        id: `msg_${id}_${phase}`,
+        type: 'message',
+        role: 'assistant',
+        phase,
+        status: 'completed',
+        content: [{ type: 'output_text', text, annotations: [] }],
+      });
+      const call = {
+        id: `call_${id}`,
+        type: 'function_call',
+        call_id: `local_${id}`,
+        status: 'completed',
+        name: 'tab',
+        namespace: 'chatbrowserx_browser',
+        arguments: '{"input":{"action":"list"}}',
+      };
+      const hosted = (suffix: string) => ({
+        id: `ws_${suffix}`,
+        type: 'web_search_call',
+        status: 'completed',
+        action: { type: 'search', query: 'PS5 editions' },
+      });
+      const output = [
+        {
+          type: 'reasoning',
+          id: `rs_${id}`,
+          summary: [{ type: 'summary_text', text: '**Checking public sources**' }],
+        },
+        message(preambles[turn] ?? '', 'commentary'),
+        ...(turn < 2
+          ? [call]
+          : [hosted('one'), hosted('two'), message(finalAnswer, 'final_answer')]),
+      ];
+      await route.fulfill({
+        status: 200,
+        contentType: 'text/event-stream',
+        body: sse([
+          { event: 'response.created', data: { type: 'response.created', response: { id } } },
+          {
+            event: 'response.completed',
+            data: { type: 'response.completed', response: { id, output } },
+          },
+        ]),
+      });
+    });
+    await sendExtensionMessage(panel, {
+      version: 1,
+      requestId: 'reply_card_settings',
+      type: 'settings.save',
+      payload: {
+        reasoningEffort: 'low',
+        systemPrompt: 'Answer the user.',
+        language: 'en',
+        accessToken: syntheticAccessToken(),
+      },
+    });
+    const composer = panel.getByRole('textbox');
+    await composer.fill('Compare the available editions.');
+    await panel.getByRole('button', { name: 'Send' }).click();
+    await expect.poll(() => releases.length).toBe(1);
+    const card = panel.locator('article.message-assistant');
+    const body = card.locator('.message-answer-segment');
+    const activity = card.getByRole('status');
+    await expect(card.locator('header')).toContainText('ChatBrowserX');
+    await expect(activity).toHaveText('Generating a response');
+
+    async function supplement(text: string) {
+      await composer.fill(text);
+      await panel.getByRole('button', { name: 'Add detail' }).click();
+      await expect(card.locator('blockquote').filter({ hasText: text })).toBeVisible();
+    }
+
+    await supplement('Only PS5, please.');
+    releases[0]?.();
+    await expect.poll(() => releases.length).toBe(2);
+    await expect(card).toHaveText(/Checking editions\.\s*Only PS5, please\./);
+    await expect(activity).toHaveText('Checking public sources');
+
+    await supplement('Include the regional stores.');
+    releases[1]?.();
+    await expect.poll(() => releases.length).toBe(3);
+    await expect(card).toHaveText(
+      /Only PS5, please\.\s*Checking PS5 editions\.\s*Include the regional stores\./,
+    );
+    const details = card.locator('.task-summary-toggle');
+    await details.click();
+    await expect(card.locator('.process-message').filter({ hasText: preambles[0] })).toBeVisible();
+    releases[2]?.();
+
+    await expect(card).toHaveCount(1);
+    await expect(body).toHaveText([finalAnswer], { timeout: 4_000 });
+    await expect(details).toHaveText(/Task completed/);
+    await expect(details).toHaveAttribute('aria-expanded', 'true');
+    await expect(activity).toHaveCount(0);
+    await expect(card.locator('blockquote')).toHaveCount(0);
+    const searchRows = card.locator('.task-event-tool-results').filter({
+      has: panel.locator('.tool-result-title').filter({ hasText: 'web_search_call' }),
+    });
+    await expect(searchRows).toHaveCount(2);
+    await expect(searchRows.nth(0).locator('.process-message + .tool-result')).toContainText(
+      'web_search_call',
+    );
+    await expect(searchRows.nth(0).locator('.process-message')).toHaveText(preambles[2]);
+    await expect(searchRows.nth(1).locator('.process-message')).toHaveCount(0);
+  },
+);
+
+extensionTest(
+  'renders live progress and forwards a supplement during the final answer to its own task',
+  async ({ extensionSession }) => {
+    const { context, sidePanelPage: panel } = extensionSession;
+    const page = await context.newPage();
+    await page.goto('https://example.com/reply-card');
+    let pending: ServerResponse | undefined;
+    const requests: unknown[] = [];
+    const emit = (event: { type: string; [key: string]: unknown }) =>
+      pending?.write(`data: ${JSON.stringify(event)}\n\n`);
+    const id = 'live_reply';
+    const server = createServer((request, response) => {
+      let body = '';
+      request.setEncoding('utf8').on('data', (chunk: string) => {
+        body += chunk;
+      });
+      request.once('end', () => {
+        requests.push(JSON.parse(body));
+        pending = response;
+        response.writeHead(200, {
+          'Content-Type': 'text/event-stream',
+          'Access-Control-Allow-Origin': '*',
+        });
+        emit({
+          type: 'response.created',
+          response: { id: requests.length === 1 ? id : 'follow_up' },
+        });
+      });
+    });
+    await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
+    const address = server.address();
+    if (!address || typeof address === 'string') throw new Error('Missing fixture address');
+    try {
+      await context.route('https://chatgpt.com/backend-api/codex/responses', (route) =>
+        route.fulfill({
+          status: 307,
+          headers: { Location: `http://127.0.0.1:${address.port}/responses` },
+        }),
+      );
+      await sendExtensionMessage(panel, {
+        version: 1,
+        requestId: 'streaming_reply_settings',
+        type: 'settings.save',
+        payload: {
+          reasoningEffort: 'low',
+          systemPrompt: '',
+          language: 'en',
+          accessToken: syntheticAccessToken(),
+        },
+      });
+      await panel.getByRole('textbox').fill('Compare the available editions.');
+      await panel.getByRole('button', { name: 'Send' }).click();
+      await expect.poll(() => pending !== undefined).toBe(true);
+      expect(requests[0]).toMatchObject({
+        tool_choice: 'auto',
+        tools: expect.arrayContaining([
+          expect.objectContaining({ type: 'web_search' }),
+          expect.objectContaining({
+            type: 'namespace',
+            name: 'chatbrowserx_browser',
+            tools: expect.arrayContaining([
+              expect.objectContaining({ type: 'function', name: 'inspect' }),
+            ]),
+          }),
+        ]),
+      });
+      const cards = panel.locator('article.message-assistant');
+      const card = cards.nth(0);
+      const details = card.locator('.task-summary-toggle');
+      const history = card.locator('.task-detail-content');
+      const summary = (summary_index: number, text: string) => ({
+        type: 'response.reasoning_summary_text.done',
+        item_id: 'rs_live',
+        output_index: 0,
+        summary_index,
+        text,
+      });
+      await details.click();
+      emit(summary(0, 'Checking the official edition list.'));
+      await expect(details.getByRole('status')).toHaveText('Checking the official edition list.');
+      emit(summary(1, 'Comparing prices across stores.'));
+      await expect(details.getByRole('status')).toHaveText('Comparing prices across stores.');
+      await expect(history).not.toContainText(
+        /Checking the official edition list|Comparing prices across stores/,
+      );
+      const preamble = {
+        type: 'message',
+        id: 'msg_preamble',
+        role: 'assistant',
+        phase: 'commentary',
+        status: 'completed',
+        content: [{ type: 'output_text', text: 'I will check the stores.', annotations: [] }],
+      };
+      emit({ type: 'response.output_item.done', output_index: 1, item: preamble });
+      const processCard = history
+        .locator('.process-message')
+        .filter({ hasText: 'I will check the stores.' });
+      await expect(processCard).toBeVisible();
+      await expect(card.locator('.message-answer-segment')).toContainText(
+        'I will check the stores.',
+      );
+      const search = {
+        id: 'ws_live',
+        type: 'web_search_call',
+        status: 'completed',
+        action: { type: 'search', query: 'edition comparison' },
+      };
+      emit({ type: 'response.output_item.done', output_index: 2, item: search });
+      await expect(history.locator('.process-message + .tool-result')).toContainText(
+        'web_search_call',
+      );
+      await expect(details.getByRole('status')).toBeVisible();
+      const lastNote = {
+        ...preamble,
+        id: 'msg_note',
+        content: [{ type: 'output_text', text: 'I have the information I need.', annotations: [] }],
+      };
+      emit({ type: 'response.output_item.done', output_index: 3, item: lastNote });
+      const standalone = history
+        .locator('.process-message')
+        .filter({ hasText: 'I have the information I need.' });
+      await expect(standalone).toBeVisible();
+      await expect(card.locator('.message-answer-segment')).toContainText(
+        /I will check the stores\.\s*I have the information I need\./,
+      );
+
+      const answer = {
+        ...preamble,
+        id: 'msg_final',
+        phase: 'final_answer',
+        content: [{ type: 'output_text', text: 'Both editions are available.', annotations: [] }],
+      };
+      emit({
+        type: 'response.output_item.added',
+        output_index: 4,
+        item: { ...answer, status: 'in_progress', content: [] },
+      });
+      emit({
+        type: 'response.output_text.delta',
+        item_id: answer.id,
+        output_index: 4,
+        content_index: 0,
+        delta: 'Both editions ',
+      });
+      await expect(card.locator('.message-answer-segment')).toHaveText('Both editions');
+      await expect(details.getByRole('status')).toBeVisible();
+      await expect(processCard).toBeVisible();
+      await expect(standalone).toBeVisible();
+      const supplement = 'Test message';
+      await panel.getByRole('textbox').fill(supplement);
+      await panel.getByRole('button', { name: 'Add detail' }).click();
+      await expect(history).toContainText('Next turn');
+      await expect(card.locator('blockquote')).toHaveCount(0);
+      emit({
+        type: 'response.completed',
+        response: {
+          id,
+          status: 'completed',
+          output: [
+            { type: 'reasoning', id: 'rs_live', summary: [] },
+            preamble,
+            search,
+            lastNote,
+            answer,
+          ],
+        },
+      });
+      pending?.end();
+      await expect(details).toContainText('Task completed');
+      await expect(card.locator('.message-answer-segment')).toHaveText(
+        'Both editions are available.',
+      );
+      await expect(processCard).toHaveCount(1);
+      await expect(standalone).toBeVisible();
+      await expect(details.getByRole('status')).toHaveCount(0);
+      await expect(card.locator('blockquote')).toHaveCount(0);
+      await expect(history).toContainText('Sent to a new task');
+      const users = panel.locator('article.message-user');
+      await expect(users).toHaveCount(2);
+      await expect(users.nth(1)).toContainText(supplement);
+
+      await expect.poll(() => requests.length).toBe(2);
+      const nextInput = JSON.stringify(requests[1]);
+      expect(nextInput).toContain('Both editions are available.');
+      expect(inputTexts(requests[1]).filter((value) => value === supplement)).toHaveLength(1);
+      pending?.end(finalTextResponse('follow_up', 'Test acknowledged.'));
+      await expect(cards).toHaveCount(2);
+      await expect(cards.nth(1).locator('.message-answer-segment')).toHaveText(
+        'Test acknowledged.',
+      );
+      await expect(card.locator('.message-answer-segment')).toHaveText(
+        'Both editions are available.',
+      );
+      await panel.reload();
+      await expect(cards).toHaveCount(2);
+      await details.click();
+      await expect(card).not.toContainText(
+        /Checking the official edition list|Comparing prices across stores/,
+      );
+      await expect(history.locator('.process-message + .tool-result')).toHaveCount(1);
+      await expect(standalone).toBeVisible();
+    } finally {
+      await closeHttpFixtureServer(server);
+    }
+  },
+);
+
+extensionTest(
   'keeps historical image references across tasks and rereads original bytes on demand',
   async ({ extensionSession }) => {
     const { context, sidePanelPage: panel } = extensionSession;
@@ -237,15 +572,12 @@ extensionTest(
       const turn = requests.push(body);
       let response = finalTextResponse(`image_response_${turn}`, `Image fixture answer ${turn}.`);
       if (turn === 7) {
-        response = toolResponse('image_history', 'item_history', 'call_history', 'history_read', {
-          taskId: originalTaskId,
-          offset: null,
-          cursor: '',
-          limit: 100,
+        response = toolResponse('image_history', 'item_history', 'call_history', 'history.read', {
+          target: { taskId: originalTaskId, cursor: '', limit: 100 },
         });
       } else if (turn === 8) {
         historyOutput = JSON.parse(functionOutputs(body).at(-1) ?? 'null');
-        response = toolResponse('image_read', 'item_image', 'call_image', 'attachment_read', {
+        response = toolResponse('image_read', 'item_image', 'call_image', 'attachment.read', {
           attachmentIds: [attachmentId],
         });
       }
@@ -335,8 +667,8 @@ extensionTest(
       payload: { taskId: rereadTaskId },
     });
     expect(details.toolResults.map(({ toolName }) => toolName)).toEqual([
-      'history_read',
-      'attachment_read',
+      'history.read',
+      'attachment.read',
     ]);
     expect(details.toolResults.at(-1)?.attachmentIds).toEqual([attachmentId]);
     await submit('Another unrelated text-only question after rereading.');
@@ -388,8 +720,8 @@ extensionTest(
             'resp_exact_history',
             'item_exact_history',
             'call_exact_history',
-            'history_read',
-            { taskId: targetTaskId, offset: null, cursor: '', limit: 100 },
+            'history.read',
+            { target: { taskId: targetTaskId, cursor: '', limit: 100 } },
           );
         } else {
           const output = functionOutputs(body).at(-1);
@@ -498,12 +830,16 @@ extensionTest(
     expect(replyInputText).toContain(targetQuestion);
     expect(serializedReplyRequest).not.toContain('historyTaskOffset');
     expect(serializedReplyRequest).not.toContain('availableHistoryTaskCount');
-    expect(serializedReplyRequest).toContain('"history_read"');
+    expect(replyRequestBody).toMatchObject({
+      tools: expect.arrayContaining([
+        expect.objectContaining({ type: 'namespace', name: 'chatbrowserx_history' }),
+      ]),
+    });
     expect(serializedReplyRequest).not.toContain('history_read_task');
     expect(exactHistoryOutput).toMatchObject({
       ok: true,
       task: { id: targetTaskId },
-      hasMore: false,
+      nextCursor: null,
     });
     expect(JSON.stringify(exactHistoryOutput)).toContain(targetQuestion);
     expect(JSON.stringify(exactHistoryOutput)).toContain(targetAnswer);
@@ -665,7 +1001,7 @@ extensionTest(
                 'resp_cancelled_run_wait',
                 'item_cancelled_run_wait',
                 'call_cancelled_run_wait',
-                'browser_wait',
+                'browser.wait',
                 { tabId, condition: 'delay', timeoutMs: 10_000 },
               )
             : finalTextResponse('resp_cancelled_run_recovered', finalAnswer);
@@ -709,7 +1045,7 @@ extensionTest(
           payload: { taskId: first.task.id },
         });
         return running.events.some(
-          (event) => event.type === 'tool.call' && event.name === 'browser_wait',
+          (event) => event.type === 'tool.call' && event.name === 'browser.wait',
         );
       })
       .toBe(true);
@@ -819,7 +1155,7 @@ extensionTest(
           },
         ]);
       } else if (requests.length === 1) {
-        response = toolResponse('observe', 'observe-item', 'observe-once', 'browser_inspect', {
+        response = toolResponse('observe', 'observe-item', 'observe-once', 'browser.inspect', {
           tabId,
           mode: 'interactive',
           ref: '',

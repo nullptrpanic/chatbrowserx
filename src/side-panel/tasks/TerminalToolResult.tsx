@@ -5,7 +5,14 @@ import type { PanelToolResult } from '../../shared/protocol/panel-types';
 import { toolDisplayName } from './browser-tool-label';
 import { ToolCopyButton } from './ToolCopyButton';
 
-const terminalToolNames = new Set(['bash', 'shell', 'terminal', 'exec_command', 'sandbox_exec']);
+const terminalToolNames = new Set([
+  'bash',
+  'shell',
+  'terminal',
+  'exec_command',
+  'sandbox_exec',
+  'sandbox.exec',
+]);
 
 export interface TerminalToolResultProps {
   readonly result: PanelToolResult;
@@ -50,7 +57,7 @@ function readTerminalInvocation(argumentsJson: string): TerminalInvocation {
 
 /** Parses only the bounded Sandbox result fields and otherwise preserves the raw output. */
 function readTerminalOutput(result: PanelToolResult): TerminalOutput {
-  if (result.toolName.trim().toLowerCase() !== 'sandbox_exec') {
+  if (!['sandbox.exec', 'sandbox_exec'].includes(result.toolName.trim().toLowerCase())) {
     return { stdout: result.output, stderr: '', code: null, truncated: false };
   }
   try {

@@ -2,6 +2,7 @@ import type { ConversationRepository } from '../persistence/conversation-reposit
 import {
   TaskRepositoryBusyError,
   TaskRepositoryConflictError,
+  type QueuedTask,
   type TaskRepository,
 } from '../persistence/task-repository';
 import type { IdGenerator, MessageId, TaskId } from '../shared/ids';
@@ -10,7 +11,7 @@ import type { Checkpoint } from './checkpoint-types';
 import type { Conversation } from './conversation-types';
 import type { ContinuationItem, PendingToolCall } from './continuation-types';
 import type { MessageRecord, TaskMessageDraft } from './message-types';
-import { createTaskRecords, createTaskRun, type CreateTaskInput } from './task-factory';
+import { createInitialSubmission, createTaskRun, type CreateTaskInput } from './task-factory';
 import { transitionTask, type TaskTransitionType } from './task-transition';
 import type { Task, TaskEvent, TaskRun } from './task-types';
 import type { MaterializedToolResult } from './tool-result-types';
@@ -25,6 +26,7 @@ export interface TaskSnapshot {
   readonly checkpoint: Checkpoint | null;
   readonly events: readonly TaskEvent[];
   readonly toolResults: readonly MaterializedToolResult[];
+  readonly nextTask?: QueuedTask;
 }
 
 interface ContinuationSnapshotInput {
@@ -58,7 +60,7 @@ export interface TaskCommandPort {
 export interface TaskSubmissionPort {
   createSubmission(input: CreateTaskSubmissionInput): Promise<TaskSnapshot>;
   continueSubmission(input: ContinueTaskSubmissionInput): Promise<TaskSnapshot>;
-  appendSupplement(message: MessageRecord): Promise<void>;
+  appendSupplement(message: MessageRecord): Promise<QueuedTask | undefined>;
 }
 
 export class TaskCommandError extends Error {
@@ -129,10 +131,10 @@ export class TaskCommandService implements TaskCommandPort, TaskSubmissionPort {
         'Submission conversation records do not match.',
       );
     }
-    const snapshot = await this.#createSubmissionSnapshot(input, input.message.id);
-    if (snapshot.events[0]?.type !== 'message.recorded') {
-      throw new TaskCommandError('TASK_STATE_INVALID', 'Initial message event is missing.');
-    }
+    const snapshot = createInitialSubmission(input, [this.#readMessageId(input.message.id)], {
+      clock: this.#clock,
+      ids: this.#ids,
+    });
     const storedTask = await this.#mapBusyError(() =>
       this.#repository.createSubmission({
         conversation: input.conversation,
@@ -141,71 +143,26 @@ export class TaskCommandService implements TaskCommandPort, TaskSubmissionPort {
         task: snapshot.task,
         run: snapshot.run,
         events: snapshot.events,
-        checkpoint: this.#requiredCheckpoint(snapshot),
+        checkpoint: snapshot.checkpoint,
       }),
     );
-    return { ...snapshot, task: storedTask };
+    return { ...snapshot, task: storedTask, toolResults: [] };
   }
 
-  async appendSupplement(message: MessageRecord): Promise<void> {
+  async appendSupplement(message: MessageRecord): Promise<QueuedTask | undefined> {
     if (message.kind !== 'supplement') {
       throw new TaskCommandError('TASK_STATE_INVALID', 'Supplement message is invalid.');
     }
     const now = this.#clock.now();
-    await this.#repository.appendTaskMessage({
-      message,
-      eventId: this.#createId('event'),
-      at: now,
-    });
-  }
-
-  async #createSubmissionSnapshot(
-    input: CreateTaskInput,
-    userMessageId: MessageId,
-  ): Promise<TaskSnapshot> {
-    const records = createTaskRecords(input, { clock: this.#clock, ids: this.#ids });
-    const checkpointId = this.#createId('checkpoint');
-    const run: TaskRun = { ...records.run, checkpointId };
-    const sequence = 2;
-    const task: Task = {
-      ...records.task,
-      latestRunId: run.id,
-      lastEventSequence: sequence,
-    };
-    const checkpoint: Checkpoint = {
-      id: checkpointId,
-      taskId: task.id,
-      runId: run.id,
-      continuationItems: [{ type: 'message_ref', messageId: this.#readMessageId(userMessageId) }],
-      pendingToolCall: null,
-      browserToolCallsInAttempt: 0,
-      browserTargetTabId: task.tabId,
-      createdAt: run.startedAt,
-    };
-    const events: TaskEvent[] = [
-      {
-        id: this.#createId('event'),
-        taskId: task.id,
-        runId: run.id,
-        sequence: 1,
-        type: 'message.recorded',
-        messageId: this.#readMessageId(userMessageId),
-        at: task.createdAt,
-      },
-    ];
-    events.push({
-      id: this.#createId('event'),
-      taskId: task.id,
-      runId: run.id,
-      sequence,
-      type: 'status.changed',
-      taskStatus: 'queued',
-      runStatus: 'queued',
-      reason: 'task.queued',
-      error: null,
-      at: task.createdAt,
-    });
-    return { task, run, checkpoint, events, toolResults: [] };
+    const appended = await this.#mapBusyError(() =>
+      this.#repository.appendTaskMessage({
+        message,
+        eventId: this.#createId('event'),
+        at: now,
+        followUpFactory: { clock: this.#clock, ids: this.#ids },
+      }),
+    );
+    return 'type' in appended ? undefined : appended;
   }
 
   /** Stores a new user message while keeping the same recoverable logical task. */

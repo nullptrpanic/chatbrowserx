@@ -1,4 +1,4 @@
-import type { AttachmentId } from '../shared/ids';
+import type { AttachmentId, ToolCallKey } from '../shared/ids';
 
 export type AttachmentSource =
   'paste' | 'file' | 'viewport_capture' | 'region_capture' | 'visual_fallback';
@@ -19,5 +19,5 @@ export type AttachmentRecord = NewAttachment;
 
 export interface AttachmentReference {
   readonly attachmentId: AttachmentId;
-  readonly referenceId: string;
+  readonly referenceId: string | ToolCallKey;
 }

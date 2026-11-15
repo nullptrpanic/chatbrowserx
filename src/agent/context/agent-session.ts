@@ -7,6 +7,7 @@ import type { TaskRepository } from '../../persistence/task-repository';
 import type { AttachmentRepository } from '../../persistence/attachment-repository';
 import { attachmentDataUrl, modelMessage, resolveReplyProjections } from './agent-context';
 import { MAX_MODEL_IMAGE_COUNT, MAX_MODEL_IMAGE_TOTAL_BYTES } from './context-budget';
+import { toolNameParts } from '../../tools/model-tool';
 
 const ATTACHMENT_PREFIX = 'attachment://';
 
@@ -89,7 +90,7 @@ export function sessionToolResult(result: ToolResult): AgentInputItem {
   const text = result.modelOutput ?? result.output;
   return {
     type: 'function_call_result',
-    name: result.toolName,
+    ...toolNameParts(result.toolName),
     callId: result.callId,
     status: 'completed',
     output:
@@ -104,6 +105,27 @@ export function sessionToolResult(result: ToolResult): AgentInputItem {
             })),
           ],
   };
+}
+
+const retiredToolMessages = new Map([
+  ['load_tools', 'Use the tools already provided in the request.'],
+  [
+    'browser_get_current_tab',
+    'Use browser.tab with action=list to read the task-bound currentTabId.',
+  ],
+  ['history_detail_read', 'Use history.read to read a saved message or tool output.'],
+]);
+
+/** Resolves saved calls whose tool definitions were removed. */
+export function retiredToolOutput(name: string): string | undefined {
+  const message = retiredToolMessages.get(name);
+  if (message === undefined) return undefined;
+  return JSON.stringify({
+    ok: false,
+    code: 'TOOL_RETIRED',
+    message,
+    retryable: false,
+  });
 }
 
 /** An interrupted task's unknown side effect must never become a successful historical result. */
@@ -167,10 +189,15 @@ export async function restoreAgentSession(
           : [],
       ),
     );
-    // Cancellation may leave durable supplements outside the last admitted model window.
+    const forwarded = new Set(
+      messages.flatMap((message) =>
+        message.forwardedFromSupplementId ? [message.forwardedFromSupplementId] : [],
+      ),
+    );
+    // Tasks can leave durable input outside the last admitted model window.
     for (const message of messages.filter((value) => value.taskId === previous.id)) {
       if (
-        (message.role === 'user' && !admitted.has(message.id)) ||
+        (message.role === 'user' && !admitted.has(message.id) && !forwarded.has(message.id)) ||
         (message.role === 'assistant' &&
           message.status === 'interrupted' &&
           message.text &&
@@ -193,7 +220,10 @@ export async function restoreAgentSession(
       repository.listToolResults(previous.id),
     ]);
     if (events.some((event) => event.type === 'context.cleared')) continue;
-    const resultsById = new Map(results.map((result) => [result.id, result]));
+    const resultsByCallId = new Map(results.map((result) => [result.callId, result]));
+    const forwarded = new Set(
+      events.flatMap((event) => (event.type === 'supplement.forwarded' ? [event.messageId] : [])),
+    );
     const hostedCalls = new Set(
       results.filter((result) => result.providerHosted).map((result) => result.callId),
     );
@@ -201,7 +231,8 @@ export async function restoreAgentSession(
       const active = previous.id === task.id;
       if (
         event.type === 'message.recorded' ||
-        event.type === (active ? 'supplement.applied' : 'supplement.queued')
+        (event.type === (active ? 'supplement.applied' : 'supplement.queued') &&
+          !forwarded.has(event.messageId))
       ) {
         const message = messagesById.get(event.messageId);
         if (!message || message.status === 'streaming' || message.status === 'error') continue;
@@ -213,12 +244,12 @@ export async function restoreAgentSession(
         items.push({
           type: 'function_call',
           callId: event.callId,
-          name: event.name,
+          ...toolNameParts(event.name),
           arguments: event.argumentsJson,
           status: 'completed',
         });
       } else if (event.type === 'tool.result') {
-        const result = resultsById.get(event.resultId);
+        const result = resultsByCallId.get(event.callId);
         if (!result) throw new Error('Historical tool result is missing.');
         items.push(
           result.providerHosted

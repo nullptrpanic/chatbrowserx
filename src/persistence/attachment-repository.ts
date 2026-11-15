@@ -1,13 +1,17 @@
 import type { IDBPDatabase } from 'idb';
-import type { AttachmentRecord, NewAttachment } from '../attachments/attachment-types';
+import type {
+  AttachmentRecord,
+  AttachmentReference,
+  NewAttachment,
+} from '../attachments/attachment-types';
 import type { AttachmentId, ConversationId } from '../shared/ids';
 import type { ChatBrowserDatabase } from './database-schema';
 
 export interface AttachmentRepository {
   put(input: NewAttachment): Promise<AttachmentRecord>;
   get(id: AttachmentId, conversationId?: ConversationId): Promise<AttachmentRecord | undefined>;
-  addReference(id: AttachmentId, referenceId: string): Promise<void>;
-  removeReference(id: AttachmentId, referenceId: string): Promise<void>;
+  addReference(id: AttachmentId, referenceId: AttachmentReference['referenceId']): Promise<void>;
+  removeReference(id: AttachmentId, referenceId: AttachmentReference['referenceId']): Promise<void>;
   deleteUnreferenced(before: number): Promise<number>;
 }
 
@@ -57,14 +61,14 @@ export class IndexedDbAttachmentRepository implements AttachmentRepository {
         .index('by-attachment')
         .getAll(id);
       for (const { referenceId } of references) {
-        if (referenceId.startsWith('message:')) {
+        if (typeof referenceId === 'string' && referenceId.startsWith('message:')) {
           const message = await transaction
             .objectStore('messages')
             .get(referenceId.slice('message:'.length));
           if (message?.conversationId === conversationId && message.attachmentIds.includes(id)) {
             return transaction.objectStore('attachments').get(id);
           }
-        } else {
+        } else if (Array.isArray(referenceId)) {
           const result = await transaction.objectStore('tool-results').get(referenceId);
           if (result?.attachmentIds.includes(id)) {
             const task = await transaction.objectStore('tasks').get(result.taskId);
@@ -81,8 +85,12 @@ export class IndexedDbAttachmentRepository implements AttachmentRepository {
   /**
    * Adds one idempotent owner reference after verifying that the attachment exists.
    */
-  async addReference(id: AttachmentId, referenceId: string): Promise<void> {
-    if (referenceId.trim().length === 0) {
+  async addReference(
+    id: AttachmentId,
+    referenceId: AttachmentReference['referenceId'],
+  ): Promise<void> {
+    const parts = typeof referenceId === 'string' ? [referenceId] : referenceId;
+    if (parts.some((part) => part.trim().length === 0)) {
       throw new Error('Attachment reference ID is required.');
     }
 
@@ -105,7 +113,10 @@ export class IndexedDbAttachmentRepository implements AttachmentRepository {
   /**
    * Removes one owner reference and treats an already absent reference as a successful no-op.
    */
-  async removeReference(id: AttachmentId, referenceId: string): Promise<void> {
+  async removeReference(
+    id: AttachmentId,
+    referenceId: AttachmentReference['referenceId'],
+  ): Promise<void> {
     await this.#database.delete('attachment-references', [id, referenceId]);
   }
 

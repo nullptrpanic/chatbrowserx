@@ -38,113 +38,76 @@ interface HistoryMessagePreview {
   readonly textLength: number;
 }
 
-interface HistorySearchPage {
-  readonly items: readonly {
-    readonly taskId: TaskId;
-    readonly taskStatus: TaskStatus;
-    readonly messageId: string;
-    readonly context: readonly HistoryMessagePreview[];
-  }[];
-  readonly totalCount: number;
-  readonly nextCursor: string | null;
-  readonly hasMore: boolean;
-}
-
 export type HistorySearchResponse =
-  | (HistorySearchPage & { readonly ok: true; readonly recent?: HistorySearchPage })
+  | {
+      readonly ok: true;
+      readonly items: readonly {
+        readonly taskId: TaskId;
+        readonly taskStatus: TaskStatus;
+        readonly messageId: string;
+        readonly context: readonly HistoryMessagePreview[];
+      }[];
+      readonly nextCursor: string | null;
+    }
   | HistoryReadError;
 
-export interface ResultReadInput {
-  readonly resultId: string;
+interface TextRange {
   readonly offset: number;
   readonly limit: number;
 }
 
-export interface HistoryDetailReadInput {
-  readonly detailId: string;
-  readonly offset: number;
-  readonly limit: number;
+export interface ResultReadInput extends TextRange {
+  readonly taskId: TaskId;
+  readonly callId: string;
 }
 
-export type HistoryDetailField =
-  | 'task_goal'
-  | 'message_text'
-  | 'reasoning_summary'
-  | 'tool_arguments'
-  | 'status_reason'
-  | 'status_error';
+export interface MessageReadInput extends TextRange {
+  readonly taskId: TaskId;
+  readonly messageId: string;
+}
 
-export type HistoryItem =
+type HistoryItem = {
+  readonly at: number;
+  readonly runId: string;
+} & (
   | {
-      readonly sequence: number;
-      readonly at: number;
-      readonly runId: string;
       readonly type: 'message' | 'supplement';
       readonly messageId: string;
       readonly role: MessageRecord['role'];
       readonly status: MessageRecord['status'];
       readonly text: string;
       readonly textLength: number;
-      readonly textDetailId: string | null;
-      readonly attachmentCount: number;
       readonly attachmentIds: readonly string[];
       readonly applied?: boolean;
-      readonly replyTo?: {
-        readonly messageId: string;
-        readonly taskId: TaskId;
-      };
+      readonly replyTo?: { readonly messageId: string; readonly taskId: TaskId };
     }
+  | { readonly type: 'reasoning_summary'; readonly summary: string }
   | {
-      readonly sequence: number;
-      readonly at: number;
-      readonly runId: string;
-      readonly type: 'reasoning_summary';
-      readonly summary: string;
-      readonly summaryLength: number;
-      readonly summaryDetailId: string | null;
-    }
-  | {
-      readonly sequence: number;
-      readonly at: number;
-      readonly runId: string;
       readonly type: 'tool_call';
       readonly callId: string;
       readonly name: string;
       readonly argumentsJson: string;
-      readonly argumentsLength: number;
-      readonly argumentsDetailId: string | null;
     }
   | {
-      readonly sequence: number;
-      readonly at: number;
-      readonly runId: string;
       readonly type: 'tool_result';
       readonly callId: string;
-      readonly resultId: string;
       readonly toolName: string;
       readonly preview: string;
       readonly outputLength: number;
-      readonly attachmentCount: number;
       readonly attachmentIds: readonly string[];
     }
   | {
-      readonly sequence: number;
-      readonly at: number;
-      readonly runId: string;
       readonly type: 'status';
       readonly taskStatus: TaskStatus;
       readonly runStatus: TaskStatus;
       readonly reason: string;
-      readonly reasonLength: number;
-      readonly reasonDetailId: string | null;
       readonly error: string | null;
-      readonly errorLength: number;
-      readonly errorDetailId: string | null;
-    };
+    }
+);
 
 interface HistoryReadError {
   readonly ok: false;
-  readonly code: 'HISTORY_NOT_FOUND' | 'INVALID_CURSOR' | 'DETAIL_NOT_FOUND' | 'RESULT_NOT_FOUND';
+  readonly code: 'HISTORY_NOT_FOUND' | 'INVALID_CURSOR' | 'RESULT_NOT_FOUND';
   readonly message: string;
   readonly retryable: false;
 }
@@ -152,58 +115,27 @@ interface HistoryReadError {
 export type HistoryReadResponse =
   | {
       readonly ok: true;
-      readonly task: Pick<
-        Task,
-        'id' | 'ordinal' | 'goal' | 'status' | 'createdAt' | 'updatedAt'
-      > & {
-        readonly goalLength: number;
-        readonly goalDetailId: string | null;
-      };
+      readonly task: Pick<Task, 'id' | 'ordinal' | 'goal' | 'status' | 'createdAt' | 'updatedAt'>;
       readonly items: readonly HistoryItem[];
-      readonly itemsCharacterCount: number;
-      readonly itemsCharacterLimit: number;
-      readonly returnedCount: number;
-      readonly consumedCount: number;
-      readonly totalCount: number;
-      readonly remainingCount: number;
       readonly nextCursor: string | null;
-      readonly hasMore: boolean;
     }
   | HistoryReadError;
+
+interface TextPage {
+  readonly ok: true;
+  readonly content: string;
+  readonly nextOffset: number | null;
+}
 
 export type ResultReadResponse =
-  | {
-      readonly ok: true;
-      readonly resultId: string;
-      readonly taskId: TaskId;
-      readonly toolName: string;
-      readonly content: string;
-      readonly offset: number;
-      readonly returnedCount: number;
-      readonly consumedCount: number;
-      readonly totalCount: number;
-      readonly remainingCount: number;
-      readonly nextOffset: number | null;
-      readonly hasMore: boolean;
-    }
+  | (TextPage & { readonly taskId: TaskId; readonly callId: string; readonly toolName: string })
   | HistoryReadError;
 
-export type HistoryDetailReadResponse =
-  | {
-      readonly ok: true;
-      readonly detailId: string;
-      readonly taskId: TaskId;
-      readonly sequence: number;
-      readonly field: HistoryDetailField;
-      readonly content: string;
-      readonly offset: number;
-      readonly returnedCount: number;
-      readonly consumedCount: number;
-      readonly totalCount: number;
-      readonly remainingCount: number;
-      readonly nextOffset: number | null;
-      readonly hasMore: boolean;
-    }
+export type MessageReadResponse =
+  | (TextPage &
+      Pick<MessageRecord, 'taskId' | 'role' | 'status' | 'attachmentIds'> & {
+        readonly messageId: string;
+      })
   | HistoryReadError;
 
 export interface TaskHistoryReaderPort {
@@ -216,10 +148,7 @@ export interface TaskHistoryReaderPort {
     attachmentIds: readonly string[],
   ): Promise<readonly AttachmentRecord[] | null>;
   readHistory(context: TaskHistoryContext, input: HistoryReadInput): Promise<HistoryReadResponse>;
-  readDetail(
-    context: TaskHistoryContext,
-    input: HistoryDetailReadInput,
-  ): Promise<HistoryDetailReadResponse>;
+  readMessage(context: TaskHistoryContext, input: MessageReadInput): Promise<MessageReadResponse>;
   readResult(context: TaskHistoryContext, input: ResultReadInput): Promise<ResultReadResponse>;
 }
 
@@ -231,15 +160,7 @@ interface CursorPayload {
   readonly messageId?: string;
 }
 
-interface DetailPayload {
-  readonly version: 1;
-  readonly taskId: TaskId;
-  readonly sequence: number;
-  readonly field: HistoryDetailField;
-}
-
 const HISTORY_PROJECTION_VERSION = 1;
-const HISTORY_DETAIL_VERSION = 1;
 const TOOL_RESULT_PREVIEW_CHARACTERS = 1_000;
 const HISTORY_FIELD_PREVIEW_CHARACTERS = 2_000;
 const HISTORY_ITEMS_CHARACTER_LIMIT = 40_000;
@@ -267,15 +188,6 @@ function resultNotFound(): HistoryReadError {
     ok: false,
     code: 'RESULT_NOT_FOUND',
     message: 'The requested tool result is unavailable in this conversation history.',
-    retryable: false,
-  };
-}
-
-function detailNotFound(): HistoryReadError {
-  return {
-    ok: false,
-    code: 'DETAIL_NOT_FOUND',
-    message: 'The requested history detail is unavailable in this conversation history.',
     retryable: false,
   };
 }
@@ -322,35 +234,6 @@ function decodeCursor(value: string): CursorPayload | null {
   return parsed as unknown as CursorPayload;
 }
 
-function isHistoryDetailField(value: unknown): value is HistoryDetailField {
-  return (
-    value === 'task_goal' ||
-    value === 'message_text' ||
-    value === 'reasoning_summary' ||
-    value === 'tool_arguments' ||
-    value === 'status_reason' ||
-    value === 'status_error'
-  );
-}
-
-function decodeDetail(value: string): DetailPayload | null {
-  const parsed = decodeReference(value);
-  if (
-    parsed === null ||
-    !('version' in parsed) ||
-    parsed.version !== HISTORY_DETAIL_VERSION ||
-    !('taskId' in parsed) ||
-    typeof parsed.taskId !== 'string' ||
-    !('sequence' in parsed) ||
-    !Number.isSafeInteger(parsed.sequence) ||
-    !('field' in parsed) ||
-    !isHistoryDetailField(parsed.field)
-  ) {
-    return null;
-  }
-  return parsed as unknown as DetailPayload;
-}
-
 function searchPreview(message: MessageRecord, terms: readonly string[]): HistoryMessagePreview {
   const lower = message.text.toLowerCase();
   const match = terms.map((term) => lower.indexOf(term)).find((index) => index >= 0) ?? 0;
@@ -366,57 +249,32 @@ function searchPreview(message: MessageRecord, terms: readonly string[]): Histor
   };
 }
 
-function projectedField(
-  value: string,
-  payload: DetailPayload,
-): {
-  readonly preview: string;
-  readonly length: number;
-  readonly detailId: string | null;
-} {
-  return {
-    preview: value.slice(0, HISTORY_FIELD_PREVIEW_CHARACTERS),
-    length: value.length,
-    detailId: value.length > HISTORY_FIELD_PREVIEW_CHARACTERS ? encodeReference(payload) : null,
-  };
+function preview(text: string): string {
+  return text.slice(0, HISTORY_FIELD_PREVIEW_CHARACTERS);
 }
 
 function messageItem(
-  event: Pick<TaskEvent, 'sequence' | 'at' | 'runId'> & {
+  event: Pick<TaskEvent, 'at' | 'runId'> & {
     readonly type: 'message.recorded' | 'supplement.queued';
   },
   message: MessageRecord,
   appliedSupplements: ReadonlySet<string>,
 ): HistoryItem {
   const supplement = event.type === 'supplement.queued';
-  const text = projectedField(message.text, {
-    version: HISTORY_DETAIL_VERSION,
-    taskId: message.taskId,
-    sequence: event.sequence,
-    field: 'message_text',
-  });
   return {
-    sequence: event.sequence,
     at: event.at,
     runId: event.runId,
     type: supplement ? 'supplement' : 'message',
     messageId: message.id,
     role: message.role,
     status: message.status,
-    text: text.preview,
-    textLength: text.length,
-    textDetailId: text.detailId,
-    attachmentCount: message.attachmentIds.length,
+    text: preview(message.text),
+    textLength: message.text.length,
     attachmentIds: message.attachmentIds,
     ...(supplement ? { applied: appliedSupplements.has(message.id) } : {}),
     ...(message.replyTo === undefined
       ? {}
-      : {
-          replyTo: {
-            messageId: message.replyTo.messageId,
-            taskId: message.replyTo.taskId,
-          },
-        }),
+      : { replyTo: { messageId: message.replyTo.messageId, taskId: message.replyTo.taskId } }),
   };
 }
 
@@ -468,131 +326,68 @@ function visibleHistoryEvent(event: TaskEvent): boolean {
 function historyItems(
   events: readonly TaskEvent[],
   messageById: ReadonlyMap<string, MessageRecord>,
-  resultById: ReadonlyMap<string, ToolResult>,
+  resultByCall: ReadonlyMap<string, ToolResult>,
   appliedSupplements: ReadonlySet<string>,
   callsById: ReadonlyMap<string, Extract<TaskEvent, { readonly type: 'tool.call' }>>,
 ): readonly HistoryItem[] {
-  return [...events].flatMap((event): HistoryItem[] => {
-    if (event.type === 'message.recorded') {
-      const message = messageById.get(event.messageId);
-      if (
-        message === undefined ||
-        message.taskId !== event.taskId ||
-        message.kind !== 'conversation'
-      )
-        throw new Error('Task history message association is invalid.');
-      return [messageItem(event, message, appliedSupplements)];
-    }
-    if (event.type === 'supplement.queued') {
-      const message = messageById.get(event.messageId);
-      if (message === undefined || message.taskId !== event.taskId || message.kind !== 'supplement')
-        throw new Error('Task history message association is invalid.');
-      return [messageItem({ ...event, type: 'supplement.queued' }, message, appliedSupplements)];
-    }
-    if (event.type === 'reasoning.summary') {
-      const summary = projectedField(event.summary, {
-        version: HISTORY_DETAIL_VERSION,
-        taskId: event.taskId,
-        sequence: event.sequence,
-        field: 'reasoning_summary',
-      });
-      return [
-        {
-          sequence: event.sequence,
-          at: event.at,
-          runId: event.runId,
-          type: 'reasoning_summary',
-          summary: summary.preview,
-          summaryLength: summary.length,
-          summaryDetailId: summary.detailId,
-        },
-      ];
-    }
-    if (event.type === 'tool.call') {
-      const argumentsJson = projectedField(event.argumentsJson, {
-        version: HISTORY_DETAIL_VERSION,
-        taskId: event.taskId,
-        sequence: event.sequence,
-        field: 'tool_arguments',
-      });
-      return [
-        {
-          sequence: event.sequence,
-          at: event.at,
-          runId: event.runId,
+  return events.map((event): HistoryItem => {
+    const base = { at: event.at, runId: event.runId };
+    switch (event.type) {
+      case 'message.recorded':
+      case 'supplement.queued': {
+        const message = messageById.get(event.messageId);
+        if (
+          message === undefined ||
+          message.taskId !== event.taskId ||
+          message.kind !== (event.type === 'message.recorded' ? 'conversation' : 'supplement')
+        )
+          throw new Error('Task history message association is invalid.');
+        return messageItem({ ...base, type: event.type }, message, appliedSupplements);
+      }
+      case 'reasoning.summary':
+        return { ...base, type: 'reasoning_summary', summary: preview(event.summary) };
+      case 'tool.call':
+        return {
+          ...base,
           type: 'tool_call',
           callId: event.callId,
           name: event.name,
-          argumentsJson: argumentsJson.preview,
-          argumentsLength: argumentsJson.length,
-          argumentsDetailId: argumentsJson.detailId,
-        },
-      ];
-    }
-    if (event.type === 'tool.result') {
-      const result = resultById.get(event.resultId);
-      const call = callsById.get(event.callId);
-      if (
-        result === undefined ||
-        call === undefined ||
-        result.taskId !== event.taskId ||
-        result.runId !== event.runId ||
-        result.callId !== event.callId ||
-        result.toolName !== call.name ||
-        call.sequence >= event.sequence
-      ) {
-        throw new Error('Task history tool-result association is invalid.');
-      }
-      return [
-        {
-          sequence: event.sequence,
-          at: event.at,
-          runId: event.runId,
+          argumentsJson: preview(event.argumentsJson),
+        };
+      case 'tool.result': {
+        const result = resultByCall.get(event.callId);
+        const call = callsById.get(event.callId);
+        if (
+          result === undefined ||
+          call === undefined ||
+          result.taskId !== event.taskId ||
+          result.runId !== event.runId ||
+          result.toolName !== call.name ||
+          call.sequence >= event.sequence
+        )
+          throw new Error('Task history tool-result association is invalid.');
+        return {
+          ...base,
           type: 'tool_result',
           callId: event.callId,
-          resultId: result.id,
           toolName: result.toolName,
           preview: result.output.slice(0, TOOL_RESULT_PREVIEW_CHARACTERS),
           outputLength: result.output.length,
-          attachmentCount: result.attachmentIds.length,
           attachmentIds: result.attachmentIds,
-        },
-      ];
-    }
-    if (event.type === 'status.changed') {
-      const reason = projectedField(event.reason, {
-        version: HISTORY_DETAIL_VERSION,
-        taskId: event.taskId,
-        sequence: event.sequence,
-        field: 'status_reason',
-      });
-      const error =
-        event.error == null
-          ? null
-          : projectedField(event.error.userMessage, {
-              version: HISTORY_DETAIL_VERSION,
-              taskId: event.taskId,
-              sequence: event.sequence,
-              field: 'status_error',
-            });
-      return [
-        {
-          sequence: event.sequence,
-          at: event.at,
-          runId: event.runId,
+        };
+      }
+      case 'status.changed':
+        return {
+          ...base,
           type: 'status',
           taskStatus: event.taskStatus,
           runStatus: event.runStatus,
-          reason: reason.preview,
-          reasonLength: reason.length,
-          reasonDetailId: reason.detailId,
-          error: error?.preview ?? null,
-          errorLength: error?.length ?? 0,
-          errorDetailId: error?.detailId ?? null,
-        },
-      ];
+          reason: preview(event.reason),
+          error: event.error === null ? null : preview(event.error.userMessage),
+        };
+      default:
+        throw new Error('Unexpected event in task history.');
     }
-    return [];
   });
 }
 
@@ -608,30 +403,10 @@ function boundedHistoryItems(items: readonly HistoryItem[]): readonly HistoryIte
   return page;
 }
 
-function characterRange(
-  detailId: string,
-  payload: DetailPayload,
-  value: string,
-  input: Pick<HistoryDetailReadInput, 'offset' | 'limit'>,
-): HistoryDetailReadResponse {
-  const content = value.slice(input.offset, input.offset + input.limit);
-  const consumedCount = Math.min(input.offset + content.length, value.length);
-  const remainingCount = value.length - consumedCount;
-  return {
-    ok: true,
-    detailId,
-    taskId: payload.taskId,
-    sequence: payload.sequence,
-    field: payload.field,
-    content,
-    offset: input.offset,
-    returnedCount: content.length,
-    consumedCount,
-    totalCount: value.length,
-    remainingCount,
-    nextOffset: remainingCount > 0 ? consumedCount : null,
-    hasMore: remainingCount > 0,
-  };
+function characterRange(value: string, { offset, limit }: TextRange): TextPage {
+  const content = value.slice(offset, offset + limit);
+  const next = offset + content.length;
+  return { ok: true, content, nextOffset: next < value.length ? next : null };
 }
 
 export class TaskHistoryReader implements TaskHistoryReaderPort {
@@ -759,28 +534,14 @@ export class TaskHistoryReader implements TaskHistoryReaderPort {
         return [saved];
       },
     );
-    let terms = query === '' ? [] : query.split(' ');
-    let matches =
+    const terms = query === '' ? [] : query.split(' ');
+    const matches =
       terms.length === 0
         ? messages
         : messages.filter(({ text }) => {
             const lower = text.toLowerCase();
             return terms.every((term) => lower.includes(term));
           });
-    const recentFallback =
-      query !== '' &&
-      matches.length === 0 &&
-      cursor === null &&
-      messages.length > 0 &&
-      messages.length <= input.limit &&
-      !messages.some(({ text }) => {
-        const lower = text.toLowerCase();
-        return terms.some((term) => lower.includes(term));
-      });
-    if (recentFallback) {
-      terms = [];
-      matches = messages;
-    }
     matches.sort((a, b) => b.createdAt - a.createdAt || (a.id < b.id ? 1 : a.id > b.id ? -1 : 0));
     const anchor =
       cursor === null ? -1 : matches.findIndex((message) => message.id === cursor.messageId);
@@ -829,10 +590,9 @@ export class TaskHistoryReader implements TaskHistoryReaderPort {
       });
     }
     const hasMore = anchor + 1 + page.length < matches.length;
-    const result = {
+    return {
+      ok: true,
       items,
-      totalCount: matches.length,
-      hasMore,
       nextCursor: hasMore
         ? encodeReference({
             version: 1,
@@ -842,9 +602,6 @@ export class TaskHistoryReader implements TaskHistoryReaderPort {
           })
         : null,
     };
-    return recentFallback
-      ? { ok: true, items: [], totalCount: 0, nextCursor: null, hasMore: false, recent: result }
-      : { ok: true, ...result };
   }
 
   async readAttachments(
@@ -925,13 +682,15 @@ export class TaskHistoryReader implements TaskHistoryReaderPort {
         event.type === 'tool.result',
     );
     const pageResults = await Promise.all(
-      pageResultEvents.map(({ resultId }) => this.#tasks.getToolResult(resultId)),
+      pageResultEvents.map(({ callId }) => this.#tasks.getToolResult(selected.id, callId)),
     );
     if (pageResults.some((result) => result === undefined)) {
       throw new Error('Task history tool-result association is invalid.');
     }
-    const resultById = new Map(
-      pageResults.flatMap((result) => (result === undefined ? [] : [[result.id, result] as const])),
+    const resultByCall = new Map(
+      pageResults.flatMap((result) =>
+        result === undefined ? [] : [[result.callId, result] as const],
+      ),
     );
     const appliedSupplements = new Set(
       events.flatMap((event) => (event.type === 'supplement.applied' ? [event.messageId] : [])),
@@ -944,43 +703,25 @@ export class TaskHistoryReader implements TaskHistoryReaderPort {
     const projectedItems = historyItems(
       pageEvents,
       messageById,
-      resultById,
+      resultByCall,
       appliedSupplements,
       callsById,
     );
     const page = boundedHistoryItems(projectedItems);
-    const consumedCount = start + page.length;
-    const remainingCount = visibleEvents.length - consumedCount;
-    const hasMore = remainingCount > 0;
-    const lastSequence = page.at(-1)?.sequence;
-    const goal = projectedField(selected.goal, {
-      version: HISTORY_DETAIL_VERSION,
-      taskId: selected.id,
-      sequence: 0,
-      field: 'task_goal',
-    });
-    const itemsCharacterCount = JSON.stringify(page).length;
+    const lastSequence = pageEvents[page.length - 1]?.sequence;
     return {
       ok: true,
       task: {
         id: selected.id,
         ordinal: selected.ordinal,
-        goal: goal.preview,
-        goalLength: goal.length,
-        goalDetailId: goal.detailId,
+        goal: preview(selected.goal),
         status: selected.status,
         createdAt: selected.createdAt,
         updatedAt: selected.updatedAt,
       },
       items: page,
-      itemsCharacterCount,
-      itemsCharacterLimit: HISTORY_ITEMS_CHARACTER_LIMIT,
-      returnedCount: page.length,
-      consumedCount,
-      totalCount: visibleEvents.length,
-      remainingCount,
       nextCursor:
-        hasMore && lastSequence !== undefined
+        start + page.length < visibleEvents.length && lastSequence !== undefined
           ? encodeReference({
               version: HISTORY_PROJECTION_VERSION,
               taskId: selected.id,
@@ -989,59 +730,38 @@ export class TaskHistoryReader implements TaskHistoryReaderPort {
               ...(input.messageId ? { messageId: input.messageId } : {}),
             })
           : null,
-      hasMore,
     };
   }
 
-  async readDetail(
+  async readMessage(
     context: TaskHistoryContext,
-    input: HistoryDetailReadInput,
-  ): Promise<HistoryDetailReadResponse> {
-    const payload = decodeDetail(input.detailId);
-    if (payload === null) return detailNotFound();
-    const selected = await this.#tasks.get(payload.taskId);
-    if (selected === undefined || !this.#isReadable(selected, context)) return detailNotFound();
-    if (payload.field === 'task_goal' && payload.sequence === 0) {
-      return characterRange(input.detailId, payload, selected.goal, input);
-    }
-
-    const { events, messageById } = await this.#records(
-      selected,
-      selected.id === context.currentTaskId
-        ? Math.min(selected.lastEventSequence, context.currentTaskLastEventSequence ?? 0)
+    input: MessageReadInput,
+  ): Promise<MessageReadResponse> {
+    const task = await this.#tasks.get(input.taskId);
+    if (!task || !this.#isReadable(task, context)) return historyNotFound();
+    const { messageById } = await this.#records(
+      task,
+      task.id === context.currentTaskId
+        ? Math.min(task.lastEventSequence, context.currentTaskLastEventSequence ?? 0)
         : undefined,
     );
-    const event = events.find(({ sequence }) => sequence === payload.sequence);
-    if (event === undefined) return detailNotFound();
-
-    let value: string | null = null;
-    if (
-      payload.field === 'message_text' &&
-      (event.type === 'message.recorded' || event.type === 'supplement.queued')
-    ) {
-      const message = messageById.get(event.messageId);
-      value = message?.status === 'streaming' ? null : (message?.text ?? null);
-    } else if (payload.field === 'reasoning_summary' && event.type === 'reasoning.summary') {
-      value = event.summary;
-    } else if (payload.field === 'tool_arguments' && event.type === 'tool.call') {
-      value = event.argumentsJson;
-    } else if (payload.field === 'status_reason' && event.type === 'status.changed') {
-      value = event.reason;
-    } else if (payload.field === 'status_error' && event.type === 'status.changed') {
-      value = event.error?.userMessage ?? null;
-    }
-    return value === null
-      ? detailNotFound()
-      : characterRange(input.detailId, payload, value, input);
+    const message = messageById.get(input.messageId);
+    if (!message) return historyNotFound();
+    return {
+      taskId: task.id,
+      messageId: message.id,
+      role: message.role,
+      status: message.status,
+      attachmentIds: message.attachmentIds,
+      ...characterRange(message.text, input),
+    };
   }
 
   async readResult(
     context: TaskHistoryContext,
     input: ResultReadInput,
   ): Promise<ResultReadResponse> {
-    const result = await this.#tasks.getToolResult(input.resultId);
-    if (result === undefined) return resultNotFound();
-    const task = await this.#tasks.get(result.taskId);
+    const task = await this.#tasks.get(input.taskId);
     if (
       task === undefined ||
       task.conversationId !== context.conversationId ||
@@ -1049,33 +769,23 @@ export class TaskHistoryReader implements TaskHistoryReaderPort {
     ) {
       return resultNotFound();
     }
+    const result = await this.#tasks.getToolResult(task.id, input.callId);
+    if (result === undefined) return resultNotFound();
     if (
       task.id === context.currentTaskId &&
       !(await this.#tasks.listEvents(task.id)).some(
         (event) =>
           event.type === 'tool.result' &&
-          event.resultId === result.id &&
-          event.callId === result.callId &&
+          event.callId === input.callId &&
           event.sequence <= (context.currentTaskLastEventSequence ?? -1),
       )
     )
       return resultNotFound();
-    const content = result.output.slice(input.offset, input.offset + input.limit);
-    const consumedCount = Math.min(input.offset + content.length, result.output.length);
-    const remainingCount = result.output.length - consumedCount;
     return {
-      ok: true,
-      resultId: result.id,
       taskId: result.taskId,
+      callId: result.callId,
       toolName: result.toolName,
-      content,
-      offset: input.offset,
-      returnedCount: content.length,
-      consumedCount,
-      totalCount: result.output.length,
-      remainingCount,
-      nextOffset: remainingCount > 0 ? consumedCount : null,
-      hasMore: remainingCount > 0,
+      ...characterRange(result.output, input),
     };
   }
 }

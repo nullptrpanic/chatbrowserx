@@ -1,32 +1,40 @@
 import {
   Agent as FrameworkAgent,
   Runner,
-  RunContext,
+  toolNamespace,
   type FunctionTool,
   type Model,
   type ModelRequest,
   type ResponseStreamEvent,
-  type Tool,
   type AgentInputItem,
+  type AgentOutputItem,
 } from '@openai/agents-core';
 import type { ProviderRegistry } from '../providers/registry';
-import type { AgentModelTurn, AgentRunHooks, AgentRuntimePort } from './execution-types';
+import type {
+  AgentModelTurn,
+  AgentPlanInput,
+  AgentRunHooks,
+  AgentRuntimePort,
+  AssistantCommentary,
+} from './execution-types';
 import type { TaskRepository } from '../persistence/task-repository';
 import type { ConversationRepository } from '../persistence/conversation-repository';
 import type { AttachmentRepository } from '../persistence/attachment-repository';
-import type { ToolRuntimePort, ModelToolContract } from '../tools/types';
+import type { ToolRuntimePort, ModelToolContract, ValidatedToolCall } from '../tools/types';
+import { qualifiedToolName, toolNameParts } from '../tools/model-tool';
 import type { Clock } from '../shared/time';
 import type { IdGenerator } from '../shared/ids';
 import type { MessageRecord } from '../tasks/message-types';
 import {
   admitSessionMessages,
   renderSessionItems,
+  retiredToolOutput,
   restoreAgentSession,
   sessionToolResult,
 } from './context/agent-session';
 import { StreamPersistenceBuffer } from './stream-persistence-buffer';
 import { isProviderError, providerErrorFromCode } from '../providers/provider-error';
-import type { ModelUsage } from '../providers/model-events';
+import type { ModelActivity, ModelUsage } from '../providers/model-events';
 import type { ModelRequest as GenerationRequest } from './model/model-provider';
 import type { ModelStreamEvent } from '../providers/model-events';
 
@@ -48,6 +56,52 @@ function reportedUsage(raw: unknown): ModelUsage | null {
     typeof value.totalTokens === 'number'
     ? value
     : null;
+}
+
+function assistantText(item: Extract<AgentOutputItem, { role: 'assistant' }>): string {
+  return item.content
+    .flatMap((part) =>
+      part.type === 'output_text' ? [part.text] : part.type === 'refusal' ? [part.refusal] : [],
+    )
+    .join('\n');
+}
+
+function replyFromModelOutput(output: readonly AgentOutputItem[]) {
+  const calls = output.flatMap((item, index) => {
+    const callId =
+      item.type === 'function_call'
+        ? item.callId
+        : item.type === 'hosted_tool_call'
+          ? item.id
+          : null;
+    return callId ? [{ callId, index }] : [];
+  });
+  const continues = output.some((item) => item.type === 'function_call');
+  const messages: string[] = [];
+  const commentary: Extract<AssistantCommentary, { text: string }>[] = [];
+  const answer: string[] = [];
+  for (const [index, item] of output.entries()) {
+    if (item.type !== 'message' || item.role !== 'assistant') continue;
+    const text = assistantText(item);
+    if (!text.trim()) continue;
+    messages.push(text);
+    if (continues || item.phase === 'commentary') {
+      const callId = calls.find((call) => call.index > index)?.callId;
+      commentary.push({
+        text,
+        ...(callId ? { callId } : {}),
+        ...(item.id ? { itemId: item.id } : {}),
+      });
+    } else {
+      answer.push(text);
+    }
+  }
+  return {
+    continues,
+    text: messages.join('\n\n'),
+    finalAnswer: answer.join('\n\n'),
+    commentary,
+  };
 }
 
 /** Framework iteration with host-owned checkpoints; no second model/tool loop. */
@@ -95,7 +149,7 @@ export class AgentRuntime implements AgentRuntimePort {
       outputType: 'text',
       tracing: false,
       signal,
-      modelSettings: { store: false, preserveRawUsage: true },
+      modelSettings: { store: false, preserveRawUsage: true, toolChoice: 'none' },
     })) {
       if (event.type === 'output_text_delta') {
         textReceived = true;
@@ -166,13 +220,57 @@ export class AgentRuntime implements AgentRuntimePort {
       .catch(() => undefined);
     const providerModel = await provider.getModel(settings, snapshot.task.conversationId);
     let contract: ModelToolContract;
-    let pendingTurn: { metrics: AgentModelTurn; messageId: string | null } | null = null;
+    type PendingTurn = {
+      metrics: AgentModelTurn;
+      messageId: string | null;
+      commentary: readonly AssistantCommentary[];
+    };
+    let pendingTurn: PendingTurn | null = null;
     let reply: { message: MessageRecord; buffer: StreamPersistenceBuffer } | null = null;
     let compactRequired = false;
     let compactedAfterLimit = false;
     let retryNeedsPreparation = false;
 
-    const prepare = async (): Promise<Tool[]> => {
+    const appendToolResult = (
+      outcome: Pick<AgentPlanInput, 'toolResults' | 'checkpoint'>,
+      callId: string,
+    ) => {
+      const result = outcome.toolResults.find((value) => value.callId === callId);
+      if (!result) throw new Error('Executed tool has no durable result.');
+      const reference = outcome.checkpoint.continuationItems.find(
+        (value) => value.type === 'function_call_output_ref' && value.callId === callId,
+      );
+      const item = sessionToolResult({
+        ...result,
+        attachmentIds:
+          reference?.type === 'function_call_output_ref' ? (reference.attachmentIds ?? []) : [],
+      });
+      session = { ...session, items: [...session.items, item] };
+      return item.type === 'function_call_result' ? item.output : '';
+    };
+
+    const invokeTool = async (call: ValidatedToolCall) => {
+      const outcome = await hooks.observe({
+        type: 'tool.call',
+        call,
+        session,
+        ...(pendingTurn?.commentary.length ? { commentary: pendingTurn.commentary } : {}),
+        ...(pendingTurn ? { modelTurn: pendingTurn.metrics } : {}),
+        ...(pendingTurn?.messageId
+          ? {
+              modelOutputItems: [
+                { type: 'assistant_message_ref' as const, messageId: pendingTurn.messageId },
+              ],
+            }
+          : {}),
+      });
+      pendingTurn = null;
+      if (outcome.task.status !== 'planning' || !outcome.checkpoint)
+        throw new Error('Task stopped at a tool boundary.');
+      return appendToolResult({ ...outcome, checkpoint: outcome.checkpoint }, call.callId);
+    };
+
+    const prepare = async (): Promise<FunctionTool[]> => {
       snapshot = await hooks.prepare();
       const currentMessages = await d.conversations.listTaskMessages(snapshot.task.id);
       await loadReplyTargets(currentMessages);
@@ -190,10 +288,7 @@ export class AgentRuntime implements AgentRuntimePort {
         [...byId.values()],
         tasks,
       );
-      contract = await d.tools.contract(
-        { ...snapshot, conversationTasks: tasks, optionalTools: provider.hostedTools ?? [] },
-        signal,
-      );
+      contract = await d.tools.contract({ ...snapshot, conversationTasks: tasks }, signal);
       agent.instructions = [settings.systemPrompt, contract.systemPrompt]
         .filter(Boolean)
         .join('\n\n');
@@ -201,60 +296,26 @@ export class AgentRuntime implements AgentRuntimePort {
         typeof contract.toolChoice === 'object'
           ? contract.toolChoice.name
           : (contract.toolChoice ?? 'auto');
-      return [
-        ...(contract.additionalTools ?? []),
-        ...contract.definitions.map(
-          (definition) =>
-            ({
-              ...definition,
-              parameters: definition.parameters as FunctionTool['parameters'],
-              needsApproval: async () => false,
-              isEnabled: async () => true,
-              invoke: async (_context, input, details) => {
-                const callId = details?.toolCall?.callId;
-                if (!callId) throw new Error('Framework tool call has no identity.');
-                const call = contract.parse({
-                  callId,
-                  name: definition.name,
-                  argumentsJson: input,
-                });
-                const outcome = await hooks.observe({
-                  type: 'tool.call',
-                  call,
-                  session,
-                  ...(pendingTurn ? { modelTurn: pendingTurn.metrics } : {}),
-                  ...(pendingTurn?.messageId
-                    ? {
-                        modelOutputItems: [
-                          {
-                            type: 'assistant_message_ref' as const,
-                            messageId: pendingTurn.messageId,
-                          },
-                        ],
-                      }
-                    : {}),
-                });
-                pendingTurn = null;
-                if (outcome.task.status !== 'planning' || !outcome.checkpoint)
-                  throw new Error('Task stopped at a tool boundary.');
-                const result = outcome.toolResults.find((value) => value.callId === callId);
-                if (!result) throw new Error('Executed tool has no durable result.');
-                const reference = outcome.checkpoint.continuationItems.find(
-                  (value) => value.type === 'function_call_output_ref' && value.callId === callId,
-                );
-                const item = sessionToolResult({
-                  ...result,
-                  attachmentIds:
-                    reference?.type === 'function_call_output_ref'
-                      ? (reference.attachmentIds ?? [])
-                      : [],
-                });
-                session = { ...session, items: [...session.items, item] };
-                return item.type === 'function_call_result' ? item.output : '';
-              },
-            }) satisfies FunctionTool,
-        ),
-      ];
+      return contract.definitions.flatMap((definition) => {
+        const { name, namespace } = toolNameParts(definition.name);
+        const tool: FunctionTool = {
+          ...definition,
+          name,
+          parameters: definition.parameters as FunctionTool['parameters'],
+          needsApproval: async () => false,
+          isEnabled: async () => true,
+          invoke: async (_context, input, details) => {
+            const callId = details?.toolCall?.callId;
+            if (!callId) throw new Error('Framework tool call has no identity.');
+            return invokeTool(
+              contract.parse({ callId, name: definition.name, argumentsJson: input }),
+            );
+          },
+        };
+        return namespace
+          ? toolNamespace({ name: namespace, description: `${namespace} tools`, tools: [tool] })
+          : [tool];
+      });
     };
 
     const ensureReply = async (): Promise<StreamPersistenceBuffer> => {
@@ -385,13 +446,79 @@ export class AgentRuntime implements AgentRuntimePort {
         const started = d.clock.now();
         let firstEvent: number | undefined;
         let firstText: number | undefined;
+        let lastTextItem: string | undefined;
+        let hasDraftText = false;
+        let finalAnswerStarted = false;
         let usage: ModelUsage | null = null;
         let completed = false;
         const summary = new Map<string, string>();
+        const displayedItems = new Set<string>();
+        const finalAnswerItems = new Set<string>();
+        const streamedCommentary = new Map<string, { index: number; callId?: string }>();
+        const streamedHostedCalls = new Set<string>();
         let summarySaved = '';
         let summarySavedAt = 0;
+        const appendText = async (text: string, itemId?: string) => {
+          const isFinalAnswer = itemId !== undefined && finalAnswerItems.has(itemId);
+          if (!text || (finalAnswerStarted && !isFinalAnswer)) return;
+          firstText ??= d.clock.now();
+          const buffer = await ensureReply();
+          if (isFinalAnswer && !finalAnswerStarted) {
+            await buffer.startFinalAnswer(text);
+            finalAnswerStarted = true;
+          } else {
+            const newItem = hasDraftText && itemId !== lastTextItem;
+            await buffer.append(newItem ? `\n\n${text}` : text);
+          }
+          if (itemId !== undefined) displayedItems.add(itemId);
+          lastTextItem = itemId;
+          hasDraftText = true;
+        };
+        const observeActivity = async (activity: ModelActivity) => {
+          if (
+            activity.type === 'reasoning_summary_delta' ||
+            activity.type === 'reasoning_summary_done'
+          ) {
+            const text =
+              activity.type === 'reasoning_summary_delta'
+                ? `${summary.get(activity.key) ?? ''}${activity.delta}`
+                : activity.text;
+            summary.set(activity.key, text.slice(0, 20_000));
+            if (
+              activity.type === 'reasoning_summary_done' ||
+              !summarySaved ||
+              d.clock.now() - summarySavedAt >= 1000
+            )
+              await flushSummary();
+          } else if (activity.type === 'assistant_final_answer') {
+            finalAnswerItems.add(activity.itemId);
+            if (
+              activity.text !== undefined &&
+              (!finalAnswerStarted || !displayedItems.has(activity.itemId))
+            )
+              await appendText(activity.text, activity.itemId);
+          } else if (activity.type === 'assistant_commentary') {
+            const { itemId, index, text } = activity;
+            if (streamedCommentary.has(itemId)) return;
+            streamedCommentary.set(itemId, { index });
+            if (!displayedItems.has(itemId)) await appendText(text, itemId);
+            await hooks.observe({ type: 'assistant.commentary', item: { itemId, text } });
+          } else if (activity.type === 'hosted_tool_done') {
+            const { item, index } = activity;
+            const callId = item.id;
+            if (!callId || streamedHostedCalls.has(callId)) return;
+            streamedHostedCalls.add(callId);
+            const commentary: AssistantCommentary[] = [];
+            for (const [itemId, entry] of streamedCommentary) {
+              if (entry.callId !== undefined || entry.index >= index) continue;
+              entry.callId = callId;
+              commentary.push({ itemId, callId });
+            }
+            await hooks.observe({ type: 'tool.hosted', item, commentary });
+          }
+        };
         const flushSummary = async () => {
-          const text = [...summary.values()].join('\n\n').slice(0, 20_000);
+          const text = [...summary.values()].join('\n\n').slice(-20_000);
           if (text && text !== summarySaved) {
             await hooks.observe({ type: 'reasoning.summary', text });
             summarySaved = text;
@@ -413,55 +540,74 @@ export class AgentRuntime implements AgentRuntimePort {
           })) {
             firstEvent ??= d.clock.now();
             if (event.type === 'output_text_delta') {
-              firstText ??= d.clock.now();
-              await (await ensureReply()).append(event.delta);
+              await appendText(event.delta, event.itemId);
             } else if (
               event.type === 'model' &&
               typeof event.event === 'object' &&
               event.event !== null
             ) {
-              const raw = event.event as Record<string, unknown>;
-              if (raw.type === 'reasoning_summary_delta' && typeof raw.delta === 'string') {
-                const key = String(raw.key);
-                const text = `${summary.get(key) ?? ''}${raw.delta}`.slice(0, 20_000);
-                summary.set(key, text);
-                if (!summarySaved || d.clock.now() - summarySavedAt >= 1000) await flushSummary();
-              }
+              await observeActivity(event.event as ModelActivity);
             } else if (event.type === 'response_done') {
+              const { output } = event.response;
+              for (const item of output) {
+                if (item.type !== 'reasoning') continue;
+                for (const [index, part] of item.content.entries()) {
+                  if (part.text.trim())
+                    summary.set(`${item.id}:${index}`, part.text.slice(0, 20_000));
+                }
+              }
               await flushSummary();
               usage = reportedUsage(event.response.rawUsage);
               session = {
                 ...session,
-                items: [...session.items, ...event.response.output],
+                items: [...session.items, ...output],
                 lastInputTokens: usage?.inputTokens ?? session.lastInputTokens,
               };
-              for (const item of event.response.output)
-                if (item.type === 'hosted_tool_call')
-                  await hooks.observe({ type: 'tool.hosted', item, session });
-              const hasCall = event.response.output.some((item) => item.type === 'function_call');
-              if (!reply) {
-                const text = event.response.output
-                  .flatMap((item) =>
-                    item.type === 'message'
-                      ? item.content.flatMap((part) =>
-                          part.type === 'output_text' ? [part.text] : [],
-                        )
-                      : [],
-                  )
-                  .join('\n');
-                if (text) await (await ensureReply()).append(text);
+              const presentation = replyFromModelOutput(output);
+              const remainingCommentary: AssistantCommentary[] = presentation.commentary.flatMap(
+                (item): AssistantCommentary[] => {
+                  const previous = item.itemId && streamedCommentary.get(item.itemId);
+                  if (!previous) return [item];
+                  return item.itemId && item.callId && previous.callId !== item.callId
+                    ? [{ itemId: item.itemId, callId: item.callId }]
+                    : [];
+                },
+              );
+              const hostedCalls = output.filter((item) => item.type === 'hosted_tool_call');
+              const reportedAtEnd = new Set<string>();
+              for (const item of hostedCalls) {
+                if (!item.id || streamedHostedCalls.has(item.id)) continue;
+                reportedAtEnd.add(item.id);
+                await hooks.observe({
+                  type: 'tool.hosted',
+                  item,
+                  session,
+                  commentary: remainingCommentary.filter(({ callId }) => callId === item.id),
+                });
               }
+              const commentary = remainingCommentary.filter(
+                ({ callId }) => callId === undefined || !reportedAtEnd.has(callId),
+              );
+              if (!reply && presentation.text)
+                await (await ensureReply()).append(presentation.text);
               const messageId = reply?.message.id ?? null;
               if (messageId)
                 session = {
                   ...session,
                   admittedMessageIds: [...new Set([...session.admittedMessageIds, messageId])],
                 };
-              if (reply) {
-                if (hasCall) await reply.buffer.interrupt();
-                else await reply.buffer.complete();
+              if (reply !== null) {
+                if (presentation.continues) await reply.buffer.interrupt();
+                else
+                  await reply.buffer.complete(
+                    presentation.text ? presentation.finalAnswer : undefined,
+                  );
               }
-              pendingTurn = { metrics: metrics(), messageId };
+              pendingTurn = {
+                metrics: metrics(),
+                messageId,
+                commentary,
+              };
               reply = null;
               completed = true;
             }
@@ -537,35 +683,35 @@ export class AgentRuntime implements AgentRuntimePort {
       (item) => item.type === 'function_call' && !resolved.has(item.callId),
     )) {
       if (call.type !== 'function_call') continue;
-      const available = await prepare();
+      await prepare();
+      const name = qualifiedToolName(call.name, call.namespace);
       const receipt = snapshot.toolResults.find((result) => result.callId === call.callId);
       if (receipt) {
-        if (receipt.toolName !== call.name || receipt.argumentsJson !== call.arguments)
+        if (receipt.toolName !== name || receipt.argumentsJson !== call.arguments)
           throw new Error('Recorded tool call differs from its durable receipt.');
-        const reference = snapshot.checkpoint.continuationItems.find(
-          (item) => item.type === 'function_call_output_ref' && item.callId === call.callId,
-        );
+        appendToolResult(snapshot, call.callId);
+        continue;
+      }
+      const retiredOutput = retiredToolOutput(name);
+      if (retiredOutput !== undefined) {
         session = {
           ...session,
           items: [
             ...session.items,
-            sessionToolResult({
-              ...receipt,
-              attachmentIds:
-                reference?.type === 'function_call_output_ref'
-                  ? (reference.attachmentIds ?? [])
-                  : [],
-            }),
+            {
+              type: 'function_call_result',
+              name: call.name,
+              callId: call.callId,
+              status: 'completed',
+              output: retiredOutput,
+            },
           ],
         };
         continue;
       }
-      const tool = available.find(
-        (tool): tool is FunctionTool => tool.type === 'function' && tool.name === call.name,
+      await invokeTool(
+        d.tools.parseRecorded({ callId: call.callId, name, argumentsJson: call.arguments }),
       );
-      if (!tool)
-        throw new Error('A recorded model call is no longer available. Inspect before continuing.');
-      await tool.invoke(new RunContext(), call.arguments, { toolCall: call });
     }
     const runner = new Runner({
       tracingDisabled: true,
@@ -605,7 +751,7 @@ export class AgentRuntime implements AgentRuntimePort {
       }
       await stream.completed;
       signal.throwIfAborted();
-      const turn = pendingTurn as { metrics: AgentModelTurn; messageId: string | null } | null;
+      const turn = pendingTurn as PendingTurn | null;
       if (!turn?.messageId)
         throw providerErrorFromCode('INVALID_RESPONSE', { invalidResponseStage: 'model_turn' });
       const outcome = await hooks.observe({
@@ -613,6 +759,7 @@ export class AgentRuntime implements AgentRuntimePort {
         reason: 'model_response_completed',
         messageId: turn.messageId,
         modelTurn: turn.metrics,
+        commentary: turn.commentary,
         session,
       });
       if (outcome.task.status !== 'planning') return;

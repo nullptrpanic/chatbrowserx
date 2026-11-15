@@ -121,8 +121,8 @@ describe('Sandbox Skill loader', () => {
     try {
       await vi.advanceTimersByTimeAsync(5_000);
       expect(contract?.definitions.map(({ name }) => name)).toEqual([
-        'sandbox_read',
-        'sandbox_exec',
+        'sandbox.read',
+        'sandbox.exec',
       ]);
       expect(scanSignal?.aborted).toBe(true);
       expect(contract?.systemPrompt).toBe('');

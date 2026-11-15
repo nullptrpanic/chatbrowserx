@@ -11,7 +11,7 @@ import { SandboxToolExecutor } from '../../src/sandbox/sandbox-tool-executor';
 const SIGNAL = new AbortController().signal;
 
 function readCall(
-  overrides: Partial<Extract<SandboxToolCall, { name: 'sandbox_read' }>['arguments']> = {},
+  overrides: Partial<Extract<SandboxToolCall, { operation: 'read' }>['arguments']> = {},
 ) {
   const arguments_ = {
     path: '/home/test/.codex/skills/example/SKILL.md',
@@ -134,7 +134,7 @@ describe('SandboxToolExecutor sandbox_read', () => {
     const current = fixture({ code: 0, stdout: 'x'.repeat(70 * 1024) + '\n', stderr: '' });
     const output = JSON.parse(await current.executor.execute(readCall({ startLine: 7 }), SIGNAL));
     expect(output).toMatchObject({ startLine: 7, endLine: 6, truncated: true });
-    expect(output.error).toContain('sandbox_exec');
+    expect(output.error).toContain('sandbox.exec');
   });
 
   it('propagates sanitized client failures', async () => {

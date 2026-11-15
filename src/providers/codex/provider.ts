@@ -14,12 +14,13 @@ import type {
 } from '@openai/agents-core';
 import { z } from 'zod';
 import type { Provider, ProviderCredentialSync, ProviderModel, ModelSelection } from '../provider';
-import type { ModelUsage } from '../model-events';
+import type { ModelActivity, ModelUsage } from '../model-events';
 import { isProviderError, providerErrorFromCode } from '../provider-error';
 import { retryAfterMs } from '../../shared/net/http-failure';
 import { compactionItemSchema } from '../../shared/protocol/compaction-item';
 import { extractChatGptAccountId } from './access-token';
 import { CODEX_CATALOG_CLIENT_VERSION, CODEX_RESPONSES_URL } from './codex-constants';
+import { decodeCodexToolCall, encodeCodexToolNames } from './tool-namespace';
 export type FetchPort = (input: RequestInfo | URL, init?: RequestInit) => Promise<Response>;
 
 function reportedUsage(raw: CodexResponse['usage'] | undefined): ModelUsage | null {
@@ -35,6 +36,65 @@ function reportedUsage(raw: CodexResponse['usage'] | undefined): ModelUsage | nu
       ? {}
       : { reasoningOutputTokens: raw.output_tokens_details.reasoning_tokens }),
   };
+}
+
+function streamActivity(event: ResponseStreamEvent): ModelActivity | undefined {
+  if (event.type === 'response.reasoning_summary_text.delta') {
+    return {
+      type: 'reasoning_summary_delta',
+      key: `${event.item_id}:${event.summary_index}`,
+      delta: event.delta,
+    };
+  }
+  if (
+    event.type === 'response.reasoning_summary_text.done' ||
+    event.type === 'response.reasoning_summary_part.done'
+  ) {
+    return {
+      type: 'reasoning_summary_done',
+      key: `${event.item_id}:${event.summary_index}`,
+      text: event.type === 'response.reasoning_summary_text.done' ? event.text : event.part.text,
+    };
+  }
+  if (
+    (event.type !== 'response.output_item.added' && event.type !== 'response.output_item.done') ||
+    !event.item
+  )
+    return;
+  const { item, output_index: index } = event;
+  if (
+    item.type === 'message' &&
+    item.role === 'assistant' &&
+    item.id &&
+    (item.phase === 'commentary' || item.phase === 'final_answer')
+  ) {
+    if (event.type === 'response.output_item.added')
+      return item.phase === 'final_answer'
+        ? { type: 'assistant_final_answer', itemId: item.id }
+        : undefined;
+    if (!Array.isArray(item.content)) return;
+    const text = item.content
+      .flatMap((part) =>
+        part.type === 'output_text' ? [part.text] : part.type === 'refusal' ? [part.refusal] : [],
+      )
+      .join('\n');
+    if (text.trim())
+      return item.phase === 'final_answer'
+        ? { type: 'assistant_final_answer', itemId: item.id, text }
+        : { type: 'assistant_commentary', itemId: item.id, index, text };
+  }
+  if (
+    event.type === 'response.output_item.done' &&
+    item.type === 'web_search_call' &&
+    item.status === 'completed'
+  ) {
+    const { status, ...providerData } = item;
+    return {
+      type: 'hosted_tool_done',
+      index,
+      item: { type: 'hosted_tool_call', id: item.id, name: item.type, status, providerData },
+    };
+  }
 }
 
 const catalogSchema = z.object({
@@ -86,6 +146,10 @@ class CodexResponsesModel extends OpenAIResponsesModel {
     const built = this._buildResponsesCreateRequest(
       {
         ...request,
+        tools:
+          request.modelSettings.toolChoice === 'none'
+            ? request.tools
+            : [webSearchTool(), ...request.tools],
         modelSettings: {
           ...request.modelSettings,
           providerData: {
@@ -98,7 +162,9 @@ class CodexResponsesModel extends OpenAIResponsesModel {
       },
       true,
     );
-    return built.requestData as ResponseCreateParamsStreaming;
+    const body = built.requestData as ResponseCreateParamsStreaming;
+    encodeCodexToolNames(body);
+    return body;
   }
 
   override async *getStreamedResponse(request: ModelRequest): AsyncGenerator<ModelStreamEvent> {
@@ -111,26 +177,9 @@ class CodexResponsesModel extends OpenAIResponsesModel {
             ...event,
             response: { ...response, ...(usage ? { rawUsage: { ...usage } } : {}) },
           };
-        } else if (
-          event.type === 'model' &&
-          typeof event.event === 'object' &&
-          event.event !== null &&
-          'type' in event.event &&
-          event.event.type === 'response.reasoning_summary_text.delta'
-        ) {
-          const raw = event.event as unknown as {
-            item_id: string;
-            summary_index: number;
-            delta: string;
-          };
-          yield {
-            type: 'model',
-            event: {
-              type: 'reasoning_summary_delta',
-              key: `${raw.item_id}:${raw.summary_index}`,
-              delta: raw.delta,
-            },
-          };
+        } else if (event.type === 'model') {
+          const activity = streamActivity(event.event as ResponseStreamEvent);
+          yield activity ? { type: 'model', event: activity } : event;
         } else yield event;
       }
     } catch (error) {
@@ -188,8 +237,12 @@ class CodexResponsesModel extends OpenAIResponsesModel {
         };
         renew();
         try {
-          for await (const event of source) {
+          for await (const raw of source) {
             renew();
+            const event =
+              raw.type === 'response.output_item.added' || raw.type === 'response.output_item.done'
+                ? { ...raw, item: decodeCodexToolCall(raw.item) }
+                : raw;
             if (event.type === 'response.failed')
               throw providerErrorFromCode(
                 String(event.response.error?.code) === 'context_length_exceeded'
@@ -205,15 +258,10 @@ class CodexResponsesModel extends OpenAIResponsesModel {
             if (event.type === 'response.output_item.done')
               completed.set(event.output_index, event.item);
             if (event.type === 'response.completed') {
-              yield event.response.output.length === 0 && completed.size > 0
-                ? {
-                    ...event,
-                    response: {
-                      ...event.response,
-                      output: [...completed].sort(([a], [b]) => a - b).map(([, item]) => item),
-                    },
-                  }
-                : event;
+              const output = event.response.output.length
+                ? event.response.output.map(decodeCodexToolCall)
+                : [...completed].sort(([a], [b]) => a - b).map(([, item]) => item);
+              yield { ...event, response: { ...event.response, output } };
               return;
             }
             yield event;
@@ -271,7 +319,6 @@ class CodexResponsesModel extends OpenAIResponsesModel {
 }
 
 export class CodexProvider implements Provider {
-  readonly hostedTools = [webSearchTool()];
   private catalog: { token: string; at: number; models: readonly ProviderModel[] } | null = null;
   constructor(
     private readonly credentials: {

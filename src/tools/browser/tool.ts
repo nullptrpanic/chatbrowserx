@@ -1,13 +1,13 @@
 import { register } from '../register';
-import type { ToolRuntimeHooks } from '../types';
-import { BROWSER_TOOL_SPECS } from './contract';
+import type { ToolRuntimeHooks, ValidatedToolCall } from '../types';
+import { BROWSER_PUBLIC_TOOLS, browserEngineCall, type BrowserCommand } from './public-contract';
 import { browserTool } from './declaration';
 import { browserPreflight } from './lifecycle';
 import { browserService } from './service';
 
 export const browserRuntime = {
   preflight(call, context) {
-    return browserPreflight(call, context);
+    return browserPreflight(browserEngineCall(call as ValidatedToolCall<BrowserCommand>), context);
   },
   contextCompacted(services) {
     if (services.has(browserService)) {
@@ -21,6 +21,6 @@ export const browserRuntime = {
   },
 } satisfies ToolRuntimeHooks;
 
-for (const [order, spec] of BROWSER_TOOL_SPECS.entries()) {
+for (const [order, spec] of BROWSER_PUBLIC_TOOLS.entries()) {
   register(browserTool(spec, order), browserRuntime);
 }

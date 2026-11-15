@@ -83,23 +83,31 @@ describe('BrowserToolExecutor', () => {
     expect(tabs.reload).not.toHaveBeenCalled();
   });
 
-  it('resolves the task-bound current tab without querying active tabs', async () => {
-    const tabs = tabPort();
+  it('lists the task-bound tab separately from the active tab', async () => {
+    const tab = {
+      tabId: 7,
+      windowId: 1,
+      url: 'https://example.com/current',
+      title: 'Task page',
+      active: false,
+      controllable: true,
+    };
+    const activeTab = { ...tab, tabId: 8, active: true };
+    const tabs = tabPort({ list: vi.fn(async () => [tab, activeTab]) });
     const executor = new BrowserToolExecutor({ tabs });
 
     const result = await executor.execute(
-      call('browser_get_current_tab', {}),
+      call('browser_list_tabs', {}),
       new AbortController().signal,
       { currentTabId: 7 },
     );
 
-    expect(tabs.get).toHaveBeenCalledWith(7);
-    expect(tabs.list).not.toHaveBeenCalled();
+    expect(tabs.list).toHaveBeenCalledOnce();
     expect(JSON.parse(result.output)).toEqual({
       ok: true,
-      tabId: 7,
-      url: 'https://example.com/current',
-      data: { title: 'Current page', active: true, taskBound: true },
+      tabId: null,
+      url: null,
+      data: { tabs: [tab, activeTab], currentTabId: 7 },
       observation: null,
     });
     expect(result.modelOutput).toBeUndefined();

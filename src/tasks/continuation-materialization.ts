@@ -12,10 +12,10 @@ export function materializeContinuationItems(
 ): readonly MaterializedContinuationItem[] {
   const results = new Map<string, MaterializedToolResult>();
   for (const result of source.toolResults) {
-    if (results.has(result.id)) {
+    if (results.has(result.callId)) {
       throw new Error('Task tool result reference is invalid.');
     }
-    results.set(result.id, result);
+    results.set(result.callId, result);
   }
   return source.continuationItems.map((item): MaterializedContinuationItem => {
     if (item.type !== 'function_call_output_ref') {
@@ -28,11 +28,10 @@ export function materializeContinuationItems(
       }
       return item;
     }
-    const result = results.get(item.resultId);
+    const result = results.get(item.callId);
     const attachmentIds = item.attachmentIds ?? [];
     if (
       result === undefined ||
-      result.callId !== item.callId ||
       attachmentIds.some((id) => !(result.attachmentIds ?? []).includes(id))
     ) {
       throw new Error('Task tool result reference is invalid.');
@@ -41,7 +40,6 @@ export function materializeContinuationItems(
       type: 'function_call_output',
       callId: item.callId,
       output: result.modelOutput ?? result.output,
-      resultId: item.resultId,
       attachmentIds,
     };
   });

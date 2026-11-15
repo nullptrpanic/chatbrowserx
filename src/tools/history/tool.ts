@@ -1,23 +1,16 @@
 import { validateImageBatch } from '../../attachments/attachment-policy';
-import type {
-  HistoryDetailReadInput,
-  HistoryReadInput,
-  HistorySearchInput,
-  ResultReadInput,
-} from '../../tasks/task-history-reader';
+import type { HistorySearchInput } from '../../tasks/task-history-reader';
 import { register } from '../register';
 import type { ToolDeclaration, ToolRuntimeContext, ToolRuntimeHooks } from '../types';
 import {
   attachmentReadDefinition,
   attachmentReadSchema,
-  historyDetailReadDefinition,
-  historyDetailReadSchema,
   historyReadDefinition,
   historyReadSchema,
   historySearchDefinition,
   historySearchSchema,
-  resultReadDefinition,
-  resultReadSchema,
+  historyReadRecordedSchemas,
+  type HistoryReadTarget,
 } from './contract';
 import { historyService } from './service';
 
@@ -43,9 +36,10 @@ function taskIdentity(context: ToolRuntimeContext): {
 }
 
 export const historySearchTool: ToolDeclaration<HistorySearchInput> = {
-  name: 'history_search',
+  name: 'history.search',
   definition: historySearchDefinition,
   schema: historySearchSchema,
+  recordedSchemas: new Map([['history_search', historySearchSchema]]),
   order: 299,
   policy: historyPolicy,
   available: historyAvailable,
@@ -53,77 +47,30 @@ export const historySearchTool: ToolDeclaration<HistorySearchInput> = {
     const result = await services
       .get(historyService)
       .searchHistory(taskIdentity(context), call.arguments);
-    const output = JSON.stringify(result);
-    if (!result.ok || !result.recent) return { output };
-
-    // Only reference a page still present in the current model window. Keep the audit copy intact.
-    const shown = new Set<string>();
-    for (const event of context.events ?? []) {
-      if (event.type === 'context.compacted' || event.type === 'context.cleared') shown.clear();
-      if (event.type === 'tool.result') shown.add(event.resultId);
-    }
-    if (
-      !(context.toolResults ?? []).some(
-        (receipt) =>
-          receipt.toolName === 'history_search' &&
-          receipt.modelOutput === undefined &&
-          receipt.output === output &&
-          shown.has(receipt.id),
-      )
-    )
-      return { output };
-    return {
-      output,
-      modelOutput: JSON.stringify({
-        ...result,
-        recent: { ...result.recent, items: [], alreadyShown: true },
-      }),
-    };
+    return { output: JSON.stringify(result) };
   },
 };
 
-export const historyReadTool: ToolDeclaration<HistoryReadInput> = {
-  name: 'history_read',
+export const historyReadTool: ToolDeclaration<HistoryReadTarget> = {
+  name: 'history.read',
   definition: historyReadDefinition,
   schema: historyReadSchema,
+  recordedSchemas: historyReadRecordedSchemas,
   order: 300,
   policy: historyPolicy,
   available: historyAvailable,
   async execute(call, context, services) {
-    const result = await services
-      .get(historyService)
-      .readHistory(taskIdentity(context), call.arguments);
-    return { output: JSON.stringify(result) };
-  },
-};
-
-export const resultReadTool: ToolDeclaration<ResultReadInput> = {
-  name: 'result_read',
-  definition: resultReadDefinition,
-  schema: resultReadSchema,
-  order: 302,
-  policy: historyPolicy,
-  available: historyAvailable,
-  async execute(call, context, services) {
-    const result = await services
-      .get(historyService)
-      .readResult(taskIdentity(context), call.arguments);
-    return { output: JSON.stringify(result) };
-  },
-};
-
-export const historyDetailReadTool: ToolDeclaration<HistoryDetailReadInput> = {
-  name: 'history_detail_read',
-  definition: historyDetailReadDefinition,
-  schema: historyDetailReadSchema,
-  order: 301,
-  policy: historyPolicy,
-  available: historyAvailable,
-  async execute(call, context, services) {
-    const result = await services
-      .get(historyService)
-      .readDetail(taskIdentity(context), call.arguments);
-    return { output: JSON.stringify(result) };
+    const history = services.get(historyService);
+    const identity = taskIdentity(context);
+    const target = call.arguments;
+    switch (target.kind) {
+      case 'timeline':
+        return { output: JSON.stringify(await history.readHistory(identity, target.input)) };
+      case 'message':
+        return { output: JSON.stringify(await history.readMessage(identity, target.input)) };
+      case 'result':
+        return { output: JSON.stringify(await history.readResult(identity, target.input)) };
+    }
   },
 };
 
@@ -154,9 +101,10 @@ export const historyRuntime = {
 } satisfies ToolRuntimeHooks;
 
 export const attachmentReadTool: ToolDeclaration<{ readonly attachmentIds: readonly string[] }> = {
-  name: 'attachment_read',
+  name: 'attachment.read',
   definition: attachmentReadDefinition,
   schema: attachmentReadSchema,
+  recordedSchemas: new Map([['attachment_read', attachmentReadSchema]]),
   order: 303,
   policy: historyPolicy,
   available: historyAvailable,
@@ -190,6 +138,4 @@ export const attachmentReadTool: ToolDeclaration<{ readonly attachmentIds: reado
 
 register(historySearchTool, historyRuntime);
 register(historyReadTool, historyRuntime);
-register(historyDetailReadTool, historyRuntime);
-register(resultReadTool, historyRuntime);
 register(attachmentReadTool, historyRuntime);

@@ -24,6 +24,10 @@ export function bindToolRuntime(
     readonly declarations: ErasedDeclaration[];
   }[] = [];
   for (const { declaration, runtime } of tools) {
+    for (const name of declaration.recordedSchemas?.keys() ?? []) {
+      if (byName.has(name)) throw new Error(`Duplicate recorded tool name: ${name}`);
+      byName.set(name, { declaration, ...(runtime === undefined ? {} : { runtime }) });
+    }
     if (runtime === undefined) {
       groups.push({ declarations: [declaration] });
       continue;
@@ -42,8 +46,9 @@ export function bindToolRuntime(
   const parse = (
     declaration: ErasedDeclaration,
     source: Parameters<ModelToolContract['parse']>[0],
+    schema = declaration.schema,
   ): ValidatedToolCall => {
-    const parsed = declaration.schema.parse(parseToolCallArguments(source));
+    const parsed = schema.parse(parseToolCallArguments(source));
     const base: ValidatedToolCall = Object.freeze({
       ...source,
       arguments: parsed,
@@ -80,8 +85,12 @@ export function bindToolRuntime(
       for (const runtime of runtimes) await runtime.release?.(ownerId, services);
     },
 
-    policyFor(name) {
-      return byName.get(name)?.declaration.policy ?? null;
+    policyFor(name, call) {
+      const declaration = byName.get(name)?.declaration;
+      if (declaration === undefined) return null;
+      return declaration.mutates && call
+        ? { ...declaration.policy, mutation: declaration.mutates(call) }
+        : declaration.policy;
     },
 
     canRecover(name) {
@@ -100,13 +109,13 @@ export function bindToolRuntime(
     },
 
     parseRecorded(source) {
-      return parse(declarationFor(source.name), source);
+      const declaration = declarationFor(source.name);
+      return parse(declaration, source, declaration.recordedSchemas?.get(source.name));
     },
 
     async contract(context, signal = new AbortController().signal): Promise<ModelToolContract> {
       const available = new Map<string, ErasedDeclaration>();
       const definitions = [];
-      const additionalTools = [];
       const forced: string[] = [];
       const toolSystemPrompts: string[] = [];
       let preparedContext = context;
@@ -124,7 +133,6 @@ export function bindToolRuntime(
           if (exposure === null) continue;
           available.set(declaration.name, declaration);
           definitions.push(exposure.definition);
-          additionalTools.push(...(exposure.additionalTools ?? []));
           if (exposure.force === true) forced.push(declaration.name);
         }
         if (group.runtime?.system_prompt !== undefined) {
@@ -139,7 +147,6 @@ export function bindToolRuntime(
 
       return Object.freeze({
         definitions: Object.freeze(definitions),
-        additionalTools: Object.freeze(additionalTools),
         ...(forced[0] === undefined
           ? {}
           : { toolChoice: { type: 'function' as const, name: forced[0] } }),

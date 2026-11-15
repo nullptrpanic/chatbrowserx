@@ -75,6 +75,9 @@ export function TaskProgressCard({
   }, [expanded, onLoadTaskDetails, task.detailLevel, task.id, task.sequence]);
 
   if (embedded) {
+    const running = runningStatuses.has(task.status);
+    const activity = running ? activityLabel(task.reasoningSummary) : '';
+    const statusLabel = taskStatusLabel(task.status, t);
     const summaryMeta = t('taskSummaryMeta', {
       toolCalls: detailItemCount,
       duration: formatTaskDuration(task),
@@ -86,10 +89,21 @@ export function TaskProgressCard({
           type="button"
           className="task-summary-toggle"
           aria-expanded={expanded}
-          aria-label={`${taskStatusLabel(task.status, t)} ${summaryMeta}`}
+          aria-label={`${statusLabel} ${summaryMeta}${activity ? ` · ${activity}` : ''}`}
           onClick={() => setExpanded((value) => !value)}
         >
-          <TaskStatusLabel status={task.status} t={t} />
+          {running ? (
+            <span className="task-status task-activity" role="status">
+              <span className="typing-dots" aria-hidden="true">
+                <i /> <i /> <i />
+              </span>
+              <span className="task-activity-text" title={activity || statusLabel}>
+                {activity || statusLabel}
+              </span>
+            </span>
+          ) : (
+            <TaskStatusLabel status={task.status} t={t} />
+          )}
           <span className="task-summary-meta">{summaryMeta}</span>
           {expanded ? (
             <ChevronUp size={14} aria-hidden="true" />
@@ -126,9 +140,6 @@ export function TaskProgressCard({
   return (
     <section className="task-card" aria-label={taskStatusLabelForAria(task, t)}>
       {compactionNotice}
-      {task.status === 'planning' && task.reasoningSummary ? (
-        <RestrictedMarkdown text={task.reasoningSummary} />
-      ) : null}
       <div className="task-card-header">
         <TaskStatusLabel status={task.status} t={t} />
         <span className="task-updated">
@@ -181,6 +192,19 @@ export function TaskProgressCard({
   );
 }
 
+function activityLabel(summary: string | undefined): string {
+  return (
+    summary
+      ?.trim()
+      .split(/\n\s*\n/)
+      .at(-1)
+      ?.split('\n', 1)[0]
+      ?.replace(/^#{1,6}\s+/, '')
+      .replace(/^(\*{1,2}|_{1,2})(.+)\1$/, '$2')
+      .trim() ?? ''
+  );
+}
+
 /** Keeps an earlier execution attempt's terminal state attached to its own answer. */
 export function TaskRunStatusCard({
   run,
@@ -217,35 +241,45 @@ function TaskDetailContent({
   const detailItems = taskDetailItems(task);
   return (
     <div className="task-detail-content">
-      {task.toolResults.length === 0 && task.supplements.length === 0 ? (
+      {detailItems.length === 0 ? (
         <p className="task-detail-empty">{t('noEvents')}</p>
-      ) : null}
-      {task.toolResults.length === 0 && task.supplements.length === 0 ? null : (
+      ) : (
         <ol className="task-event-list">
-          {detailItems.map((item) =>
-            item.type === 'tool' ? (
-              <CompletedToolEvent
-                key={item.result.callId}
-                result={item.result}
-                number={item.result.detailIndex}
-                at={item.at}
-                attachments={attachments}
-                t={t}
-                onOpenImagePreview={onOpenImagePreview}
-              />
-            ) : (
+          {detailItems.map((item) => {
+            if (item.type === 'tool') {
+              return (
+                <CompletedToolEvent
+                  key={'tool:' + item.result.callId}
+                  result={item.result}
+                  at={item.at}
+                  commentary={item.commentary}
+                  attachments={attachments}
+                  t={t}
+                  onOpenImagePreview={onOpenImagePreview}
+                />
+              );
+            }
+            if (item.type === 'commentary') {
+              return (
+                <li key={item.sequence}>
+                  <div className="task-event-tool-results">
+                    <ProcessMessage text={item.text} />
+                  </div>
+                </li>
+              );
+            }
+            return (
               <li className="task-supplement-entry" key={item.supplement.id}>
                 <span className="task-event-index">{item.supplement.detailIndex}</span>
                 <TaskSupplement
                   supplement={item.supplement}
-                  applicationState={item.supplement.applicationState}
                   attachments={attachments}
                   t={t}
                   onOpenImagePreview={onOpenImagePreview}
                 />
               </li>
-            ),
-          )}
+            );
+          })}
         </ol>
       )}
     </div>
@@ -254,22 +288,22 @@ function TaskDetailContent({
 
 function CompletedToolEvent({
   result,
-  number,
   at,
+  commentary,
   attachments,
   t,
   onOpenImagePreview,
 }: {
   readonly result: PanelToolResult;
-  readonly number: number;
   readonly at?: number | undefined;
+  readonly commentary: readonly { readonly sequence: number; readonly text: string }[];
   readonly attachments: AttachmentDraftClient;
   readonly t: Translator;
   readonly onOpenImagePreview?: ((attachmentId: string) => Promise<boolean>) | undefined;
 }) {
   return (
     <li>
-      <span className="task-event-index">{number}</span>
+      <span className="task-event-index">{result.detailIndex}</span>
       <span>{toolResultEventLabel(result.toolName, t)}</span>
       {at === undefined ? (
         <span />
@@ -283,6 +317,9 @@ function CompletedToolEvent({
         </time>
       )}
       <div className="task-event-tool-results">
+        {commentary.map(({ sequence, text }) => (
+          <ProcessMessage key={sequence} text={text} />
+        ))}
         <RenderedToolResult
           result={result}
           attachments={attachments}
@@ -294,37 +331,76 @@ function CompletedToolEvent({
   );
 }
 
+function ProcessMessage({ text }: { readonly text: string }) {
+  return (
+    <div className="tool-result process-message">
+      <RestrictedMarkdown text={text} />
+    </div>
+  );
+}
+
 type TaskDetailItem =
   | {
       readonly type: 'tool';
       readonly result: PanelToolResult;
       readonly at: number | undefined;
+      readonly commentary: readonly { readonly sequence: number; readonly text: string }[];
     }
-  | { readonly type: 'supplement'; readonly supplement: PanelTaskSupplement };
+  | { readonly type: 'supplement'; readonly supplement: PanelTaskSupplement }
+  | {
+      readonly type: 'commentary';
+      readonly sequence: number;
+      readonly text: string;
+      readonly afterIndex: number;
+    };
 
 /** Merges permanent detail projections by their TaskEvent-derived display index. */
 function taskDetailItems(task: PanelTask): readonly TaskDetailItem[] {
-  const resultTimeById = new Map(
-    task.events.flatMap((event) =>
-      event.type === 'tool.result-recorded' && event.resultId !== undefined
-        ? ([[event.resultId, event.at]] as const)
-        : [],
-    ),
+  const tools = new Map(
+    task.toolResults.map(({ callId, detailIndex }) => [
+      callId,
+      {
+        detailIndex,
+        at: undefined as number | undefined,
+        commentary: [] as { sequence: number; text: string }[],
+      },
+    ]),
   );
+  const supplements = new Map(task.supplements.map(({ id, detailIndex }) => [id, detailIndex]));
+  const standalone: TaskDetailItem[] = [];
+  let afterIndex = 0;
+  for (const event of task.events) {
+    const tool = event.callId ? tools.get(event.callId) : undefined;
+    if (tool) {
+      afterIndex = tool.detailIndex;
+      tool.at = event.at;
+    } else if (event.supplementIds?.[0]) {
+      afterIndex = supplements.get(event.supplementIds[0]) ?? afterIndex;
+    }
+    if (!event.commentary) continue;
+    const { callId, text } = event.commentary;
+    const message = { sequence: event.sequence, text };
+    const group = callId ? tools.get(callId) : undefined;
+    if (group) group.commentary.push(message);
+    else standalone.push({ type: 'commentary', ...message, afterIndex });
+  }
   return [
     ...task.toolResults.map((result): TaskDetailItem => ({
       type: 'tool',
       result,
-      at: resultTimeById.get(result.resultId),
+      at: tools.get(result.callId)?.at,
+      commentary: tools.get(result.callId)?.commentary ?? [],
     })),
     ...task.supplements.map((supplement): TaskDetailItem => ({
       type: 'supplement',
       supplement,
     })),
+    ...standalone,
   ].sort((left, right) => detailIndex(left) - detailIndex(right));
 }
 
 function detailIndex(item: TaskDetailItem): number {
+  if (item.type === 'commentary') return item.afterIndex;
   return item.type === 'tool' ? item.result.detailIndex : item.supplement.detailIndex;
 }
 

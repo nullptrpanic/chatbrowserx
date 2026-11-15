@@ -862,31 +862,15 @@ export class BrowserToolExecutor implements BrowserExecutionPort {
       let attachmentIds: readonly string[] = [];
       let modelAttachmentIds: readonly string[] | undefined;
       switch (call.operation) {
-        case 'get_current_tab': {
-          if (context?.currentTabId === undefined || context.currentTabId === null) {
-            output = failure(
-              'CURRENT_TAB_UNAVAILABLE',
-              'This task has no current browser tab. List tabs and switch to one before continuing.',
-              false,
-              false,
-            );
-            break;
-          }
-          const tab = await this.#dependencies.tabs.get(context.currentTabId);
-          output = success(tab, {
-            title: tab.title,
-            active: tab.active,
-            taskBound: true,
-          });
-          break;
-        }
         case 'list_tabs': {
           const tabs = await this.#dependencies.tabs.list();
+          const currentTabId =
+            tabs.find((tab) => tab.tabId === context?.currentTabId)?.tabId ?? null;
           output = {
             ok: true,
             tabId: null,
             url: null,
-            data: { tabs },
+            data: { tabs, currentTabId },
             observation: null,
           };
           break;

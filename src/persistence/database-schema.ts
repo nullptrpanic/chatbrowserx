@@ -8,7 +8,7 @@ import type {
   TaskEventId,
   TaskId,
   TaskRunId,
-  ToolResultId,
+  ToolCallKey,
 } from '../shared/ids';
 import type { Checkpoint } from '../tasks/checkpoint-types';
 import type { Conversation } from '../tasks/conversation-types';
@@ -17,8 +17,7 @@ import type { Task, TaskEvent, TaskRun } from '../tasks/task-types';
 import type { ToolResult } from '../tasks/tool-result-types';
 import type { AgentSession } from '../tasks/agent-session-types';
 
-// Never lower this value: existing extension profiles may already have completed version 2.
-export const DATABASE_VERSION = 5;
+export const DATABASE_VERSION = 6;
 export const DEFAULT_DATABASE_NAME = 'chatbrowserx-v1';
 
 export const STORE_NAMES = {
@@ -86,12 +85,11 @@ export interface ChatBrowserDatabase extends DBSchema {
     };
   };
   'tool-results': {
-    key: ToolResultId;
+    key: ToolCallKey;
     value: ToolResult;
     indexes: {
       'by-task': TaskId;
       'by-run': TaskRunId;
-      'by-task-call': [TaskId, string];
     };
   };
   checkpoints: {
@@ -108,11 +106,11 @@ export interface ChatBrowserDatabase extends DBSchema {
     indexes: { 'by-created-at': number };
   };
   'attachment-references': {
-    key: [AttachmentId, string];
+    key: [AttachmentId, AttachmentReference['referenceId']];
     value: AttachmentReference;
     indexes: {
       'by-attachment': AttachmentId;
-      'by-reference': string;
+      'by-reference': AttachmentReference['referenceId'];
     };
   };
 }

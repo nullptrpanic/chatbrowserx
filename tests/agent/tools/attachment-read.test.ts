@@ -63,7 +63,6 @@ async function fixture() {
     updatedAt: 1,
   });
   await database.put('tool-results', {
-    id: 'result',
     taskId: current.id,
     runId: 'run_current',
     callId: 'capture',
@@ -73,7 +72,7 @@ async function fixture() {
     createdAt: 2,
   });
   await attachments.addReference('message_image', 'message:message');
-  await attachments.addReference('tool_image', 'result');
+  await attachments.addReference('tool_image', ['current', 'capture']);
   const services = new ToolServiceResolver();
   services.bind(
     historyService,
@@ -87,11 +86,11 @@ async function fixture() {
   const runtime = bindToolRuntime(tools, services);
   const context = { task: current, conversationTasks: [previous, current] };
   const contract = await runtime.contract(context);
-  expect(contract.definitions.map(({ name }) => name)).toContain('attachment_read');
+  expect(contract.definitions.map(({ name }) => name)).toContain('attachment.read');
   const read = (attachmentIds: string[], conversationId = current.conversationId) =>
     runtime.execute(
       contract.parse({
-        name: 'attachment_read',
+        name: 'attachment.read',
         callId: 'read',
         argumentsJson: JSON.stringify({ attachmentIds }),
       }),
@@ -101,7 +100,7 @@ async function fixture() {
   return { database, attachments, contract, read, runtime };
 }
 
-describe('attachment_read', () => {
+describe('attachment.read', () => {
   it('returns ordered, deduplicated image references from historical messages and current tool results', async () => {
     const { read, attachments } = await fixture();
     const result = await read(['tool_image', 'message_image', 'tool_image']);
@@ -125,7 +124,7 @@ describe('attachment_read', () => {
   it('does not authorize stale owner references or an owner that no longer contains the image', async () => {
     const { read, database } = await fixture();
     await database.delete('messages', 'message');
-    const result = await database.get('tool-results', 'result');
+    const result = await database.get('tool-results', ['current', 'capture']);
     if (!result) throw new Error('Fixture result missing.');
     await database.put('tool-results', { ...result, attachmentIds: [] });
     for (const id of ['message_image', 'tool_image']) {
@@ -152,7 +151,7 @@ describe('attachment_read', () => {
     for (const attachmentIds of [[], Array.from({ length: 9 }, (_, i) => `image_${i}`)]) {
       expect(() =>
         contract.parse({
-          name: 'attachment_read',
+          name: 'attachment.read',
           callId: 'invalid',
           argumentsJson: JSON.stringify({ attachmentIds }),
         }),
@@ -163,7 +162,7 @@ describe('attachment_read', () => {
   it('rejects an oversized image or aggregate batch using the shared image policy', async () => {
     const { read, database, attachments } = await fixture();
     const image = await database.get('attachments', 'message_image');
-    const owner = await database.get('tool-results', 'result');
+    const owner = await database.get('tool-results', ['current', 'capture']);
     if (!image || !owner) throw new Error('Fixture records missing.');
     const largeBlob = new Blob([new Uint8Array(11 * 1024 * 1024)], { type: 'image/png' });
     await database.put('attachments', { ...image, blob: largeBlob, byteSize: largeBlob.size });
@@ -176,7 +175,7 @@ describe('attachment_read', () => {
     await database.put('tool-results', { ...owner, attachmentIds });
     for (const id of attachmentIds) {
       await attachments.put({ ...image, id, blob: batchBlob, byteSize: batchBlob.size });
-      await attachments.addReference(id, owner.id);
+      await attachments.addReference(id, [owner.taskId, owner.callId]);
     }
     const result = await read(attachmentIds);
     expect(result.attachmentIds).toBeUndefined();

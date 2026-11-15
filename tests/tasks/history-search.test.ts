@@ -9,7 +9,7 @@ import type { MessageRecord } from '../../src/tasks/message-types';
 import type { Task, TaskEvent } from '../../src/tasks/task-types';
 import { discoverTools } from '../../src/tools/discover';
 import { historyService } from '../../src/tools/history/service';
-import { historyRuntime, historySearchTool } from '../../src/tools/history/tool';
+import { historyRuntime } from '../../src/tools/history/tool';
 import { bindToolRuntime } from '../../src/tools/registry';
 import { ToolServiceResolver } from '../../src/tools/service-resolver';
 
@@ -97,8 +97,7 @@ describe('history discovery and anchored reads', () => {
     });
     expect(result).toEqual({
       ok: true,
-      totalCount: 1,
-      hasMore: false,
+
       nextCursor: null,
       items: [
         {
@@ -135,7 +134,7 @@ describe('history discovery and anchored reads', () => {
     const page = await f.reader.searchHistory(f.context, { query: '', cursor: '', limit: 2 });
     expect(page).toMatchObject({
       ok: true,
-      hasMore: true,
+
       items: [
         {
           messageId: 'new_1',
@@ -154,7 +153,7 @@ describe('history discovery and anchored reads', () => {
     });
     expect(next).toMatchObject({
       ok: true,
-      hasMore: false,
+
       items: [{ messageId: 'old_1' }, { messageId: 'old_0' }],
     });
     expect(
@@ -172,128 +171,25 @@ describe('history discovery and anchored reads', () => {
     ).toMatchObject({ ok: false, code: 'INVALID_CURSOR' });
   });
 
-  it('returns a recent page only when no terms match and the available history fits', async () => {
+  it('returns an empty search and browses history explicitly', async () => {
     const f = await fixture();
-    await f.seed('older', 1, [
-      'How do image attachments affect Token usage?',
-      'Use attachment IDs.',
-    ]);
-    await f.seed('recent', 2, ['Different topic', 'A more recent reply']);
-    await f.seed('foreign', 3, ['Private question', 'Private answer'], {
-      conversationId: 'foreign',
-    });
-    const page = await f.reader.searchHistory(f.context, {
-      query: 'screenshot costs',
-      cursor: '',
-      limit: 4,
-    });
-    expect(page).toMatchObject({
-      ok: true,
-      totalCount: 0,
-      items: [],
-      recent: {
-        totalCount: 4,
-        nextCursor: null,
-        hasMore: false,
-        items: [
-          { messageId: 'recent_1' },
-          { messageId: 'recent_0' },
-          { messageId: 'older_1' },
-          { messageId: 'older_0' },
-        ],
-      },
-    });
-    for (const [query, limit] of [
-      ['screenshot costs', 2],
-      ['image topic', 4],
-    ] as const) {
-      const miss = await f.reader.searchHistory(f.context, { query, cursor: '', limit });
-      expect(miss).toEqual({
-        ok: true,
-        items: [],
-        totalCount: 0,
-        nextCursor: null,
-        hasMore: false,
-      });
-    }
+    await f.seed('old', 1, ['Old question', 'Old answer']);
+    await f.seed('recent', 2, ['Recent question', 'Recent answer']);
     expect(
-      await f.reader.searchHistory(f.context, {
-        query: 'image',
-        cursor: '',
-        limit: 2,
-      }),
-    ).toMatchObject({ ok: true, totalCount: 1, items: [{ messageId: 'older_0' }] });
-  });
-
-  it('keeps an identical recent page out of the model window until compaction removes its prior copy', async () => {
-    const f = await fixture();
-    await f.seed('older', 1, ['Earlier question', 'Earlier answer']);
-    await f.seed('new', 2, ['Recent question', 'Recent answer']);
-    const task = await f.seed('current', 3, ['Current request'], { status: 'planning' });
-    const services = new ToolServiceResolver();
-    services.bind(historyService, f.reader);
-    const search = (
-      query: string,
-      id: string,
-      context: Parameters<typeof historySearchTool.execute>[1],
-    ) => {
-      const args = { query, cursor: '', limit: 4 };
-      return historySearchTool.execute(
-        {
-          name: 'history_search',
-          callId: id,
-          argumentsJson: JSON.stringify(args),
-          arguments: args,
-        },
-        { ...context, task },
-        services,
-        new AbortController().signal,
-      );
-    };
-    const first = await search('first miss', 'first', {});
-    const base = { taskId: task.id, runId: 'run_current', at: 302 };
-    const previous = {
-      id: 'result',
-      ...base,
-      callId: 'first',
-      toolName: 'history_search',
-      argumentsJson: '{"query":"first miss","cursor":"","limit":4}',
-      output: first.output,
-      attachmentIds: [],
-      createdAt: 302,
-    };
-    const recorded: TaskEvent = {
-      ...base,
-      id: 'recorded',
-      sequence: 2,
-      type: 'tool.result',
-      callId: 'first',
-      resultId: previous.id,
-    };
-    const repeated = await search('second miss', 'second', {
-      toolResults: [previous],
-      events: [recorded],
-    });
-    expect(repeated.output).toBe(first.output);
-    expect(JSON.parse(repeated.modelOutput ?? 'null')).toMatchObject({
-      items: [],
-      recent: { items: [], alreadyShown: true, nextCursor: null },
-    });
-    const afterCompaction = await search('second miss', 'after', {
-      toolResults: [previous],
-      events: [
-        recorded,
-        {
-          ...base,
-          id: 'compacted',
-          sequence: 3,
-          type: 'context.compacted',
-          releasedImages: 0,
-          releasedTextCharacters: 0,
-        },
+      await f.reader.searchHistory(f.context, { query: 'unmatched terms', cursor: '', limit: 4 }),
+    ).toEqual({ ok: true, items: [], nextCursor: null });
+    expect(
+      await f.reader.searchHistory(f.context, { query: '', cursor: '', limit: 4 }),
+    ).toMatchObject({
+      ok: true,
+      nextCursor: null,
+      items: [
+        { messageId: 'recent_1' },
+        { messageId: 'recent_0' },
+        { messageId: 'old_1' },
+        { messageId: 'old_0' },
       ],
     });
-    expect(afterCompaction).toEqual(first);
   });
 
   it('returns a bounded excerpt around a late match and reads the original answer by message', async () => {
@@ -326,10 +222,10 @@ describe('history discovery and anchored reads', () => {
       'long_1',
     ]);
     const item = page.items[1];
-    if (!item || item.type !== 'message' || !item.textDetailId)
-      throw new Error('Expected original text reference.');
-    const detail = await f.reader.readDetail(f.context, {
-      detailId: item.textDetailId,
+    if (!item || item.type !== 'message') throw new Error('Expected original text reference.');
+    const detail = await f.reader.readMessage(f.context, {
+      taskId: match.taskId,
+      messageId: item.messageId,
       offset: 6_300,
       limit: 40,
     });
@@ -389,7 +285,6 @@ describe('history discovery and anchored reads', () => {
       ).toMatchObject({
         ok: true,
         items: [],
-        recent: { items: [{ messageId: 'current_1' }, { messageId: 'current_0' }] },
       });
     }
     const page = await f.reader.readHistory(f.context, {
@@ -409,7 +304,7 @@ describe('history discovery and anchored reads', () => {
       { ...f.context, currentTaskLastEventSequence: 5 },
       { taskId: 'current', offset: null, cursor: page.nextCursor, limit: 20 },
     );
-    expect(next).toMatchObject({ ok: true, hasMore: false, items: [{ messageId: 'current_2' }] });
+    expect(next).toMatchObject({ ok: true, nextCursor: null, items: [{ messageId: 'current_2' }] });
     const services = new ToolServiceResolver();
     services.bind(historyService, f.reader);
     const runtime = bindToolRuntime(
@@ -421,8 +316,8 @@ describe('history discovery and anchored reads', () => {
       events: await f.db.getAll('task-events'),
       conversationTasks: [current],
     });
-    expect(contract.definitions.map(({ name }) => name)).toContain('history_search');
-    expect(contract.definitions.map(({ name }) => name)).toContain('history_read');
+    expect(contract.definitions.map(({ name }) => name)).toContain('history.search');
+    expect(contract.definitions.map(({ name }) => name)).toContain('history.read');
     expect(contract.systemPrompt).toBe('');
   });
 
@@ -466,7 +361,6 @@ describe('history discovery and anchored reads', () => {
 
     const page = await f.reader.searchHistory(f.context, { query: '', cursor: '', limit: 5 });
     if (!page.ok) throw new Error('Expected a search page.');
-    expect(page.totalCount).toBe(2);
     expect(page.items.map(({ messageId }) => messageId)).toEqual(['current_1', 'current_0']);
     expect(page.items.flatMap(({ context }) => context.map(({ messageId }) => messageId))).toEqual([
       'current_1',
@@ -514,10 +408,8 @@ describe('history discovery and anchored reads', () => {
       at: 103,
       type: 'tool.result',
       callId: 'read',
-      resultId: 'original',
     });
     await f.db.put('tool-results', {
-      id: 'original',
       taskId: current.id,
       runId: 'run_current',
       callId: 'read',
@@ -526,7 +418,7 @@ describe('history discovery and anchored reads', () => {
       attachmentIds: [],
       createdAt: 103,
     });
-    const read = { resultId: 'original', offset: 0, limit: 100 };
+    const read = { taskId: current.id, callId: 'read', offset: 0, limit: 100 };
     expect(
       await f.reader.readResult({ ...f.context, currentTaskLastEventSequence: 2 }, read),
     ).toMatchObject({ ok: false, code: 'RESULT_NOT_FOUND' });

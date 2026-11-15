@@ -1,14 +1,14 @@
 import { describe, expect, it } from 'vitest';
 import {
   BROWSER_TOOL_DEFINITIONS,
-  BROWSER_TOOL_SPECS,
   browserOperationForName,
   parseBrowserToolCall,
 } from '../../../src/tools/browser/contract';
-import { browserTool } from '../../../src/tools/browser/declaration';
+import { discoverTools } from '../../../src/tools/discover';
+import { bindToolRuntime } from '../../../src/tools/registry';
+import { ToolServiceResolver } from '../../../src/tools/service-resolver';
 
 const CASES = [
-  ['browser_get_current_tab', 'get_current_tab', 'safe', {}],
   ['browser_list_tabs', 'list_tabs', 'safe', {}],
   [
     'browser_open_tab',
@@ -108,7 +108,82 @@ const CASES = [
   ['browser_network_stop', 'network_stop', 'mutation', { tabId: 7 }],
 ] as const;
 
+const runtime = bindToolRuntime(discoverTools(), new ToolServiceResolver());
+
 const NAMES = CASES.map(([name]) => name);
+
+describe('public browser tool routes', () => {
+  it.each([
+    ['browser.tab', { input: { action: 'list' } }, 'browser_list_tabs', false],
+    ['browser.tab', { input: { action: 'switch', tabId: 7 } }, 'browser_switch_tab', false],
+    [
+      'browser.tab',
+      { input: { action: 'open', url: 'https://example.com/', activate: false } },
+      'browser_open_tab',
+      true,
+    ],
+    ['browser.tab', { input: { action: 'close', tabId: 7 } }, 'browser_close_tab', true],
+    [
+      'browser.click',
+      { tabId: 7, target: { ref: 'ref_1', button: 'middle', count: 1 } },
+      'browser_click',
+      true,
+    ],
+    [
+      'browser.click',
+      { tabId: 7, target: { x: 12, y: 5, button: 'right', count: 1 } },
+      'browser_click_point',
+      true,
+    ],
+    ['browser.drag', { tabId: 7, target: { fromRef: 'a', toRef: 'b' } }, 'browser_drag', true],
+    [
+      'browser.drag',
+      { tabId: 7, target: { fromX: 12, fromY: 5, toX: 20, toY: 15 } },
+      'browser_drag_point',
+      true,
+    ],
+    ['browser.set_checked', { items: [{ ref: 'a', checked: true }] }, 'browser_set_checked', true],
+    [
+      'browser.set_checked',
+      {
+        items: [
+          { ref: 'a', checked: true },
+          { ref: 'b', checked: false },
+        ],
+      },
+      'browser_set_checked_many',
+      true,
+    ],
+    [
+      'browser.paste',
+      { type: 'image', tabId: 7, ref: 'ref_1', assetId: 'asset_1' },
+      'browser_paste_image',
+      true,
+    ],
+    ['network.capture', { input: { action: 'start', tabId: 7 } }, 'browser_network_start', true],
+    ['network.capture', { input: { action: 'stop', tabId: 7 } }, 'browser_network_stop', true],
+  ])('routes %s %j and preserves replay policy', (name, input, operation, mutation) => {
+    const call = runtime.parseRecorded({
+      name,
+      callId: 'public',
+      argumentsJson: JSON.stringify(input),
+    });
+    expect(call.arguments).toMatchObject({ name: operation });
+    expect(runtime.policyFor(name, call)?.mutation).toBe(mutation);
+  });
+
+  it.each([
+    ['browser.paste', { ref: 'ref_1', assetId: 'asset_1' }],
+    ['browser.paste', { type: 'text', ref: 'ref_1', assetId: 'asset_1' }],
+    ['browser.click', { target: { ref: 'ref_1', x: 12, y: 5, button: 'left', count: 1 } }],
+    ['browser.drag', { target: { fromRef: 'ref_1', toX: 12, toY: 5 } }],
+    ['browser.tab', { input: { action: 'list', tabId: 7 } }],
+  ])('rejects ambiguous or unsupported %s %j', (name, input) => {
+    expect(() =>
+      runtime.parseRecorded({ name, callId: 'bad', argumentsJson: JSON.stringify(input) }),
+    ).toThrow();
+  });
+});
 
 describe('BROWSER_TOOL_DEFINITIONS', () => {
   it('accepts scoped deep inspection but rejects scope on other modes or a full-page delta', () => {
@@ -189,7 +264,7 @@ describe('BROWSER_TOOL_DEFINITIONS', () => {
     };
 
     expect(listTabs?.description).toBe(
-      'List browser tabs with IDs, titles, URLs, and active state.',
+      'List browser tabs with IDs, titles, URLs, and active state. currentTabId identifies the tab bound to this task.',
     );
     expect(parameters.required).toContain('tabId');
     expect(parameters.properties.tabId?.description).toContain('Required');
@@ -267,7 +342,7 @@ describe('BROWSER_TOOL_DEFINITIONS', () => {
     const definition = BROWSER_TOOL_DEFINITIONS.find(({ name }) => name === 'browser_network_stop');
 
     expect(definition?.description).toContain('remain readable');
-    expect(definition?.description).toContain('next browser_network_start');
+    expect(definition?.description).toContain('next capture start');
   });
 
   it('describes the staged stop, list, then get lifecycle', () => {
@@ -275,11 +350,11 @@ describe('BROWSER_TOOL_DEFINITIONS', () => {
     const stop = BROWSER_TOOL_DEFINITIONS.find(({ name }) => name === 'browser_network_stop');
     const list = BROWSER_TOOL_DEFINITIONS.find(({ name }) => name === 'browser_network_list');
 
-    expect(start?.description).toContain('browser_network_stop');
+    expect(start?.description).toContain('network.capture using action=stop');
     expect(start?.description).toContain('require a frozen capture');
-    expect(stop?.description).toContain('then call browser_network_list');
+    expect(stop?.description).toContain('then call network.list');
     expect(list?.description).toContain('After the first successful list');
-    expect(list?.description).toContain('browser_network_get');
+    expect(list?.description).toContain('network.get');
     expect(start?.description.length).toBeLessThanOrEqual(400);
     expect(stop?.description.length).toBeLessThanOrEqual(400);
     expect(list?.description.length).toBeLessThanOrEqual(500);
@@ -434,9 +509,8 @@ describe('parseBrowserToolCall', () => {
     'parses %s into one typed browser operation',
     (name, operation, replay, arguments_) => {
       const argumentsJson = JSON.stringify(arguments_);
-      const spec = BROWSER_TOOL_SPECS.find((entry) => entry.name === name);
-      if (spec === undefined) throw new Error(`Missing browser tool: ${name}`);
-      expect(browserTool(spec, 0).policy.mutation).toBe(replay !== 'safe');
+      const call = runtime.parseRecorded({ callId: 'call_1', name, argumentsJson });
+      expect(runtime.policyFor(name, call)?.mutation).toBe(replay !== 'safe');
 
       expect(parseBrowserToolCall({ callId: 'call_1', name, argumentsJson })).toEqual({
         operation,

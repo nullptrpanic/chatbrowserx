@@ -8,7 +8,7 @@ import type { TaskEvent } from '../../../src/tasks/task-types';
 
 function runtime() {
   return bindToolRuntime(
-    discoverTools().filter(({ declaration }) => declaration.name === 'task_progress'),
+    discoverTools().filter(({ declaration }) => declaration.name === 'task.progress'),
     new ToolServiceResolver(),
   );
 }
@@ -45,7 +45,6 @@ function fixture() {
   function receipt(toolName = 'browser_inspect', output = '{"ok":true}', argumentsJson = '{}') {
     const callId = `call_${results.length}`;
     const result = {
-      id: `result_${results.length}`,
       callId,
       taskId: 'task',
       runId: 'run',
@@ -64,7 +63,6 @@ function fixture() {
       sequence: events.length + 1,
       at: results.length,
       callId,
-      resultId: result.id,
     });
     return callId;
   }
@@ -72,41 +70,44 @@ function fixture() {
     const tools = runtime();
     const call = (await tools.contract(context)).parse({
       callId: `call_${results.length}`,
-      name: 'task_progress',
+      name: 'task.progress',
       argumentsJson: JSON.stringify({ update: input }),
     });
     const result = await tools.execute(call, context, AbortSignal.timeout(1000));
-    receipt('task_progress', result.output, call.argumentsJson);
+    receipt('task.progress', result.output, call.argumentsJson);
     return JSON.parse(result.output);
   }
   return { context, results, events, receipt, update };
 }
 
 const plan = {
-  scope: 'Move Alpha and Beta; Hold is excluded',
-  inventoryComplete: true,
-  inventoryEvidence: 'All three items are explicitly enumerated in the user request',
-  blocker: '',
-  items: [
+  inventory: {
+    scope: 'Move Alpha and Beta; Hold is excluded',
+    complete: true,
+    evidence: 'All three items are explicitly enumerated in the user request',
+  },
+  explanation: null,
+  blocker: null,
+  plan: [
     {
       id: 'alpha',
-      description: 'Alpha',
+      step: 'Alpha',
       status: 'pending',
-      evidence: '',
+      reason: '',
       evidenceCallId: '',
     },
     {
       id: 'beta',
-      description: 'Beta',
+      step: 'Beta',
       status: 'pending',
-      evidence: '',
+      reason: '',
       evidenceCallId: '',
     },
     {
       id: 'hold',
-      description: 'Hold',
+      step: 'Hold',
       status: 'excluded',
-      evidence: 'User exclusion',
+      reason: 'User exclusion',
       evidenceCallId: '',
     },
   ],
@@ -120,16 +121,16 @@ describe('durable task progress', () => {
     ['browser_inspect', '{}'],
     ['sandbox_exec', '{"code":1,"stdout":"","stderr":"permission denied","truncated":false}'],
     ['sandbox_exec', '{"code":0,"stdout":"","stderr":"","executionStatus":"running"}'],
-  ])('rejects unusable %s evidence: %s', async (toolName, output) => {
+  ])('rejects unusable %s reason: %s', async (toolName, output) => {
     const f = fixture();
     await f.update(plan);
     const evidenceCallId = f.receipt(toolName, output);
     const result = await f.update({
       ...plan,
-      items: plan.items.slice(0, 2).map((item) => ({
+      plan: plan.plan.slice(0, 2).map((item) => ({
         ...item,
-        status: 'verified',
-        evidence: 'Observed destination',
+        status: 'completed',
+        reason: 'Observed destination',
         evidenceCallId,
       })),
     });
@@ -151,10 +152,10 @@ describe('durable task progress', () => {
     expect(
       await f.update({
         ...plan,
-        items: plan.items.slice(0, 2).map((item) => ({
+        plan: plan.plan.slice(0, 2).map((item) => ({
           ...item,
-          status: 'verified',
-          evidence: 'Readback confirms absence',
+          status: 'completed',
+          reason: 'Readback confirms absence',
           evidenceCallId,
         })),
       }),
@@ -170,13 +171,24 @@ describe('durable task progress', () => {
         ok: true,
         updated: true,
         state: {
-          ...plan,
-          items: [{ ...plan.items[0], status: 'verified', evidence: 'Done', evidenceCallId }],
+          scope: plan.inventory.scope,
+          inventoryComplete: true,
+          inventoryEvidence: plan.inventory.evidence,
+          blocker: '',
+          items: [
+            {
+              id: 'alpha',
+              description: 'Alpha',
+              status: 'verified',
+              evidence: 'Done',
+              evidenceCallId,
+            },
+          ],
         },
       }),
     );
     expect(await f.update(null)).toMatchObject({
-      state: { items: [{ id: 'alpha', status: 'uncertain' }] },
+      state: { plan: [{ id: 'alpha', status: 'uncertain' }] },
       review: { completion: 'continue', reason: 'unverified_outcomes' },
     });
     expect(await runtime().reviewCompletion?.(f.context)).toMatchObject({ type: 'continue' });
@@ -186,13 +198,13 @@ describe('durable task progress', () => {
     const f = fixture();
     await f.update({
       ...plan,
-      items: [
+      plan: [
         {
-          ...plan.items[0],
+          ...plan.plan[0],
           status: 'uncertain',
-          evidence: 'Move dispatched; target list is partial',
+          reason: 'Move dispatched; target list is partial',
         },
-        ...plan.items.slice(1),
+        ...plan.plan.slice(1),
       ],
     });
     f.events.push({
@@ -204,14 +216,14 @@ describe('durable task progress', () => {
       at: 20,
       taskStatus: 'planning',
       runStatus: 'planning',
-      reason: 'completion_review:task_progress',
+      reason: 'completion_review:task.progress',
       error: null,
     });
     const read = await f.update(null);
     const expectedReview = {
       completion: 'continue',
       reason: 'unverified_outcomes',
-      counts: { pending: 1, uncertain: 1, verified: 0, excluded: 1 },
+      counts: { pending: 1, in_progress: 0, completed: 0, uncertain: 1, excluded: 1 },
       next: { action: 'observe_outcomes', itemIds: ['alpha'] },
     };
     expect(read.review).toEqual(expectedReview);
@@ -220,15 +232,15 @@ describe('durable task progress', () => {
     expect(
       JSON.parse(completionReview?.type === 'continue' ? completionReview.feedback : '{}'),
     ).toEqual(expectedReview);
-    expect(read.state.items).toHaveLength(3);
+    expect(read.state.plan).toHaveLength(3);
     const evidenceCallId = f.receipt();
     const verified = await f.update({
       ...plan,
-      items: [
+      plan: [
         {
-          ...plan.items[0],
-          status: 'verified',
-          evidence: 'Destination observed',
+          ...plan.plan[0],
+          status: 'completed',
+          reason: 'Destination observed',
           evidenceCallId,
         },
       ],
@@ -245,7 +257,10 @@ describe('durable task progress', () => {
     expect((await f.update(null)).review).toMatchObject({
       completion: 'not_tracked',
     });
-    const incomplete = await f.update({ ...plan, inventoryComplete: false });
+    const incomplete = await f.update({
+      ...plan,
+      inventory: { ...plan.inventory, complete: false },
+    });
     expect(incomplete.review).toMatchObject({
       completion: 'continue',
       reason: 'incomplete_inventory',
@@ -264,10 +279,10 @@ describe('durable task progress', () => {
     const evidenceCallId = f.receipt();
     const ready = await f.update({
       ...plan,
-      items: plan.items.slice(0, 2).map((item) => ({
+      plan: plan.plan.slice(0, 2).map((item) => ({
         ...item,
-        status: 'verified',
-        evidence: 'Observed under target',
+        status: 'completed',
+        reason: 'Observed under target',
         evidenceCallId,
       })),
     });
@@ -289,11 +304,11 @@ describe('durable task progress', () => {
     await f.update(plan);
     const invalid = await f.update({
       ...plan,
-      items: [
+      plan: [
         {
-          ...plan.items[0],
-          status: 'verified',
-          evidence: 'Clicked',
+          ...plan.plan[0],
+          status: 'completed',
+          reason: 'Clicked',
           evidenceCallId: 'missing',
         },
       ],
@@ -327,7 +342,7 @@ describe('durable task progress', () => {
 
   it('exposes structured progress without adding instructions', async () => {
     const contract = await runtime().contract({});
-    expect(contract.definitions.map(({ name }) => name)).toEqual(['task_progress']);
+    expect(contract.definitions.map(({ name }) => name)).toEqual(['task.progress']);
     expect(contract.systemPrompt).toBe('');
   });
 
@@ -337,24 +352,24 @@ describe('durable task progress', () => {
     const evidenceCallId = f.receipt();
     const result = await f.update({
       ...plan,
-      items: [
+      plan: [
         {
           id: 'alpha',
-          description: 'Alpha',
-          status: 'verified',
-          evidence: 'Alpha is under target',
+          step: 'Alpha',
+          status: 'completed',
+          reason: 'Alpha is under target',
           evidenceCallId,
         },
       ],
     });
-    expect(result.state.items.map((item: { id: string }) => item.id)).toEqual([
+    expect(result.state.plan.map((item: { id: string }) => item.id)).toEqual([
       'alpha',
       'beta',
       'hold',
     ]);
     expect(await runtime().reviewCompletion?.(f.context)).toMatchObject({
       type: 'continue',
-      toolName: 'task_progress',
+      toolName: 'task.progress',
     });
   });
 
@@ -363,10 +378,10 @@ describe('durable task progress', () => {
     await f.update(plan);
     const bad = await f.update({
       ...plan,
-      items: plan.items.slice(0, 2).map((item) => ({
+      plan: plan.plan.slice(0, 2).map((item) => ({
         ...item,
-        status: 'verified',
-        evidence: 'done',
+        status: 'completed',
+        reason: 'done',
         evidenceCallId: 'invented',
       })),
     });
@@ -374,10 +389,10 @@ describe('durable task progress', () => {
     const evidenceCallId = f.receipt();
     await f.update({
       ...plan,
-      items: plan.items.slice(0, 2).map((item) => ({
+      plan: plan.plan.slice(0, 2).map((item) => ({
         ...item,
-        status: 'verified',
-        evidence: 'Reloaded target contains this item',
+        status: 'completed',
+        reason: 'Reloaded target contains this item',
         evidenceCallId,
       })),
     });
@@ -388,12 +403,12 @@ describe('durable task progress', () => {
     const f = fixture();
     await f.update({
       ...plan,
-      inventoryComplete: false,
-      items: [
+      inventory: { ...plan.inventory, complete: false },
+      plan: [
         {
-          ...plan.items[0],
+          ...plan.plan[0],
           status: 'uncertain',
-          evidence: 'Drop sent but no readback',
+          reason: 'Drop sent but no readback',
         },
       ],
     });
@@ -431,7 +446,7 @@ describe('durable task progress', () => {
       at: 20,
       taskStatus: 'planning',
       runStatus: 'planning',
-      reason: 'completion_review:task_progress',
+      reason: 'completion_review:task.progress',
       error: null,
     });
     expect((await runtime().contract(f.context)).toolChoice).toBeUndefined();
@@ -461,7 +476,9 @@ describe('durable task progress', () => {
 
   it('still requires correction after an invalid initial progress update', async () => {
     const f = fixture();
-    expect(await f.update({ ...plan, inventoryEvidence: '' })).toMatchObject({
+    expect(
+      await f.update({ ...plan, inventory: { ...plan.inventory, evidence: '' } }),
+    ).toMatchObject({
       ok: false,
     });
     await f.update(null);
@@ -478,7 +495,7 @@ describe('durable task progress', () => {
     expect(read).toMatchObject({
       ok: true,
       updated: false,
-      state: { blocker: 'Access denied', items: plan.items },
+      state: { blocker: 'Access denied', plan: plan.plan },
     });
     expect(await runtime().reviewCompletion?.(f.context)).toMatchObject({
       type: 'blocked',
@@ -492,10 +509,10 @@ describe('durable task progress', () => {
       const evidenceCallId = f.receipt();
       await f.update({
         ...plan,
-        items: plan.items.map((item) => ({
+        plan: plan.plan.map((item) => ({
           ...item,
-          status: 'verified',
-          evidence: 'Observed destination',
+          status: 'completed',
+          reason: 'Observed destination',
           evidenceCallId,
         })),
       });
@@ -524,7 +541,7 @@ describe('durable task progress', () => {
       });
       await f.update({
         ...plan,
-        items: [],
+        plan: [],
         blocker: 'Awaiting new authorization',
       });
       expect(await runtime().reviewCompletion?.(f.context)).toMatchObject({
@@ -536,28 +553,30 @@ describe('durable task progress', () => {
   it('rejects duplicate IDs, unjustified exclusions, and excessive cumulative inventory atomically', async () => {
     const f = fixture();
     await f.update(plan);
-    expect(await f.update({ ...plan, items: [plan.items[0], plan.items[0]] })).toMatchObject({
+    expect(await f.update({ ...plan, plan: [plan.plan[0], plan.plan[0]] })).toMatchObject({
       ok: false,
     });
     expect(
       await f.update({
         ...plan,
-        items: [{ ...plan.items[0], status: 'excluded' }],
+        plan: [{ ...plan.plan[0], status: 'excluded' }],
       }),
     ).toMatchObject({ ok: false });
-    expect(await f.update({ ...plan, inventoryEvidence: '' })).toMatchObject({
+    expect(
+      await f.update({ ...plan, inventory: { ...plan.inventory, evidence: '' } }),
+    ).toMatchObject({
       ok: false,
     });
     expect(
       await f.update({
         ...plan,
-        items: Array.from({ length: 100 }, (_, i) => ({
-          ...plan.items[0],
+        plan: Array.from({ length: 100 }, (_, i) => ({
+          ...plan.plan[0],
           id: String(i),
         })),
       }),
     ).toMatchObject({ ok: false });
-    expect((await f.update(null)).state.items).toEqual(plan.items);
+    expect((await f.update(null)).state.plan).toEqual(plan.plan);
   });
 
   it('returns copyable evidence call IDs when the model supplied an observation snapshot ID', async () => {
@@ -565,12 +584,12 @@ describe('durable task progress', () => {
     await f.update(plan);
     const callId = f.receipt('browser_inspect', '{"ok":true,"data":{"snapshot":"snapshot_1"}}');
     const item = {
-      ...plan.items[0],
-      status: 'verified',
-      evidence: 'Observed destination',
+      ...plan.plan[0],
+      status: 'completed',
+      reason: 'Observed destination',
       evidenceCallId: 'snapshot_1',
     };
-    const rejected = await f.update({ ...plan, items: [item] });
+    const rejected = await f.update({ ...plan, plan: [item] });
     expect(rejected).toMatchObject({
       ok: false,
       availableEvidence: [{ callId, toolName: 'browser_inspect' }],
@@ -580,7 +599,7 @@ describe('durable task progress', () => {
     expect(
       await f.update({
         ...plan,
-        items: [{ ...item, evidenceCallId: read.availableEvidence[0].callId }],
+        plan: [{ ...item, evidenceCallId: read.availableEvidence[0].callId }],
       }),
     ).toMatchObject({ ok: true });
   });
@@ -589,8 +608,8 @@ describe('durable task progress', () => {
     const f = fixture();
     await f.update({
       ...plan,
-      inventoryEvidence: 'All pages inspected; no eligible items',
-      items: [],
+      inventory: { ...plan.inventory, evidence: 'All pages inspected; no eligible items' },
+      plan: [],
     });
     expect(await runtime().reviewCompletion?.(f.context)).toBeNull();
   });

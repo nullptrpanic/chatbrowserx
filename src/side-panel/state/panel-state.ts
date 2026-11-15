@@ -103,7 +103,6 @@ const toolResultSchema = z
     toolName: z.string().min(1).max(128),
     argumentsJson: z.string().max(20_000),
     output: z.string().max(100_000),
-    resultId: z.string().max(512),
     attachmentIds: z.array(idSchema).max(8),
     detailIndex: z.number().int().positive(),
   })
@@ -115,13 +114,19 @@ const taskSupplementSchema = z
     text: z.string().max(20_000),
     attachmentIds: z.array(idSchema).max(8),
     createdAt: timestampSchema,
-    applicationState: z.enum(['applied', 'pending']),
+    applicationState: z.enum(['applied', 'pending', 'forwarded']),
     detailIndex: z.number().int().positive(),
   })
   .strict();
+const supplementQuoteSchema = taskSupplementSchema.pick({
+  id: true,
+  text: true,
+  attachmentIds: true,
+});
 const panelTaskSchema = z
   .object({
     reasoningSummary: z.string().max(20_000).default(''),
+    liveSupplements: z.array(supplementQuoteSchema).max(100).optional(),
     contextCompaction: z.enum(['started', 'completed', 'failed']).optional(),
     id: idSchema,
     latestRunId: idSchema.nullable(),
@@ -173,7 +178,11 @@ const panelTaskSchema = z
             reason: z.string().max(500),
             at: timestampSchema,
             supplementIds: z.array(idSchema).max(100).optional(),
-            resultId: z.string().max(512).optional(),
+            callId: idSchema.optional(),
+            commentary: z
+              .object({ text: z.string().max(20_000), callId: idSchema.optional() })
+              .strict()
+              .optional(),
           })
           .strict(),
       )
@@ -208,21 +217,14 @@ export const panelSnapshotSchema: z.ZodType<PanelSnapshot> = z
             runId: idSchema.optional(),
             role: z.enum(['user', 'assistant', 'system']),
             status: z.enum(['complete', 'streaming', 'interrupted', 'error']),
+            phase: z.literal('final_answer').optional(),
             text: z.string().max(1_000_000),
             attachmentIds: z.array(idSchema).max(64),
             sourcePage: messageSourcePageSchema.optional(),
             replySegment: z
               .object({
                 id: idSchema,
-                supplements: z
-                  .array(
-                    taskSupplementSchema.pick({
-                      id: true,
-                      text: true,
-                      attachmentIds: true,
-                    }),
-                  )
-                  .max(100),
+                supplements: z.array(supplementQuoteSchema).max(100),
               })
               .strict()
               .optional(),

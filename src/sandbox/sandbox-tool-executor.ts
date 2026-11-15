@@ -182,7 +182,7 @@ export class SandboxToolExecutor implements SandboxExecutionPort {
       content: oversizedLine ? bounded.text : completeContent,
       ...(oversizedLine
         ? {
-            error: `Line ${startLine} exceeds the read byte limit; only a prefix is shown. Use sandbox_exec to read bounded byte ranges of this line.`,
+            error: `Line ${startLine} exceeds the read byte limit; only a prefix is shown. Use sandbox.exec to read bounded byte ranges of this line.`,
           }
         : {}),
     });

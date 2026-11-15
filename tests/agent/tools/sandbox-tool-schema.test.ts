@@ -44,8 +44,8 @@ const EXEC = {
 describe('SANDBOX_TOOL_DEFINITIONS', () => {
   it('exposes exactly two strict fixed contracts with every property required', () => {
     expect(SANDBOX_TOOL_DEFINITIONS.map(({ name }) => name)).toEqual([
-      'sandbox_read',
-      'sandbox_exec',
+      'sandbox.read',
+      'sandbox.exec',
     ]);
     for (const definition of SANDBOX_TOOL_DEFINITIONS) {
       expect(definition.strict).toBe(true);
@@ -125,8 +125,8 @@ describe('registered Sandbox tool parsing', () => {
     );
     reachable = false;
     expect((await connected.contract({})).definitions.map(({ name }) => name)).toEqual([
-      'sandbox_read',
-      'sandbox_exec',
+      'sandbox.read',
+      'sandbox.exec',
     ]);
     token = '';
     const disabled = await connected.contract({ sandboxSkillPrompt: 'stale catalog' });
@@ -134,89 +134,89 @@ describe('registered Sandbox tool parsing', () => {
     expect(disabled.systemPrompt).not.toContain('stale catalog');
   });
   it('parses reads as replay-safe and execs as mutations', async () => {
-    expect(runtime.policyFor('sandbox_read')?.mutation ?? false).toBe(false);
-    expect(runtime.policyFor('sandbox_exec')?.mutation).toBe(true);
+    expect(runtime.policyFor('sandbox.read')?.mutation ?? false).toBe(false);
+    expect(runtime.policyFor('sandbox.exec')?.mutation).toBe(true);
     const contract = await runtime.contract({ sandboxAvailable: true });
     expect(
       contract.parse({
         callId: 'call_read',
-        name: 'sandbox_read',
+        name: 'sandbox.read',
         argumentsJson: JSON.stringify(READ),
       }),
     ).toEqual({
       operation: 'read',
       callId: 'call_read',
-      name: 'sandbox_read',
+      name: 'sandbox.read',
       argumentsJson: JSON.stringify(READ),
       arguments: READ,
     });
     expect(
       contract.parse({
         callId: 'call_exec',
-        name: 'sandbox_exec',
+        name: 'sandbox.exec',
         argumentsJson: JSON.stringify({ ...EXEC, cwd: null }),
       }),
     ).toEqual({
       operation: 'exec',
       callId: 'call_exec',
-      name: 'sandbox_exec',
+      name: 'sandbox.exec',
       argumentsJson: JSON.stringify({ ...EXEC, cwd: null }),
       arguments: { ...EXEC, cwd: null },
     });
   });
 
   it.each([
-    { callId: '', name: 'sandbox_read', argumentsJson: JSON.stringify(READ) },
+    { callId: '', name: 'sandbox.read', argumentsJson: JSON.stringify(READ) },
     {
       callId: 'c'.repeat(257),
-      name: 'sandbox_read',
+      name: 'sandbox.read',
       argumentsJson: JSON.stringify(READ),
     },
     { callId: 'call_1', name: 'sandbox_unknown', argumentsJson: '{}' },
-    { callId: 'call_1', name: 'sandbox_read', argumentsJson: '{secret-value' },
+    { callId: 'call_1', name: 'sandbox.read', argumentsJson: '{secret-value' },
     {
       callId: 'call_1',
-      name: 'sandbox_read',
+      name: 'sandbox.read',
       argumentsJson: `${' '.repeat(32 * 1_024)}${JSON.stringify(READ)}`,
     },
     {
       callId: 'call_1',
-      name: 'sandbox_read',
+      name: 'sandbox.read',
       argumentsJson: JSON.stringify({ ...READ, path: 'relative/SKILL.md' }),
     },
     {
       callId: 'call_1',
-      name: 'sandbox_read',
+      name: 'sandbox.read',
       argumentsJson: JSON.stringify({ ...READ, path: `/${'p'.repeat(4_096)}` }),
     },
     {
       callId: 'call_1',
-      name: 'sandbox_read',
+      name: 'sandbox.read',
       argumentsJson: JSON.stringify({ ...READ, startLine: 0 }),
     },
     {
       callId: 'call_1',
-      name: 'sandbox_read',
+      name: 'sandbox.read',
       argumentsJson: JSON.stringify({ ...READ, maxLines: 401 }),
     },
     {
       callId: 'call_1',
-      name: 'sandbox_read',
+      name: 'sandbox.read',
       argumentsJson: JSON.stringify({ ...READ, extra: true }),
     },
     {
       callId: 'call_1',
-      name: 'sandbox_exec',
+      name: 'sandbox.exec',
       argumentsJson: JSON.stringify({ ...EXEC, command: ' '.repeat(20_001) }),
     },
     {
       callId: 'call_1',
-      name: 'sandbox_exec',
+      name: 'sandbox.exec',
       argumentsJson: JSON.stringify({ ...EXEC, cwd: `/${'c'.repeat(4_096)}` }),
     },
     {
       callId: 'call_1',
-      name: 'sandbox_exec',
+      name: 'sandbox.exec',
       argumentsJson: JSON.stringify({ ...EXEC, env: { SECRET: 'value' } }),
     },
   ])('rejects unsupported or malformed calls', async (input) => {
@@ -254,7 +254,7 @@ describe('registered Sandbox tool parsing', () => {
 
     const contract = await availableRuntime.contract({ sandboxAvailable: false });
 
-    expect(contract.definitions.map(({ name }) => name)).toEqual(['sandbox_read', 'sandbox_exec']);
+    expect(contract.definitions.map(({ name }) => name)).toEqual(['sandbox.read', 'sandbox.exec']);
     expect(contract.systemPrompt).toContain('Run the example workflow.');
     expect(contract.systemPrompt).toContain('/home/test/.codex/skills/example/SKILL.md');
     expect(contract.systemPrompt).toContain('Run another workflow.');
@@ -300,17 +300,17 @@ describe('registered Sandbox tool parsing', () => {
       const stale = await changingRuntime.contract({});
 
       expect(available.definitions.map(({ name }) => name)).toEqual([
-        'sandbox_read',
-        'sandbox_exec',
+        'sandbox.read',
+        'sandbox.exec',
       ]);
       expect(available.systemPrompt).toContain('Run the example workflow.');
-      expect(stale.definitions.map(({ name }) => name)).toEqual(['sandbox_read', 'sandbox_exec']);
+      expect(stale.definitions.map(({ name }) => name)).toEqual(['sandbox.read', 'sandbox.exec']);
       expect(stale.systemPrompt).toContain('Run the example workflow.');
       expect(execute).toHaveBeenCalledTimes(2);
       now.mockReturnValue(910_000);
       execute.mockRejectedValue(new Error('Still unavailable'));
       const expired = await changingRuntime.contract({});
-      expect(expired.definitions.map(({ name }) => name)).toEqual(['sandbox_read', 'sandbox_exec']);
+      expect(expired.definitions.map(({ name }) => name)).toEqual(['sandbox.read', 'sandbox.exec']);
       expect(expired.systemPrompt).not.toContain('Run the example workflow.');
     } finally {
       now.mockRestore();

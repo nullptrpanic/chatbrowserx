@@ -51,12 +51,12 @@ export function ConversationView({
   const [following, setFollowing] = useState(true);
   const contentVersion = conversationContentVersion(messages, tasks, task);
   const tasksById = new Map(tasks.map((item) => [item.id, item]));
-  const displayMessages = messagesWithTerminalRunReplies(messages, tasks);
+  const displayMessages = messagesWithRunReplies(messages, tasks);
   const runsById = new Map(
     tasks.flatMap((item) => item.runs.map((run) => [taskRunKey(item.id, run.id), run] as const)),
   );
   const answerHostByRun = new Map<string, string>();
-  const answersByRun = new Map<string, Map<string, PanelMessage>>();
+  const answersByRun = new Map<string, PanelMessage[]>();
   for (const message of displayMessages) {
     const run =
       message.runId === undefined
@@ -65,9 +65,9 @@ export function ConversationView({
     if (canHostTaskDetails(message, tasksById.get(message.taskId) ?? null, run)) {
       const key = messageRunKey(message);
       answerHostByRun.set(key, message.id);
-      const segments = answersByRun.get(key) ?? new Map<string, PanelMessage>();
-      segments.set(message.replySegment?.id ?? 'original', message);
-      answersByRun.set(key, segments);
+      const answers = answersByRun.get(key) ?? [];
+      answers.push(message);
+      answersByRun.set(key, answers);
     }
   }
   const visibleAssistantMessageIds = new Set(answerHostByRun.values());
@@ -142,12 +142,15 @@ export function ConversationView({
               message.runId === undefined
                 ? null
                 : (runsById.get(taskRunKey(message.taskId, message.runId)) ?? null);
-            const answers = [...(answersByRun.get(messageRunKey(message))?.values() ?? [])];
             return (
               <MessageItem
                 key={message.role === 'assistant' ? messageRunKey(message) : message.id}
                 message={message}
-                segments={message.role === 'assistant' ? answers : undefined}
+                segments={
+                  message.role === 'assistant'
+                    ? answersByRun.get(messageRunKey(message))
+                    : undefined
+                }
                 task={messageTask}
                 run={messageRun}
                 taskInteractive={messageTask?.id === task?.id}
@@ -206,14 +209,16 @@ function taskRunKey(taskId: string, runId: string): string {
   return `${taskId}\u0000${runId}`;
 }
 
-/** Derives an empty answer from terminal Run facts when no assistant text was persisted. */
-function messagesWithTerminalRunReplies(
+/** Gives a running or failed attempt a stable answer card before any text arrives. */
+function messagesWithRunReplies(
   messages: readonly PanelMessage[],
   tasks: readonly PanelTask[],
 ): readonly PanelMessage[] {
   const assistantRuns = new Set(
     messages.flatMap((message) =>
-      message.role === 'assistant' && message.runId !== undefined
+      message.role === 'assistant' &&
+      message.runId !== undefined &&
+      (message.status !== 'interrupted' || message.text || message.attachmentIds.length)
         ? [taskRunKey(message.taskId, message.runId)]
         : [],
     ),
@@ -226,8 +231,9 @@ function messagesWithTerminalRunReplies(
   );
   const derived = tasks.flatMap((task) =>
     task.runs.flatMap((run): PanelMessage[] => {
+      const running = run.status === 'queued' || run.status === 'planning';
       if (
-        (run.status !== 'failed' && run.status !== 'cancelled') ||
+        (!running && run.status !== 'failed' && run.status !== 'cancelled') ||
         assistantRuns.has(taskRunKey(task.id, run.id))
       ) {
         return [];
@@ -235,11 +241,11 @@ function messagesWithTerminalRunReplies(
       const at = run.endedAt ?? run.startedAt;
       return [
         {
-          id: `terminal-reply:${run.id}`,
+          id: `run-reply:${run.id}`,
           taskId: task.id,
           runId: run.id,
           role: 'assistant',
-          status: run.status === 'failed' ? 'error' : 'interrupted',
+          status: running ? 'streaming' : run.status === 'failed' ? 'error' : 'interrupted',
           text: '',
           attachmentIds: [],
           createdAt: at,
@@ -279,6 +285,7 @@ function conversationContentVersion(
           latestMessage.id,
           latestMessage.updatedAt,
           latestMessage.status,
+          latestMessage.phase,
           latestMessage.text.length,
           latestMessage.attachmentIds.length,
         ].join(':');

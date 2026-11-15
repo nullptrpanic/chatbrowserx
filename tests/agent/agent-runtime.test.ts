@@ -30,10 +30,11 @@ type OutputItem = Extract<
   ResponseStreamEvent,
   { type: 'response_done' }
 >['response']['output'][number];
-const text = (value: string): OutputItem => ({
+const text = (value: string, phase?: 'commentary' | 'final_answer'): OutputItem => ({
   type: 'message',
   role: 'assistant',
   status: 'completed',
+  ...(phase === undefined ? {} : { phase }),
   content: [{ type: 'output_text', text: value }],
 });
 const call = (id: string): OutputItem => ({
@@ -43,7 +44,6 @@ const call = (id: string): OutputItem => ({
   arguments: '{}',
   status: 'completed',
 });
-
 async function fixture(
   outputs: Array<OutputItem[] | Error>,
   options: {
@@ -51,6 +51,7 @@ async function fixture(
     providerId?: () => string;
     backend?: Partial<Provider>;
     partialError?: string;
+    activities?: readonly ResponseStreamEvent[];
     onAttempt?: (index: number, request: ModelRequest) => Promise<void>;
     tools?: ToolRuntimePort;
   } = {},
@@ -75,6 +76,7 @@ async function fixture(
       if (output instanceof Error) throw output;
       if (!output) throw new Error('Unexpected model turn');
       yield { type: 'response_started' };
+      if (requests.length === 1) for (const activity of options.activities ?? []) yield activity;
       if (options.emitText !== false)
         for (const item of output)
           if (item.type === 'message')
@@ -199,6 +201,114 @@ async function fixture(
 }
 
 describe('framework-backed agent runtime', () => {
+  it.each(['saved window', 'durable history'] as const)(
+    'preserves the answer and forwards the supplement once using %s',
+    async (context) => {
+      const note = { ...text('I will check the source.', 'commentary'), id: 'msg_progress' };
+      const f = await fixture(
+        [[note, text('Original answer.', 'final_answer')], [text('Updated answer.')]],
+        {
+          activities: [
+            {
+              type: 'model',
+              event: {
+                type: 'assistant_commentary',
+                index: 0,
+                itemId: note.id,
+                text: 'I will check the source.',
+              },
+            },
+          ],
+        },
+      );
+      try {
+        const { task } = await f.submit('Read the source.');
+        const save = f.tasks.saveTransition.bind(f.tasks);
+        let queued = false;
+        vi.spyOn(f.tasks, 'saveTransition').mockImplementation(async (boundary) => {
+          if (!queued && boundary.events.some(({ type }) => type === 'assistant.commentary')) {
+            queued = true;
+            const at = f.clock.now();
+            await f.commands.appendSupplement({
+              id: 'during_commentary',
+              taskId: task.id,
+              conversationId: task.conversationId,
+              kind: 'supplement',
+              role: 'user',
+              status: 'complete',
+              text: 'Include the second source.',
+              attachmentIds: [],
+              createdAt: at,
+              updatedAt: at,
+            });
+          }
+          await save(boundary);
+        });
+        const result = await f.executor.run(task.id, new AbortController().signal);
+        expect(result.task.status).toBe('completed');
+        expect(result.events.filter(({ type }) => type === 'assistant.commentary')).toHaveLength(1);
+        expect(f.requests).toHaveLength(1);
+        expect(await f.conversations.listTaskMessages(task.id)).toContainEqual(
+          expect.objectContaining({
+            role: 'assistant',
+            status: 'complete',
+            text: 'Original answer.',
+          }),
+        );
+        const followUp = required((await f.tasks.listByConversation(task.conversationId))[1]);
+        expect(followUp).toMatchObject({ goal: 'Include the second source.', status: 'queued' });
+        expect(await f.conversations.listTaskMessages(followUp.id)).toMatchObject([
+          { role: 'user', kind: 'conversation', text: 'Include the second source.' },
+        ]);
+        if (context === 'durable history') {
+          await f.db.delete('agent-sessions', task.conversationId);
+        }
+        await f.executor.run(followUp.id, new AbortController().signal);
+        expect(f.requests).toHaveLength(2);
+        const input = JSON.stringify(required(f.requests[1]).input);
+        expect(input).toMatch(/Original answer\..*Include the second source\./s);
+        expect(input.match(/Include the second source\./g)).toHaveLength(1);
+        expect(await f.conversations.listTaskMessages(followUp.id)).toContainEqual(
+          expect.objectContaining({
+            role: 'assistant',
+            status: 'complete',
+            text: 'Updated answer.',
+          }),
+        );
+      } finally {
+        f.db.close();
+      }
+    },
+  );
+
+  it('keeps a hosted-tool preamble in execution history and saves only the final answer', async () => {
+    const preamble = text('I will check the official editions.', 'commentary');
+    const search = (id: string): OutputItem => ({
+      type: 'hosted_tool_call',
+      id,
+      name: 'web_search_call',
+      status: 'completed',
+    });
+    const answer = text('The standard edition is available.', 'final_answer');
+    const f = await fixture([[preamble, search('ws_1'), search('ws_2'), answer]]);
+    try {
+      const { task } = await f.submit('Find the available edition.');
+      await f.executor.run(task.id, new AbortController().signal);
+      const archive = required((await f.tasks.readTaskTimelines([task.id]))[0]);
+      expect(archive.task.status).toBe('completed');
+      const replies = (await f.conversations.listTaskMessages(task.id)).filter(
+        ({ role }) => role === 'assistant',
+      );
+      expect(replies.map(({ text }) => text)).toEqual(['The standard edition is available.']);
+      expect(archive.events.filter(({ type }) => type === 'assistant.commentary')).toEqual([
+        expect.objectContaining({ callId: 'ws_1', text: 'I will check the official editions.' }),
+      ]);
+      expect((await f.tasks.getAgentSession(task.conversationId))?.items).toContainEqual(preamble);
+    } finally {
+      f.db.close();
+    }
+  });
+
   it('retrieves an original answer through registered history tools after restoring a compacted window', async () => {
     const outputs: OutputItem[][] = [[text('The original receipt is QX-7391.')]];
     const services = new ToolServiceResolver();
@@ -233,7 +343,8 @@ describe('framework-backed agent runtime', () => {
           {
             type: 'function_call',
             callId: 'find-old-answer',
-            name: 'history_search',
+            name: 'search',
+            namespace: 'history',
             arguments: JSON.stringify({ query: 'receipt', cursor: '', limit: 5 }),
             status: 'completed',
           },
@@ -242,13 +353,10 @@ describe('framework-backed agent runtime', () => {
           {
             type: 'function_call',
             callId: 'read-old-answer',
-            name: 'history_read',
+            name: 'read',
+            namespace: 'history',
             arguments: JSON.stringify({
-              taskId: old.task.id,
-              offset: null,
-              messageId: answer.id,
-              cursor: '',
-              limit: 5,
+              target: { taskId: old.task.id, messageId: answer.id, offset: 0, limit: 100 },
             }),
             status: 'completed',
           },
@@ -263,21 +371,21 @@ describe('framework-backed agent runtime', () => {
       const beforeSearch = required(f.requests[1]);
       expect(JSON.stringify(beforeSearch.input)).not.toContain('QX-7391');
       expect(beforeSearch.tools).toContainEqual(
-        expect.objectContaining({ name: 'history_search' }),
+        expect.objectContaining({ name: 'search', namespace: 'history' }),
       );
       expect(beforeSearch.systemInstructions).toBe(DEFAULT_APP_SETTINGS.systemPrompt);
       expect(JSON.stringify(required(f.requests[2]).input)).toContain(
         'The original receipt is QX-7391.',
       );
       const result = required(
-        completed.toolResults.find((item) => item.toolName === 'history_read'),
+        completed.toolResults.find((item) => item.toolName === 'history.read'),
       );
       expect(JSON.parse(result.output)).toMatchObject({
         ok: true,
-        items: [
-          { role: 'user', text: 'Save the receipt number.' },
-          { role: 'assistant', text: 'The original receipt is QX-7391.' },
-        ],
+        messageId: answer.id,
+        role: 'assistant',
+        content: 'The original receipt is QX-7391.',
+        nextOffset: null,
       });
       expect(f.requests).toHaveLength(4);
     } finally {
@@ -285,66 +393,120 @@ describe('framework-backed agent runtime', () => {
     }
   });
 
-  it('loads optional backend tools on demand with a durable receipt and isolates the next task', async () => {
-    const hosted = {
-      type: 'hosted_tool' as const,
-      name: 'web_search',
-      providerData: { type: 'web_search' },
-    };
-    const activation: OutputItem = {
-      type: 'function_call',
-      callId: 'load-search',
-      name: 'load_tools',
-      arguments: JSON.stringify({ names: ['web_search'] }),
+  it('records provider-hosted search without a local search tool', async () => {
+    const hit: OutputItem = {
+      type: 'hosted_tool_call',
+      id: 'first-turn-search',
+      name: 'web_search_call',
       status: 'completed',
+      providerData: { action: { type: 'search', query: 'fixture release notes' } },
     };
-    const tools = bindToolRuntime(
-      discoverTools().filter(({ declaration }) => declaration.name === 'load_tools'),
-      new ToolServiceResolver(),
-    );
-    const f = await fixture(
-      [[activation], [text('Search enabled.')], [text('Unrelated answer.')]],
-      {
-        backend: { hostedTools: [hosted] },
-        tools,
-      },
-    );
+    const f = await fixture([[text('Four.')], [hit, text('Found the release notes.')]]);
     try {
-      const first = await f.submit('Search the web.');
-      const result = await f.executor.run(first.task.id, new AbortController().signal);
-      expect(required(f.requests[0]).tools).not.toContainEqual(hosted);
-      expect(required(f.requests[0]).tools).toContainEqual(
-        expect.objectContaining({ name: 'load_tools' }),
-      );
-      expect(result.task.status).toBe('completed');
-      expect(result.toolResults).toContainEqual(
-        expect.objectContaining({
-          toolName: 'load_tools',
-          callId: 'load-search',
-          output: JSON.stringify({ ok: true, requested: ['web_search'] }),
-        }),
-      );
-      expect(required(f.requests[1]).tools).toContainEqual(hosted);
-      expect(required(f.requests[1]).input).toContainEqual(
-        expect.objectContaining({
-          type: 'function_call_result',
-          callId: 'load-search',
-        }),
-      );
-      const next = await f.submit('An unrelated question without browsing.');
-      await f.executor.run(next.task.id, new AbortController().signal);
-      expect(required(f.requests[2]).tools).not.toContainEqual(hosted);
-      expect(required(f.requests[2]).input).toContainEqual(activation);
-      expect(required(f.requests[2]).input).toContainEqual(
-        expect.objectContaining({
-          type: 'function_call_result',
-          callId: 'load-search',
-        }),
-      );
+      const question = await f.submit('What is two plus two?');
+      const direct = await f.executor.run(question.task.id, new AbortController().signal);
+      expect(direct.task.status).toBe('completed');
+      expect(direct.toolResults).toEqual([]);
+
+      const lookup = await f.submit('Search the web for the release notes.');
+      const found = await f.executor.run(lookup.task.id, new AbortController().signal);
+      expect(found.task.status).toBe('completed');
+      expect(found.toolResults).toMatchObject([
+        { callId: hit.id, toolName: 'web_search_call', providerHosted: true },
+      ]);
+      expect(f.requests).toHaveLength(2);
+      for (const request of f.requests) {
+        expect(request.tools.map(({ name }) => name)).toEqual(['inspect_fixture']);
+        expect(request.modelSettings.toolChoice).toBe('auto');
+      }
+      expect(f.tools.execute).not.toHaveBeenCalled();
     } finally {
       f.db.close();
     }
   });
+
+  it.each([
+    ['checkpoint', 'load_tools', '{"names":["web_search"]}'],
+    ['session', 'load_tools', '{"names":["web_search"]}'],
+    ['checkpoint', 'browser_get_current_tab', '{}'],
+    ['session', 'browser_get_current_tab', '{}'],
+  ] as const)(
+    'resumes from a %s containing a retired %s call',
+    async (boundary, name, argumentsJson) => {
+      const tools = bindToolRuntime([], new ToolServiceResolver());
+      const f = await fixture([[text('Task resumed.')]], {
+        tools,
+      });
+      try {
+        const { task, run, checkpoint } = await f.submit('Continue the task.');
+        const activation = {
+          type: 'function_call' as const,
+          callId: 'previous-tool-call',
+          name,
+          arguments: argumentsJson,
+          status: 'completed' as const,
+        };
+        const session = {
+          conversationId: task.conversationId,
+          taskId: task.id,
+          items: [activation],
+          admittedMessageIds: [],
+          lastInputTokens: null,
+        };
+        if (boundary === 'checkpoint') {
+          const checkpointBeforeCall = required(checkpoint ?? undefined);
+          const sequence = task.lastEventSequence + 1;
+          const call = {
+            name: activation.name,
+            callId: activation.callId,
+            argumentsJson: activation.arguments,
+          };
+          await f.tasks.saveTransition({
+            task: { ...task, status: 'planning', lastEventSequence: sequence },
+            run: { ...run, status: 'planning' },
+            checkpoint: {
+              ...checkpointBeforeCall,
+              pendingToolCall: { ...call, executionState: 'recorded' },
+              continuationItems: [
+                ...checkpointBeforeCall.continuationItems,
+                { type: 'function_call', ...call },
+              ],
+            },
+            events: [
+              {
+                type: 'tool.call',
+                id: 'previous-load-event',
+                taskId: task.id,
+                runId: run.id,
+                sequence,
+                at: f.clock.now(),
+                ...call,
+              },
+            ],
+            session,
+          });
+        } else {
+          await f.db.put('agent-sessions', session);
+        }
+
+        const result = await f.executor.run(task.id, new AbortController().signal);
+        expect(result.task.status).toBe('completed');
+        expect(f.requests).toHaveLength(1);
+        const request = required(f.requests[0]);
+        expect(request.tools).toEqual([]);
+        expect(request.input).toContainEqual(activation);
+        expect(request.input).toContainEqual(
+          expect.objectContaining({
+            type: 'function_call_result',
+            callId: activation.callId,
+            output: expect.stringContaining('TOOL_RETIRED'),
+          }),
+        );
+      } finally {
+        f.db.close();
+      }
+    },
+  );
 
   it('runs the same tool loop through a provider that translates a different wire format', async () => {
     const wireInputs: string[] = [];

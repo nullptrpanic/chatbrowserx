@@ -48,6 +48,73 @@ function completedTask(id: string, goal: string, updatedAt: number): PanelTask {
 }
 
 describe('ConversationView answer execution details', () => {
+  it('keeps the branded card and activity row mounted while waiting for more model text', () => {
+    const task: PanelTask = {
+      ...completedTask('waiting', 'Check official editions', 1_500),
+      status: 'planning',
+      latestRunId: 'run_1',
+      detailLevel: 'summary',
+      runs: [
+        {
+          id: 'run_1',
+          attempt: 1,
+          status: 'planning',
+          startedAt: 1_000,
+          endedAt: null,
+          lastError: null,
+        },
+      ],
+    };
+    const props = {
+      task,
+      tasks: [task],
+      attachments,
+      t,
+      onSuggestion: vi.fn(),
+      onPause: vi.fn(),
+      onResume: vi.fn(),
+      onRetry: vi.fn(),
+      onCancel: vi.fn(),
+    };
+    const { rerender } = render(<ConversationView {...props} messages={[]} />);
+    const card = screen.getByRole('article');
+    expect(within(card).getByText('ChatBrowserX')).toBeVisible();
+    const footer = within(card).getByRole('button', { name: /^正在生成回复 0 步/ });
+    expect(within(footer).getByRole('status')).toHaveTextContent('正在生成回复');
+    expect(within(card).getAllByRole('status')).toEqual([within(footer).getByRole('status')]);
+
+    const next = {
+      ...task,
+      reasoningSummary: '**Opening official editions**\n\n**Checking prices**',
+    };
+    rerender(
+      <ConversationView
+        {...props}
+        task={next}
+        tasks={[next]}
+        messages={[
+          {
+            id: 'reply_1',
+            taskId: task.id,
+            runId: 'run_1',
+            role: 'assistant',
+            status: 'interrupted',
+            text: 'I will check the official editions.',
+            attachmentIds: [],
+            createdAt: 1_050,
+            updatedAt: 1_100,
+          },
+        ]}
+      />,
+    );
+    expect(screen.getByRole('article')).toBe(card);
+    expect(within(card).getByText('I will check the official editions.')).toBeVisible();
+    expect(within(footer).getByRole('status')).toHaveTextContent('Checking prices');
+    expect(within(card).queryByText('Opening official editions')).not.toBeInTheDocument();
+    expect(footer.querySelector('.typing-dots')).not.toBeNull();
+    expect(within(footer).getByText(/0 步/)).toBeVisible();
+  });
+
   it('appends quoted continuations in one stable answer card without disturbing older reading', () => {
     const task: PanelTask = {
       ...completedTask('task_segments', 'Original question', 1_500),
@@ -166,7 +233,7 @@ describe('ConversationView answer execution details', () => {
     expect(screen.getAllByText('Add A')).toHaveLength(1);
   });
 
-  it('replaces all supplements and process replies with only the final answer on completion and copy', async () => {
+  it('replaces process replies and supplements when the final answer starts streaming', async () => {
     const user = userEvent.setup();
     const task: PanelTask = {
       ...completedTask('final_card', 'Create a calendar event', 1_500),
@@ -227,6 +294,20 @@ describe('ConversationView answer execution details', () => {
     const { rerender } = render(<ConversationView {...props} />);
     const card = screen.getByRole('article');
     expect(screen.getByText(original.text)).toBeVisible();
+    expect(screen.getByText('Only myself')).toBeVisible();
+    const draft = {
+      ...final,
+      status: 'streaming',
+      phase: 'final_answer',
+      text: 'Created successfully.',
+    } satisfies PanelMessage;
+    rerender(<ConversationView {...props} messages={[original, process, draft]} />);
+    expect(screen.getAllByRole('article')).toEqual([card]);
+    expect(card.querySelector('.message-answer-segment')).toHaveTextContent(draft.text);
+    expect(screen.queryByText(original.text)).not.toBeInTheDocument();
+    expect(screen.queryByText(process.text)).not.toBeInTheDocument();
+    expect(card.querySelector('.message-supplement-quote')).toBeNull();
+    expect(within(card).getByRole('status')).toBeVisible();
     const completed: PanelTask = {
       ...task,
       status: 'completed',
@@ -440,12 +521,13 @@ describe('ConversationView answer execution details', () => {
     );
 
     const articles = screen.getAllByRole('article');
-    expect(articles).toHaveLength(3);
+    expect(articles).toHaveLength(4);
     expect(articles[0]).toHaveTextContent('问题1');
     expect(articles[1]).toHaveTextContent('任务已取消，未生成回复。');
     expect(articles[1]).toHaveTextContent('任务已取消');
     expect(articles[2]).toHaveTextContent('问题2');
-    expect(screen.getAllByText('正在生成回复').length).toBeGreaterThan(0);
+    expect(articles[3]).toHaveTextContent('ChatBrowserX');
+    expect(articles[3]).toHaveTextContent('正在生成回复');
   });
 
   it('shows current task progress separately until the latest run has an assistant answer', () => {
@@ -627,7 +709,6 @@ describe('ConversationView answer execution details', () => {
           toolName: 'Bash',
           argumentsJson: '{"cmd":"npm run test:run"}',
           output: 'All tests passed',
-          resultId: 'result_1',
           detailIndex: 1,
           attachmentIds: [],
         },
@@ -775,7 +856,6 @@ describe('ConversationView answer execution details', () => {
           toolName: 'tavily_search',
           argumentsJson: '{"query":"browser reliability"}',
           output: '{"ok":true,"results":[{"title":"Reliable browsing"}]}',
-          resultId: 'result_search_1',
           detailIndex: 1,
           attachmentIds: [],
         },
@@ -861,7 +941,6 @@ describe('ConversationView answer execution details', () => {
           toolName: 'commit_context',
           argumentsJson: '{"state":"Goal: continue."}',
           output: '{"ok":true,"compactedCalls":2,"releasedTextChars":100,"releasedImages":1}',
-          resultId: 'result_commit',
           detailIndex: 1,
           attachmentIds: [],
         },
@@ -945,7 +1024,6 @@ describe('ConversationView answer execution details', () => {
           toolName: 'browser_inspect',
           argumentsJson: '{"tabId":7,"mode":"screenshot"}',
           output: '{"ok":true}',
-          resultId: 'result_screenshot',
           detailIndex: 1,
           attachmentIds: ['attachment_screenshot'],
         },
@@ -1020,7 +1098,6 @@ describe('ConversationView answer execution details', () => {
           toolName: 'tavily_search',
           argumentsJson: '{"query":"browser reliability"}',
           output: '{"ok":true}',
-          resultId: 'result_search',
           detailIndex: 1,
           attachmentIds: [],
         },
@@ -1029,7 +1106,6 @@ describe('ConversationView answer execution details', () => {
           toolName: 'tavily_extract',
           argumentsJson: '{"urls":["https://example.com"]}',
           output: '{"ok":true}',
-          resultId: 'result_extract',
           detailIndex: 2,
           attachmentIds: [],
         },

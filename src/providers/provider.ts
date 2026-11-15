@@ -1,4 +1,4 @@
-import type { AgentInputItem, Model, ModelRequest, Tool } from '@openai/agents-core';
+import type { AgentInputItem, Model, ModelRequest } from '@openai/agents-core';
 import type { ModelUsage } from './model-events';
 
 export interface ProviderModel {
@@ -31,7 +31,6 @@ export interface ProviderCredentialSync {
 /** The host depends on capabilities; wire formats and authentication belong to the backend. */
 export interface Provider {
   readonly credentialSync?: ProviderCredentialSync | undefined;
-  readonly hostedTools?: readonly Tool[];
   /** Model streams expose public summary deltas and canonical ModelUsage in rawUsage when reported. */
   getModel(selection: ModelSelection, sessionId?: string): Promise<Model>;
   listModels(signal: AbortSignal): Promise<readonly ProviderModel[]>;

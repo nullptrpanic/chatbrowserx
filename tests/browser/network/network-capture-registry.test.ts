@@ -316,8 +316,8 @@ describe('NetworkCaptureRegistry', () => {
       generation: 3,
     });
     expect(first.message).toContain('Earlier traffic is unavailable');
-    expect(first.message).toContain('browser_network_stop');
-    expect(first.message).toContain('browser_network_list to discover request IDs');
+    expect(first.message).toContain('network.capture with action=stop');
+    expect(first.message).toContain('network.list to discover request IDs');
     expect(second).toMatchObject({ alreadyActive: true });
     expect(debuggerTransport.send).toHaveBeenCalledWith({ tabId: 7 }, 'Network.enable', {
       maxTotalBufferSize: 10_485_760,
@@ -1031,7 +1031,7 @@ describe('NetworkCaptureRegistry', () => {
       droppedCount: 0,
       bufferLossless: true,
     });
-    expect(stopped.message).toContain('browser_network_list');
+    expect(stopped.message).toContain('network.list');
     expect(debuggerTransport.send).not.toHaveBeenCalledWith({ tabId: 7 }, 'Network.disable');
 
     request(debuggerTransport, 'cdp_2', 'https://api.test/after-stop');
@@ -1113,7 +1113,7 @@ describe('NetworkCaptureRegistry', () => {
       returnedCount: 2,
       hasMore: false,
     });
-    expect(page.message).toContain('browser_network_get is available now');
+    expect(page.message).toContain('network.get is available now');
     expect(page.requests[0]).not.toHaveProperty('requestBodyPreview');
     expect(page.requests[1]).toMatchObject({
       requestBodyPreview: {

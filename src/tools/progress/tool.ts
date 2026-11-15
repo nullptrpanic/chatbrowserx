@@ -5,7 +5,10 @@ import {
   TASK_PROGRESS_TOOL,
   progressDefinition,
   progressSchema,
-  progressStateSchema,
+  isProgressTool,
+  progressRecordedSchemas,
+  savedProgressInputSchema,
+  savedProgressStateSchema,
   type ProgressInput,
   type ProgressState,
 } from './contract';
@@ -15,7 +18,7 @@ function usableEvidence(context: ToolRuntimeContext): readonly MaterializedToolR
   return (context.toolResults ?? []).filter((result) => {
     if (
       result.taskId !== context.task?.id ||
-      result.toolName === TASK_PROGRESS_TOOL ||
+      isProgressTool(result.toolName) ||
       result.toolName === 'commit_context'
     )
       return false;
@@ -41,7 +44,7 @@ function latestProgress(context: ToolRuntimeContext): {
   sequence: number;
 } | null {
   for (const result of [...(context.toolResults ?? [])].reverse()) {
-    if (result.toolName !== TASK_PROGRESS_TOOL || result.taskId !== context.task?.id) continue;
+    if (!isProgressTool(result.toolName) || result.taskId !== context.task?.id) continue;
     try {
       const output = JSON.parse(result.output) as {
         ok?: boolean;
@@ -49,17 +52,18 @@ function latestProgress(context: ToolRuntimeContext): {
         state?: unknown;
       };
       if (output.ok !== true || output.updated !== true) continue;
-      const state = progressStateSchema.parse(output.state);
+      const state = savedProgressStateSchema.parse(output.state);
       const evidence = new Set(usableEvidence(context).map(({ callId }) => callId));
       // Reconcile persisted ledgers created before evidence validation, without rewriting history.
-      state.items = state.items.map((item) =>
-        item.status === 'verified' && !evidence.has(item.evidenceCallId)
+      state.plan = state.plan.map((item) =>
+        item.status === 'completed' &&
+        (item.evidenceCallId === null || !evidence.has(item.evidenceCallId))
           ? { ...item, status: 'uncertain' }
           : item,
       );
       const sequence =
         context.events?.find(
-          (event) => event.type === 'tool.result' && event.resultId === result.id,
+          (event) => event.type === 'tool.result' && event.callId === result.callId,
         )?.sequence ?? 0;
       return { state, result, sequence };
     } catch {
@@ -72,12 +76,12 @@ function latestProgress(context: ToolRuntimeContext): {
 function progressReview(context: ToolRuntimeContext, updatedState?: ProgressState) {
   const progress = latestProgress(context);
   const state = updatedState ?? progress?.state;
-  const counts = { pending: 0, uncertain: 0, verified: 0, excluded: 0 };
-  for (const item of state?.items ?? []) counts[item.status] += 1;
-  const next = (action: string, status?: 'pending' | 'uncertain') => ({
+  const counts = { pending: 0, in_progress: 0, completed: 0, uncertain: 0, excluded: 0 };
+  for (const item of state?.plan ?? []) counts[item.status] += 1;
+  const next = (action: string, status?: 'pending' | 'in_progress' | 'uncertain') => ({
     action,
     itemIds: status
-      ? (state?.items ?? [])
+      ? (state?.plan ?? [])
           .filter((item) => item.status === status)
           .slice(0, 5)
           .map((item) => item.id)
@@ -85,10 +89,9 @@ function progressReview(context: ToolRuntimeContext, updatedState?: ProgressStat
   });
   if (!state) {
     const attempted = context.toolResults?.some((result) => {
-      if (result.toolName !== TASK_PROGRESS_TOOL || result.taskId !== context.task?.id)
-        return false;
+      if (!isProgressTool(result.toolName) || result.taskId !== context.task?.id) return false;
       try {
-        return progressSchema.parse(JSON.parse(result.argumentsJson)).update !== null;
+        return savedProgressInputSchema.parse(JSON.parse(result.argumentsJson)).update !== null;
       } catch {
         return true;
       }
@@ -119,7 +122,7 @@ function progressReview(context: ToolRuntimeContext, updatedState?: ProgressStat
         (event) =>
           event.sequence > progress.sequence &&
           event.type === 'tool.call' &&
-          event.name !== TASK_PROGRESS_TOOL &&
+          !isProgressTool(event.name) &&
           event.name !== 'commit_context',
       ));
   const reconcile = {
@@ -144,19 +147,19 @@ function progressReview(context: ToolRuntimeContext, updatedState?: ProgressStat
       counts,
       next: next('observe_outcomes', 'uncertain'),
     };
-  if (!state.inventoryComplete)
+  if (!state.inventory.complete)
     return {
       completion: 'continue',
       reason: 'incomplete_inventory',
       counts,
       next: next('complete_inventory'),
     };
-  if (counts.pending)
+  if (counts.pending || counts.in_progress)
     return {
       completion: 'continue',
       reason: 'pending_items',
       counts,
-      next: next('execute_pending', 'pending'),
+      next: next('execute_pending', counts.in_progress ? 'in_progress' : 'pending'),
     };
   if (changed) return reconcile;
   return {
@@ -184,6 +187,7 @@ export const taskProgressTool: ToolDeclaration<ProgressInput> = {
   name: TASK_PROGRESS_TOOL,
   definition: progressDefinition,
   schema: progressSchema,
+  recordedSchemas: progressRecordedSchemas,
   order: -50,
   policy: { budgetGroup: 'progress', maxCalls: 200, errorSource: 'model' },
   reviewCompletion,
@@ -215,25 +219,25 @@ export const taskProgressTool: ToolDeclaration<ProgressInput> = {
         availableEvidence,
       }),
     });
-    if (update.inventoryComplete && !update.inventoryEvidence)
+    if (update.inventory.complete && !update.inventory.evidence)
       return fail('Full inventory coverage needs evidence.');
-    if (new Set(update.items.map((item) => item.id)).size !== update.items.length)
+    if (new Set(update.plan.map((item) => item.id)).size !== update.plan.length)
       return fail('Item IDs must be unique.');
-    for (const item of update.items) {
-      if (item.status !== 'pending' && !item.evidence)
+    for (const item of update.plan) {
+      if ((item.status === 'excluded' || item.status === 'uncertain') && !item.reason)
         return fail(`${item.id}: this status needs evidence or an exclusion reason.`);
       if (
-        item.status === 'verified' &&
+        item.status === 'completed' &&
         !evidenceResults.some((result) => result.callId === item.evidenceCallId)
       ) {
         return fail(
-          `${item.id}: verified requires a usable observation tool call ID; failed or missing results cannot verify an outcome.`,
+          `${item.id}: completed requires a usable observation tool call ID; failed or missing results cannot verify an outcome.`,
         );
       }
     }
-    const items = new Map(previous?.state.items.map((item) => [item.id, item]));
-    for (const item of update.items) items.set(item.id, item);
-    const state = { ...update, items: [...items.values()] };
+    const items = new Map(previous?.state.plan.map((item) => [item.id, item]));
+    for (const item of update.plan) items.set(item.id, item);
+    const state = { ...update, plan: [...items.values()] };
     if (items.size > 100 || JSON.stringify(state).length > 32_768)
       return fail('Ledger exceeds its 100-item / 32768-character limit.');
     return {

@@ -110,7 +110,7 @@ interface InteractiveCoverage {
   readonly moreAfter: boolean | 'unknown';
   readonly targets: readonly string[];
   readonly primaryTarget?: string;
-  readonly traversalTool: 'browser_scroll';
+  readonly traversalTool: 'browser.scroll';
   readonly traversalRequiredFor: readonly [
     'whole_document',
     'all_items',
@@ -683,7 +683,7 @@ function interactiveCoverage(
     moreAfter: documentCoverage?.moreAfter ?? 'unknown',
     targets,
     ...(primaryTarget === undefined ? {} : { primaryTarget }),
-    traversalTool: 'browser_scroll',
+    traversalTool: 'browser.scroll',
     traversalRequiredFor: ['whole_document', 'all_items', 'date_range', 'page_summary'],
     contentKey: semanticContentKey(elements),
   };

@@ -7,24 +7,27 @@ import type { AttachmentDraftClient } from '../chat/use-image-draft';
 
 interface TaskSupplementProps {
   readonly supplement: PanelTaskSupplement;
-  readonly applicationState: 'applied' | 'pending';
   readonly attachments: AttachmentDraftClient;
   readonly t: Translator;
   readonly onOpenImagePreview?: ((attachmentId: string) => Promise<boolean>) | undefined;
 }
 
-/** Renders one queued or applied runtime supplement as a compact task detail. */
+/** Renders one runtime supplement and the boundary that handled it. */
 export function TaskSupplement({
   supplement,
-  applicationState,
   attachments,
   t,
   onOpenImagePreview,
 }: TaskSupplementProps) {
   const [expanded, setExpanded] = useState(false);
+  const { applicationState } = supplement;
   const toggleLabel = expanded ? t('collapseUserSupplement') : t('expandUserSupplement');
   const stateLabel = t(
-    applicationState === 'applied' ? 'userSupplementApplied' : 'userSupplementPending',
+    applicationState === 'applied'
+      ? 'userSupplementApplied'
+      : applicationState === 'forwarded'
+        ? 'userSupplementForwarded'
+        : 'userSupplementPending',
   );
 
   return (

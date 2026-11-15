@@ -35,7 +35,6 @@ const browserUrlSchema = z
   });
 
 export const browserListTabsSchema = z.object({}).strict();
-export const browserGetCurrentTabSchema = z.object({}).strict();
 export const browserOpenTabSchema = z
   .object({ url: browserUrlSchema, activate: z.boolean() })
   .strict();
@@ -242,15 +241,9 @@ function taskBrowserToolSpec<const TName extends `browser_${string}`, TSchema ex
 
 export const BROWSER_TOOL_SPECS = [
   browserToolSpec(
-    'browser_get_current_tab',
-    browserGetCurrentTabSchema,
-    'Return the browser tab currently bound to this task. Use it for requests about this or the current page.',
-    {},
-  ),
-  browserToolSpec(
     'browser_list_tabs',
     browserListTabsSchema,
-    'List browser tabs with IDs, titles, URLs, and active state.',
+    'List browser tabs with IDs, titles, URLs, and active state. currentTabId identifies the tab bound to this task.',
     {},
   ),
   browserToolSpec(
@@ -291,7 +284,7 @@ export const BROWSER_TOOL_SPECS = [
   taskBrowserToolSpec(
     'browser_inspect',
     browserInspectSchema,
-    'Inspect the task current webpage for requests to read, locate, summarize, or interact with its content. It returns mounted readable DOM content, a compact native accessibility tree with cross-frame actionable refs, or a viewport screenshot. Content mode does not prove offscreen or virtualized completeness; use interactive for page-wide requests. Interactive is viewport-prioritized and bounded. A click verification showing the requested heading and content satisfies scoped inspection. Use interactive_deep for truncated/missing content, or with ref to resolve ambiguous hierarchy, ownership or row actions. d is DOM depth, not directory level; h is explicit accessibility hierarchy. If parentage is unclear, inspect the local structure or expand/collapse and read back before building a batch worklist. Always inspect interactive before requesting a screenshot. Reuse refs and interactive deltas while the accessibility tree has the needed controls. For lists or timelines, use the scrollable ref that advertises scroll; passive text is not pagination. Do not use screenshots to verify semantic form state. Screenshot fallback is for missing actionable targets, visual surfaces, or a still-missing control after deep inspection. After a successful screenshot inspection, browser_click_point becomes available on the next model turn. since="" returns a full result; otherwise reuse only the latest snapshot whose base remains in context. Delta upsert contains identity k and replacement e; remove contains deleted identities.',
+    'Inspect the task current webpage for requests to read, locate, summarize, or interact with its content. It returns mounted readable DOM content, a compact native accessibility tree with cross-frame actionable refs, or a viewport screenshot. Content mode does not prove offscreen or virtualized completeness; use interactive for page-wide requests. Interactive is viewport-prioritized and bounded. A click verification showing the requested heading and content satisfies scoped inspection. Use interactive_deep for truncated/missing content, or with ref to resolve ambiguous hierarchy, ownership or row actions. d is DOM depth, not directory level; h is explicit accessibility hierarchy. If parentage is unclear, inspect the local structure or expand/collapse and read back before building a batch worklist. Always inspect interactive before requesting a screenshot. Reuse refs and interactive deltas while the accessibility tree has the needed controls. For lists or timelines, use the scrollable ref that advertises scroll; passive text is not pagination. Do not use screenshots to verify semantic form state. Screenshot fallback is for missing actionable targets, visual surfaces, or a still-missing control after deep inspection. After a successful screenshot inspection, browser.click and browser.drag accept coordinates on the next model turn. since="" returns a full result; otherwise reuse only the latest snapshot whose base remains in context. Delta upsert contains identity k and replacement e; remove contains deleted identities.',
     {
       mode: {
         type: 'string',
@@ -318,13 +311,13 @@ export const BROWSER_TOOL_SPECS = [
   taskBrowserToolSpec(
     'browser_capture_screenshot',
     browserCaptureScreenshotSchema,
-    'Capture the current webpage viewport as a task-owned image asset. After success, browser_paste_image appears on the next model turn with the returned assetId; reread tools rather than report it missing. For visual inspection use browser_inspect mode screenshot instead.',
+    'Capture the current webpage viewport as a task-owned image asset. After success, browser.paste appears on the next model turn with the returned assetId; reread tools rather than report it missing. For visual inspection use browser.inspect mode screenshot instead.',
     {},
   ),
   taskBrowserToolSpec(
     'browser_paste_image',
     browserPasteImageSchema,
-    'Paste a task-owned screenshot into a recent semantic editable message or file-input ref. This tool becomes available after capture returns an assetId. It first uses bounded page-local delivery and may fall back to staging the image on the system clipboard plus a native browser paste; clipboardChanged=true reports that fallback. Captured assets remain valid across context compaction within the current task, and currently available IDs are listed in the assetId enum. Continue only when the result reports verified=true; that means a real editor or attachment-preview change was measured, not merely a retained hidden file input. After sending, inspect again to verify remote delivery. Never paste the same asset twice after an ambiguous result.',
+    'With type=image, paste a task-owned screenshot into a recent semantic editable message or file-input ref. This tool becomes available after capture returns an assetId. It first uses bounded page-local delivery and may fall back to staging the image on the system clipboard plus a native browser paste; clipboardChanged=true reports that fallback. Captured assets remain valid across context compaction within the current task, and currently available IDs are listed in the assetId enum. Continue only when the result reports verified=true; that means a real editor or attachment-preview change was measured, not merely a retained hidden file input. After sending, inspect again to verify remote delivery. Never paste the same asset twice after an ambiguous result.',
     {
       ref: REF_PROPERTY,
       assetId: {
@@ -337,7 +330,7 @@ export const BROWSER_TOOL_SPECS = [
   taskBrowserToolSpec(
     'browser_click',
     browserClickSchema,
-    'Automatically scroll a recent semantic element ref into view, click it, and return its latest readable state when available. For page-wide reading, never click same-page or table-of-contents links; answer after boundary traversal. When an inspected ref advertises set_checked in its actions, use browser_set_checked instead for an idempotent action.',
+    'Automatically scroll a recent semantic element ref into view, click it, and return its latest readable state when available. For page-wide reading, never click same-page or table-of-contents links; answer after boundary traversal. When an inspected ref advertises set_checked in its actions, use browser.set_checked instead for an idempotent action.',
     {
       ref: REF_PROPERTY,
       button: { type: 'string', enum: ['left', 'right', 'middle'] },
@@ -473,13 +466,13 @@ export const BROWSER_TOOL_SPECS = [
   taskBrowserToolSpec(
     'browser_network_start',
     browserNetworkStartSchema,
-    'Start future-traffic capture, replacing any frozen snapshot. Call first for network evidence. Complete and verify the user-visible workflow, wait for final network quiet, then freeze it with browser_network_stop. Request readers require a frozen capture. Reload after starting when initial page traffic is required.',
+    'Start future-traffic capture, replacing any frozen snapshot. Call first for network evidence. Complete and verify the user-visible workflow, wait for final network quiet, then freeze it with network.capture using action=stop. Request readers require a frozen capture. Reload after starting when initial page traffic is required.',
     {},
   ),
   taskBrowserToolSpec(
     'browser_network_list',
     browserNetworkListSchema,
-    'Page through one frozen capture after browser_network_stop. Counts distinguish captured, retained, matched, total result, and current-page requests; follow nextCursor until hasMore=false. Small sanitized structured request bodies may be included as bounded previews. Use recent for complete retained metadata or endpoint_sample for a compact newest-per-endpoint sample. After the first successful list, inspect selected IDs with browser_network_get.',
+    'Page through one frozen capture after network.capture stops. Counts distinguish captured, retained, matched, total result, and current-page requests; follow nextCursor until hasMore=false. Small sanitized structured request bodies may be included as bounded previews. Use recent for complete retained metadata or endpoint_sample for a compact newest-per-endpoint sample. After the first successful list, inspect selected IDs with network.get.',
     {
       urlPattern: {
         type: 'string',
@@ -495,7 +488,7 @@ export const BROWSER_TOOL_SPECS = [
   taskBrowserToolSpec(
     'browser_network_get',
     browserNetworkGetSchema,
-    'After browser_network_list, read sanitized details for 1 to 5 listed request IDs. Request and response bodies are separate and fetched only when their per-ID flags are true. Duplicate IDs use the first item. If any ID is absent from the frozen capture, list again with cursor="" and copy requestId values exactly before retrying.',
+    'After network.list, read sanitized details for 1 to 5 listed request IDs. Request and response bodies are separate and fetched only when their per-ID flags are true. Duplicate IDs use the first item. If any ID is absent from the frozen capture, list again with cursor="" and copy requestId values exactly before retrying.',
     {
       requests: {
         type: 'array',
@@ -517,7 +510,7 @@ export const BROWSER_TOOL_SPECS = [
   taskBrowserToolSpec(
     'browser_network_stop',
     browserNetworkStopSchema,
-    'After verifying business completion and final network quiet, stop accepting events and freeze the capture, then call browser_network_list. Frozen request IDs and bodies remain readable until the next browser_network_start, task-run release, or debugger loss. Stop itself never waits for business completion.',
+    'After verifying business completion and final network quiet, stop accepting events and freeze the capture, then call network.list. Frozen request IDs and bodies remain readable until the next capture start, task-run release, or debugger loss. Stop itself never waits for business completion.',
     {},
   ),
 ] as const;
@@ -554,7 +547,6 @@ export interface ParsedBrowserToolCall {
 }
 
 export const SAFE_TO_REPLAY_BROWSER_TOOLS = new Set<BrowserToolName>([
-  'browser_get_current_tab',
   'browser_list_tabs',
   'browser_switch_tab',
   'browser_inspect',

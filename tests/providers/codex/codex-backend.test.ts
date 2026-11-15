@@ -21,7 +21,7 @@ const output = [
     content: [{ type: 'output_text', text: 'OK', annotations: [] }],
   },
 ];
-function response(items = output): Response {
+function response(items: object[] = output, terminalOutput: object[] = []): Response {
   const initial = {
     id: 'resp_1',
     object: 'response',
@@ -42,7 +42,7 @@ function response(items = output): Response {
       response: {
         ...initial,
         status: 'completed',
-        output: [],
+        output: terminalOutput,
         usage: { input_tokens: 12, output_tokens: 3, total_tokens: 15 },
       },
     },
@@ -56,6 +56,109 @@ function response(items = output): Response {
 }
 
 describe('Codex backend SDK boundary', () => {
+  it.each([false, true])(
+    'round-trips application namespaces with terminal output present=%s',
+    async (terminalOutput) => {
+      const calls = [
+        {
+          id: 'fc_1',
+          type: 'function_call',
+          namespace: 'chatbrowserx_browser',
+          name: 'tab',
+          call_id: 'call_1',
+          arguments: '{}',
+          status: 'completed',
+        },
+        {
+          id: 'fc_2',
+          type: 'function_call',
+          name: 'chatbrowserx_browser.tab',
+          call_id: 'call_2',
+          arguments: '{}',
+          status: 'completed',
+        },
+      ];
+      let body: unknown;
+      const backend = new CodexProvider(
+        { getAccessToken: async () => token },
+        async (_url, init) => {
+          body = JSON.parse(String(init?.body));
+          return response(calls, terminalOutput ? calls : []);
+        },
+      );
+      const model = await backend.getModel({ model: 'fixture', reasoningEffort: 'low' });
+      const events = [];
+      for await (const event of model.getStreamedResponse({
+        ...request,
+        input: [
+          {
+            type: 'function_call',
+            namespace: 'browser',
+            name: 'tab',
+            arguments: '{}',
+            callId: 'earlier',
+          },
+          {
+            type: 'function_call_result',
+            name: 'tab',
+            callId: 'earlier',
+            status: 'completed',
+            output: '[]',
+          },
+        ],
+        modelSettings: { ...request.modelSettings, toolChoice: 'browser.tab' },
+        tools: [
+          {
+            type: 'function',
+            namespace: 'browser',
+            namespaceDescription: 'Browser operations.',
+            name: 'tab',
+            description: 'Call browser.tab.',
+            parameters: {
+              type: 'object',
+              properties: {},
+              required: [],
+              additionalProperties: false,
+            },
+            strict: true,
+          },
+        ],
+      }))
+        events.push(event);
+      expect(body).toMatchObject({
+        instructions: request.systemInstructions,
+        tools: [
+          { type: 'web_search' },
+          {
+            type: 'namespace',
+            name: 'chatbrowserx_browser',
+            tools: [{ name: 'tab', description: 'Call chatbrowserx_browser.tab.' }],
+          },
+        ],
+        tool_choice: { type: 'function', name: 'chatbrowserx_browser.tab' },
+        input: [
+          {
+            type: 'function_call',
+            name: 'tab',
+            namespace: 'chatbrowserx_browser',
+            call_id: 'earlier',
+          },
+          { type: 'function_call_output', call_id: 'earlier', output: '[]' },
+        ],
+      });
+      expect(events.find((event) => event.type === 'response_done')).toMatchObject({
+        response: {
+          output: ['call_1', 'call_2'].map((callId) => ({
+            type: 'function_call',
+            namespace: 'browser',
+            name: 'tab',
+            callId,
+          })),
+        },
+      });
+    },
+  );
+
   it('routes a conversation consistently without adding session state to the request body', async () => {
     const sent: Array<{ session: string | null; body: unknown }> = [];
     const backend = new CodexProvider({ getAccessToken: async () => token }, async (_url, init) => {
@@ -288,7 +391,7 @@ describe('Codex backend SDK boundary', () => {
     },
   );
 
-  it('preserves public summaries and native search evidence without decoding encrypted reasoning', async () => {
+  it('enables native search by default and preserves public summaries and search evidence', async () => {
     const rawItems = [
       {
         id: 'rs_1',
@@ -314,7 +417,9 @@ describe('Codex backend SDK boundary', () => {
       summary_index: 0,
       delta: 'Checking the source.',
     };
-    const backend = new CodexProvider({ getAccessToken: async () => token }, async () => {
+    const sent: unknown[] = [];
+    const backend = new CodexProvider({ getAccessToken: async () => token }, async (_url, init) => {
+      sent.push(JSON.parse(String(init?.body)));
       const stream = await response(rawItems as typeof output).text();
       return new Response(`data: ${JSON.stringify(initial)}\n\n${stream}`, {
         headers: { 'Content-Type': 'text/event-stream' },
@@ -325,6 +430,12 @@ describe('Codex backend SDK boundary', () => {
       await backend.getModel({ model: 'fixture', reasoningEffort: 'high' })
     ).getStreamedResponse(request))
       events.push(event);
+    expect(sent).toMatchObject([
+      {
+        instructions: request.systemInstructions,
+        tools: [{ type: 'web_search' }],
+      },
+    ]);
     expect(events).toContainEqual({
       type: 'model',
       event: { type: 'reasoning_summary_delta', key: 'rs_1:0', delta: 'Checking the source.' },

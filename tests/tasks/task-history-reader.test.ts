@@ -87,13 +87,11 @@ const events: TaskEvent[] = [
     at: 230,
     type: 'tool.result',
     callId: 'call_2',
-    resultId: 'result_2',
   },
 ];
 
 const results: MaterializedToolResult[] = [
   {
-    id: 'result_2',
     taskId: 'task_2',
     runId: 'run_2',
     callId: 'call_2',
@@ -113,7 +111,10 @@ function reader(
     readonly archiveResults?: readonly MaterializedToolResult[];
     readonly messages?: readonly MessageRecord[];
     readonly extraResults?: readonly MaterializedToolResult[];
-    readonly getToolResult?: (resultId: string) => Promise<MaterializedToolResult | undefined>;
+    readonly getToolResult?: (
+      taskId: string,
+      callId: string,
+    ) => Promise<MaterializedToolResult | undefined>;
   } = {},
 ) {
   const archiveTask = input.archiveTask ?? task('task_2', 2);
@@ -128,7 +129,8 @@ function reader(
         taskId === archiveTask.id ? [...(input.archiveEvents ?? events)] : [],
       getToolResult:
         input.getToolResult ??
-        (async (resultId) => readableResults.find(({ id }) => id === resultId)),
+        (async (taskId, callId) =>
+          readableResults.find((result) => result.taskId === taskId && result.callId === callId)),
       get: async (taskId) => allTasks.find(({ id }) => id === taskId),
     },
     conversations: {
@@ -151,15 +153,15 @@ describe('TaskHistoryReader', () => {
     expect(page).toMatchObject({
       ok: true,
       items: [
-        { type: 'message', attachmentCount: 1, attachmentIds: ['image_message_2'] },
+        { type: 'message', attachmentIds: ['image_message_2'] },
         { type: 'tool_call' },
-        { type: 'supplement', attachmentCount: 1, attachmentIds: ['image_supplement_2'] },
-        { type: 'tool_result', attachmentCount: 1, attachmentIds: ['image_result'] },
+        { type: 'supplement', attachmentIds: ['image_supplement_2'] },
+        { type: 'tool_result', attachmentIds: ['image_result'] },
       ],
     });
   });
 
-  it('reads the previous logical task in stable event order with cursor counts', async () => {
+  it('reads the previous logical task in stable event order with a cursor', async () => {
     const first = await reader().readHistory(
       { conversationId, currentTaskId },
       { taskId: null, offset: 1, cursor: '', limit: 2 },
@@ -167,18 +169,13 @@ describe('TaskHistoryReader', () => {
     expect(first).toMatchObject({
       ok: true,
       task: { id: 'task_2', ordinal: 2 },
-      returnedCount: 2,
-      consumedCount: 2,
-      totalCount: 4,
-      remainingCount: 2,
-      hasMore: true,
+
       items: [
         {
-          sequence: 1,
           type: 'message',
           text: 'inspect the previous page traffic',
         },
-        { sequence: 2, type: 'tool_call', name: 'browser_network_get' },
+        { type: 'tool_call', name: 'browser_network_get' },
       ],
     });
     if (!first.ok || first.nextCursor === null) throw new Error('Expected another page.');
@@ -189,18 +186,14 @@ describe('TaskHistoryReader', () => {
     );
     expect(second).toMatchObject({
       ok: true,
-      returnedCount: 2,
-      consumedCount: 4,
-      totalCount: 4,
-      remainingCount: 0,
+
       nextCursor: null,
-      hasMore: false,
+
       items: [
-        { sequence: 3, type: 'supplement', text: 'include request bodies' },
+        { type: 'supplement', text: 'include request bodies' },
         {
-          sequence: 4,
           type: 'tool_result',
-          resultId: 'result_2',
+          callId: 'call_2',
           preview: '0123456789',
         },
       ],
@@ -259,39 +252,34 @@ describe('TaskHistoryReader', () => {
       { conversationId, currentTaskId },
       { taskId: null, offset: 1, cursor: '', limit: 100 },
     );
-    expect(page).toMatchObject({ ok: true, totalCount: 101, hasMore: true });
+    expect(page).toMatchObject({ ok: true, nextCursor: expect.any(String) });
     if (!page.ok) throw new Error('Expected a history page.');
-    expect(page.returnedCount).toBeLessThan(100);
-    expect(JSON.stringify(page.items).length).toBeLessThanOrEqual(page.itemsCharacterLimit);
-    expect(page.itemsCharacterCount).toBe(JSON.stringify(page.items).length);
+    expect(page.items.length).toBeLessThan(100);
+    expect(JSON.stringify(page.items).length).toBeLessThanOrEqual(40_000);
     expect(page.items[0]).toMatchObject({
       type: 'message',
       textLength: oversizedText.length,
     });
     const firstItem = page.items[0];
-    if (firstItem?.type !== 'message' || firstItem.textDetailId === null) {
-      throw new Error('Expected an oversized message detail reference.');
+    if (firstItem?.type !== 'message') {
+      throw new Error('Expected an oversized message.');
     }
     expect(firstItem.text.length).toBeLessThan(oversizedText.length);
 
-    const detail = await history.readDetail(
+    const detail = await history.readMessage(
       { conversationId, currentTaskId },
-      { detailId: firstItem.textDetailId, offset: 10_000, limit: 20_000 },
+      { taskId: 'task_2', messageId: firstItem.messageId, offset: 10_000, limit: 20_000 },
     );
     expect(detail).toEqual({
       ok: true,
-      detailId: firstItem.textDetailId,
       taskId: 'task_2',
-      sequence: 1,
-      field: 'message_text',
+      messageId: firstItem.messageId,
+      role: firstItem.role,
+      status: firstItem.status,
+      attachmentIds: firstItem.attachmentIds,
       content: oversizedText.slice(10_000, 30_000),
-      offset: 10_000,
-      returnedCount: 20_000,
-      consumedCount: 30_000,
-      totalCount: oversizedText.length,
-      remainingCount: 2_000,
+
       nextOffset: 30_000,
-      hasMore: true,
     });
   });
 
@@ -360,8 +348,6 @@ describe('TaskHistoryReader', () => {
     expect(first).toMatchObject({
       ok: true,
       task: { id: 'task_2', ordinal: 2 },
-      returnedCount: 2,
-      hasMore: true,
     });
     if (!first.ok || first.nextCursor === null) throw new Error('Expected another page.');
 
@@ -373,8 +359,6 @@ describe('TaskHistoryReader', () => {
     ).resolves.toMatchObject({
       ok: true,
       task: { id: 'task_2' },
-      returnedCount: 2,
-      hasMore: false,
     });
   });
 
@@ -422,8 +406,8 @@ describe('TaskHistoryReader', () => {
   });
 
   it('loads tool-result bodies only for the current history page', async () => {
-    const getToolResult = vi.fn(async (resultId: string) =>
-      results.find(({ id }) => id === resultId),
+    const getToolResult = vi.fn(async (taskId: string, callId: string) =>
+      results.find((result) => result.taskId === taskId && result.callId === callId),
     );
     const history = reader({ getToolResult });
 
@@ -431,7 +415,14 @@ describe('TaskHistoryReader', () => {
       { conversationId, currentTaskId },
       { taskId: null, offset: 1, cursor: '', limit: 2 },
     );
-    expect(first).toMatchObject({ ok: true, returnedCount: 2, hasMore: true });
+    expect(first).toMatchObject({
+      ok: true,
+      nextCursor: expect.any(String),
+      items: expect.arrayContaining([
+        expect.objectContaining({ type: 'message' }),
+        expect.objectContaining({ type: 'tool_call' }),
+      ]),
+    });
     expect(getToolResult).not.toHaveBeenCalled();
     if (!first.ok || first.nextCursor === null) throw new Error('Expected another page.');
 
@@ -440,7 +431,7 @@ describe('TaskHistoryReader', () => {
       { taskId: null, offset: 1, cursor: first.nextCursor, limit: 2 },
     );
     expect(getToolResult).toHaveBeenCalledOnce();
-    expect(getToolResult).toHaveBeenCalledWith('result_2');
+    expect(getToolResult).toHaveBeenCalledWith('task_2', 'call_2');
   });
 
   it('rejects a cursor used with a different offset', async () => {
@@ -465,21 +456,16 @@ describe('TaskHistoryReader', () => {
     await expect(
       reader().readResult(
         { conversationId, currentTaskId },
-        { resultId: 'result_2', offset: 3, limit: 4 },
+        { taskId: 'task_2', callId: 'call_2', offset: 3, limit: 4 },
       ),
     ).resolves.toEqual({
       ok: true,
-      resultId: 'result_2',
       taskId: 'task_2',
+      callId: 'call_2',
       toolName: 'browser_network_get',
       content: '3456',
-      offset: 3,
-      returnedCount: 4,
-      consumedCount: 7,
-      totalCount: 10,
-      remainingCount: 3,
+
       nextOffset: 7,
-      hasMore: true,
     });
   });
 
@@ -519,16 +505,12 @@ describe('TaskHistoryReader', () => {
     ).resolves.toMatchObject({
       ok: true,
       items: [],
-      returnedCount: 0,
-      consumedCount: 0,
-      totalCount: 0,
-      remainingCount: 0,
+
       nextCursor: null,
-      hasMore: false,
     });
   });
 
-  it('paginates 125 visible events with exact total and remaining counts', async () => {
+  it('paginates 125 visible events without skipping an event', async () => {
     const previous = { ...task('task_2', 2), lastEventSequence: 125 };
     const summaries: TaskEvent[] = Array.from({ length: 125 }, (_, index) => ({
       id: `summary_${String(index + 1)}`,
@@ -551,11 +533,6 @@ describe('TaskHistoryReader', () => {
     );
     expect(first).toMatchObject({
       ok: true,
-      returnedCount: 100,
-      consumedCount: 100,
-      totalCount: 125,
-      remainingCount: 25,
-      hasMore: true,
     });
     if (!first.ok || first.nextCursor === null) throw new Error('Expected another page.');
     await expect(
@@ -565,12 +542,8 @@ describe('TaskHistoryReader', () => {
       ),
     ).resolves.toMatchObject({
       ok: true,
-      returnedCount: 25,
-      consumedCount: 125,
-      totalCount: 125,
-      remainingCount: 0,
+
       nextCursor: null,
-      hasMore: false,
     });
   });
 
@@ -600,12 +573,10 @@ describe('TaskHistoryReader', () => {
     };
     const foreignResult: MaterializedToolResult = {
       ...baseResult,
-      id: 'result_foreign',
       taskId: foreignTask.id,
     };
     const activeResult: MaterializedToolResult = {
       ...baseResult,
-      id: 'result_active',
       taskId: currentTaskId,
       runId: 'run_3',
     };
@@ -617,13 +588,13 @@ describe('TaskHistoryReader', () => {
     await expect(
       history.readResult(
         { conversationId, currentTaskId },
-        { resultId: foreignResult.id, offset: 0, limit: 10 },
+        { taskId: foreignResult.taskId, callId: foreignResult.callId, offset: 0, limit: 10 },
       ),
     ).resolves.toMatchObject({ ok: false, code: 'RESULT_NOT_FOUND' });
     await expect(
       history.readResult(
         { conversationId, currentTaskId },
-        { resultId: activeResult.id, offset: 0, limit: 10 },
+        { taskId: activeResult.taskId, callId: activeResult.callId, offset: 0, limit: 10 },
       ),
     ).resolves.toMatchObject({ ok: false, code: 'RESULT_NOT_FOUND' });
   });

@@ -504,11 +504,13 @@
   display: inline-flex;
   align-items: center;
   gap: 6px;
+  max-width: 100%;
   margin-top: 5px;
 }
 
 .typing-dots {
   display: inline-flex;
+  flex: none;
   gap: 2px;
 }
 

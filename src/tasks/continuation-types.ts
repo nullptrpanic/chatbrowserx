@@ -19,7 +19,6 @@ export interface MaterializedFunctionCallOutput {
   readonly type: 'function_call_output';
   readonly callId: string;
   readonly output: string;
-  readonly resultId: string;
   readonly attachmentIds?: readonly string[];
 }
 
@@ -38,7 +37,6 @@ export type ContinuationItem =
   | {
       readonly type: 'function_call_output_ref';
       readonly callId: string;
-      readonly resultId: string;
       readonly attachmentIds?: readonly string[];
     }
   | {

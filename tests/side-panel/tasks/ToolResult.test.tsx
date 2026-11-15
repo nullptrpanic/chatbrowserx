@@ -35,7 +35,6 @@ describe('ToolResult reviewed labels', () => {
           toolName: 'sandbox_read',
           argumentsJson: '{"path":"/tmp/SKILL.md","startLine":1,"maxLines":400}',
           output: '{"code":0,"content":"skill body\\n","truncated":false}',
-          resultId: 'result_read',
           detailIndex: 1,
           attachmentIds: [],
         }}
@@ -62,7 +61,6 @@ describe('ToolResult reviewed labels', () => {
           toolName: 'tavily_search',
           argumentsJson: '{"query":"browser reliability"}',
           output: '{"ok":true}',
-          resultId: 'result_search',
           detailIndex: 1,
           attachmentIds: [],
         }}
@@ -88,7 +86,6 @@ describe('ToolResult reviewed labels', () => {
           toolName: 'browser_inspect',
           argumentsJson: '{"tabId":7,"mode":"content"}',
           output: '{"ok":true}',
-          resultId: 'result_1',
           detailIndex: 1,
           attachmentIds: [],
         }}
@@ -119,7 +116,6 @@ describe('ToolResult reviewed labels', () => {
           toolName: 'browser_set_checked_many',
           argumentsJson: '{"items":[{"ref":"ref_1","checked":true}]}',
           output: '{"ok":true}',
-          resultId: 'result_batch',
           detailIndex: 1,
           attachmentIds: [],
         }}
@@ -140,7 +136,6 @@ describe('ToolResult reviewed labels', () => {
           toolName: 'custom_browser_tool',
           argumentsJson: '{}',
           output: '{}',
-          resultId: 'result_unknown',
           detailIndex: 1,
           attachmentIds: [],
         }}
@@ -180,7 +175,6 @@ describe('ToolResult reviewed labels', () => {
           toolName: 'browser_capture_screenshot',
           argumentsJson: '{"tabId":7}',
           output: '{"ok":true,"data":{"assetId":"result_image"}}',
-          resultId: 'result_capture',
           detailIndex: 1,
           attachmentIds: ['result_image'],
         }}
@@ -207,7 +201,6 @@ describe('ToolResult reviewed labels', () => {
           toolName: 'commit_context',
           argumentsJson: '{"state":"Goal: continue."}',
           output: '{"ok":true,"compactedCalls":2,"releasedTextChars":100,"releasedImages":1}',
-          resultId: 'result_commit',
           detailIndex: 1,
           attachmentIds: [],
         }}
@@ -256,7 +249,6 @@ describe('ToolResult reviewed labels', () => {
           toolName: 'browser_inspect',
           argumentsJson: '{"tabId":7,"mode":"interactive"}',
           output: '{"ok":true,"snapshot":"page_1"}',
-          resultId: 'result_copy',
           detailIndex: 1,
           attachmentIds: ['result_image'],
         }}
@@ -305,7 +297,6 @@ describe('ToolResult reviewed labels', () => {
           toolName: 'custom_tool',
           argumentsJson: 'query=browser reliability',
           output: 'partial {"ok":true',
-          resultId: 'result_text',
           detailIndex: 1,
           attachmentIds: [],
         }}

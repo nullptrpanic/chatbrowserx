@@ -5,6 +5,7 @@ export type TaskTransitionType =
   | 'planning.started'
   | 'planning.retrying'
   | 'reasoning.summary-recorded'
+  | 'assistant.commentary-recorded'
   | 'tool.call-recorded'
   | 'tool.execution-started'
   | 'tool.result-recorded'
@@ -28,6 +29,7 @@ const targetStatus: Readonly<Record<TaskTransitionType, TaskStatus>> = {
   'planning.started': 'planning',
   'planning.retrying': 'planning',
   'reasoning.summary-recorded': 'planning',
+  'assistant.commentary-recorded': 'planning',
   'tool.call-recorded': 'planning',
   'tool.execution-started': 'planning',
   'tool.result-recorded': 'planning',
@@ -52,6 +54,7 @@ const allowed: Readonly<Record<TaskStatus, ReadonlySet<TaskTransitionType>>> = {
   planning: new Set([
     'planning.retrying',
     'reasoning.summary-recorded',
+    'assistant.commentary-recorded',
     'tool.call-recorded',
     'tool.execution-started',
     'tool.result-recorded',

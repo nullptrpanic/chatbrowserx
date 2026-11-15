@@ -25,11 +25,14 @@ export interface MessageRecord {
   readonly taskId: TaskId;
   readonly role: MessageRole;
   readonly status: MessageStatus;
+  readonly phase?: 'final_answer';
   readonly text: string;
   readonly attachmentIds: readonly AttachmentId[];
   readonly sourceTabId?: number | undefined;
   readonly sourcePage?: MessageSourcePage | undefined;
   readonly replyTo?: MessageReplyReference | undefined;
+  /** Original supplement retained in the source task's execution details. */
+  readonly forwardedFromSupplementId?: MessageId;
   readonly createdAt: number;
   readonly updatedAt: number;
 }

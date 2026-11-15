@@ -38,7 +38,6 @@ describe('TerminalToolResult', () => {
             stderr: 'fixture failed\n',
             truncated: true,
           }),
-          resultId: 'result_sandbox',
           detailIndex: 1,
           attachmentIds: [],
         }}
@@ -67,7 +66,6 @@ describe('TerminalToolResult', () => {
           toolName: 'Bash',
           argumentsJson: JSON.stringify({ cmd: 'npm run test:run' }),
           output: '37 tests passed',
-          resultId: 'result_1',
           detailIndex: 1,
           attachmentIds: [],
         }}
@@ -99,7 +97,6 @@ describe('TerminalToolResult', () => {
           toolName: 'shell',
           argumentsJson: '<script>alert("unsafe")</script>',
           output: '',
-          resultId: 'result_2',
           detailIndex: 1,
           attachmentIds: [],
         }}
@@ -127,7 +124,6 @@ describe('TerminalToolResult', () => {
           toolName: 'bash',
           argumentsJson: JSON.stringify({ cmd: 'npm run test:run' }),
           output: '42 tests passed',
-          resultId: 'result_copy',
           detailIndex: 1,
           attachmentIds: [],
         }}
@@ -163,7 +159,6 @@ describe('TerminalToolResult', () => {
             stderr: 'standard error',
             truncated: false,
           }),
-          resultId: 'result_sandbox_copy',
           detailIndex: 1,
           attachmentIds: [],
         }}

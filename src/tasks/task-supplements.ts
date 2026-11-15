@@ -9,7 +9,7 @@ export function pendingTaskSupplementIds(
   taskId: TaskId,
 ): ReadonlySet<string> {
   const queuedSequenceById = new Map<string, number>();
-  const applied = new Set<string>();
+  const handled = new Set<string>();
   for (const event of [...events].sort((left, right) => left.sequence - right.sequence)) {
     if (event.taskId !== taskId) continue;
     if (event.type === 'supplement.queued') {
@@ -19,19 +19,19 @@ export function pendingTaskSupplementIds(
       queuedSequenceById.set(event.messageId, event.sequence);
       continue;
     }
-    if (event.type === 'supplement.applied') {
+    if (event.type === 'supplement.applied' || event.type === 'supplement.forwarded') {
       const queuedSequence = queuedSequenceById.get(event.messageId);
       if (
         queuedSequence === undefined ||
         queuedSequence >= event.sequence ||
-        applied.has(event.messageId)
+        handled.has(event.messageId)
       ) {
         throw new Error('Task supplement event association is invalid.');
       }
-      applied.add(event.messageId);
+      handled.add(event.messageId);
     }
   }
-  return new Set([...queuedSequenceById.keys()].filter((id) => !applied.has(id)));
+  return new Set([...queuedSequenceById.keys()].filter((id) => !handled.has(id)));
 }
 
 /** Selects queued but not-yet-applied supplements in permanent TaskEvent order. */

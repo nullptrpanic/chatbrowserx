@@ -27,13 +27,13 @@ const NETWORK_ENABLE_PARAMETERS = {
   maxPostDataSize: 0,
 } as const;
 const CAPTURE_STARTED_MESSAGE =
-  'Capture started. Earlier traffic is unavailable, and any prior frozen snapshot was replaced. Complete and verify the requested user-visible workflow; network_idle alone does not prove asynchronous business completion. Reload now if initial page traffic is required. After business completion and final network quiet, call browser_network_stop to freeze the capture, browser_network_list to discover request IDs, and browser_network_get to read selected listed IDs. Readers reject an active capture.';
+  'Capture started. Earlier traffic is unavailable, and any prior frozen snapshot was replaced. Complete and verify the requested user-visible workflow; network_idle alone does not prove asynchronous business completion. Reload now if initial page traffic is required. After business completion and final network quiet, call network.capture with action=stop to freeze the capture, network.list to discover request IDs, and network.get to read selected listed IDs. Readers reject an active capture.';
 const CAPTURE_STOPPED_MESSAGE =
-  'Capture frozen. Call browser_network_list with an empty cursor, then browser_network_get with selected request IDs returned by the list.';
+  'Capture frozen. Call network.list with an empty cursor, then network.get with selected request IDs returned by the list.';
 const CAPTURE_UNAVAILABLE_MESSAGE =
-  'No active or frozen capture was available. Call browser_network_start to create a new capture.';
+  'No active or frozen capture was available. Call network.capture with action=start to create a new capture.';
 const REQUESTS_LISTED_MESSAGE =
-  'Frozen requests listed. browser_network_get is available now for request IDs returned by this list.';
+  'Frozen requests listed. network.get is available now for request IDs returned by this list.';
 const SENSITIVE_NAME =
   /(?:^|[-_])(?:authorization|proxy[-_]?authorization|cookie|set[-_]?cookie|token|secret|password|passwd|api[-_]?key|credential|session)(?:$|[-_])/i;
 

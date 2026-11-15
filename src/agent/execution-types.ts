@@ -29,14 +29,18 @@ interface AgentOutcomeMetadata {
   readonly session?: AgentSession;
   readonly modelTurn?: AgentModelTurn;
   readonly modelOutputItems?: readonly ModelOutputContinuationItem[];
+  readonly commentary?: readonly AssistantCommentary[];
 }
 
+export type AssistantCommentary =
+  | Pick<Extract<TaskEvent, { type: 'assistant.commentary' }>, 'text' | 'itemId' | 'callId'>
+  | Pick<Extract<TaskEvent, { type: 'assistant.commentary-linked' }>, 'itemId' | 'callId'>;
+
 export type AgentEvent =
-  | {
+  | (AgentOutcomeMetadata & {
       readonly type: 'tool.hosted';
       readonly item: Extract<AgentOutputItem, { type: 'hosted_tool_call' }>;
-      readonly session: AgentSession;
-    }
+    })
   | {
       readonly type: 'context.compaction';
       readonly phase: 'started' | 'completed' | 'failed';
@@ -50,6 +54,7 @@ export type AgentEvent =
       readonly modelTurn?: AgentModelTurn;
     }
   | { readonly type: 'reasoning.summary'; readonly text: string }
+  | { readonly type: 'assistant.commentary'; readonly item: AssistantCommentary }
   | (AgentOutcomeMetadata & {
       readonly type: 'tool.call';
       readonly call: ValidatedToolCall;

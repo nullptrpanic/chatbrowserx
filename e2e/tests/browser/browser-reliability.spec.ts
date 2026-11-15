@@ -1,4 +1,4 @@
-import { codexFixtureEvents } from './helpers/codex-fixture';
+import { codexFixtureEvents, codexFixtureToolName } from './helpers/codex-fixture';
 import { createServer, type Server } from 'node:http';
 import { extensionTest, expect } from './fixtures/extension-test';
 import { sendExtensionMessage } from './helpers/extension-runtime';
@@ -32,7 +32,7 @@ function toolResponse(
     id: itemId,
     type: 'function_call',
     call_id: callId,
-    name,
+    ...codexFixtureToolName(name),
     arguments: JSON.stringify(arguments_),
   };
   return sse([
@@ -164,16 +164,19 @@ extensionTest(
       );
       if (tabId === undefined) throw new Error('Fixture tab missing');
       const state = {
-        scope: 'Finish Alpha and Beta',
-        inventoryComplete: true,
-        inventoryEvidence: 'Two explicitly requested items',
-        blocker: '',
-        items: ['Alpha', 'Beta'].map((id) => ({
+        inventory: {
+          scope: 'Finish Alpha and Beta',
+          complete: true,
+          evidence: 'Two explicitly requested items',
+        },
+        explanation: null,
+        blocker: null,
+        plan: ['Alpha', 'Beta'].map((id) => ({
           id,
-          description: id,
+          step: id,
           status: 'pending',
-          evidence: '',
-          evidenceCallId: '',
+          reason: null,
+          evidenceCallId: null,
         })),
       };
       const inspect = {
@@ -193,35 +196,39 @@ extensionTest(
           let body: string;
           switch (++turn) {
             case 1:
-              body = toolResponse('p1', 'i1', 'plan', 'task_progress', {
+              body = toolResponse('p1', 'i1', 'plan', 'task.progress', {
                 update: state,
               });
               break;
             case 2:
-              expect(output.state.items).toHaveLength(2);
+              expect(output.state.plan).toHaveLength(2);
               body = finalTextResponse('partial', 'Still pending.');
               break;
             case 3:
               expect(request.tool_choice).toBe('auto');
               expect(
-                request.tools.some((tool: { name: string }) => tool.name === 'browser_click'),
+                request.tools.some(
+                  (tool: { name: string; tools?: { name: string }[] }) =>
+                    tool.name === 'chatbrowserx_browser' &&
+                    tool.tools?.some(({ name }) => name === 'click'),
+                ),
               ).toBe(true);
               expect(JSON.stringify(request.input.at(-1))).toContain('runtime_completion_review');
               expect(JSON.stringify(request.input.at(-1))).toContain('execute_pending');
-              body = toolResponse('p3', 'i3', 'review', 'task_progress', {
+              body = toolResponse('p3', 'i3', 'review', 'task.progress', {
                 update: null,
               });
               break;
             case 4:
               expect(
-                output.state.items.every((item: { status: string }) => item.status === 'pending'),
+                output.state.plan.every((item: { status: string }) => item.status === 'pending'),
               ).toBe(true);
               expect(output.review).toMatchObject({
                 completion: 'continue',
                 reason: 'pending_items',
                 next: { action: 'execute_pending', itemIds: ['Alpha', 'Beta'] },
               });
-              body = toolResponse('p4', 'i4', 'inspect', 'browser_inspect', inspect);
+              body = toolResponse('p4', 'i4', 'inspect', 'browser.inspect', inspect);
               break;
             case 5: {
               const button = output.data.elements.find(
@@ -229,26 +236,24 @@ extensionTest(
                   item.r === 'button' && item.n === 'Finish batch',
               );
               expect(button?.ref).toBeTruthy();
-              body = toolResponse('p5', 'i5', 'finish', 'browser_click', {
+              body = toolResponse('p5', 'i5', 'finish', 'browser.click', {
                 tabId: 0,
-                ref: button.ref,
-                button: 'left',
-                count: 1,
+                target: { ref: button.ref, button: 'left', count: 1 },
               });
               break;
             }
             case 6:
-              body = toolResponse('p6', 'i6', 'verified', 'browser_inspect', inspect);
+              body = toolResponse('p6', 'i6', 'verified', 'browser.inspect', inspect);
               break;
             case 7:
               expect(JSON.stringify(output)).toContain('Alpha done; Beta done');
-              body = toolResponse('p7', 'i7', 'recorded', 'task_progress', {
+              body = toolResponse('p7', 'i7', 'recorded', 'task.progress', {
                 update: {
                   ...state,
-                  items: state.items.map((item) => ({
+                  plan: state.plan.map((item) => ({
                     ...item,
-                    status: 'verified',
-                    evidence: 'Read back done status',
+                    status: 'completed',
+                    reason: 'Read back done status',
                     evidenceCallId: output.data.snapshot,
                   })),
                 },
@@ -257,13 +262,13 @@ extensionTest(
             case 8:
               expect(output.ok).toBe(false);
               expect(output.availableEvidence.at(-1)?.callId).toBe('verified');
-              body = toolResponse('p8', 'i8', 'corrected', 'task_progress', {
+              body = toolResponse('p8', 'i8', 'corrected', 'task.progress', {
                 update: {
                   ...state,
-                  items: state.items.map((item) => ({
+                  plan: state.plan.map((item) => ({
                     ...item,
-                    status: 'verified',
-                    evidence: 'Read back done status',
+                    status: 'completed',
+                    reason: 'Read back done status',
                     evidenceCallId: output.availableEvidence.at(-1).callId,
                   })),
                 },
@@ -293,6 +298,121 @@ extensionTest(
       );
       expect(turn).toBe(9);
       await expect(page.locator('output')).toHaveText('Alpha done; Beta done');
+    } finally {
+      await page.close();
+      await closeHttpFixtureServer(server);
+    }
+  },
+);
+
+extensionTest(
+  'pastes a task screenshot through the typed browser.paste tool',
+  async ({ extensionSession }) => {
+    const server = createServer((_request, response) => {
+      response.writeHead(200, { 'Content-Type': 'text/html' });
+      response.end(`<!doctype html><div contenteditable="true" role="textbox" aria-label="Image editor">Edit</div>
+      <script>
+        document.querySelector('[role=textbox]').addEventListener('paste', event => {
+          const file = event.clipboardData.files[0];
+          if (!file || !file.type.startsWith('image/')) return;
+          event.preventDefault();
+          const image = document.createElement('img');
+          image.alt = 'Pasted image';
+          image.src = URL.createObjectURL(file);
+          event.currentTarget.append(image);
+        });
+      </script>`);
+    });
+    const port = await listen(server);
+    const { context, sidePanelPage: panel } = extensionSession;
+    const page = await context.newPage();
+    try {
+      const url = `http://127.0.0.1:${port}/paste`;
+      await page.goto(url);
+      const tabId = await panel.evaluate(
+        async (url) => (await chrome.tabs.query({ url }))[0]?.id,
+        url,
+      );
+      if (tabId === undefined) throw new Error('Fixture tab missing');
+      let editorRef: string | undefined;
+      let turn = 0;
+      await context.route('https://chatgpt.com/backend-api/codex/responses', async (route) => {
+        const request = route.request().postDataJSON();
+        const output = JSON.parse(functionOutputs(request).at(-1) ?? '{}');
+        let body: string;
+        switch (++turn) {
+          case 1:
+            body = toolResponse('inspect', 'inspect_item', 'inspect_call', 'browser.inspect', {
+              tabId: 0,
+              mode: 'interactive',
+              ref: '',
+              since: '',
+              visualReason: '',
+            });
+            break;
+          case 2:
+            editorRef = output.data.elements.find(
+              (item: { r?: string; n?: string }) =>
+                item.r === 'textbox' && item.n?.startsWith('Image editor'),
+            )?.ref;
+            expect(
+              editorRef,
+              JSON.stringify(
+                output.data.elements.map(
+                  ({ r, n, ref }: { r: string; n: string; ref?: string }) => ({ r, n, ref }),
+                ),
+              ),
+            ).toBeTruthy();
+            body = toolResponse('capture', 'capture_item', 'capture_call', 'browser.screenshot', {
+              tabId: 0,
+            });
+            break;
+          case 3: {
+            const assetId = output.data.assetId;
+            expect(assetId).toEqual(expect.any(String));
+            expect(request.tools).toEqual(
+              expect.arrayContaining([
+                expect.objectContaining({
+                  type: 'namespace',
+                  name: 'chatbrowserx_browser',
+                  tools: expect.arrayContaining([
+                    expect.objectContaining({
+                      name: 'paste',
+                      parameters: expect.objectContaining({
+                        properties: expect.objectContaining({
+                          type: { type: 'string', enum: ['image'] },
+                          assetId: expect.objectContaining({ enum: [assetId] }),
+                        }),
+                      }),
+                    }),
+                  ]),
+                }),
+              ]),
+            );
+            body = toolResponse('paste', 'paste_item', 'paste_call', 'browser.paste', {
+              tabId: 0,
+              ref: editorRef,
+              type: 'image',
+              assetId,
+            });
+            break;
+          }
+          default:
+            expect(output).toMatchObject({
+              ok: true,
+              data: { verified: true, strategy: 'clipboard_event' },
+            });
+            body = finalTextResponse('done', 'Screenshot pasted.');
+        }
+        await route.fulfill({ status: 200, contentType: 'text/event-stream', body });
+      });
+      await runFixtureTask(
+        extensionSession,
+        tabId,
+        'Capture a screenshot and paste it into the image editor.',
+      );
+      await expect(page.getByRole('img', { name: 'Pasted image' })).toBeVisible();
+      expect(turn).toBe(4);
     } finally {
       await page.close();
       await closeHttpFixtureServer(server);
@@ -356,14 +476,14 @@ extensionTest.describe('screenshot coordinate units', () => {
               turn += 1;
               let body: string;
               if (turn === 1)
-                body = toolResponse('i', 'ii', 'ic', 'browser_inspect', {
+                body = toolResponse('i', 'ii', 'ic', 'browser.inspect', {
                   tabId: 0,
                   mode: 'interactive',
                   since: '',
                   visualReason: '',
                 });
               else if (turn === 2)
-                body = toolResponse('s', 'si', 'sc', 'browser_inspect', {
+                body = toolResponse('s', 'si', 'sc', 'browser.inspect', {
                   tabId: 0,
                   mode: 'screenshot',
                   since: '',
@@ -376,12 +496,14 @@ extensionTest.describe('screenshot coordinate units', () => {
                 });
                 capture = output.data;
                 if (!capture) throw new Error('Screenshot missing');
-                body = toolResponse('c', 'ci', 'cc', 'browser_click_point', {
+                body = toolResponse('c', 'ci', 'cc', 'browser.click', {
                   tabId: 0,
-                  x: capture.width * 0.825,
-                  y: capture.height * 0.825,
-                  button: 'left',
-                  count: 1,
+                  target: {
+                    x: capture.width * 0.825,
+                    y: capture.height * 0.825,
+                    button: 'left',
+                    count: 1,
+                  },
                 });
               } else {
                 clickOutput = output;
@@ -473,7 +595,7 @@ extensionTest(
           for (const { k, e } of data?.upsert ?? []) entries.set(e.ref ?? k, e);
           let body: string;
           if (turn === 0)
-            body = toolResponse('inspect', 'inspect_i', 'inspect_c', 'browser_inspect', {
+            body = toolResponse('inspect', 'inspect_i', 'inspect_c', 'browser.inspect', {
               tabId: 0,
               mode: 'interactive_deep',
               since: '',
@@ -496,11 +618,9 @@ extensionTest(
                 e.c?.some(([role, label]) => role === owner && (step !== 0 || label === 'Source')),
             );
             if (!entry?.ref) throw new Error(`Missing scoped ${owner} control: ${name}`);
-            body = toolResponse(`r${turn}`, `i${turn}`, `c${turn}`, 'browser_click', {
+            body = toolResponse(`r${turn}`, `i${turn}`, `c${turn}`, 'browser.click', {
               tabId: 0,
-              ref: entry.ref,
-              button: step === 0 ? 'right' : 'left',
-              count: 1,
+              target: { ref: entry.ref, button: step === 0 ? 'right' : 'left', count: 1 },
             });
           } else body = finalTextResponse('done', 'Batch checked.');
           turn += 1;
@@ -572,7 +692,7 @@ extensionTest(
           let body: string;
           if (turn === 0 || turn === 2) {
             if (turn === 2) await expect(page.locator('output')).toHaveText('expanded:0');
-            body = toolResponse(`r${turn}`, `i${turn}`, `c${turn}`, 'browser_inspect', {
+            body = toolResponse(`r${turn}`, `i${turn}`, `c${turn}`, 'browser.inspect', {
               tabId: 0,
               mode: 'interactive',
               since: '',
@@ -585,11 +705,9 @@ extensionTest(
                 e.n === name && e.r === 'button' && e.ref,
             );
             if (!button?.ref) throw new Error(`Missing icon control: ${name}`);
-            body = toolResponse(`r${turn}`, `i${turn}`, `c${turn}`, 'browser_click', {
+            body = toolResponse(`r${turn}`, `i${turn}`, `c${turn}`, 'browser.click', {
               tabId: 0,
-              ref: button.ref,
-              button: 'left',
-              count: 1,
+              target: { ref: button.ref, button: 'left', count: 1 },
             });
           } else
             body = finalTextResponse('done', 'Expanded and collapsed without opening a document.');
@@ -655,7 +773,7 @@ extensionTest(
           const output = JSON.parse(functionOutputs(route.request().postDataJSON()).at(-1) ?? '{}');
           let body: string;
           if (turn === 0)
-            body = toolResponse('r0', 'i0', 'c0', 'browser_inspect', {
+            body = toolResponse('r0', 'i0', 'c0', 'browser.inspect', {
               tabId: 0,
               mode: 'interactive',
               since: '',
@@ -668,7 +786,7 @@ extensionTest(
                 e.r === 'button' && e.n.startsWith('Report') && e.ref,
             );
             expect(report).toBeDefined();
-            body = toolResponse('r1', 'i1', 'c1', 'browser_inspect', {
+            body = toolResponse('r1', 'i1', 'c1', 'browser.inspect', {
               tabId: 0,
               mode: 'interactive_deep',
               since: '',
@@ -690,11 +808,9 @@ extensionTest(
               (n) => n.parent !== undefined && nodes[n.parent]?.attributes['data-depth'] === '1',
             );
             if (!root?.ref) throw new Error('Scoped evidence must identify the root document.');
-            body = toolResponse('r2', 'i2', 'c2', 'browser_click', {
+            body = toolResponse('r2', 'i2', 'c2', 'browser.click', {
               tabId: 0,
-              ref: root.ref,
-              button: 'left',
-              count: 1,
+              target: { ref: root.ref, button: 'left', count: 1 },
             });
           } else {
             expect(output.ok).toBe(true);
@@ -767,7 +883,7 @@ for (const delegated of [false, true]) {
           turn += 1;
           let body: string;
           if (turn === 1) {
-            body = toolResponse('inspect', 'inspect_item', 'inspect_call', 'browser_inspect', {
+            body = toolResponse('inspect', 'inspect_item', 'inspect_call', 'browser.inspect', {
               tabId: 0,
               mode: 'interactive',
               since: '',
@@ -780,7 +896,7 @@ for (const delegated of [false, true]) {
               (item) => item.n === 'Embedded document' && typeof item.ref === 'string',
             )?.ref;
             if (!ref) throw new Error('Embedded scroll target unavailable.');
-            body = toolResponse('scroll', 'scroll_item', 'scroll_call', 'browser_scroll', {
+            body = toolResponse('scroll', 'scroll_item', 'scroll_call', 'browser.scroll', {
               tabId: 0,
               target: ref,
               deltaX: 0,
@@ -915,7 +1031,7 @@ extensionTest(
             'resp_inspect',
             'item_inspect',
             'call_inspect',
-            'browser_inspect',
+            'browser.inspect',
             { tabId: 0, mode: 'interactive_deep', since: 'x'.repeat(64) },
           );
         } else if (providerTurn === 2) {
@@ -933,8 +1049,8 @@ extensionTest(
             'resp_select',
             'item_select',
             'call_select',
-            'browser_set_checked',
-            { tabId: 0, ref: inspectedRef, checked: true },
+            'browser.set_checked',
+            { tabId: 0, items: [{ ref: inspectedRef, checked: true }] },
           );
         } else {
           actionOutput = JSON.parse(outputs.at(-1) ?? '{}') as Readonly<Record<string, unknown>>;
@@ -1210,7 +1326,7 @@ extensionTest(
               'resp_search_entry',
               'item_search_entry',
               'call_search_entry',
-              'browser_inspect',
+              'browser.inspect',
               { tabId: 0, mode: 'interactive', since: '' },
             );
             break;
@@ -1221,8 +1337,8 @@ extensionTest(
               'resp_open_search',
               'item_open_search',
               'call_open_search',
-              'browser_click',
-              { tabId: 0, ref, button: 'left', count: 1 },
+              'browser.click',
+              { tabId: 0, target: { ref, button: 'left', count: 1 } },
             );
             break;
           }
@@ -1231,7 +1347,7 @@ extensionTest(
               'resp_search_editor',
               'item_search_editor',
               'call_search_editor',
-              'browser_inspect',
+              'browser.inspect',
               { tabId: 0, mode: 'interactive', since: '' },
             );
             break;
@@ -1242,7 +1358,7 @@ extensionTest(
               'resp_type_search',
               'item_type_search',
               'call_type_search',
-              'browser_type',
+              'browser.type',
               { tabId: 0, ref, text: 'Alex', replace: true, submit: false },
             );
             break;
@@ -1252,7 +1368,7 @@ extensionTest(
               'resp_person_result',
               'item_person_result',
               'call_person_result',
-              'browser_inspect',
+              'browser.inspect',
               { tabId: 0, mode: 'interactive', since: '' },
             );
             break;
@@ -1263,8 +1379,8 @@ extensionTest(
               'resp_open_person',
               'item_open_person',
               'call_open_person',
-              'browser_click',
-              { tabId: 0, ref, button: 'left', count: 1 },
+              'browser.click',
+              { tabId: 0, target: { ref, button: 'left', count: 1 } },
             );
             break;
           }
@@ -1273,7 +1389,7 @@ extensionTest(
               'resp_conversation',
               'item_conversation',
               'call_conversation',
-              'browser_inspect',
+              'browser.inspect',
               { tabId: 0, mode: 'interactive', since: '' },
             );
             break;
@@ -1285,7 +1401,7 @@ extensionTest(
               'resp_scroll',
               'item_scroll',
               'call_scroll',
-              'browser_scroll',
+              'browser.scroll',
               {
                 tabId: 0,
                 target: ref,
@@ -1301,7 +1417,7 @@ extensionTest(
             nestedScrollOutput = JSON.parse(outputs.at(-1) ?? '{}') as Readonly<
               Record<string, unknown>
             >;
-            responseBody = toolResponse('resp_send', 'item_send', 'call_send', 'browser_type', {
+            responseBody = toolResponse('resp_send', 'item_send', 'call_send', 'browser.type', {
               tabId: 0,
               ref: composerRef,
               text: 'Hello Alex',
@@ -1314,7 +1430,7 @@ extensionTest(
               'resp_repeat_send',
               'item_repeat_send',
               'call_repeat_send',
-              'browser_type',
+              'browser.type',
               {
                 tabId: 0,
                 ref: composerRef,

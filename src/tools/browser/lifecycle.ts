@@ -2,8 +2,9 @@ import { materializeContinuationItems } from '../../tasks/continuation-materiali
 import type { MaterializedContinuationItem, PendingToolCall } from '../../tasks/continuation-types';
 import type { Checkpoint } from '../../tasks/checkpoint-types';
 import type { MaterializedToolResult } from '../../tasks/tool-result-types';
-import type { ToolExecutionResult, ToolRuntimeContext, ValidatedToolCall } from '../types';
+import type { ToolExecutionResult, ToolRuntimeContext } from '../types';
 import { parseBrowserToolCall, type ParsedBrowserToolCall } from './contract';
+import { browserHistoryCall, isBrowserTool } from './public-contract';
 
 const CONTEXT_COMMIT_TOOL_NAME = 'commit_context';
 
@@ -13,7 +14,7 @@ interface ActiveTaskSnapshot {
 }
 
 const readOnlyBrowserToolNames = new Set([
-  'browser_get_current_tab',
+  'browser_get_current_tab', // Completed calls with this retired name can still be in history.
   'browser_list_tabs',
   'browser_inspect',
   'browser_wait',
@@ -119,10 +120,14 @@ function duplicateFailedBrowserTypeOutput(
   call: ReturnType<typeof parseBrowserToolCall>,
 ): string | null {
   if (call.operation !== 'type') return null;
-  const previous = snapshot.toolResults.findLast((result) =>
-    result.toolName.startsWith('browser_'),
-  );
-  if (previous?.toolName !== 'browser_type') return null;
+  const previous = snapshot.toolResults.findLast((result) => isBrowserTool(result.toolName));
+  if (!previous) return null;
+  const previousSource = browserHistoryCall({
+    callId: previous.callId,
+    name: previous.toolName,
+    argumentsJson: previous.argumentsJson,
+  });
+  if (previousSource.name !== 'browser_type') return null;
   try {
     const envelope: unknown = JSON.parse(previous.output);
     if (typeof envelope !== 'object' || envelope === null || !('code' in envelope)) return null;
@@ -132,11 +137,7 @@ function duplicateFailedBrowserTypeOutput(
     ) {
       return null;
     }
-    const previousCall = parseBrowserToolCall({
-      callId: previous.callId,
-      name: previous.toolName,
-      argumentsJson: previous.argumentsJson,
-    });
+    const previousCall = parseBrowserToolCall(previousSource);
     if (previousCall.operation !== 'type') return null;
     const currentArguments = call.arguments as BrowserTypeArguments;
     const previousArguments = previousCall.arguments as BrowserTypeArguments;
@@ -389,7 +390,7 @@ function recentBrowserProgress(
         immobileScroll = undefined;
         continue;
       }
-      calls.set(item.callId, item);
+      calls.set(item.callId, browserHistoryCall(item));
       continue;
     }
     const call = calls.get(item.callId);
@@ -621,7 +622,7 @@ function noProgressBrowserOutput(
 
 /** Applies durable browser replay/no-progress guards before any external dispatch. */
 export function browserPreflight(
-  call: ValidatedToolCall,
+  call: ParsedBrowserToolCall,
   context: ToolRuntimeContext,
 ): ToolExecutionResult | null {
   const checkpoint = context.checkpoint;
@@ -630,7 +631,6 @@ export function browserPreflight(
     throw new Error('Browser execution context is unavailable.');
   }
   const snapshot: ActiveTaskSnapshot = { checkpoint, toolResults };
-  const parsed = call as ParsedBrowserToolCall;
   const executionState =
     context.executionState === 'may_have_dispatched' ? 'may_have_dispatched' : 'recorded';
   const checkpointEffect = { browserToolCallsInAttemptDelta: 1 } as const;
@@ -653,7 +653,7 @@ export function browserPreflight(
     argumentsJson: call.argumentsJson,
     executionState,
   };
-  const duplicateFailure = duplicateFailedBrowserTypeOutput(snapshot, parsed);
+  const duplicateFailure = duplicateFailedBrowserTypeOutput(snapshot, call);
   if (duplicateFailure !== null) {
     return { output: duplicateFailure, checkpoint: checkpointEffect };
   }
@@ -665,7 +665,7 @@ export function browserPreflight(
 
 /** Projects a successful browser result onto the generic durable checkpoint effect. */
 export function browserCheckpointAfterExecution(
-  call: ValidatedToolCall,
+  call: ParsedBrowserToolCall,
   context: ToolRuntimeContext,
   output: string,
 ): NonNullable<ToolExecutionResult['checkpoint']> {
@@ -677,11 +677,7 @@ export function browserCheckpointAfterExecution(
     checkpoint,
     toolResults: context.toolResults ?? [],
   };
-  const browserTargetTabId = browserTargetAfterCall(
-    snapshot,
-    call as ParsedBrowserToolCall,
-    output,
-  );
+  const browserTargetTabId = browserTargetAfterCall(snapshot, call, output);
   return {
     browserToolCallsInAttemptDelta: 1,
     ...(browserTargetTabId === undefined ? {} : { browserTargetTabId }),

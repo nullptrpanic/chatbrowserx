@@ -47,9 +47,21 @@ export class StreamPersistenceBuffer {
     this.#schedule();
   }
 
-  /** Forces all pending text and the complete status into durable storage. */
-  async complete(): Promise<void> {
-    await this.#finalize('complete');
+  /** Replaces the streaming draft as soon as the final answer starts. */
+  async startFinalAnswer(text: string): Promise<void> {
+    this.#throwWriteFailure();
+    if (this.#message.status !== 'streaming') {
+      throw new Error('Cannot replace a completed model stream.');
+    }
+    this.#message = { ...this.#message, phase: 'final_answer', text };
+    this.#dirty = true;
+    await this.#flush();
+  }
+
+  /** Finalizes the draft with the response's authoritative answer when available. */
+  async complete(text?: string): Promise<void> {
+    if (text) this.#message = { ...this.#message, phase: 'final_answer' };
+    await this.#finalize('complete', text);
   }
 
   /** Forces all pending text and the interrupted status into durable storage. */
@@ -104,6 +116,7 @@ export class StreamPersistenceBuffer {
   /** Applies one terminal status exactly once and waits for all prior writes. */
   async #finalize(
     status: Extract<MessageStatus, 'complete' | 'interrupted' | 'error'>,
+    text = this.#message.text,
   ): Promise<void> {
     this.#throwWriteFailure();
     if (this.#message.status === status) {
@@ -120,6 +133,7 @@ export class StreamPersistenceBuffer {
     this.#message = {
       ...this.#message,
       status,
+      text,
       updatedAt: Math.max(this.#message.updatedAt, this.#clock.now()),
     };
     await this.#persist({ ...this.#message });

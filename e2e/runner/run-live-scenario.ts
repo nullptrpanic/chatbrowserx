@@ -121,13 +121,11 @@ interface RuntimeTaskEvent {
   readonly callId?: string;
   readonly name?: string;
   readonly argumentsJson?: string;
-  readonly resultId?: string;
   readonly metrics?: RuntimeModelTurn;
 }
 
 interface RuntimeToolResult {
   readonly providerHosted?: boolean;
-  readonly id: string;
   readonly callId: string;
   readonly toolName: string;
   readonly argumentsJson: string;
@@ -228,7 +226,6 @@ function readTaskEvent(value: unknown, index: number): RuntimeTaskEvent {
     return {
       type,
       callId: requiredString(event.callId, field + '.callId'),
-      resultId: requiredString(event.resultId, field + '.resultId'),
     };
   }
   return {
@@ -249,7 +246,6 @@ function readLegacyToolResult(value: unknown, index: number): RuntimeToolResult 
     throw new LiveEvidenceMismatchError(field + '.modelOutput is invalid.');
   }
   return {
-    id: requiredString(result.resultRef, field + '.resultRef'),
     callId: requiredString(result.callId, field + '.callId'),
     toolName: requiredString(result.toolName, field + '.toolName'),
     argumentsJson: requiredString(result.argumentsJson, field + '.argumentsJson'),
@@ -276,7 +272,6 @@ function readRuntimeToolResult(value: unknown, index: number): RuntimeToolResult
     throw new LiveEvidenceMismatchError(field + '.modelOutput is invalid.');
   }
   return {
-    id: requiredString(result.id, field + '.id'),
     callId: requiredString(result.callId, field + '.callId'),
     toolName: requiredString(result.toolName, field + '.toolName'),
     ...(result.providerHosted === true ? { providerHosted: true } : {}),
@@ -335,7 +330,7 @@ function readTaskSnapshot(value: unknown): RuntimeTaskSnapshot {
             name: result.toolName,
             argumentsJson: result.argumentsJson,
           },
-          { type: 'tool.result', callId: result.callId, resultId: result.id },
+          { type: 'tool.result', callId: result.callId },
         ]),
       ];
   return {
@@ -401,8 +396,7 @@ function reportedToolResults(results: readonly LiveToolResult[]): LiveToolResult
 
 function validateTaskEvidence(snapshot: RuntimeTaskSnapshot): void {
   const calls = new Map<string, RuntimeTaskEvent>();
-  const resultEventsByCall = new Map<string, RuntimeTaskEvent>();
-  const resultEventsById = new Map<string, RuntimeTaskEvent>();
+  const resultEventCallIds = new Set<string>();
   for (const event of snapshot.events) {
     if (event.type === 'tool.call') {
       const callId = event.callId;
@@ -416,25 +410,22 @@ function validateTaskEvidence(snapshot: RuntimeTaskSnapshot): void {
     }
     if (event.type === 'tool.result') {
       const callId = event.callId;
-      const resultId = event.resultId;
-      if (callId === undefined || resultId === undefined) {
-        throw new LiveEvidenceMismatchError('A tool.result event has incomplete identity.');
+      if (callId === undefined) {
+        throw new LiveEvidenceMismatchError('A tool.result event has no call ID.');
       }
       if (!calls.has(callId)) {
         throw new LiveEvidenceMismatchError('A tool.result event has no matching tool.call event.');
       }
-      if (resultEventsByCall.has(callId) || resultEventsById.has(resultId)) {
+      if (resultEventCallIds.has(callId)) {
         throw new LiveEvidenceMismatchError('A tool result identity appears more than once.');
       }
-      resultEventsByCall.set(callId, event);
-      resultEventsById.set(resultId, event);
+      resultEventCallIds.add(callId);
     }
   }
 
-  const snapshotResultsByCall = new Map<string, RuntimeToolResult>();
-  const snapshotResultsById = new Map<string, RuntimeToolResult>();
+  const resultCallIds = new Set<string>();
   for (const result of snapshot.toolResults) {
-    if (snapshotResultsByCall.has(result.callId) || snapshotResultsById.has(result.id)) {
+    if (resultCallIds.has(result.callId)) {
       throw new LiveEvidenceMismatchError('TaskSnapshot contains duplicate tool results.');
     }
     const call = calls.get(result.callId);
@@ -448,19 +439,16 @@ function validateTaskEvidence(snapshot: RuntimeTaskSnapshot): void {
         'TaskSnapshot tool result differs from its tool.call event.',
       );
     }
-    const resultEvent = resultEventsByCall.get(result.callId);
-    if (resultEvent?.resultId !== result.id) {
+    if (!resultEventCallIds.has(result.callId)) {
       throw new LiveEvidenceMismatchError(
         'TaskSnapshot tool result has no matching tool.result event.',
       );
     }
-    snapshotResultsByCall.set(result.callId, result);
-    snapshotResultsById.set(result.id, result);
+    resultCallIds.add(result.callId);
   }
 
-  for (const [resultId, event] of resultEventsById) {
-    const result = snapshotResultsById.get(resultId);
-    if (result === undefined || result.callId !== event.callId) {
+  for (const callId of resultEventCallIds) {
+    if (!resultCallIds.has(callId)) {
       throw new LiveEvidenceMismatchError(
         'A tool.result event has no matching TaskSnapshot tool result.',
       );
@@ -468,7 +456,7 @@ function validateTaskEvidence(snapshot: RuntimeTaskSnapshot): void {
   }
 
   for (const callId of calls.keys()) {
-    if (!resultEventsByCall.has(callId) && !snapshotResultsByCall.has(callId)) {
+    if (!resultCallIds.has(callId)) {
       throw new LiveEvidenceMismatchError('A tool.call event has no matching tool result.');
     }
   }

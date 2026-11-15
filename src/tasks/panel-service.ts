@@ -26,6 +26,7 @@ import type { MessageRecord, MessageSourcePage, TaskMessageDraft } from './messa
 import type { TaskSnapshot } from './task-command-service';
 import type { Task, TaskEvent } from './task-types';
 import type { MaterializedToolResult } from './tool-result-types';
+import { taskGoal } from './task-factory';
 
 const ATTACHMENT_GC_GRACE_MS = 24 * 60 * 60 * 1_000;
 const MAX_PANEL_MESSAGES = 500;
@@ -169,17 +170,12 @@ function conversationTitle(text: string, hasAttachments: boolean): string {
   return hasAttachments ? '图片任务' : '新对话';
 }
 
-/** Derives the nonblank task goal accepted by the durable task factory. */
-function taskGoal(text: string): string {
-  const normalized = text.trim();
-  return normalized.length > 0 ? normalized : '请根据所附图片完成当前页面任务。';
-}
-
 interface TaskDetailIndexes {
   readonly itemCount: number;
   readonly resultIndexes: ReadonlyMap<string, number>;
   readonly supplementIndexes: ReadonlyMap<string, number>;
   readonly appliedSupplementIds: ReadonlySet<string>;
+  readonly forwardedSupplementIds: ReadonlySet<string>;
 }
 
 /** Assigns stable display positions across completed tools and applied or pending supplements. */
@@ -193,13 +189,16 @@ function taskDetailIndexes(
   const appliedSupplementIds = new Set(
     events.flatMap((event) => (event.type === 'supplement.applied' ? [event.messageId] : [])),
   );
-  const resultIds = new Set(materializedResults.map(({ id }) => id));
+  const forwardedSupplementIds = new Set(
+    events.flatMap((event) => (event.type === 'supplement.forwarded' ? [event.messageId] : [])),
+  );
+  const callIds = new Set(materializedResults.map(({ callId }) => callId));
   const supplementIds = new Set(supplements.map(({ id }) => id));
   let itemCount = 0;
   for (const event of events) {
     if (event.type === 'tool.result') {
       itemCount += 1;
-      if (resultIds.has(event.resultId)) resultIndexes.set(event.resultId, itemCount);
+      if (callIds.has(event.callId)) resultIndexes.set(event.callId, itemCount);
     } else if (event.type === 'supplement.queued') {
       itemCount += 1;
       if (supplementIds.has(event.messageId)) supplementIndexes.set(event.messageId, itemCount);
@@ -216,6 +215,7 @@ function taskDetailIndexes(
     resultIndexes,
     supplementIndexes,
     appliedSupplementIds,
+    forwardedSupplementIds,
   };
 }
 
@@ -242,6 +242,14 @@ function eventReason(event: TaskEvent): string {
   if (event.type === 'tool.call') return `${event.name}_call_recorded`;
   if (event.type === 'tool.result') return `${event.callId}_result_recorded`;
   return event.type;
+}
+
+function supplementQuote(message: MessageRecord) {
+  return {
+    id: message.id,
+    text: message.text.slice(0, 20_000),
+    attachmentIds: message.attachmentIds.slice(0, 8),
+  };
 }
 
 export class PanelService {
@@ -300,15 +308,11 @@ export class PanelService {
     const selectedSummary = selectedIndex < 0 ? null : (summaries[selectedIndex] ?? null);
     const selectedTasks = selectedIndex < 0 ? [] : (taskLists[selectedIndex] ?? []);
     const latestTask = selectedTasks.at(-1) ?? null;
-    const storedMessages =
+    const readMessages = () =>
       selected === null
-        ? []
-        : await this.#dependencies.conversations.listRecentMessages(
-            selected.id,
-            MAX_PANEL_MESSAGES,
-          );
-    const messages = storedMessages.filter((message) => message.kind === 'conversation');
-    const attachments = await this.#readAttachmentMetadata(storedMessages);
+        ? Promise.resolve([])
+        : this.#dependencies.conversations.listRecentMessages(selected.id, MAX_PANEL_MESSAGES);
+    let storedMessages = await readMessages();
     const visibleTaskIds = new Set(storedMessages.map((message) => message.taskId));
     if (latestTask !== null) visibleTaskIds.add(latestTask.id);
     const visibleTasks = selectedTasks.filter((task) => visibleTaskIds.has(task.id));
@@ -316,11 +320,25 @@ export class PanelService {
       visibleTasks.map(({ id }) => id),
     );
     const timelineByTaskId = new Map(timelines.map((timeline) => [timeline.task.id, timeline]));
+    // A final message can be committed between the message and timeline reads.
+    if (
+      visibleTasks.some(
+        (task) =>
+          task.status !== 'completed' && timelineByTaskId.get(task.id)?.task.status === 'completed',
+      )
+    ) {
+      storedMessages = await readMessages();
+    }
+    const messages = storedMessages.filter((message) => message.kind === 'conversation');
+    const attachments = await this.#readAttachmentMetadata(storedMessages);
     const messageRunById = new Map<string, string>();
     const messageSequenceById = new Map<string, number>();
     const replySegmentById = new Map<string, NonNullable<PanelMessage['replySegment']>>();
+    const liveSupplementsByTask = new Map<string, NonNullable<PanelTask['liveSupplements']>>();
     const storedById = new Map(storedMessages.map((message) => [message.id, message]));
     for (const timeline of timelines) {
+      const { task } = timeline;
+      const live = new Map<string, ReturnType<typeof supplementQuote>>();
       const segments = new Map<
         string,
         {
@@ -330,26 +348,20 @@ export class PanelService {
         }
       >();
       for (const event of [...timeline.events].sort((a, b) => a.sequence - b.sequence)) {
-        if (event.type === 'supplement.applied') {
+        if (event.type === 'supplement.queued' || event.type === 'supplement.applied') {
+          const supplement = storedById.get(event.messageId);
+          if (supplement?.kind !== 'supplement' || supplement.taskId !== task.id) continue;
+          const quote = supplementQuote(supplement);
+          if (event.runId === task.latestRunId) live.set(quote.id, quote);
+          if (event.type === 'supplement.queued') continue;
           const previous = segments.get(event.runId);
           const segment =
             !previous || previous.hasReply
               ? { id: event.messageId, supplements: [], hasReply: false }
               : previous;
-          const supplement = storedById.get(event.messageId);
           segments.set(event.runId, {
             ...segment,
-            supplements:
-              supplement?.kind === 'supplement' && supplement.taskId === timeline.task.id
-                ? [
-                    ...segment.supplements,
-                    {
-                      id: supplement.id,
-                      text: supplement.text.slice(0, 20_000),
-                      attachmentIds: [...supplement.attachmentIds].slice(0, 8),
-                    },
-                  ].slice(-MAX_PANEL_SUPPLEMENTS)
-                : segment.supplements,
+            supplements: [...segment.supplements, quote].slice(-MAX_PANEL_SUPPLEMENTS),
           });
           continue;
         }
@@ -366,8 +378,18 @@ export class PanelService {
             id: segment.id,
             supplements: segment.supplements,
           });
-          segment.hasReply = true;
+          const message = storedById.get(event.messageId);
+          if (
+            message?.role === 'assistant' &&
+            (message.status !== 'interrupted' || message.text || message.attachmentIds.length)
+          ) {
+            segment.hasReply = true;
+            for (const { id } of segment.supplements) live.delete(id);
+          }
         }
+      }
+      if (!terminalTaskStatuses.has(task.status)) {
+        liveSupplementsByTask.set(task.id, [...live.values()].slice(-MAX_PANEL_SUPPLEMENTS));
       }
     }
     const taskOrdinals = new Map(selectedTasks.map((task) => [task.id, task.ordinal]));
@@ -379,7 +401,14 @@ export class PanelService {
     );
     const panelTasks = visibleTasks.flatMap((task) => {
       const timeline = timelineByTaskId.get(task.id);
-      return timeline === undefined ? [] : [this.#projectTask(timeline, [], 'summary')];
+      if (timeline === undefined) return [];
+      const liveSupplements = liveSupplementsByTask.get(task.id);
+      return [
+        {
+          ...this.#projectTask(timeline, [], 'summary'),
+          ...(liveSupplements ? { liveSupplements } : {}),
+        },
+      ];
     });
     const panelTask =
       latestTask === null ? null : (panelTasks.find((task) => task.id === latestTask.id) ?? null);
@@ -405,6 +434,7 @@ export class PanelService {
           ...(messageRunById.has(message.id) ? { runId: messageRunById.get(message.id) } : {}),
           role: message.role,
           status: message.status,
+          ...(message.phase === undefined ? {} : { phase: message.phase }),
           text: message.text,
           attachmentIds: [...message.attachmentIds],
           ...(sourcePage === undefined ? {} : { sourcePage }),
@@ -730,8 +760,8 @@ export class PanelService {
     );
     const projectedEvents =
       detailLevel === 'full' ? visibleDetailEvents.slice(-MAX_PANEL_EVENTS) : events.slice(-1);
-    const retainedResultIds = new Set(
-      projectedEvents.flatMap((event) => (event.type === 'tool.result' ? [event.resultId] : [])),
+    const retainedCallIds = new Set(
+      projectedEvents.flatMap((event) => (event.type === 'tool.result' ? [event.callId] : [])),
     );
     const retainedSupplementIds = new Set(
       projectedEvents.flatMap((event) =>
@@ -739,7 +769,27 @@ export class PanelService {
       ),
     );
     const results =
-      detailLevel === 'full' ? allResults.filter(({ id }) => retainedResultIds.has(id)) : [];
+      detailLevel === 'full' ? allResults.filter(({ callId }) => retainedCallIds.has(callId)) : [];
+    const commentaryLinks = new Map(
+      events.flatMap((event) =>
+        event.type === 'assistant.commentary-linked' ? [[event.itemId, event.callId] as const] : [],
+      ),
+    );
+    const commentaryCall = (event: Extract<TaskEvent, { type: 'assistant.commentary' }>) =>
+      (event.itemId === undefined ? undefined : commentaryLinks.get(event.itemId)) ?? event.callId;
+    const firstVisibleSequence =
+      visibleDetailEvents.length > MAX_PANEL_EVENTS ? (projectedEvents[0]?.sequence ?? 0) : 0;
+    const commentaryEvents =
+      detailLevel === 'full'
+        ? events
+            .filter(
+              (event) =>
+                event.type === 'assistant.commentary' &&
+                (event.sequence >= firstVisibleSequence ||
+                  retainedCallIds.has(commentaryCall(event) ?? '')),
+            )
+            .slice(-MAX_PANEL_EVENTS)
+        : [];
     const projectedSupplements =
       detailLevel === 'full'
         ? supplements
@@ -811,34 +861,46 @@ export class PanelService {
               retryable: lastError.retryable,
               userMessage: lastError.userMessage,
             },
-      events: projectedEvents.map((event) => ({
-        sequence: event.sequence,
-        type: eventDisplayType(event),
-        reason: eventReason(event),
-        at: event.at,
-        ...(event.type === 'supplement.queued'
-          ? { supplementIds: [event.messageId.slice(0, 256)] }
-          : {}),
-        ...(event.type === 'tool.result' ? { resultId: event.resultId.slice(0, 512) } : {}),
-      })),
+      events: [...projectedEvents, ...commentaryEvents]
+        .sort((a, b) => a.sequence - b.sequence)
+        .map((event) => {
+          const callId = event.type === 'assistant.commentary' ? commentaryCall(event) : undefined;
+          return {
+            sequence: event.sequence,
+            type: eventDisplayType(event),
+            reason: eventReason(event),
+            at: event.at,
+            ...(event.type === 'supplement.queued'
+              ? { supplementIds: [event.messageId.slice(0, 256)] }
+              : {}),
+            ...(event.type === 'tool.result' ? { callId: event.callId.slice(0, 256) } : {}),
+            ...(detailLevel === 'full' && event.type === 'assistant.commentary'
+              ? {
+                  commentary: {
+                    text: event.text.slice(0, 20_000),
+                    ...(callId ? { callId: callId.slice(0, 256) } : {}),
+                  },
+                }
+              : {}),
+          };
+        }),
       toolResults: results.map((result) => ({
         callId: result.callId.slice(0, 256),
         toolName: result.toolName.slice(0, 128),
         argumentsJson: result.argumentsJson.slice(0, MAX_PANEL_TOOL_ARGUMENTS),
         output: result.output.slice(0, MAX_PANEL_TOOL_OUTPUT),
-        resultId: result.id.slice(0, 512),
         attachmentIds: [...result.attachmentIds].slice(0, 8),
-        detailIndex: requiredDetailIndex(detailIndexes.resultIndexes, result.id),
+        detailIndex: requiredDetailIndex(detailIndexes.resultIndexes, result.callId),
       })),
       supplements: projectedSupplements.map((message) => ({
-        id: message.id,
+        ...supplementQuote(message),
         runId: supplementRuns.get(message.id),
-        text: message.text.slice(0, 20_000),
-        attachmentIds: [...message.attachmentIds].slice(0, 8),
         createdAt: message.createdAt,
         applicationState: detailIndexes.appliedSupplementIds.has(message.id)
           ? 'applied'
-          : 'pending',
+          : detailIndexes.forwardedSupplementIds.has(message.id)
+            ? 'forwarded'
+            : 'pending',
         detailIndex: requiredDetailIndex(detailIndexes.supplementIndexes, message.id),
       })),
     };

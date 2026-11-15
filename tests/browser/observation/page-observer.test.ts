@@ -622,7 +622,7 @@ describe('PageObserver', () => {
         moreAfter: true,
         targets: ['viewport'],
         primaryTarget: 'viewport',
-        traversalTool: 'browser_scroll',
+        traversalTool: 'browser.scroll',
         traversalRequiredFor: ['whole_document', 'all_items', 'date_range', 'page_summary'],
         contentKey: expect.stringMatching(/^[0-9a-f]{8}$/),
       },
@@ -689,7 +689,7 @@ describe('PageObserver', () => {
         moreAfter: 'unknown',
         targets: ['ref_pages'],
         primaryTarget: 'ref_pages',
-        traversalTool: 'browser_scroll',
+        traversalTool: 'browser.scroll',
         traversalRequiredFor: ['whole_document', 'all_items', 'date_range', 'page_summary'],
       },
     });

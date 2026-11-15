@@ -483,7 +483,6 @@ describe('IndexedDbTaskRepository', () => {
     });
 
     const result: ToolResult = {
-      id: 'result_tool',
       taskId: stored.id,
       runId: fixture.run.id,
       callId: 'call_tool',
@@ -500,7 +499,6 @@ describe('IndexedDbTaskRepository', () => {
       at: 120,
       type: 'tool.result',
       callId: result.callId,
-      resultId: result.id,
     };
     await repository.saveTransition({
       task: { ...planningTask, lastEventSequence: 4, updatedAt: 120 },
@@ -513,7 +511,6 @@ describe('IndexedDbTaskRepository', () => {
           {
             type: 'function_call_output_ref',
             callId: result.callId,
-            resultId: result.id,
             attachmentIds: result.attachmentIds,
           },
         ],
@@ -523,13 +520,14 @@ describe('IndexedDbTaskRepository', () => {
     });
 
     expect(await repository.listToolResults(stored.id)).toEqual([result]);
-    expect(await database.get('attachment-references', ['attachment_tool', result.id])).toEqual({
+    expect(
+      await database.get('attachment-references', ['attachment_tool', [stored.id, 'call_tool']]),
+    ).toEqual({
       attachmentId: 'attachment_tool',
-      referenceId: result.id,
+      referenceId: [stored.id, 'call_tool'],
     });
     expect((await repository.readActiveRuntimeSnapshot(stored.id))?.toolResults).toMatchObject([
       {
-        id: result.id,
         callId: result.callId,
         argumentsJson: '{}',
         output: result.output,
@@ -712,7 +710,6 @@ describe('IndexedDbTaskRepository', () => {
     });
 
     const result: ToolResult = {
-      id: 'result_cross_run_tool',
       taskId: stored.id,
       runId: nextRun.id,
       callId: callEvent.callId,
@@ -729,7 +726,6 @@ describe('IndexedDbTaskRepository', () => {
       at: 130,
       type: 'tool.result',
       callId: result.callId,
-      resultId: result.id,
     };
     await repository.saveTransition({
       task: { ...planningTask, lastEventSequence: 7, updatedAt: 130 },
@@ -742,7 +738,6 @@ describe('IndexedDbTaskRepository', () => {
           {
             type: 'function_call_output_ref',
             callId: result.callId,
-            resultId: result.id,
             attachmentIds: [],
           },
         ],
@@ -753,7 +748,6 @@ describe('IndexedDbTaskRepository', () => {
 
     expect((await repository.readTaskDetailWindow(stored.id, 100))?.toolResults).toMatchObject([
       {
-        id: result.id,
         runId: nextRun.id,
         callId: result.callId,
         argumentsJson: callEvent.argumentsJson,
@@ -769,7 +763,6 @@ describe('IndexedDbTaskRepository', () => {
     const fixture = submissionFixture('orphan');
     const stored = await createSubmission(repository, fixture);
     const result: ToolResult = {
-      id: 'result_orphan',
       taskId: stored.id,
       runId: fixture.run.id,
       callId: 'missing_call',
@@ -786,7 +779,6 @@ describe('IndexedDbTaskRepository', () => {
       at: 110,
       type: 'tool.result',
       callId: result.callId,
-      resultId: result.id,
     };
     await expect(
       repository.saveTransition({
@@ -813,7 +805,6 @@ describe('IndexedDbTaskRepository', () => {
     const fixture = submissionFixture('timeline');
     const stored = await createSubmission(repository, fixture);
     await database.add('tool-results', {
-      id: 'result_not_needed_by_timeline',
       taskId: stored.id,
       runId: fixture.run.id,
       callId: 'call_not_needed_by_timeline',
@@ -858,7 +849,6 @@ describe('IndexedDbTaskRepository', () => {
         at: 120,
         type: 'tool.result',
         callId: 'call_detail_1',
-        resultId: 'result_detail_1',
       },
       {
         id: 'event_detail_call_2',
@@ -879,7 +869,6 @@ describe('IndexedDbTaskRepository', () => {
         at: 140,
         type: 'tool.result',
         callId: 'call_detail_2',
-        resultId: 'result_detail_2',
       },
     ];
     await database.put('tasks', {
@@ -890,23 +879,18 @@ describe('IndexedDbTaskRepository', () => {
     for (const event of events) await database.add('task-events', event);
     for (const result of [
       {
-        id: 'result_detail_1',
         callId: 'call_detail_1',
         toolName: 'browser_inspect',
         output: 'first result body',
         createdAt: 120,
       },
       {
-        id: 'result_detail_2',
         callId: 'call_detail_2',
         toolName: 'browser_scroll',
         output: 'second result body',
         createdAt: 140,
       },
-    ] satisfies readonly Pick<
-      ToolResult,
-      'id' | 'callId' | 'toolName' | 'output' | 'createdAt'
-    >[]) {
+    ] satisfies readonly Pick<ToolResult, 'callId' | 'toolName' | 'output' | 'createdAt'>[]) {
       await database.add('tool-results', {
         ...result,
         taskId: stored.id,
@@ -920,7 +904,7 @@ describe('IndexedDbTaskRepository', () => {
     expect(window?.events).toHaveLength(6);
     expect(window?.toolResults).toEqual([
       expect.objectContaining({
-        id: 'result_detail_2',
+        callId: 'call_detail_2',
         argumentsJson: '{"deltaY":600}',
         output: 'second result body',
       }),
@@ -956,7 +940,6 @@ describe('IndexedDbTaskRepository', () => {
       checkpoint: fixture.checkpoint,
     });
     await database.add('tool-results', {
-      id: 'result_without_event',
       taskId: stored.id,
       runId: fixture.run.id,
       callId: callEvent.callId,

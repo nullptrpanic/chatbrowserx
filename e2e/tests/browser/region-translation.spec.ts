@@ -361,8 +361,9 @@ extensionTest(
       model: 'gpt-5.6-terra',
       reasoning: { effort: 'medium' },
       store: false,
+      tools: [],
+      tool_choice: 'none',
     });
-    expect(requests[0]?.tools).toBeUndefined();
     const input = requests[0]?.input as {
       content: { type: string; image_url?: string; text?: string }[];
     }[];

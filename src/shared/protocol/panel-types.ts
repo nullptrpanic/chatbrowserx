@@ -44,6 +44,7 @@ export interface PanelMessage {
   readonly runId?: string | undefined;
   readonly role: 'user' | 'assistant' | 'system';
   readonly status: 'complete' | 'streaming' | 'interrupted' | 'error';
+  readonly phase?: 'final_answer' | undefined;
   readonly text: string;
   readonly attachmentIds: readonly string[];
   readonly sourcePage?: PanelMessageSourcePage | undefined;
@@ -75,7 +76,8 @@ export interface PanelTaskEvent {
   readonly reason: string;
   readonly at: number;
   readonly supplementIds?: readonly string[] | undefined;
-  readonly resultId?: string | undefined;
+  readonly callId?: string | undefined;
+  readonly commentary?: { readonly text: string; readonly callId?: string | undefined } | undefined;
 }
 
 export interface PanelToolResult {
@@ -83,7 +85,6 @@ export interface PanelToolResult {
   readonly toolName: string;
   readonly argumentsJson: string;
   readonly output: string;
-  readonly resultId: string;
   readonly attachmentIds: readonly string[];
   /** One-based position among every user-visible execution-detail item. */
   readonly detailIndex: number;
@@ -95,8 +96,8 @@ export interface PanelTaskSupplement {
   readonly text: string;
   readonly attachmentIds: readonly string[];
   readonly createdAt: number;
-  /** Whether this supplement is already part of the active task continuation. */
-  readonly applicationState: 'applied' | 'pending';
+  /** Whether input is queued, consumed here, or forwarded to its own task. */
+  readonly applicationState: 'applied' | 'pending' | 'forwarded';
   /** One-based position among every user-visible execution-detail item. */
   readonly detailIndex: number;
 }
@@ -120,6 +121,9 @@ export interface PanelTaskRun {
 export interface PanelTask {
   /** Public provider summary only; hidden reasoning is never exposed. */
   readonly reasoningSummary?: string;
+  /** Supplements waiting for the reply that follows them, available with collapsed details. */
+  readonly liveSupplements?:
+    readonly Pick<PanelTaskSupplement, 'id' | 'text' | 'attachmentIds'>[] | undefined;
   readonly contextCompaction?: 'started' | 'completed' | 'failed' | undefined;
   readonly id: string;
   /** Latest execution attempt; used to attach live state to only that attempt's answer. */

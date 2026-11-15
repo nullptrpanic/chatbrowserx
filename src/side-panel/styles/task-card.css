@@ -61,6 +61,24 @@
   font-size: 10px;
 }
 
+.task-card.is-embedded .task-activity {
+  flex: 0 1 auto;
+}
+
+.task-activity .typing-dots {
+  color: var(--cbx-accent);
+}
+
+.task-activity-text {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.task-activity + .task-summary-meta {
+  flex: 1 0 auto;
+}
+
 .task-card-header,
 .task-progress-row,
 .task-controls {
@@ -507,6 +525,11 @@
   border: 1px solid var(--cbx-divider);
   border-radius: 8px;
   background: var(--cbx-raised);
+}
+
+.process-message .message-markdown {
+  padding: 8px;
+  font-size: 11px;
 }
 
 .tool-result-title {

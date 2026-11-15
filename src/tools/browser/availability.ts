@@ -8,6 +8,7 @@ import {
   BROWSER_TOOL_SPEC_BY_NAME,
   type BrowserToolName,
 } from './contract';
+import { browserHistoryCall, isBrowserTool } from './public-contract';
 
 const DISCOVERY_TOOL_NAMES = new Set<BrowserToolName>([
   'browser_list_tabs',
@@ -83,7 +84,7 @@ type MaterializedFunctionOutput = Extract<
 interface BrowserToolHistory {
   readonly items: readonly MaterializedContinuationItem[];
   readonly outputRecords: Map<MaterializedFunctionOutput, Readonly<Record<string, unknown>> | null>;
-  readonly currentRunResultIds: ReadonlySet<string>;
+  readonly currentRunCallIds: ReadonlySet<string>;
 }
 
 export interface BrowserScrollContinuation {
@@ -118,7 +119,7 @@ function availableAssetIds(toolResults: readonly MaterializedToolResult[]): read
   const ids = [
     ...new Set(
       toolResults.flatMap((result) =>
-        result.toolName.startsWith('browser_') ? [...(result.attachmentIds ?? [])] : [],
+        isBrowserTool(result.toolName) ? [...(result.attachmentIds ?? [])] : [],
       ),
     ),
   ];
@@ -218,10 +219,10 @@ function browserToolHistory(state: BrowserToolState): BrowserToolHistory {
       toolResults: state.toolResults,
     }),
     outputRecords: new Map(),
-    currentRunResultIds: new Set(
+    currentRunCallIds: new Set(
       state.toolResults
         .filter((result) => result.runId === state.checkpoint.runId)
-        .map((result) => result.id),
+        .map((result) => result.callId),
     ),
   };
 }
@@ -313,7 +314,7 @@ function browserScrollContinuation(history: BrowserToolHistory): BrowserScrollCo
       continue;
     }
     if (item.type === 'function_call') {
-      calls.set(item.callId, item);
+      calls.set(item.callId, browserHistoryCall(item));
       continue;
     }
     if (item.type !== 'function_call_output') continue;
@@ -740,7 +741,7 @@ function availableBrowserToolDefinitions(
       continue;
     }
     if (item.type === 'function_call') {
-      pendingCalls.set(item.callId, item);
+      pendingCalls.set(item.callId, browserHistoryCall(item));
       continue;
     }
     if (item.type !== 'function_call_output') continue;
@@ -762,12 +763,7 @@ function availableBrowserToolDefinitions(
     state.usedTools.add(name);
     const output = successfulOutputRecord(history, item);
     if (output) {
-      applySuccessfulBrowserResult(
-        name,
-        output,
-        state,
-        history.currentRunResultIds.has(item.resultId),
-      );
+      applySuccessfulBrowserResult(name, output, state, history.currentRunCallIds.has(item.callId));
       continue;
     }
     state.inspectSatisfiedByLatestScroll = false;
@@ -800,6 +796,9 @@ function availableBrowserToolDefinitions(
   if (state.visualSnapshotCurrent) {
     enabled.add('browser_click_point');
     enabled.add('browser_drag_point');
+  } else {
+    enabled.delete('browser_click_point');
+    enabled.delete('browser_drag_point');
   }
   if (state.selectableRefs.size >= 2) enabled.add('browser_set_checked_many');
 

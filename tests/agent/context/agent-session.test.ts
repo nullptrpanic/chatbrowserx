@@ -152,7 +152,6 @@ describe('conversation model window', () => {
 
   it('keeps the model-visible result and attachment references without storing image bytes', () => {
     const result = sessionToolResult({
-      id: 'result',
       taskId: 'task',
       runId: 'run',
       callId: 'call',

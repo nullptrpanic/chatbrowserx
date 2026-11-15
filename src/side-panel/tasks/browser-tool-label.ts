@@ -2,6 +2,12 @@ import type { Translator } from '../../shared/i18n/i18n';
 import type { MessageKey } from '../../shared/i18n/messages.zh-CN';
 
 const reviewedToolKeys: Readonly<Record<string, MessageKey>> = {
+  'browser.tab': 'browserToolTabs',
+  'browser.screenshot': 'browserToolCaptureScreenshot',
+  'browser.paste': 'browserToolPasteImage',
+  'network.capture': 'browserToolNetworkCapture',
+  'network.list': 'browserToolNetworkList',
+  'network.get': 'browserToolNetworkGet',
   tavily_search: 'tavilyToolSearch',
   tavily_extract: 'tavilyToolExtract',
   tavily_crawl: 'tavilyToolCrawl',
@@ -38,7 +44,7 @@ const reviewedToolKeys: Readonly<Record<string, MessageKey>> = {
 
 /** Maps reviewed tool wire names to compact localized UI labels. */
 export function toolDisplayName(toolName: string, t: Translator): string {
-  const key = reviewedToolKeys[toolName];
+  const key = reviewedToolKeys[toolName] ?? reviewedToolKeys[toolName.replace('.', '_')];
   return key === undefined ? toolName : t(key);
 }
 

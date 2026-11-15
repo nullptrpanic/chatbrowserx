@@ -23,9 +23,10 @@ const sandboxAvailable = (context: ToolRuntimeContext): boolean =>
   context.sandboxAvailable === true;
 
 export const sandboxReadTool: ToolDeclaration<SandboxReadInput> = {
-  name: 'sandbox_read',
+  name: 'sandbox.read',
   definition: sandboxReadDefinition,
   schema: sandboxReadSchema,
+  recordedSchemas: new Map([['sandbox_read', sandboxReadSchema]]),
   order: 201,
   policy: sandboxPolicy,
   available: sandboxAvailable,
@@ -42,9 +43,10 @@ export const sandboxReadTool: ToolDeclaration<SandboxReadInput> = {
 };
 
 export const sandboxExecTool: ToolDeclaration<SandboxExecInput> = {
-  name: 'sandbox_exec',
+  name: 'sandbox.exec',
   definition: sandboxExecDefinition,
   schema: sandboxExecSchema,
+  recordedSchemas: new Map([['sandbox_exec', sandboxExecSchema]]),
   order: 202,
   policy: {
     ...sandboxPolicy,

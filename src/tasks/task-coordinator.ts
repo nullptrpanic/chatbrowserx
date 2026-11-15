@@ -1,8 +1,17 @@
 import type { TaskId, TaskRunId } from '../shared/ids';
+import type { QueuedTask } from '../persistence/task-repository';
 import { TaskCommandError, type TaskSnapshot } from './task-command-service';
 
+export interface CoordinatedTaskResult {
+  readonly nextTask?: QueuedTask;
+}
+
 export interface CoordinatedTaskExecutor {
-  run(taskId: TaskId, signal: AbortSignal, expectedRunId?: TaskRunId): Promise<unknown>;
+  run(
+    taskId: TaskId,
+    signal: AbortSignal,
+    expectedRunId?: TaskRunId,
+  ): Promise<CoordinatedTaskResult>;
 }
 
 export interface CoordinatedTaskCommands {
@@ -51,7 +60,10 @@ export class TaskCoordinator {
     const controller = new AbortController();
     const execution = this.#dependencies.executor.run(taskId, controller.signal, runId);
     const completion = execution
-      .then(() => undefined)
+      .then((result) => {
+        const next = result.nextTask;
+        if (next) this.schedule(next.taskId, next.runId);
+      })
       .finally(() => {
         if (this.#active.get(taskId)?.completion === completion) this.#active.delete(taskId);
       });

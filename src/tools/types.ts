@@ -1,5 +1,4 @@
 import type { z } from 'zod';
-import type { Tool } from '@openai/agents-core';
 import type { Checkpoint } from '../tasks/checkpoint-types';
 import type { ContinuationItem, PendingToolCall } from '../tasks/continuation-types';
 import type { MaterializedToolResult } from '../tasks/tool-result-types';
@@ -19,14 +18,12 @@ export interface ToolExecutionPolicy {
 }
 
 export interface ToolRuntimeContext {
-  readonly optionalTools?: readonly Tool[];
   readonly task?: Task;
   readonly checkpoint?: Checkpoint;
   readonly toolResults?: readonly MaterializedToolResult[];
   readonly events?: readonly TaskEvent[];
   readonly conversationTasks?: readonly Task[];
   readonly executionState?: PendingToolCall['executionState'];
-  readonly resultId?: string;
   readonly currentTabId?: number | null;
   readonly sessionOwnerId?: string;
   readonly availableAssetIds?: readonly string[];
@@ -41,7 +38,6 @@ export interface ValidatedToolCall<TArguments = unknown> extends ModelToolCallSo
 export interface ToolModelExposure {
   readonly definition: ModelToolDefinition;
   readonly force?: boolean;
-  readonly additionalTools?: readonly Tool[];
 }
 
 export type ToolCompletionReview =
@@ -107,6 +103,9 @@ export interface ToolDeclaration<TArguments = unknown> {
   readonly schema: z.ZodType<TArguments>;
   readonly order?: number;
   readonly policy: ToolExecutionPolicy;
+  /** Argument schemas for names already present in durable tool calls. */
+  readonly recordedSchemas?: ReadonlyMap<string, z.ZodType<TArguments>>;
+  mutates?(call: ValidatedToolCall<TArguments>): boolean;
   available?(context: ToolRuntimeContext): boolean | Promise<boolean>;
   model?(context: ToolRuntimeContext): ToolModelExposure | null | Promise<ToolModelExposure | null>;
   reviewCompletion?(context: ToolRuntimeContext): ToolCompletionReview | null;
@@ -165,7 +164,6 @@ export interface RegisteredTool {
 
 export interface ModelToolContract {
   readonly definitions: readonly ModelToolDefinition[];
-  readonly additionalTools?: readonly Tool[];
   readonly toolChoice?: ModelToolChoice;
   readonly systemPrompt: string;
   parse(source: ModelToolCallSource): ValidatedToolCall;
@@ -181,7 +179,7 @@ export interface ToolRuntimePort {
   ): Promise<ToolExecutionResult | null>;
   contextCompacted(): Promise<void>;
   release(ownerId: string): Promise<void>;
-  policyFor(name: string): ToolExecutionPolicy | null;
+  policyFor(name: string, call?: ValidatedToolCall): ToolExecutionPolicy | null;
   canRecover(name: string): boolean;
   callsUsed(name: string, context: ToolRuntimeContext): number;
   parseRecorded(source: ModelToolCallSource): ValidatedToolCall;

@@ -32,7 +32,6 @@ function pair(
       type: 'function_call_output',
       callId,
       output: typeof output === 'string' ? output : JSON.stringify(output),
-      resultId: `result_${callId}`,
       attachmentIds: [],
     },
   ];
@@ -57,7 +56,6 @@ function checkpoint(
     const call = calls.get(item.callId);
     if (call === undefined) throw new Error('Tool result fixture is missing its call.');
     generatedResults.push({
-      id: item.resultId,
       taskId: 'task_1',
       runId: generatedResultRunId,
       callId: item.callId,
@@ -70,7 +68,6 @@ function checkpoint(
     return {
       type: 'function_call_output_ref',
       callId: item.callId,
-      resultId: item.resultId,
       attachmentIds: item.attachmentIds ?? [],
     };
   });
@@ -234,7 +231,7 @@ describe('browserToolDefinitionsForCheckpoint', () => {
     });
   });
 
-  it('keeps a retained current-tab call available while replaying the current task', () => {
+  it('does not advertise a retired current-tab call found in the task replay', () => {
     const currentTab = pair(
       'current_tab',
       'browser_get_current_tab',
@@ -247,7 +244,9 @@ describe('browserToolDefinitionsForCheckpoint', () => {
       },
     );
 
-    expect(names(checkpoint(currentTab))).toContain('browser_get_current_tab');
+    const available = names(checkpoint(currentTab));
+    expect(available).toContain('browser_list_tabs');
+    expect(available).not.toContain('browser_get_current_tab');
   });
 
   it('binds unified scrolling to current interactive scroll refs when available', () => {
@@ -756,7 +755,6 @@ describe('browserToolDefinitionsForCheckpoint', () => {
 
   it('enables image delivery from a durable task-owned attachment', () => {
     const completed: MaterializedToolResult = {
-      id: 'result_capture',
       taskId: 'task_1',
       runId: 'run_1',
       callId: 'capture',
@@ -787,7 +785,7 @@ describe('browserToolDefinitionsForCheckpoint', () => {
     const capture = definitions.find(({ name }) => name === 'browser_capture_screenshot');
 
     expect(definitions.map(({ name }) => name)).not.toContain('browser_paste_image');
-    expect(capture?.description).toContain('browser_paste_image');
+    expect(capture?.description).toContain('browser.paste');
     expect(capture?.description).toContain('next model turn');
   });
 
@@ -830,14 +828,24 @@ describe('browserToolDefinitionsForCheckpoint', () => {
     expect(names(checkpoint(inspected))).toContain('browser_set_checked_many');
   });
 
-  it('retains a used advanced tool until a successful context commit', () => {
+  it('restores coordinate actions only with a fresh screenshot and clears them on commit', () => {
     const used = pair(
       'point',
       'browser_click_point',
       { x: 10, y: 10, button: 'left', count: 1 },
       { ok: true, data: { action: 'click_point' } },
     );
-    expect(names(checkpoint(used))).toContain('browser_click_point');
+    expect(names(checkpoint(used))).not.toContain('browser_click_point');
+    const fresh = pair(
+      'fresh',
+      'browser_inspect',
+      { mode: 'screenshot' },
+      {
+        ok: true,
+        data: { mode: 'screenshot' },
+      },
+    );
+    expect(names(checkpoint([...used, ...fresh]))).toContain('browser_click_point');
 
     const committed = pair(
       'commit',
@@ -845,7 +853,9 @@ describe('browserToolDefinitionsForCheckpoint', () => {
       { state: 'Continue from semantic state.' },
       { ok: true, compactedCalls: 1 },
     );
-    expect(names(checkpoint([...used, ...committed]))).not.toContain('browser_click_point');
+    expect(names(checkpoint([...used, ...fresh, ...committed]))).not.toContain(
+      'browser_click_point',
+    );
   });
 
   it('resets derived browser capabilities at a native compaction boundary', () => {
