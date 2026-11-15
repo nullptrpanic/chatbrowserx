@@ -12,7 +12,7 @@ export const manifest = {
   minimum_chrome_version: '125',
   name: 'ChatBrowserX',
   description: 'A durable Codex chat client in Chrome Side Panel.',
-  version: '0.1.0',
+  version: '1.0.0',
   icons,
   permissions: [
     'activeTab',
