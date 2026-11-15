@@ -46,11 +46,13 @@ describe('tool result copy actions', () => {
     expect(action.style.visibility).toBe('visible');
     expect(action.style.border).toBe('0px');
     expect(action.style.color).toBe('var(--cbx-muted)');
-    expect(action.style.background).toBe('transparent');
+    expect(action.style.backgroundColor).toBe('transparent');
+    expect(action.style.backgroundImage).toBe('none');
 
     expect(terminalAction.style.border).toBe('0px');
     expect(terminalAction.style.color).toBe('rgb(157, 169, 189)');
-    expect(terminalAction.style.background).toBe('transparent');
+    expect(terminalAction.style.backgroundColor).toBe('transparent');
+    expect(terminalAction.style.backgroundImage).toBe('none');
   });
 
   it('keeps terminal commands and output horizontally scrollable without wrapping or clipping', () => {

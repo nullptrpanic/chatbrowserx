@@ -1,5 +1,5 @@
 const appearanceProperty = (property: string) =>
-  /^(color|background-color|border(?:-(?:top|right|bottom|left))?-color|outline-color|text-decoration-color|box-shadow)$/.test(
+  /^(color|background-color|border(?:-(?:top|right|bottom|left))?-color|outline-color|text-decoration-color|box-shadow(?:-(?:color|offset|blur|spread|position))?)$/.test(
     property,
   );
 

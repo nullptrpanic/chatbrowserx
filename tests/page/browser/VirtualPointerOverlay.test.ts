@@ -145,7 +145,7 @@ describe('VirtualPointerOverlay', () => {
     const styles = host?.shadowRoot?.querySelector('style')?.textContent ?? '';
     expect(cursor?.getAttribute('viewBox')).toBe('0 0 20 24');
     expect(cursor?.querySelector('path')).not.toBeNull();
-    expect(cursor?.style.transform).toBe('translate3d(100px, 80px, 0)');
+    expect(cursor).toHaveStyle({ transform: 'translate3d(100px, 80px, 0)' });
     expect(host?.shadowRoot?.querySelector('[data-part="ripple"]')).not.toBeNull();
     expect(styles).toContain('@keyframes cbx-pointer-ripple');
     expect(styles).toContain('animation: cbx-pointer-ripple');
@@ -201,9 +201,9 @@ describe('VirtualPointerOverlay', () => {
       '[data-chatbrowserx-overlay="virtual-pointer"]',
     );
     expect(host?.shadowRoot?.querySelector('[data-part="drag-trail"]')).toBeNull();
-    expect(
-      host?.shadowRoot?.querySelector<HTMLElement>('[data-part="cursor"]')?.style.transform,
-    ).toBe('translate3d(300px, 220px, 0)');
+    expect(host?.shadowRoot?.querySelector('[data-part="cursor"]')).toHaveStyle({
+      transform: 'translate3d(300px, 220px, 0)',
+    });
     pointer.destroy();
   });
 });

@@ -19,7 +19,9 @@ function styleRule(selector: string): CSSStyleRule {
 
 describe('Sandbox console action', () => {
   it('inherits the same transparent and hover backgrounds as the other icon actions', () => {
-    expect(styleRule('.icon-button').style.background).toBe('transparent');
+    const base = styleRule('.icon-button').style;
+    expect(base.backgroundColor).toBe('transparent');
+    expect(base.backgroundImage).toBe('none');
     expect(styleRule('.icon-button:hover').style.background).toBe('var(--cbx-hover)');
     expect(styleRule('.sandbox-console-button').style.background).toBe('');
     expect(styleRule('.sandbox-console-button:hover').style.background).toBe('');

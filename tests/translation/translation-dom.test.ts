@@ -576,6 +576,10 @@ it('translates text on a simple gradient using the original background coordinat
   const { dom, layer, area } = setup();
   document.body.innerHTML =
     '<div style="background-image:linear-gradient(to right, red, blue)"><p style="padding:0;border:0">Gradient card.</p></div>';
+  const source = document.body.firstElementChild;
+  if (!source) throw new Error('Gradient card missing');
+  const backgroundImage = window.getComputedStyle(source).backgroundImage;
+  expect(backgroundImage).toMatch(/^linear-gradient\(to right,/);
   dom.invalidate();
   dom.update(area);
   expect(dom.unsupported).toEqual([]);
@@ -583,9 +587,7 @@ it('translates text on a simple gradient using the original background coordinat
   if (!text) throw new Error('Gradient text missing');
   dom.accept({ blocks: [{ id: text.id, translation: '渐变卡片。' }] });
   const group = layer.querySelector<HTMLElement>('.translation-group');
-  expect(group?.querySelector('p')?.parentElement?.style.backgroundImage).toBe(
-    'linear-gradient(to right, red, blue)',
-  );
+  expect(group?.querySelector('p')?.parentElement?.style.backgroundImage).toBe(backgroundImage);
   expect(group?.style.left).toBe('100px');
   expect(group?.style.width).toBe('900px');
 });
