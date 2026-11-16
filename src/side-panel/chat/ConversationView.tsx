@@ -55,22 +55,26 @@ export function ConversationView({
   const runsById = new Map(
     tasks.flatMap((item) => item.runs.map((run) => [taskRunKey(item.id, run.id), run] as const)),
   );
-  const answerHostByRun = new Map<string, string>();
-  const answersByRun = new Map<string, PanelMessage[]>();
+  const answerKey = (message: PanelMessage) => {
+    const run = runsById.get(messageRunKey(message));
+    return taskRunKey(message.taskId, run?.answerId ?? message.runId ?? 'legacy');
+  };
+  const answerHosts = new Map<string, string>();
+  const answerSegments = new Map<string, PanelMessage[]>();
   for (const message of displayMessages) {
     const run =
       message.runId === undefined
         ? null
         : (runsById.get(taskRunKey(message.taskId, message.runId)) ?? null);
     if (canHostTaskDetails(message, tasksById.get(message.taskId) ?? null, run)) {
-      const key = messageRunKey(message);
-      answerHostByRun.set(key, message.id);
-      const answers = answersByRun.get(key) ?? [];
+      const key = answerKey(message);
+      answerHosts.set(key, message.id);
+      const answers = answerSegments.get(key) ?? [];
       answers.push(message);
-      answersByRun.set(key, answers);
+      answerSegments.set(key, answers);
     }
   }
-  const visibleAssistantMessageIds = new Set(answerHostByRun.values());
+  const visibleAssistantMessageIds = new Set(answerHosts.values());
   const taskHostMessageIds = new Map<string, string>();
   for (const message of displayMessages) {
     const messageTask = tasksById.get(message.taskId) ?? null;
@@ -144,12 +148,10 @@ export function ConversationView({
                 : (runsById.get(taskRunKey(message.taskId, message.runId)) ?? null);
             return (
               <MessageItem
-                key={message.role === 'assistant' ? messageRunKey(message) : message.id}
+                key={message.role === 'assistant' ? answerKey(message) : message.id}
                 message={message}
                 segments={
-                  message.role === 'assistant'
-                    ? answersByRun.get(messageRunKey(message))
-                    : undefined
+                  message.role === 'assistant' ? answerSegments.get(answerKey(message)) : undefined
                 }
                 task={messageTask}
                 run={messageRun}
@@ -200,7 +202,7 @@ export function ConversationView({
   );
 }
 
-/** Groups legacy messages by Task and new messages by their permanent execution attempt. */
+/** Looks up an attempt; visible answer identity is derived separately from its question. */
 function messageRunKey(message: PanelMessage): string {
   return taskRunKey(message.taskId, message.runId ?? 'legacy');
 }

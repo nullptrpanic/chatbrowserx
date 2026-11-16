@@ -750,6 +750,22 @@ export class PanelService {
     detailLevel: 'summary' | 'full',
   ): PanelTask {
     const { task, events, runs } = archive;
+    const startReasons = new Map<string, string>();
+    for (const event of events) {
+      if (event.type === 'status.changed' && !startReasons.has(event.runId)) {
+        startReasons.set(event.runId, event.reason);
+      }
+    }
+    // A new question starts a run with task.queued; retries/resumes retain the
+    // previous question. Derive this from durable events, even if its message is paged out.
+    const answerIds = new Map<string, string>();
+    let answerId = '';
+    for (const run of runs) {
+      if (!answerId || !['user_retry', 'user_resume'].includes(startReasons.get(run.id) ?? '')) {
+        answerId = run.id;
+      }
+      answerIds.set(run.id, answerId);
+    }
     const allResults = 'toolResults' in archive ? archive.toolResults : [];
     const supplements = messages.filter(
       (message) => message.kind === 'supplement' && message.taskId === task.id,
@@ -814,6 +830,7 @@ export class PanelService {
       latestRunId: task.latestRunId,
       runs: runs.slice(-MAX_PANEL_MESSAGES).map((run) => ({
         id: run.id,
+        answerId: answerIds.get(run.id),
         attempt: run.attempt,
         status: run.status,
         startedAt: run.startedAt,

@@ -350,13 +350,14 @@ describe('ConversationView answer execution details', () => {
     expect(process.text).toBe('I will choose a personal event.');
   });
 
-  it('keeps an earlier failed run answer with its own terminal status and error', () => {
+  it('replaces failed attempts with the final answer in the same question card', () => {
     const task = {
       ...completedTask('task_multi_run', 'Continue the page task', 1_500),
       latestRunId: 'run_2',
       runs: [
         {
           id: 'run_1',
+          answerId: 'run_1',
           attempt: 1,
           status: 'failed',
           startedAt: 1_000,
@@ -369,6 +370,7 @@ describe('ConversationView answer execution details', () => {
         },
         {
           id: 'run_2',
+          answerId: 'run_1',
           attempt: 2,
           status: 'completed',
           startedAt: 1_300,
@@ -434,25 +436,99 @@ describe('ConversationView answer execution details', () => {
       />,
     );
 
-    const previousAnswer = screen
-      .getByText('Partial answer from the failed run.')
-      .closest('article');
     const currentAnswer = screen
       .getByText('Final answer from the continued run.')
       .closest('article');
-    expect(previousAnswer).not.toBeNull();
     expect(currentAnswer).not.toBeNull();
-    expect((previousAnswer as HTMLElement).querySelector('.task-card')).not.toBeNull();
-    expect(
-      within(previousAnswer as HTMLElement).getByText(
-        'The provider returned an invalid response (stage: sse_protocol).',
-      ),
-    ).toBeVisible();
-    expect(within(previousAnswer as HTMLElement).getByText('任务失败')).toBeVisible();
-    expect(
-      within(previousAnswer as HTMLElement).getByText('Earlier progress from the failed run.'),
-    ).toBeVisible();
+    expect(screen.getAllByRole('article')).toHaveLength(1);
+    expect(screen.queryByText('Partial answer from the failed run.')).not.toBeInTheDocument();
+    expect(screen.queryByText('任务失败')).not.toBeInTheDocument();
     expect((currentAnswer as HTMLElement).querySelector('.task-card')).not.toBeNull();
+  });
+
+  it('keeps one mounted answer through retry, resumed text and reload before any new text', () => {
+    const task: PanelTask = {
+      ...completedTask('retry_task', 'Fill without submitting', 1_200),
+      status: 'failed',
+      latestRunId: 'run_1',
+      runs: [
+        {
+          id: 'run_1',
+          answerId: 'run_1',
+          attempt: 1,
+          status: 'failed',
+          startedAt: 1_000,
+          endedAt: 1_200,
+          lastError: null,
+        },
+      ],
+    };
+    const user: PanelMessage = {
+      id: 'question_1',
+      taskId: task.id,
+      runId: 'run_1',
+      role: 'user',
+      status: 'complete',
+      text: task.goal,
+      attachmentIds: [],
+      createdAt: 1_000,
+      updatedAt: 1_000,
+    };
+    const props = {
+      tasks: [task],
+      task,
+      messages: [user],
+      attachments,
+      t,
+      onSuggestion: vi.fn(),
+      onPause: vi.fn(),
+      onResume: vi.fn(),
+      onRetry: vi.fn(),
+      onCancel: vi.fn(),
+    };
+    const { rerender, unmount } = render(<ConversationView {...props} />);
+    const card = screen.getAllByRole('article')[1];
+    const retried: PanelTask = {
+      ...task,
+      status: 'planning',
+      latestRunId: 'run_2',
+      runs: [
+        ...task.runs,
+        {
+          id: 'run_2',
+          answerId: 'run_1',
+          attempt: 2,
+          status: 'planning',
+          startedAt: 1_300,
+          endedAt: null,
+          lastError: null,
+        },
+      ],
+    };
+    rerender(<ConversationView {...props} tasks={[retried]} task={retried} />);
+    expect(screen.getAllByRole('article')).toHaveLength(2);
+    expect(screen.getAllByRole('article')[1]).toBe(card);
+    expect(card).toHaveTextContent('正在生成回复');
+    const reply: PanelMessage = {
+      ...user,
+      id: 'reply_2',
+      runId: 'run_2',
+      role: 'assistant',
+      status: 'streaming',
+      text: 'Continuing from the first unanswered question.',
+      createdAt: 1_400,
+      updatedAt: 1_400,
+    };
+    rerender(
+      <ConversationView {...props} tasks={[retried]} task={retried} messages={[user, reply]} />,
+    );
+    expect(screen.getAllByRole('article')).toHaveLength(2);
+    expect(screen.getAllByRole('article')[1]).toBe(card);
+    expect(card).toHaveTextContent(reply.text);
+    unmount();
+    render(<ConversationView {...props} tasks={[retried]} task={retried} />);
+    expect(screen.getAllByRole('article')).toHaveLength(2);
+    expect(screen.getAllByRole('article')[1]).toHaveTextContent('正在生成回复');
   });
 
   it('derives a cancelled answer card from the persisted run before rendering the next question', () => {

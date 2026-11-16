@@ -865,6 +865,82 @@ extensionTest(
 );
 
 extensionTest(
+  'reuses one answer card across a failed attempt, retry, and panel reload',
+  async ({ extensionSession }) => {
+    extensionTest.setTimeout(120_000);
+    const { context, sidePanelPage: panel } = extensionSession;
+    const page = await context.newPage();
+    await page.goto('https://example.com/failed-run-history');
+    const tabId = (await panel.evaluate(async (url) => chrome.tabs.query({ url }), page.url()))[0]
+      ?.id;
+    if (tabId === undefined) throw new Error('Retry fixture tab unavailable.');
+    let providerTurn = 0;
+    let releaseRetry = () => {};
+    const retryReady = new Promise<void>((resolve) => {
+      releaseRetry = resolve;
+    });
+    await context.route('https://chatgpt.com/backend-api/codex/responses', async (route) => {
+      providerTurn += 1;
+      const turn = providerTurn;
+      if (turn > 4) await retryReady;
+      await route.fulfill({
+        status: 200,
+        contentType: 'text/event-stream',
+        body:
+          turn <= 4
+            ? invalidResponse(`retry_failed_${turn}`, turn === 1 ? 'Partial answer.' : '')
+            : finalTextResponse('retry_completed', 'The completed answer.'),
+      });
+    });
+    try {
+      await sendExtensionMessage(panel, {
+        version: 1,
+        requestId: 'retry_settings',
+        type: 'settings.save',
+        payload: {
+          reasoningEffort: 'low',
+          systemPrompt: 'Answer directly.',
+          language: 'en',
+          historyMessageLimit: 50,
+          accessToken: syntheticAccessToken(),
+        },
+      });
+      const submitted = await sendExtensionMessage<{
+        task: { id: string; conversationId: string };
+      }>(panel, {
+        version: 1,
+        requestId: 'retry_submit',
+        type: 'chat.submit',
+        payload: { tabId, text: 'One question, one answer card.', attachmentIds: [] },
+      });
+      await waitForTaskStatus(panel, submitted.task.id, 'failed');
+      const cards = panel.locator('article.message-assistant');
+      await expect(cards).toHaveCount(1);
+      await sendExtensionMessage(panel, {
+        version: 1,
+        requestId: 'retry_same_question',
+        type: 'task.retry',
+        payload: { taskId: submitted.task.id },
+      });
+      await expect.poll(() => providerTurn).toBe(5);
+      await expect(cards).toHaveCount(1);
+      await panel.reload();
+      await expect(cards).toHaveCount(1);
+      releaseRetry();
+      await waitForTask(panel, submitted.task.id);
+      await expect(cards).toHaveCount(1);
+      await expect(cards).toContainText('The completed answer.');
+      await expect(cards).not.toContainText('Task failed');
+      await panel.reload();
+      await expect(panel.locator('article.message-item')).toHaveCount(2);
+      await expect(cards).toContainText('The completed answer.');
+    } finally {
+      releaseRetry();
+    }
+  },
+);
+
+extensionTest(
   'keeps a failed run answer in order when the next question continues the task',
   async ({ extensionSession }) => {
     extensionTest.setTimeout(120_000);

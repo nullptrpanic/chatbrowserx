@@ -405,6 +405,7 @@ describe('PanelService', () => {
         runs: [
           {
             id: fixture.run.id,
+            answerId: fixture.run.id,
             attempt: 1,
             status: 'completed',
             startedAt: 1_010,
@@ -414,6 +415,46 @@ describe('PanelService', () => {
         ],
       }),
     ]);
+  });
+
+  it('projects stable answer identities from retry/resume boundaries even without visible user messages', async () => {
+    const fixture = buildFixture();
+    const reasons = ['task.queued', 'user_retry', 'user_resume', 'task.queued', 'user_retry'];
+    const runs = reasons.map((_, index) => ({
+      ...fixture.run,
+      id: `run_${index + 1}`,
+      attempt: index + 1,
+    }));
+    const events: TaskEvent[] = reasons.map((reason, index) => ({
+      id: `start_${index}`,
+      taskId: fixture.task.id,
+      runId: `run_${index + 1}`,
+      sequence: index + 1,
+      at: 1_000,
+      type: 'status.changed',
+      taskStatus: 'queued',
+      runStatus: 'queued',
+      reason,
+      error: null,
+    }));
+    useArchive(fixture, {
+      runs,
+      events,
+      task: { ...fixture.task, latestRunId: 'run_5', lastEventSequence: 5 },
+    });
+    fixture.dependencies.conversations.listMessages.mockResolvedValue([]);
+    const service = new PanelService(fixture.dependencies);
+    const snapshot = parsePanelSnapshot(await service.getSnapshot(7, fixture.conversation.id));
+    const details = await service.getTaskDetails(fixture.task.id);
+    for (const task of [snapshot.task, details]) {
+      expect(task?.runs.map((run) => run.answerId)).toEqual([
+        'run_1',
+        'run_1',
+        'run_1',
+        'run_4',
+        'run_4',
+      ]);
+    }
   });
 
   it('shares history across tabs while keeping the current page context separate', async () => {

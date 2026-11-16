@@ -111,6 +111,8 @@ export interface PanelTaskError {
 /** Permanent lifecycle state for one execution attempt of a logical task. */
 export interface PanelTaskRun {
   readonly id: string;
+  /** First attempt for this user question; retry/resume attempts share its answer card. */
+  readonly answerId?: string | undefined;
   readonly attempt: number;
   readonly status: PanelTaskStatus;
   readonly startedAt: number;
@@ -128,7 +130,7 @@ export interface PanelTask {
   readonly id: string;
   /** Latest execution attempt; used to attach live state to only that attempt's answer. */
   readonly latestRunId: string | null;
-  /** Every attempt is retained so earlier failed or cancelled answers keep their own status. */
+  /** Attempts stay available for recovery; answerId groups them by user question. */
   readonly runs: readonly PanelTaskRun[];
   /** Summary projections are lightweight; full projections are loaded only after expansion. */
   readonly detailLevel: 'summary' | 'full';

@@ -136,6 +136,7 @@ const panelTaskSchema = z
           .object({
             id: idSchema,
             attempt: z.number().int().positive(),
+            answerId: z.string().min(1).optional(),
             status: taskStatusSchema,
             startedAt: timestampSchema,
             endedAt: timestampSchema.nullable(),
