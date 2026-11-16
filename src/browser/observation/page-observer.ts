@@ -437,7 +437,18 @@ function snapshotViewportFromLayoutMetrics(
     metrics.cssVisualViewport ??
     metrics.cssLayoutViewport;
   if (!viewport) return undefined;
-  const { pageX, pageY, clientWidth, clientHeight } = viewport;
+  const { clientWidth, clientHeight } = viewport;
+  // DOMSnapshot bounds use native pixels. Chromium's legacy visual viewport mixes
+  // native dimensions with CSS page offsets, so scale the CSS origin as well.
+  const cssViewport = metrics.cssVisualViewport;
+  const scale =
+    viewport === metrics.visualViewport && cssViewport && cssViewport.clientWidth > 0
+      ? clientWidth / cssViewport.clientWidth
+      : 1;
+  const pageX =
+    cssViewport && viewport === metrics.visualViewport ? cssViewport.pageX * scale : viewport.pageX;
+  const pageY =
+    cssViewport && viewport === metrics.visualViewport ? cssViewport.pageY * scale : viewport.pageY;
   if (
     ![pageX, pageY, clientWidth, clientHeight].every(
       (value) => typeof value === 'number' && Number.isFinite(value),

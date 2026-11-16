@@ -84,7 +84,7 @@ export const progressDefinition = strictFunctionTool(
   TASK_PROGRESS_TOOL,
   [
     'Track a plan for tasks with multiple independent deliverables. Use stable step IDs across updates and read back uncertain outcomes before further writes.',
-    'Record the authorized scope and observed inventory before mutations. Mark completed only with a usable observation call ID from availableEvidence. Follow review.next until completion is ready or an external blocker is recorded.',
+    'Record the authorized scope and observed inventory before mutations. For forms, inventory and fill questions progressively in page order; keep inventory incomplete until all questions and conditional fields have been checked. Mark completed only with a usable observation call ID from availableEvidence. Follow review.next until completion is ready or an external blocker is recorded.',
   ].join(' '),
   {
     update: {

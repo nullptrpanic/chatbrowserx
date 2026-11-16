@@ -832,6 +832,83 @@ describe('PageObserver', () => {
     expect(result.scrollHierarchy?.root).toBeUndefined();
   });
 
+  it.each([1, 2, 3])(
+    'retains visible controls after scrolling with native snapshot scale %s',
+    async (scale) => {
+      const count = 201;
+      const snapshot = buttonDomSnapshot();
+      const document = snapshot.documents[0];
+      if (!document) throw new Error('Fixture document missing');
+      document.nodes.parentIndex = [-1, ...Array.from({ length: count }, () => 0)];
+      document.nodes.nodeType = [9, ...Array.from({ length: count }, () => 1)];
+      document.nodes.nodeName = [4, ...Array.from({ length: count }, () => 5)];
+      document.nodes.nodeValue = Array.from({ length: count + 1 }, () => 2);
+      document.nodes.backendNodeId = [1, ...Array.from({ length: count }, (_, i) => i + 11)];
+      document.nodes.attributes = Array.from({ length: count + 1 }, () => []);
+      document.nodes.isClickable.index = Array.from({ length: count }, (_, i) => i + 1);
+      document.layout.nodeIndex = [...document.nodes.isClickable.index];
+      document.layout.styles = Array.from({ length: count }, () => [9, 7, 8, 6]);
+      document.layout.bounds = Array.from({ length: count }, (_, i) =>
+        [1_200, i === count - 1 ? 2_500 : 1_100, 100, 30].map((value) => value * scale),
+      );
+      document.layout.text = Array.from({ length: count }, () => 2);
+      const transport = debuggerTransport((_session, method) => {
+        if (method === 'Accessibility.getFullAXTree') {
+          return {
+            nodes: Array.from({ length: count }, (_, i) => ({
+              nodeId: `button_${String(i)}`,
+              backendDOMNodeId: i + 11,
+              ignored: false,
+              role: { value: 'button' },
+              name: { value: i === count - 1 ? 'Visible answer' : `Earlier answer ${String(i)}` },
+            })),
+          };
+        }
+        if (method === 'DOMSnapshot.captureSnapshot') return snapshot;
+        if (method === 'Page.getFrameTree') return mainFrameTree();
+        if (method === 'Page.getLayoutMetrics') {
+          return {
+            layoutViewport: {
+              pageX: 1_000 * scale,
+              pageY: 2_000 * scale,
+              clientWidth: 1_440 * scale,
+              clientHeight: 900 * scale,
+            },
+            // Chromium reports CSS page offsets but native dimensions in this legacy field.
+            visualViewport: {
+              pageX: 1_000,
+              pageY: 2_000,
+              clientWidth: 1_440 * scale,
+              clientHeight: 900 * scale,
+            },
+            cssVisualViewport: {
+              pageX: 1_000,
+              pageY: 2_000,
+              clientWidth: 1_440,
+              clientHeight: 900,
+            },
+            cssContentSize: { x: 0, y: 0, width: 4_000, height: 6_000 },
+          };
+        }
+        return {};
+      });
+      let sequence = 0;
+      const observer = new PageObserver({
+        sessions: sessions({ tabId: 7, generation: 1, root: { tabId: 7 }, children: new Map() }),
+        transport,
+        content: CONTENT,
+        refs: new ElementRefStore({ create: () => `ref_${String(++sequence)}` }),
+      });
+      const result = await observer.inspect(7, 'interactive', new AbortController().signal);
+      expect(result.data.elements).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({ n: 'Visible answer', ref: expect.any(String) }),
+        ]),
+      );
+      expect(result.data.coverage).toMatchObject({ moreBefore: true, moreAfter: true });
+    },
+  );
+
   it.each([
     { innerHeight: 15_000, primary: 'ref_inner', layoutAvailable: true },
     { innerHeight: 8_000, primary: undefined, layoutAvailable: true },

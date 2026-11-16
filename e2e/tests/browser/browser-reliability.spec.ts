@@ -426,6 +426,91 @@ extensionTest.describe('screenshot coordinate units', () => {
   });
   for (const zoom of [1, 1.5]) {
     extensionTest(
+      `retains a visible checkbox after scrolling at DPR 2 and browser zoom ${zoom}`,
+      async ({ extensionSession }) => {
+        const server = createServer((_request, response) => {
+          response.writeHead(200, { 'Content-Type': 'text/html' });
+          response.end(`<!doctype html><body style="margin:0;height:8000px">
+            ${Array.from(
+              { length: 200 },
+              (_, i) => `<button style="position:absolute;top:${i * 20}px">Earlier ${i}</button>`,
+            ).join('')}
+            <label style="position:absolute;top:6200px;left:100px">
+              <input id="visible-answer" type="checkbox">Visible answer
+            </label>
+          </body>`);
+        });
+        const port = await listen(server);
+        const page = await extensionSession.context.newPage();
+        const url = `http://127.0.0.1:${port}/scrolled-form`;
+        try {
+          await page.goto(url);
+          const tabId = await extensionSession.sidePanelPage.evaluate(
+            async ({ url, zoom }) => {
+              const [tab] = await chrome.tabs.query({ url });
+              if (tab?.id === undefined) throw new Error('Fixture tab missing');
+              await chrome.tabs.setZoom(tab.id, zoom);
+              return tab.id;
+            },
+            { url, zoom },
+          );
+          await page.evaluate(() => window.scrollTo(0, 6_000));
+          await expect(page.locator('#visible-answer')).toBeInViewport();
+          let turn = 0;
+          let answerRef = '';
+          await extensionSession.context.route(
+            'https://chatgpt.com/backend-api/codex/responses',
+            async (route) => {
+              const output = JSON.parse(
+                functionOutputs(route.request().postDataJSON()).at(-1) ?? '{}',
+              );
+              turn += 1;
+              let body: string;
+              if (turn === 1) {
+                body = toolResponse('i', 'ii', 'ic', 'browser.inspect', {
+                  tabId: 0,
+                  mode: 'interactive',
+                  since: '',
+                  visualReason: '',
+                });
+              } else if (turn === 2) {
+                const answer = output.data?.elements?.find(
+                  (element: Record<string, unknown>) =>
+                    element.n === 'Visible answer' &&
+                    element.r === 'checkbox' &&
+                    typeof element.ref === 'string',
+                );
+                answerRef = answer?.ref ?? '';
+                // Finish on omission so the assertion reports the actual regression promptly.
+                body = answerRef
+                  ? toolResponse('c', 'ci', 'cc', 'browser.set_checked', {
+                      tabId: 0,
+                      items: [{ ref: answerRef, checked: true }],
+                    })
+                  : finalTextResponse('missing', 'The visible checkbox was omitted.');
+              } else {
+                expect(output).toMatchObject({ ok: true });
+                body = finalTextResponse('done', 'Selected the visible answer without submitting.');
+              }
+              await route.fulfill({ status: 200, contentType: 'text/event-stream', body });
+            },
+          );
+          await runFixtureTask(
+            extensionSession,
+            tabId,
+            'Select the visible answer; do not submit.',
+          );
+          expect(answerRef).not.toBe('');
+          await expect(page.locator('#visible-answer')).toBeChecked();
+          expect(turn).toBe(3);
+        } finally {
+          await page.close();
+          await closeHttpFixtureServer(server);
+        }
+      },
+    );
+
+    extensionTest(
       `clicks the screenshot target at DPR 2 and browser zoom ${zoom}`,
       async ({ extensionSession }) => {
         const server = createServer((_request, response) => {
@@ -977,6 +1062,148 @@ for (const delegated of [false, true]) {
     },
   );
 }
+
+extensionTest(
+  'recovers a blocked form scroll through a valid forced inspection and fills without submitting',
+  async ({ extensionSession }) => {
+    extensionTest.setTimeout(120_000);
+    const server = createServer((_request, response) => {
+      response.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
+      response.end(`<!doctype html><html><body style="margin:0">
+        <form onsubmit="event.preventDefault();document.body.dataset.submitted='true'">
+          <fieldset><legend>Question 1</legend><label><input id="first" type="radio" name="first" required>First answer</label></fieldset>
+          <div style="height:1700px"></div>
+          <fieldset><legend>Question 2</legend><label><input id="second" type="radio" name="second" required>Second answer</label></fieldset>
+          <button type="submit">Submit</button><div style="height:1200px"></div>
+        </form>
+        <div id="blocker" role="dialog" aria-label="Read each question" style="position:fixed;inset:0;z-index:10;background:white">
+          <p>Please read each question carefully.</p><button type="button" onclick="this.parentElement.remove()">Continue filling</button>
+        </div>
+        <script>document.addEventListener('wheel', event => {
+          if (document.querySelector('#blocker')) event.preventDefault();
+        }, { passive: false });</script>
+      </body></html>`);
+    });
+    const port = await listen(server);
+    const page = await extensionSession.context.newPage();
+    try {
+      await page.goto(`http://127.0.0.1:${port}/blocked-form`);
+      const tabId = await extensionSession.sidePanelPage.evaluate(
+        async (url) => (await chrome.tabs.query({ url }))[0]?.id,
+        page.url(),
+      );
+      if (tabId === undefined) throw new Error('Form fixture tab unavailable.');
+      let turn = 0;
+      let secondAnswerRef = '';
+      await extensionSession.context.route(
+        'https://chatgpt.com/backend-api/codex/responses',
+        async (route) => {
+          turn += 1;
+          const body = route.request().postDataJSON() as {
+            tools: Array<{
+              type: string;
+              name?: string;
+              tools?: Array<{ name: string }>;
+            }>;
+            tool_choice: unknown;
+          };
+          const output = JSON.parse(functionOutputs(body).at(-1) ?? '{}') as {
+            ok?: boolean;
+            data?: {
+              moved?: boolean;
+              elements?: Array<{ n?: string; ref?: string }>;
+            };
+          };
+          const ref = (name: string) => {
+            const value = output.data?.elements?.find(
+              (element) => element.n === name && element.ref,
+            )?.ref;
+            if (!value) throw new Error(`Missing form control: ${name}`);
+            return value;
+          };
+          let name = 'browser.inspect';
+          let args: Record<string, unknown> = {
+            tabId: 0,
+            mode: 'interactive',
+            since: '',
+          };
+          if (turn === 2 || turn === 7) {
+            name = 'browser.scroll';
+            args = {
+              tabId: 0,
+              target: 'viewport',
+              deltaX: 0,
+              deltaY: 1_800,
+              maxSegments: 1,
+              stopText: '',
+            };
+          } else if (turn === 3) {
+            expect(output).toMatchObject({ ok: true, data: { moved: false } });
+            expect(body.tool_choice).toBe('required');
+            expect(body.tools).toMatchObject([
+              {
+                type: 'namespace',
+                name: 'chatbrowserx_browser',
+                tools: [{ name: 'inspect' }],
+              },
+            ]);
+            expect(body.tools).toHaveLength(1);
+            expect(body.tools[0]?.tools).toHaveLength(1);
+          } else if (turn === 4) {
+            expect(body.tool_choice).toBe('auto');
+            expect(
+              body.tools
+                .find((tool) => tool.name === 'chatbrowserx_browser')
+                ?.tools?.some((tool) => tool.name === 'click'),
+            ).toBe(true);
+            name = 'browser.click';
+            args = {
+              tabId: 0,
+              target: {
+                ref: ref('Continue filling'),
+                button: 'left',
+                count: 1,
+              },
+            };
+          } else if (turn === 6 || turn === 8) {
+            if (turn === 6) secondAnswerRef = ref('Second answer');
+            name = 'browser.set_checked';
+            args = {
+              tabId: 0,
+              items: [
+                {
+                  ref: turn === 6 ? ref('First answer') : secondAnswerRef,
+                  checked: true,
+                },
+              ],
+            };
+          }
+          if (turn > 9) throw new Error('Unexpected form retry.');
+          await route.fulfill({
+            status: 200,
+            contentType: 'text/event-stream',
+            body:
+              turn === 9
+                ? finalTextResponse(
+                    'form_done',
+                    'Both questions are filled; the form is unsubmitted.',
+                  )
+                : toolResponse(`form_${turn}`, `item_${turn}`, `call_${turn}`, name, args),
+          });
+        },
+      );
+      await runFixtureTask(extensionSession, tabId, 'Fill both questions in order. Do not submit.');
+      await expect(page.locator('#first')).toBeChecked();
+      await expect(page.locator('#second')).toBeChecked();
+      await expect(page.locator('#blocker')).toHaveCount(0);
+      await expect(page.locator('body')).not.toHaveAttribute('data-submitted', 'true');
+      expect(turn).toBe(9);
+    } finally {
+      await page.close();
+      await closeHttpFixtureServer(server);
+    }
+  },
+);
 
 extensionTest(
   'completes a long reactive form through deep AX inspection after the selected node is replaced',
