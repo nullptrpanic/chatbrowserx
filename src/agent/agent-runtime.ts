@@ -37,6 +37,7 @@ import { isProviderError, providerErrorFromCode } from '../providers/provider-er
 import type { ModelActivity, ModelUsage } from '../providers/model-events';
 import type { ModelRequest as GenerationRequest } from './model/model-provider';
 import type { ModelStreamEvent } from '../providers/model-events';
+import { prepareModelInput } from './model/model-input-preparation-error';
 
 export interface AgentRuntimeDependencies {
   readonly providers: Pick<ProviderRegistry, 'resolve'>;
@@ -177,20 +178,29 @@ export class AgentRuntime implements AgentRuntimePort {
 
   async run(hooks: AgentRunHooks, signal: AbortSignal): Promise<void> {
     const d = this.dependencies;
-    let snapshot = await hooks.prepare();
-    const { provider, settings, providerId } = await d.providers.resolve();
-    const [tasks, savedSession] = await Promise.all([
-      d.tasks.listByConversation(snapshot.task.conversationId),
-      d.tasks.getAgentSession(snapshot.task.conversationId),
-    ]);
+    let snapshot = await prepareModelInput('agent_context', hooks.prepare());
+    const { provider, settings, providerId } = await prepareModelInput(
+      'settings',
+      d.providers.resolve(),
+    );
+    const [tasks, savedSession] = await prepareModelInput(
+      'conversation_history',
+      Promise.all([
+        d.tasks.listByConversation(snapshot.task.conversationId),
+        d.tasks.getAgentSession(snapshot.task.conversationId),
+      ]),
+    );
     const loadedTasks = new Set(
       savedSession ? [snapshot.task.id, savedSession.taskId] : tasks.map((task) => task.id),
     );
-    const messages = savedSession
-      ? (
-          await Promise.all([...loadedTasks].map((id) => d.conversations.listTaskMessages(id)))
-        ).flat()
-      : await d.conversations.listMessages(snapshot.task.conversationId);
+    const messages = await prepareModelInput(
+      'conversation_history',
+      savedSession
+        ? Promise.all([...loadedTasks].map((id) => d.conversations.listTaskMessages(id))).then(
+            (messages) => messages.flat(),
+          )
+        : d.conversations.listMessages(snapshot.task.conversationId),
+    );
     const loadReplyTargets = async (inputs: readonly MessageRecord[]): Promise<void> => {
       const missing = new Set(
         inputs.flatMap((message) => {
@@ -198,15 +208,19 @@ export class AgentRuntime implements AgentRuntimePort {
           return id && !loadedTasks.has(id) && tasks.some((task) => task.id === id) ? [id] : [];
         }),
       );
-      const replies = await Promise.all(
-        [...missing].map((id) => d.conversations.listTaskMessages(id)),
+      const replies = await prepareModelInput(
+        'conversation_history',
+        Promise.all([...missing].map((id) => d.conversations.listTaskMessages(id))),
       );
       messages.push(...replies.flat());
       for (const id of missing) loadedTasks.add(id);
     };
     await loadReplyTargets(messages);
     messages.sort((a, b) => a.createdAt - b.createdAt || (a.id < b.id ? -1 : a.id > b.id ? 1 : 0));
-    let session = await restoreAgentSession(snapshot.task, tasks, messages, d.tasks, savedSession);
+    let session = await prepareModelInput(
+      'conversation_history',
+      restoreAgentSession(snapshot.task, tasks, messages, d.tasks, savedSession),
+    );
     if (session.providerId && session.providerId !== providerId)
       throw providerErrorFromCode('PROVIDER_MISMATCH');
     session = { ...session, providerId };
@@ -271,8 +285,11 @@ export class AgentRuntime implements AgentRuntimePort {
     };
 
     const prepare = async (): Promise<FunctionTool[]> => {
-      snapshot = await hooks.prepare();
-      const currentMessages = await d.conversations.listTaskMessages(snapshot.task.id);
+      snapshot = await prepareModelInput('agent_context', hooks.prepare());
+      const currentMessages = await prepareModelInput(
+        'conversation_history',
+        d.conversations.listTaskMessages(snapshot.task.id),
+      );
       await loadReplyTargets(currentMessages);
       const byId = new Map(
         [...messages, ...currentMessages].map((message) => [message.id, message]),
@@ -288,7 +305,10 @@ export class AgentRuntime implements AgentRuntimePort {
         [...byId.values()],
         tasks,
       );
-      contract = await d.tools.contract({ ...snapshot, conversationTasks: tasks }, signal);
+      contract = await prepareModelInput(
+        'tool_contract',
+        d.tools.contract({ ...snapshot, conversationTasks: tasks }, signal),
+      );
       agent.instructions = [settings.systemPrompt, contract.systemPrompt]
         .filter(Boolean)
         .join('\n\n');
@@ -401,7 +421,10 @@ export class AgentRuntime implements AgentRuntimePort {
               settings,
               {
                 ...request,
-                input: await renderSessionItems(session.items, d.attachments),
+                input: await prepareModelInput(
+                  'agent_context',
+                  renderSessionItems(session.items, d.attachments),
+                ),
               },
               snapshot.task.conversationId,
             );
@@ -533,7 +556,10 @@ export class AgentRuntime implements AgentRuntimePort {
           usage,
         });
         try {
-          const rendered = await renderSessionItems(session.items, d.attachments);
+          const rendered = await prepareModelInput(
+            'agent_context',
+            renderSessionItems(session.items, d.attachments),
+          );
           for await (const event of providerModel.getStreamedResponse({
             ...request,
             input: rendered,
@@ -643,6 +669,8 @@ export class AgentRuntime implements AgentRuntimePort {
       name: 'ChatBrowserX',
       model: observedModel,
       tools: [],
+      // prepare() refreshes the choice every turn; the SDK must not clear that new constraint.
+      resetToolChoice: false,
       modelSettings: {
         store: false,
         preserveRawUsage: true,
@@ -716,6 +744,9 @@ export class AgentRuntime implements AgentRuntimePort {
     const runner = new Runner({
       tracingDisabled: true,
       traceIncludeSensitiveData: false,
+      // Dynamic availability can retire a tool the model saw earlier; let it recover
+      // from the SDK's error result without dispatching the unavailable call.
+      toolNotFoundBehavior: 'return_error_to_model',
       toolExecution: { maxFunctionToolConcurrency: 1 },
       callModelInputFilter: async ({ modelData }) => {
         // SDK-generated validation results have no external effects but remain part of the transcript.

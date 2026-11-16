@@ -975,6 +975,64 @@ describe('browserToolDefinitionsForCheckpoint', () => {
     });
   });
 
+  it('allows dismissing a blocker after inspecting a scroll that made no progress', () => {
+    const stalledScroll = pair(
+      'scroll_blocked',
+      'browser_scroll',
+      { tabId: 0, target: 'viewport', deltaX: 0, deltaY: 1_800, maxSegments: 1, stopText: '' },
+      {
+        ok: true,
+        data: {
+          action: 'scroll',
+          moved: false,
+          actualDeltaX: 0,
+          actualDeltaY: 0,
+          requestedDeltaApplied: false,
+          remainingDeltaX: 0,
+          remainingDeltaY: 1_800,
+          contentChanged: false,
+          extentChanged: false,
+          loadedMore: false,
+          boundaryVerified: false,
+          needsBoundaryProbe: false,
+          verification: {
+            mode: 'interactive',
+            snapshot: 'snapshot_unchanged',
+            unchanged: true,
+          },
+        },
+      },
+    );
+    const blocked = browserToolContractForCheckpoint(checkpoint(stalledScroll));
+    expect(blocked.toolChoice).toEqual({ type: 'function', name: 'browser_inspect' });
+
+    const inspected = pair(
+      'inspect_blocker',
+      'browser_inspect',
+      { tabId: 0, mode: 'interactive', since: '' },
+      {
+        ok: true,
+        data: {
+          mode: 'interactive',
+          snapshot: 'snapshot_dialog',
+          elements: [
+            { r: 'dialog', n: 'Please read each question carefully' },
+            { r: 'button', n: 'OK', ref: 'ref_dismiss' },
+          ],
+          coverage: { targets: ['viewport'], primaryTarget: 'viewport', moreAfter: true },
+        },
+      },
+    );
+    const recovered = browserToolContractForCheckpoint(
+      checkpoint([...stalledScroll, ...inspected]),
+    );
+    expect(recovered.scrollContinuation).toBeUndefined();
+    expect(recovered.toolChoice).toBeUndefined();
+    expect(recovered.tools.map(({ name }) => name)).toEqual(
+      expect.arrayContaining(['browser_click', 'browser_scroll']),
+    );
+  });
+
   it('leaves an objective-level traversal optional after its evidence budget is exhausted', () => {
     const boundedTraversal = pair(
       'scroll_traversal_evidence_budget',

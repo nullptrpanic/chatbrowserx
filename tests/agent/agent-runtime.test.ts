@@ -37,7 +37,7 @@ const text = (value: string, phase?: 'commentary' | 'final_answer'): OutputItem 
   ...(phase === undefined ? {} : { phase }),
   content: [{ type: 'output_text', text: value }],
 });
-const call = (id: string): OutputItem => ({
+const call = (id: string): Extract<OutputItem, { type: 'function_call' }> => ({
   type: 'function_call',
   callId: id,
   name: 'inspect_fixture',
@@ -201,6 +201,106 @@ async function fixture(
 }
 
 describe('framework-backed agent runtime', () => {
+  it('returns a disabled tool error to the model and continues with an available tool', async () => {
+    const f = await fixture([
+      [call('first')],
+      [call('hidden')],
+      [{ ...call('recovered'), name: 'click_fixture' }],
+      [text('Done without submitting.')],
+    ]);
+    const original = f.tools.contract.bind(f.tools);
+    vi.spyOn(f.tools, 'contract').mockImplementation(async (context, signal) => ({
+      ...(await original(context, signal)),
+      definitions: [
+        strictFunctionTool(
+          context.toolResults?.length ? 'click_fixture' : 'inspect_fixture',
+          'Interact with the fixture',
+          {},
+        ),
+      ],
+    }));
+    try {
+      const { task } = await f.submit('Fill the form without submitting.');
+      const result = await f.executor.run(task.id, new AbortController().signal);
+      expect(result.task.status).toBe('completed');
+      expect(f.tools.execute).toHaveBeenCalledTimes(2);
+      expect(vi.mocked(f.tools.execute).mock.calls.map(([tool]) => tool.callId)).toEqual([
+        'first',
+        'recovered',
+      ]);
+      const unavailable = expect.objectContaining({
+        type: 'function_call_result',
+        callId: 'hidden',
+        output: { type: 'text', text: expect.stringContaining('not found') },
+      });
+      expect(f.requests[2]?.input).toContainEqual(unavailable);
+      const session = await f.tasks.getAgentSession(task.conversationId);
+      expect(session?.items).toContainEqual(unavailable);
+    } finally {
+      f.db.close();
+    }
+  });
+
+  it('honors each refreshed tool choice after a tool call and returns to automatic choice', async () => {
+    const f = await fixture([[call('first')], [call('forced')], [text('Done.')]]);
+    const original = f.tools.contract.bind(f.tools);
+    vi.spyOn(f.tools, 'contract').mockImplementation(async (context, signal) => ({
+      ...(await original(context, signal)),
+      toolChoice:
+        context.toolResults?.length === 1 ? { type: 'function', name: 'inspect_fixture' } : 'auto',
+    }));
+    try {
+      const { task } = await f.submit('Inspect again when the page requires it.');
+      const result = await f.executor.run(task.id, new AbortController().signal);
+      expect(result.task.status).toBe('completed');
+      expect(f.requests.map((request) => request.modelSettings.toolChoice)).toEqual([
+        'auto',
+        'inspect_fixture',
+        'auto',
+      ]);
+    } finally {
+      f.db.close();
+    }
+  });
+
+  it.each(['conversation_history', 'tool_contract'] as const)(
+    'retains the failing %s preparation stage without persisting private error details',
+    async (stage) => {
+      const f = await fixture([]);
+      try {
+        const { task } = await f.submit('Fill the form without submitting.');
+        const error = new Error('Private upstream diagnostic');
+        if (stage === 'conversation_history')
+          vi.spyOn(f.conversations, 'listMessages').mockRejectedValue(error);
+        else vi.spyOn(f.tools, 'contract').mockRejectedValue(error);
+        const result = await f.executor.run(task.id, new AbortController().signal);
+        expect(result.task.status).toBe('failed');
+        expect(result.run.error).toMatchObject({
+          code: 'TaskInputError',
+          userMessage: `Task input could not be prepared (stage: ${stage}).`,
+          evidenceRef: `input_preparation:${stage}`,
+        });
+        expect(JSON.stringify(result.events)).not.toContain(error.message);
+        expect(f.requests).toHaveLength(0);
+      } finally {
+        f.db.close();
+      }
+    },
+  );
+
+  it('preserves provider authentication failures during tool preparation', async () => {
+    const f = await fixture([]);
+    try {
+      const { task } = await f.submit('Inspect the page.');
+      vi.spyOn(f.tools, 'contract').mockRejectedValue(providerErrorFromCode('AUTH'));
+      const result = await f.executor.run(task.id, new AbortController().signal);
+      expect(result.task.status).toBe('waiting_for_auth');
+      expect(result.run.error?.code).toBe('AuthError');
+    } finally {
+      f.db.close();
+    }
+  });
+
   it.each(['saved window', 'durable history'] as const)(
     'preserves the answer and forwards the supplement once using %s',
     async (context) => {

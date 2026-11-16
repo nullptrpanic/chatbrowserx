@@ -223,7 +223,7 @@ describe('Codex backend SDK boundary', () => {
             output: '[]',
           },
         ],
-        modelSettings: { ...request.modelSettings, toolChoice: 'browser.tab' },
+        modelSettings: { ...request.modelSettings, toolChoice: 'auto' },
         tools: [
           {
             type: 'function',
@@ -252,7 +252,7 @@ describe('Codex backend SDK boundary', () => {
             tools: [{ name: 'tab', description: 'Call chatbrowserx_browser.tab.' }],
           },
         ],
-        tool_choice: { type: 'function', name: 'chatbrowserx_browser.tab' },
+        tool_choice: 'auto',
         input: [
           {
             type: 'function_call',
@@ -275,6 +275,68 @@ describe('Codex backend SDK boundary', () => {
       });
     },
   );
+
+  it('requires only the selected namespace member without sending an unresolvable function choice', async () => {
+    let body: Record<string, unknown> = {};
+    const backend = new CodexProvider({ getAccessToken: async () => token }, async (_url, init) => {
+      body = JSON.parse(String(init?.body));
+      // The backend resolves named function choices against top-level tools only.
+      if (typeof body.tool_choice === 'object') {
+        return Response.json(
+          {
+            error: { message: "Tool choice not found in 'tools' parameter.", param: 'tool_choice' },
+          },
+          { status: 400 },
+        );
+      }
+      return response([
+        {
+          id: 'fc_inspect',
+          type: 'function_call',
+          namespace: 'chatbrowserx_browser',
+          name: 'inspect',
+          call_id: 'inspect_1',
+          arguments: '{}',
+          status: 'completed',
+        },
+      ]);
+    });
+    const model = await backend.getModel({ model: 'fixture', reasoningEffort: 'low' });
+    const events = [];
+    for await (const event of model.getStreamedResponse({
+      ...request,
+      tools: (
+        [
+          ['browser', 'inspect'],
+          ['browser', 'scroll'],
+          ['task', 'inspect'],
+        ] as const
+      ).map(([namespace, name]) => ({
+        type: 'function' as const,
+        namespace,
+        name,
+        namespaceDescription: 'Operations',
+        description: 'Test operation',
+        parameters: { type: 'object', properties: {}, required: [], additionalProperties: false },
+        strict: true,
+      })),
+      modelSettings: { ...request.modelSettings, toolChoice: 'browser.inspect' },
+    }))
+      events.push(event);
+    expect(body.tools).toEqual([
+      {
+        type: 'namespace',
+        name: 'chatbrowserx_browser',
+        description: 'Operations',
+        tools: [expect.objectContaining({ type: 'function', name: 'inspect' })],
+      },
+    ]);
+    expect(body.tool_choice).toBe('required');
+    expect(body.parallel_tool_calls).toBe(false);
+    expect(events.find((event) => event.type === 'response_done')).toMatchObject({
+      response: { output: [expect.objectContaining({ namespace: 'browser', name: 'inspect' })] },
+    });
+  });
 
   it('routes a conversation consistently without adding session state to the request body', async () => {
     const sent: Array<{ session: string | null; body: unknown }> = [];

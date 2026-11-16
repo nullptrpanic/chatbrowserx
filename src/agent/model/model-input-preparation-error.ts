@@ -1,3 +1,5 @@
+import { isProviderError } from '../../providers/provider-error';
+
 export type ModelInputPreparationStage =
   'settings' | 'conversation_history' | 'tool_contract' | 'agent_context' | 'assistant_message';
 
@@ -40,6 +42,7 @@ export async function prepareModelInput<T>(
   } catch (error) {
     if (
       isModelInputPreparationError(error) ||
+      isProviderError(error) ||
       (error instanceof Error && error.name === 'AbortError')
     ) {
       throw error;

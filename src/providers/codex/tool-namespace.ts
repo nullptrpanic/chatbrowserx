@@ -11,6 +11,23 @@ export function decodeCodexToolName(name: string): string {
 
 /** Codex reserves some namespace names for its own tools. Scope application tools on the wire. */
 export function encodeCodexToolNames(body: ResponseCreateParamsStreaming): void {
+  const choice = body.tool_choice;
+  if (typeof choice === 'object' && choice !== null && choice.type === 'function') {
+    for (const tool of body.tools ?? []) {
+      if (tool.type !== 'namespace') continue;
+      const member = tool.tools.find(
+        (candidate) =>
+          candidate.type === 'function' && `${tool.name}.${candidate.name}` === choice.name,
+      );
+      if (!member) continue;
+      // Codex cannot resolve a qualified name in a forced function choice. Expose just
+      // that member and require a call, preserving both its namespace and the constraint.
+      body.tools = [{ ...tool, tools: [member] }];
+      body.tool_choice = 'required';
+      body.parallel_tool_calls = false;
+      break;
+    }
+  }
   const namespaces = new Set(
     body.tools?.flatMap((tool) => (tool.type === 'namespace' ? [tool.name] : [])),
   );

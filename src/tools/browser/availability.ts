@@ -443,10 +443,6 @@ function browserScrollContinuation(history: BrowserToolHistory): BrowserScrollCo
     const requestedDeltaX = arguments_?.deltaX;
     const requestedDeltaY = arguments_?.deltaY;
     const needsBoundaryProbe = data?.needsBoundaryProbe === true;
-    const hasInteractiveEvidence =
-      embeddedInteractiveObservations(data).length > 0 &&
-      data?.verificationUnavailable !== true &&
-      data?.continuationFailure === undefined;
     const incomplete =
       data?.action === 'scroll' &&
       data.requestedDeltaApplied === false &&
@@ -455,6 +451,20 @@ function browserScrollContinuation(history: BrowserToolHistory): BrowserScrollCo
       remainingDeltaY !== null &&
       (remainingDeltaX !== 0 || remainingDeltaY !== 0) &&
       typeof arguments_?.target === 'string';
+    // A blocked wheel event is not unfinished virtualized traversal. Inspect once,
+    // then allow the model to dismiss an overlay or choose another scroll target.
+    const stalled =
+      incomplete &&
+      data.moved === false &&
+      data.contentChanged !== true &&
+      data.extentChanged !== true &&
+      data.loadedMore !== true &&
+      !needsBoundaryProbe;
+    const hasInteractiveEvidence =
+      !stalled &&
+      embeddedInteractiveObservations(data).length > 0 &&
+      data?.verificationUnavailable !== true &&
+      data?.continuationFailure === undefined;
     if (data?.action !== 'scroll' || typeof arguments_?.target !== 'string') {
       state.continuation = null;
       continue;
@@ -469,8 +479,8 @@ function browserScrollContinuation(history: BrowserToolHistory): BrowserScrollCo
       target: arguments_.target as string,
       maxSegments: 1,
       stopText: '',
-      remainingDeltaX: incomplete ? (remainingDeltaX ?? 0) : 0,
-      remainingDeltaY: incomplete ? (remainingDeltaY ?? 0) : 0,
+      remainingDeltaX: incomplete && !stalled ? (remainingDeltaX ?? 0) : 0,
+      remainingDeltaY: incomplete && !stalled ? (remainingDeltaY ?? 0) : 0,
       ...(needsBoundaryProbe &&
       typeof requestedDeltaX === 'number' &&
       Number.isFinite(requestedDeltaX) &&
@@ -840,7 +850,7 @@ function constrainedContinuationDefinition(
             ? 'A virtualized scroll still has unconsumed distance. Inspect the newly exposed interactive batch before any further scrolling or final answer.'
             : requiresBoundaryProbe
               ? 'The scroll only just reached an apparent boundary. Inspect the exposed batch, then verify the boundary with one same-direction probe before any final answer.'
-              : 'The page was scrolled. Inspect the resulting interactive state before any further action or final answer.'
+              : 'Inspect the current interactive state and any blocking overlay after the scroll attempt before any further action or final answer.'
         : continuation.mode === 'traverse'
           ? continuation.targetOptions !== undefined
             ? 'Continue the same unfinished bounded traversal. Choose the semantically matching target from the fresh schema-constrained refs, preserve its direction, stop marker, and segment bound, and do not finish while continuation is required.'
