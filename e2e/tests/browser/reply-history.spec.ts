@@ -185,7 +185,7 @@ async function waitForTask(
 async function waitForTaskStatus(
   page: Parameters<typeof sendExtensionMessage>[0],
   taskId: string,
-  status: 'completed' | 'failed' | 'cancelled',
+  status: TaskSnapshot['task']['status'],
 ): Promise<void> {
   await expect
     .poll(
@@ -299,14 +299,23 @@ extensionTest(
     await supplement('Only PS5, please.');
     releases[0]?.();
     await expect.poll(() => releases.length).toBe(2);
-    await expect(card).toHaveText(/Checking editions\.\s*Only PS5, please\./);
+    await expect(card).toHaveText(/Only PS5, please\.\s*Checking editions\./);
     await expect(activity).toHaveText('Checking public sources');
 
     await supplement('Include the regional stores.');
     releases[1]?.();
     await expect.poll(() => releases.length).toBe(3);
     await expect(card).toHaveText(
-      /Only PS5, please\.\s*Checking PS5 editions\.\s*Include the regional stores\./,
+      /Only PS5, please\.\s*Checking editions\.\s*Include the regional stores\.\s*Checking PS5 editions\./,
+    );
+    await expect(card.locator('blockquote')).toHaveText([
+      'Only PS5, please.',
+      'Include the regional stores.',
+    ]);
+    await panel.reload();
+    await expect(card).toHaveCount(1);
+    await expect(card).toHaveText(
+      /Only PS5, please\.\s*Checking editions\.\s*Include the regional stores\.\s*Checking PS5 editions\./,
     );
     const details = card.locator('.task-summary-toggle');
     await details.click();
@@ -328,6 +337,127 @@ extensionTest(
     );
     await expect(searchRows.nth(0).locator('.process-message')).toHaveText(preambles[2]);
     await expect(searchRows.nth(1).locator('.process-message')).toHaveCount(0);
+  },
+);
+
+extensionTest(
+  'preserves supplement chronology in completed execution details after reopening',
+  async ({ extensionSession }) => {
+    const { context, sidePanelPage: panel } = extensionSession;
+    const page = await context.newPage();
+    await page.goto('https://example.com/reply-card');
+    const requests: unknown[] = [];
+    let pending: ServerResponse | undefined;
+    const emit = (event: { type: string; [key: string]: unknown }) =>
+      pending?.write(`data: ${JSON.stringify(event)}\n\n`);
+    const server = createServer((request, response) => {
+      let body = '';
+      request.setEncoding('utf8').on('data', (chunk: string) => {
+        body += chunk;
+      });
+      request.once('end', () => {
+        requests.push(JSON.parse(body));
+        pending = response;
+        response.writeHead(200, {
+          'Content-Type': 'text/event-stream',
+          'Access-Control-Allow-Origin': '*',
+        });
+        emit({ type: 'response.created', response: { id: `chronology_${requests.length}` } });
+      });
+    });
+    await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
+    const address = server.address();
+    if (!address || typeof address === 'string') throw new Error('Missing fixture address');
+    try {
+      await context.route('https://chatgpt.com/backend-api/codex/responses', (route) =>
+        route.fulfill({
+          status: 307,
+          headers: { Location: `http://127.0.0.1:${address.port}/responses` },
+        }),
+      );
+      await sendExtensionMessage(panel, {
+        version: 1,
+        requestId: 'chronology_settings',
+        type: 'settings.save',
+        payload: {
+          reasoningEffort: 'low',
+          systemPrompt: '',
+          language: 'en',
+          accessToken: syntheticAccessToken(),
+        },
+      });
+      await panel.getByRole('textbox').fill('Inspect the page without submitting.');
+      await panel.getByRole('button', { name: 'Send' }).click();
+      await expect.poll(() => requests.length).toBe(1);
+      const card = panel.locator('article.message-assistant');
+      const details = card.locator('.task-summary-toggle');
+      await details.click();
+      const preamble = {
+        type: 'message',
+        id: 'msg_before_supplement',
+        role: 'assistant',
+        phase: 'commentary',
+        status: 'completed',
+        content: [
+          { type: 'output_text', text: 'I will inspect the current options.', annotations: [] },
+        ],
+      };
+      emit({ type: 'response.output_item.done', output_index: 0, item: preamble });
+      await expect(card.locator('.process-message')).toHaveText(
+        'I will inspect the current options.',
+      );
+      await panel.getByRole('textbox').fill('Use positive choices.');
+      await panel.getByRole('button', { name: 'Add detail' }).click();
+      await expect(card.locator('.message-bubble')).toHaveText(
+        /I will inspect the current options\.\s*Use positive choices\./,
+      );
+      const call = {
+        type: 'function_call',
+        id: 'fc_chronology',
+        call_id: 'call_chronology',
+        name: 'inspect',
+        namespace: 'chatbrowserx_browser',
+        status: 'completed',
+        arguments: JSON.stringify({
+          tabId: 0,
+          mode: 'interactive',
+          since: '',
+          ref: '',
+          visualReason: '',
+        }),
+      };
+      emit({ type: 'response.output_item.done', output_index: 1, item: call });
+      emit({
+        type: 'response.completed',
+        response: { id: 'chronology_1', status: 'completed', output: [preamble, call] },
+      });
+      pending?.end();
+      await expect.poll(() => requests.length).toBe(2);
+      expect(inputTexts(requests[1]).join('\n')).toContain('Use positive choices.');
+      expect(JSON.parse(functionOutputs(requests[1]).at(-1) ?? '{}')).toMatchObject({ ok: true });
+      const rows = card.locator('.task-event-list > li');
+      const expectChronology = async () => {
+        await expect(rows).toHaveCount(3);
+        await expect(rows.nth(0)).toHaveText('I will inspect the current options.');
+        await expect(rows.nth(1)).toHaveClass('task-supplement-entry');
+        await expect(rows.nth(2)).toContainText('Inspect page completed');
+        await expect(rows.nth(2).locator('.process-message')).toHaveCount(0);
+      };
+      await expectChronology();
+      pending?.end(
+        finalTextResponse('chronology_2', 'The page is inspected and remains unsubmitted.'),
+      );
+      await expect(details).toContainText('Task completed');
+      await expectChronology();
+      await panel.reload();
+      await expect(card).toHaveCount(1);
+      await details.click();
+      await expect(details).toContainText('Task completed');
+      await expectChronology();
+    } finally {
+      pending?.end();
+      await closeHttpFixtureServer(server);
+    }
   },
 );
 
@@ -864,79 +994,262 @@ extensionTest(
   },
 );
 
+for (const retryStatus of ['planning', 'paused', 'waiting_for_auth'] as const) {
+  extensionTest(
+    `reuses one answer card across a failed attempt, ${retryStatus} retry, and panel reload`,
+    async ({ extensionSession }) => {
+      extensionTest.setTimeout(120_000);
+      const { context, sidePanelPage: panel } = extensionSession;
+      const page = await context.newPage();
+      await page.goto('https://example.com/failed-run-history');
+      const tabId = (await panel.evaluate(async (url) => chrome.tabs.query({ url }), page.url()))[0]
+        ?.id;
+      if (tabId === undefined) throw new Error('Retry fixture tab unavailable.');
+      let providerTurn = 0;
+      let releaseRetry = () => {};
+      const retryReady = new Promise<void>((resolve) => {
+        releaseRetry = resolve;
+      });
+      await context.route('https://chatgpt.com/backend-api/codex/responses', async (route) => {
+        providerTurn += 1;
+        const turn = providerTurn;
+        if (turn === 5) {
+          if (retryStatus === 'waiting_for_auth') {
+            await route.fulfill({
+              status: 401,
+              contentType: 'application/json',
+              body: JSON.stringify({ error: { message: 'Synthetic expired credential.' } }),
+            });
+            return;
+          }
+          await retryReady;
+          if (retryStatus === 'paused') {
+            await route.abort().catch(() => undefined);
+            return;
+          }
+        }
+        await route.fulfill({
+          status: 200,
+          contentType: 'text/event-stream',
+          body:
+            turn <= 4
+              ? invalidResponse(`retry_failed_${turn}`, turn === 1 ? 'Partial answer.' : '')
+              : finalTextResponse('retry_completed', 'The completed answer.'),
+        });
+      });
+      try {
+        await sendExtensionMessage(panel, {
+          version: 1,
+          requestId: 'retry_settings',
+          type: 'settings.save',
+          payload: {
+            reasoningEffort: 'low',
+            systemPrompt: 'Answer directly.',
+            language: 'en',
+            historyMessageLimit: 50,
+            accessToken: syntheticAccessToken(),
+          },
+        });
+        const submitted = await sendExtensionMessage<{
+          task: { id: string; conversationId: string };
+        }>(panel, {
+          version: 1,
+          requestId: 'retry_submit',
+          type: 'chat.submit',
+          payload: { tabId, text: 'One question, one answer card.', attachmentIds: [] },
+        });
+        await waitForTaskStatus(panel, submitted.task.id, 'failed');
+        const cards = panel.locator('article.message-assistant');
+        await expect(cards).toHaveCount(1);
+        await sendExtensionMessage(panel, {
+          version: 1,
+          requestId: 'retry_same_question',
+          type: 'task.retry',
+          payload: { taskId: submitted.task.id },
+        });
+        await expect.poll(() => providerTurn).toBe(5);
+        if (retryStatus === 'paused') {
+          await sendExtensionMessage(panel, {
+            version: 1,
+            requestId: 'pause_retry_before_text',
+            type: 'task.pause',
+            payload: { taskId: submitted.task.id },
+          });
+          releaseRetry();
+        }
+        await waitForTaskStatus(panel, submitted.task.id, retryStatus);
+        const statusText =
+          retryStatus === 'paused'
+            ? 'Task paused'
+            : retryStatus === 'waiting_for_auth'
+              ? 'Access Token needs an update'
+              : 'Generating a response';
+        await expect(cards).toHaveCount(1);
+        await expect(panel.locator('.task-card')).toHaveCount(1);
+        await expect(cards).toContainText(statusText);
+        await expect(cards).not.toContainText('Task failed');
+        await panel.reload();
+        await expect(cards).toHaveCount(1);
+        await expect(panel.locator('.task-card')).toHaveCount(1);
+        await expect(cards).toContainText(statusText);
+        releaseRetry();
+        if (retryStatus !== 'planning') {
+          await sendExtensionMessage(panel, {
+            version: 1,
+            requestId: 'resume_waiting_retry',
+            type: 'task.resume',
+            payload: { taskId: submitted.task.id },
+          });
+        }
+        await waitForTask(panel, submitted.task.id);
+        await expect(cards).toHaveCount(1);
+        await expect(cards).toContainText('The completed answer.');
+        await expect(cards).not.toContainText('Task failed');
+        await panel.reload();
+        await expect(panel.locator('article.message-item')).toHaveCount(2);
+        await expect(cards).toContainText('The completed answer.');
+      } finally {
+        releaseRetry();
+      }
+    },
+  );
+}
+
 extensionTest(
-  'reuses one answer card across a failed attempt, retry, and panel reload',
+  'retries an old inspection history and batches selections in a background tab without submitting',
   async ({ extensionSession }) => {
-    extensionTest.setTimeout(120_000);
     const { context, sidePanelPage: panel } = extensionSession;
+    const url = 'https://example.com/retry-browser-form';
+    await context.route(url, (route) =>
+      route.fulfill({
+        contentType: 'text/html',
+        body: '<title>Retry form</title><form onsubmit="event.preventDefault();document.querySelector(\'output\').textContent=\'Submitted\'"><label><input type="checkbox">First choice</label><label><input type="checkbox">Second choice</label><label>Feedback<input type="text"></label><button>Submit</button></form><output>Not submitted</output>',
+      }),
+    );
     const page = await context.newPage();
-    await page.goto('https://example.com/failed-run-history');
-    const tabId = (await panel.evaluate(async (url) => chrome.tabs.query({ url }), page.url()))[0]
-      ?.id;
-    if (tabId === undefined) throw new Error('Retry fixture tab unavailable.');
+    await page.goto(url);
+    const tabId = (await panel.evaluate(async (url) => chrome.tabs.query({ url }), url))[0]?.id;
+    if (tabId === undefined) throw new Error('Retry form tab unavailable.');
+    const foreground = await context.newPage();
+    await foreground.goto('about:blank');
+    await foreground.bringToFront();
+
     let providerTurn = 0;
-    let releaseRetry = () => {};
-    const retryReady = new Promise<void>((resolve) => {
-      releaseRetry = resolve;
-    });
+    let initialOutputs: unknown[] = [];
+    let retryOutput: {
+      ok?: boolean;
+      data?: { elements?: { n?: string; r?: string; ref?: string }[] };
+    } = {};
+    let feedbackRef = '';
+    let batchLimit: unknown;
+    const inspect = { tabId: 0, mode: 'interactive', since: '', ref: '', visualReason: '' };
     await context.route('https://chatgpt.com/backend-api/codex/responses', async (route) => {
-      providerTurn += 1;
-      const turn = providerTurn;
-      if (turn > 4) await retryReady;
-      await route.fulfill({
-        status: 200,
-        contentType: 'text/event-stream',
-        body:
-          turn <= 4
-            ? invalidResponse(`retry_failed_${turn}`, turn === 1 ? 'Partial answer.' : '')
-            : finalTextResponse('retry_completed', 'The completed answer.'),
-      });
+      const request = route.request().postDataJSON();
+      const outputs = functionOutputs(request);
+      const turn = ++providerTurn;
+      if (turn === 3) {
+        initialOutputs = outputs.map((value) => JSON.parse(value));
+        await route.fulfill({
+          status: 400,
+          contentType: 'application/json',
+          body: JSON.stringify({
+            error: {
+              type: 'invalid_request_error',
+              param: 'tool_choice',
+              message: 'Synthetic provider interruption.',
+            },
+          }),
+        });
+        return;
+      }
+      let body: string;
+      if (turn <= 2 || turn === 4) {
+        body = toolResponse(
+          `inspect_${turn}`,
+          `item_${turn}`,
+          `call_${turn}`,
+          'browser.inspect',
+          inspect,
+        );
+      } else if (turn === 5) {
+        retryOutput = JSON.parse(outputs.at(-1) ?? '{}');
+        const elements = retryOutput.data?.elements ?? [];
+        const choices = elements.filter((element) => element.r === 'checkbox' && element.ref);
+        feedbackRef = elements.find((element) => element.r === 'textbox')?.ref ?? '';
+        const batch = request.tools
+          .find((tool: { name?: string }) => tool.name === 'chatbrowserx_browser')
+          ?.tools?.find((tool: { name?: string }) => tool.name === 'set_checked');
+        batchLimit = batch?.parameters?.properties?.items?.maxItems;
+        body =
+          retryOutput.ok && choices.length === 2 && feedbackRef
+            ? toolResponse('batch', 'batch_item', 'batch_call', 'browser.set_checked', {
+                tabId: 0,
+                items: choices.map((element) => ({ ref: element.ref, checked: true })),
+              })
+            : finalTextResponse('blocked', 'Could not inspect the form.');
+      } else if (turn === 6) {
+        body = toolResponse('fill', 'fill_item', 'fill_call', 'browser.type', {
+          tabId: 0,
+          ref: feedbackRef,
+          text: 'Verified after retry.',
+          replace: true,
+          submit: false,
+        });
+      } else {
+        body = finalTextResponse('done', 'Filled without submitting.');
+      }
+      await route.fulfill({ status: 200, contentType: 'text/event-stream', body });
     });
-    try {
-      await sendExtensionMessage(panel, {
-        version: 1,
-        requestId: 'retry_settings',
-        type: 'settings.save',
-        payload: {
-          reasoningEffort: 'low',
-          systemPrompt: 'Answer directly.',
-          language: 'en',
-          historyMessageLimit: 50,
-          accessToken: syntheticAccessToken(),
-        },
-      });
-      const submitted = await sendExtensionMessage<{
-        task: { id: string; conversationId: string };
-      }>(panel, {
-        version: 1,
-        requestId: 'retry_submit',
-        type: 'chat.submit',
-        payload: { tabId, text: 'One question, one answer card.', attachmentIds: [] },
-      });
-      await waitForTaskStatus(panel, submitted.task.id, 'failed');
-      const cards = panel.locator('article.message-assistant');
-      await expect(cards).toHaveCount(1);
-      await sendExtensionMessage(panel, {
-        version: 1,
-        requestId: 'retry_same_question',
-        type: 'task.retry',
-        payload: { taskId: submitted.task.id },
-      });
-      await expect.poll(() => providerTurn).toBe(5);
-      await expect(cards).toHaveCount(1);
-      await panel.reload();
-      await expect(cards).toHaveCount(1);
-      releaseRetry();
-      await waitForTask(panel, submitted.task.id);
-      await expect(cards).toHaveCount(1);
-      await expect(cards).toContainText('The completed answer.');
-      await expect(cards).not.toContainText('Task failed');
-      await panel.reload();
-      await expect(panel.locator('article.message-item')).toHaveCount(2);
-      await expect(cards).toContainText('The completed answer.');
-    } finally {
-      releaseRetry();
-    }
+    await sendExtensionMessage(panel, {
+      version: 1,
+      requestId: 'retry_browser_settings',
+      type: 'settings.save',
+      payload: {
+        reasoningEffort: 'low',
+        systemPrompt: 'Use browser tools.',
+        language: 'en',
+        accessToken: syntheticAccessToken(),
+      },
+    });
+    const submitted = await sendExtensionMessage<{ task: { id: string } }>(panel, {
+      version: 1,
+      requestId: 'retry_browser_submit',
+      type: 'chat.submit',
+      payload: {
+        tabId,
+        text: 'Select both choices and fill Feedback without submitting.',
+        attachmentIds: [],
+      },
+    });
+    await waitForTaskStatus(panel, submitted.task.id, 'failed');
+    expect(initialOutputs).toEqual([
+      expect.objectContaining({ ok: true }),
+      expect.objectContaining({ ok: true }),
+    ]);
+    await sendExtensionMessage(panel, {
+      version: 1,
+      requestId: 'retry_browser_retry',
+      type: 'task.retry',
+      payload: { taskId: submitted.task.id },
+    });
+    await waitForTask(panel, submitted.task.id);
+    expect(retryOutput).toMatchObject({ ok: true });
+    expect(batchLimit).toBe(20);
+    expect(providerTurn).toBe(7);
+    await expect(page.getByRole('checkbox', { name: 'First choice' })).toBeChecked();
+    await expect(page.getByRole('checkbox', { name: 'Second choice' })).toBeChecked();
+    await expect(page.getByRole('textbox', { name: 'Feedback' })).toHaveValue(
+      'Verified after retry.',
+    );
+    await expect(page.locator('output')).toHaveText('Not submitted');
+    expect(await panel.evaluate(async (id) => (await chrome.tabs.get(id)).active, tabId)).toBe(
+      false,
+    );
+    await panel.reload();
+    await expect(panel.locator('article.message-assistant')).toHaveCount(1);
+    await expect(panel.locator('article.message-assistant')).toContainText(
+      'Filled without submitting.',
+    );
   },
 );
 

@@ -367,6 +367,19 @@ function taskDetailItems(task: PanelTask): readonly TaskDetailItem[] {
     ]),
   );
   const supplements = new Map(task.supplements.map(({ id, detailIndex }) => [id, detailIndex]));
+  const followingDetails = new Map<number, number>();
+  let followingIndex: number | undefined;
+  for (const event of [...task.events].reverse()) {
+    const index = event.callId
+      ? tools.get(event.callId)?.detailIndex
+      : event.supplementIds?.[0]
+        ? supplements.get(event.supplementIds[0])
+        : undefined;
+    if (index !== undefined) followingIndex = index;
+    if (event.commentary && followingIndex !== undefined) {
+      followingDetails.set(event.sequence, followingIndex);
+    }
+  }
   const standalone: TaskDetailItem[] = [];
   let afterIndex = 0;
   for (const event of task.events) {
@@ -381,7 +394,9 @@ function taskDetailItems(task: PanelTask): readonly TaskDetailItem[] {
     const { callId, text } = event.commentary;
     const message = { sequence: event.sequence, text };
     const group = callId ? tools.get(callId) : undefined;
-    if (group) group.commentary.push(message);
+    // Keep commentary beside its tool only when no user input or other result intervened.
+    if (group && group.detailIndex === followingDetails.get(event.sequence))
+      group.commentary.push(message);
     else standalone.push({ type: 'commentary', ...message, afterIndex });
   }
   return [

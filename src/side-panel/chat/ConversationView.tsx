@@ -234,8 +234,9 @@ function messagesWithRunReplies(
   const derived = tasks.flatMap((task) =>
     task.runs.flatMap((run): PanelMessage[] => {
       const running = run.status === 'queued' || run.status === 'planning';
+      const waiting = run.status === 'paused' || run.status === 'waiting_for_auth';
       if (
-        (!running && run.status !== 'failed' && run.status !== 'cancelled') ||
+        (!running && !waiting && run.status !== 'failed' && run.status !== 'cancelled') ||
         assistantRuns.has(taskRunKey(task.id, run.id))
       ) {
         return [];
@@ -247,7 +248,13 @@ function messagesWithRunReplies(
           taskId: task.id,
           runId: run.id,
           role: 'assistant',
-          status: running ? 'streaming' : run.status === 'failed' ? 'error' : 'interrupted',
+          status: running
+            ? 'streaming'
+            : waiting
+              ? 'complete'
+              : run.status === 'failed'
+                ? 'error'
+                : 'interrupted',
           text: '',
           attachmentIds: [],
           createdAt: at,

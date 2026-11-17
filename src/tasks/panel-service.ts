@@ -339,6 +339,7 @@ export class PanelService {
     for (const timeline of timelines) {
       const { task } = timeline;
       const live = new Map<string, ReturnType<typeof supplementQuote>>();
+      const queuedSupplementRuns = new Map<string, string>();
       const segments = new Map<
         string,
         {
@@ -351,9 +352,15 @@ export class PanelService {
         if (event.type === 'supplement.queued' || event.type === 'supplement.applied') {
           const supplement = storedById.get(event.messageId);
           if (supplement?.kind !== 'supplement' || supplement.taskId !== task.id) continue;
+          // Quotes follow the user's send order, just like execution details. Applying a
+          // supplement later must not move it past a reply that arrived while it was queued.
+          if (event.type === 'supplement.queued') {
+            queuedSupplementRuns.set(event.messageId, event.runId);
+          } else if (queuedSupplementRuns.get(event.messageId) === event.runId) {
+            continue;
+          }
           const quote = supplementQuote(supplement);
           if (event.runId === task.latestRunId) live.set(quote.id, quote);
-          if (event.type === 'supplement.queued') continue;
           const previous = segments.get(event.runId);
           const segment =
             !previous || previous.hasReply

@@ -110,6 +110,75 @@ function runningTask(completedToolCallCount: number): PanelTask {
 }
 
 describe('TaskProgressCard execution details', () => {
+  it.each(['planning', 'completed'] as const)(
+    'keeps a supplement after earlier commentary when the linked tool finishes later (%s)',
+    async (status) => {
+      const user = userEvent.setup();
+      const task = runningTask(2);
+      render(
+        <TaskProgressCard
+          task={{
+            ...task,
+            status,
+            events: [
+              {
+                sequence: 1,
+                type: 'assistant.commentary',
+                reason: 'assistant_commentary',
+                at: 1_100,
+                commentary: { callId: 'call_inspect', text: 'I will inspect the current options.' },
+              },
+              {
+                sequence: 2,
+                type: 'task.supplements-queued',
+                reason: 'supplement_queued',
+                at: 1_200,
+                supplementIds: ['supplement_1'],
+              },
+              {
+                sequence: 3,
+                type: 'assistant.commentary',
+                reason: 'assistant_commentary',
+                at: 1_300,
+                commentary: { callId: 'call_inspect', text: 'The inspection is still running.' },
+              },
+              {
+                sequence: 4,
+                type: 'tool.result-recorded',
+                reason: 'inspect_done',
+                at: 1_400,
+                callId: 'call_inspect',
+              },
+            ],
+            toolResults: task.toolResults.map((result, index) => ({
+              ...result,
+              detailIndex: index + 2,
+            })),
+            supplements: task.supplements.map((supplement) => ({
+              ...supplement,
+              detailIndex: 1,
+            })),
+          }}
+          attachments={attachments}
+          t={createTranslator('en')}
+          onPause={vi.fn()}
+          onResume={vi.fn()}
+          onRetry={vi.fn()}
+          onCancel={vi.fn()}
+        />,
+      );
+
+      await user.click(screen.getByRole('button', { name: 'Show execution details(3)' }));
+      const rows = [...screen.getByRole('list').children];
+      expect(rows).toHaveLength(4);
+      expect(rows[0]).toHaveTextContent('I will inspect the current options.');
+      expect(rows[1]).toHaveClass('task-supplement-entry');
+      expect(rows[2]).toHaveTextContent('The inspection is still running.');
+      expect(rows[2]).toHaveTextContent('Inspect page completed');
+      expect(rows[2]).not.toHaveTextContent('I will inspect the current options.');
+    },
+  );
+
   it('counts completed tools and renders only tool results plus user supplements', async () => {
     const user = userEvent.setup();
     const { rerender } = render(

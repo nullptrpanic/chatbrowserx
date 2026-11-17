@@ -260,6 +260,7 @@ describe('PanelService', () => {
       { ...base, id: 'reply_original', role: 'assistant', text: 'Original answer' },
       { ...base, id: 'supplement_a', kind: 'supplement', text: 'Add A' },
       { ...base, id: 'supplement_b', kind: 'supplement', text: 'Add B' },
+      { ...base, id: 'reply_inflight', role: 'assistant', text: 'Finishing the current step' },
       { ...base, id: 'reply_tool', role: 'assistant', text: 'Working on both' },
       { ...base, id: 'reply_final', role: 'assistant', text: 'Both answered' },
       { ...base, id: 'supplement_c', kind: 'supplement', text: 'Add C' },
@@ -272,6 +273,7 @@ describe('PanelService', () => {
       ['message.recorded', 'reply_original'],
       ['supplement.queued', 'supplement_a'],
       ['supplement.queued', 'supplement_b'],
+      ['message.recorded', 'reply_inflight'],
       ['supplement.applied', 'supplement_a'],
       ['supplement.applied', 'supplement_b'],
       ['message.recorded', 'reply_tool'],
@@ -297,6 +299,7 @@ describe('PanelService', () => {
     expect(snapshot.messages.map((m) => m.id)).toEqual([
       'message_1',
       'reply_original',
+      'reply_inflight',
       'reply_tool',
       'reply_final',
       'reply_c',
@@ -304,7 +307,7 @@ describe('PanelService', () => {
     expect(snapshot.messages.find((m) => m.id === 'reply_original')).not.toHaveProperty(
       'replySegment',
     );
-    for (const id of ['reply_tool', 'reply_final']) {
+    for (const id of ['reply_inflight', 'reply_tool', 'reply_final']) {
       expect(snapshot.messages.find((m) => m.id === id)).toMatchObject({
         replySegment: {
           id: 'supplement_a',

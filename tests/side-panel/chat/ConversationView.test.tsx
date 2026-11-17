@@ -531,6 +531,79 @@ describe('ConversationView answer execution details', () => {
     expect(screen.getAllByRole('article')[1]).toHaveTextContent('正在生成回复');
   });
 
+  it.each(['paused', 'waiting_for_auth'] as const)(
+    'keeps the retry in its original answer card when %s before any new text, including reload',
+    (status) => {
+      const task: PanelTask = {
+        ...completedTask('retry_waiting', 'Fill without submitting', 3_000),
+        status: 'planning',
+        latestRunId: 'run_2',
+        runs: [
+          {
+            id: 'run_1',
+            answerId: 'run_1',
+            attempt: 1,
+            status: 'failed',
+            startedAt: 1_000,
+            endedAt: 2_000,
+            lastError: null,
+          },
+          {
+            id: 'run_2',
+            answerId: 'run_1',
+            attempt: 2,
+            status: 'planning',
+            startedAt: 3_000,
+            endedAt: null,
+            lastError: null,
+          },
+        ],
+      };
+      const previous: PanelMessage = {
+        id: 'old_reply',
+        taskId: task.id,
+        runId: 'run_1',
+        role: 'assistant',
+        status: 'interrupted',
+        text: 'Old partial answer.',
+        attachmentIds: [],
+        createdAt: 1_500,
+        updatedAt: 2_000,
+      };
+      const props = {
+        tasks: [task],
+        task,
+        messages: [previous],
+        attachments,
+        t,
+        onSuggestion: vi.fn(),
+        onPause: vi.fn(),
+        onResume: vi.fn(),
+        onRetry: vi.fn(),
+        onCancel: vi.fn(),
+      };
+      const { rerender, unmount, container } = render(<ConversationView {...props} />);
+      const card = screen.getByRole('article');
+      const waiting: PanelTask = {
+        ...task,
+        status,
+        runs: task.runs.map((run) => (run.id === 'run_2' ? { ...run, status } : run)),
+      };
+      const expectedStatus = status === 'paused' ? '任务已暂停' : '需要更新 Access Token';
+      rerender(<ConversationView {...props} task={waiting} tasks={[waiting]} />);
+      expect(screen.getByRole('article')).toBe(card);
+      expect(card).toHaveTextContent(expectedStatus);
+      expect(card).not.toHaveTextContent('任务失败');
+      expect(container.querySelectorAll('.task-card')).toHaveLength(1);
+
+      unmount();
+      const reopened = render(<ConversationView {...props} task={waiting} tasks={[waiting]} />);
+      expect(screen.getByRole('article')).toHaveTextContent(expectedStatus);
+      expect(screen.queryByText('任务失败')).not.toBeInTheDocument();
+      expect(reopened.container.querySelectorAll('.task-card')).toHaveLength(1);
+    },
+  );
+
   it('derives a cancelled answer card from the persisted run before rendering the next question', () => {
     const task = {
       ...completedTask('task_cancel_then_continue', 'Continue the page task', 1_500),
