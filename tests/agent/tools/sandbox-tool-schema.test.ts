@@ -296,7 +296,7 @@ describe('registered Sandbox tool parsing', () => {
 
     try {
       const available = await changingRuntime.contract({});
-      now.mockReturnValue(310_000);
+      now.mockReturnValue(610_000);
       const stale = await changingRuntime.contract({});
 
       expect(available.definitions.map(({ name }) => name)).toEqual([
@@ -307,7 +307,7 @@ describe('registered Sandbox tool parsing', () => {
       expect(stale.definitions.map(({ name }) => name)).toEqual(['sandbox.read', 'sandbox.exec']);
       expect(stale.systemPrompt).toContain('Run the example workflow.');
       expect(execute).toHaveBeenCalledTimes(2);
-      now.mockReturnValue(910_000);
+      now.mockReturnValue(1_210_000);
       execute.mockRejectedValue(new Error('Still unavailable'));
       const expired = await changingRuntime.contract({});
       expect(expired.definitions.map(({ name }) => name)).toEqual(['sandbox.read', 'sandbox.exec']);
