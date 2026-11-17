@@ -816,7 +816,7 @@ describe('TaskExecutor', () => {
     database.close();
   });
 
-  it('does not redispatch an immediately repeated verified submit', async () => {
+  it.each([false, true])('does not redispatch a verified submit across retry=%s', async (retry) => {
     const database = await openChatBrowserDatabase(
       createTestDatabaseName('duplicate-browser-submit-success'),
     );
@@ -843,7 +843,8 @@ describe('TaskExecutor', () => {
     const plan = vi.fn<(input: AgentPlanInput) => AsyncGenerator<AgentEvent>>(() =>
       (async function* () {
         turn += 1;
-        if (turn <= 2) {
+        if (retry && turn === 2) throw providerErrorFromCode('INVALID_RESPONSE');
+        if (turn <= (retry ? 3 : 2)) {
           yield browserCall(`call_submit_${turn}`, 'browser_type', typeArguments);
           return;
         }
@@ -879,7 +880,12 @@ describe('TaskExecutor', () => {
       ids: dependencies.ids,
     });
 
-    const result = await executor.run(created.task.id, new AbortController().signal);
+    let result = await executor.run(created.task.id, new AbortController().signal);
+    if (retry) {
+      expect(result.task.status).toBe('failed');
+      await commands.retry(created.task.id);
+      result = await executor.run(created.task.id, new AbortController().signal);
+    }
 
     expect(result.task.status).toBe('completed');
     expect(execute).toHaveBeenCalledOnce();
@@ -1033,6 +1039,101 @@ describe('TaskExecutor', () => {
       needsInspect: false,
     });
   });
+
+  it.each(['inspect', 'scroll'] as const)(
+    'rechecks %s after retry without inheriting the previous attempt no-progress guard',
+    async (operation) => {
+      const database = await openChatBrowserDatabase(
+        createTestDatabaseName(`retry-browser-progress-${operation}`),
+      );
+      try {
+        const repository = new IndexedDbTaskRepository(database);
+        const dependencies = sources();
+        const commands = new TaskCommandService(
+          repository,
+          dependencies.clock,
+          dependencies.ids,
+          dependencies.conversations,
+        );
+        const created = await commands.create({
+          conversationId: 'conversation_1',
+          tabId: 7,
+          goal: 'Recheck the page after a failed attempt',
+        });
+        const allowedCalls = operation === 'inspect' ? 2 : 1;
+        const arguments_ =
+          operation === 'inspect'
+            ? { mode: 'interactive' }
+            : { target: 'viewport', deltaX: 0, deltaY: 600, maxSegments: 1, stopText: '' };
+        let retry = false;
+        let turn = 0;
+        const executor = new TaskExecutor({
+          repository,
+          conversations: dependencies.conversations,
+          planner: {
+            plan: () =>
+              (async function* () {
+                turn += 1;
+                if (turn <= allowedCalls + (retry ? 1 : 0)) {
+                  yield browserCall(`call_${retry}_${turn}`, `browser_${operation}`, arguments_);
+                  return;
+                }
+                if (!retry) throw providerErrorFromCode('INVALID_RESPONSE');
+                yield {
+                  type: 'task.completed',
+                  reason: 'model_response_completed',
+                  messageId: 'message_answer',
+                } as const;
+              })(),
+          },
+          fixture: fixturePort(),
+          browser: browserPort({
+            execute: vi.fn(async () => ({
+              output: JSON.stringify({
+                ok: true,
+                tabId: 7,
+                data:
+                  operation === 'inspect'
+                    ? { mode: 'interactive', snapshot: 'same_page', unchanged: true }
+                    : {
+                        action: 'scroll',
+                        moved: false,
+                        position: { x: 0, y: 0, maxX: 0, maxY: 0 },
+                        verification: {
+                          mode: 'interactive',
+                          snapshot: 'same_page',
+                          unchanged: true,
+                        },
+                      },
+              }),
+              attachmentIds: [],
+            })),
+          }),
+          clock: dependencies.clock,
+          ids: dependencies.ids,
+        });
+        const failed = await executor.run(created.task.id, new AbortController().signal);
+        expect(failed.task.status).toBe('failed');
+        expect(failed.toolResults).toHaveLength(allowedCalls);
+
+        retry = true;
+        turn = 0;
+        const retried = await commands.retry(created.task.id);
+        const completed = await executor.run(created.task.id, new AbortController().signal);
+        const retryOutputs = completed.toolResults
+          .filter((result) => result.runId === retried.run.id)
+          .map((result) => JSON.parse(result.output));
+
+        expect(retryOutputs.slice(0, allowedCalls)).toEqual(
+          Array.from({ length: allowedCalls }, () => expect.objectContaining({ ok: true })),
+        );
+        expect(retryOutputs.at(-1)).toMatchObject({ ok: false, code: 'NO_PROGRESS' });
+        expect(completed.task.status).toBe('completed');
+      } finally {
+        database.close();
+      }
+    },
+  );
 
   it.each([true, false])(
     'does not block repeatable clicks solely because AX is unchanged (%s)',

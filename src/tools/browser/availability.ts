@@ -305,12 +305,14 @@ function browserScrollContinuation(history: BrowserToolHistory): BrowserScrollCo
   const state: {
     continuation: BrowserScrollContinuation | null;
     continuationFailures: number;
-  } = { continuation: null, continuationFailures: 0 };
+    inspectionFailures: number;
+  } = { continuation: null, continuationFailures: 0, inspectionFailures: 0 };
   for (const item of history.items) {
     if (item.type === 'compaction') {
       calls.clear();
       state.continuation = null;
       state.continuationFailures = 0;
+      state.inspectionFailures = 0;
       continue;
     }
     if (item.type === 'function_call') {
@@ -325,12 +327,23 @@ function browserScrollContinuation(history: BrowserToolHistory): BrowserScrollCo
     if (SCROLL_INVALIDATING_TOOLS.has(call.name) && output !== null) {
       state.continuation = null;
       state.continuationFailures = 0;
+      state.inspectionFailures = 0;
       continue;
     }
     if (call.name === 'browser_inspect' && state.continuation !== null) {
       if (output === null) {
-        state.continuation = { ...state.continuation, next: 'inspect' };
-      } else if (
+        state.inspectionFailures += 1;
+        // A forced inspection must not trap the model behind an unavailable debugger or guard.
+        if (outputRecord(history, item)?.retryable === false || state.inspectionFailures >= 2) {
+          state.continuation = null;
+          state.continuationFailures = 0;
+        } else {
+          state.continuation = { ...state.continuation, next: 'inspect' };
+        }
+        continue;
+      }
+      state.inspectionFailures = 0;
+      if (
         state.continuation.remainingDeltaX !== 0 ||
         state.continuation.remainingDeltaY !== 0 ||
         state.continuation.boundaryProbeDeltaX !== undefined ||
@@ -376,6 +389,7 @@ function browserScrollContinuation(history: BrowserToolHistory): BrowserScrollCo
       continue;
     }
     if (call.name !== 'browser_scroll') continue;
+    state.inspectionFailures = 0;
     if (output === null) {
       if (state.continuation !== null) {
         state.continuationFailures += 1;

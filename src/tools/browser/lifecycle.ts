@@ -357,6 +357,7 @@ function outputVerifiedSubmit(record: Readonly<Record<string, unknown>>): boolea
 /** Reconstructs page-state evidence while keeping user supplements as non-destructive boundaries. */
 function recentBrowserProgress(
   items: readonly MaterializedContinuationItem[],
+  currentRunCallIds: ReadonlySet<string>,
 ): BrowserProgressState {
   const calls = new Map<
     string,
@@ -397,12 +398,16 @@ function recentBrowserProgress(
     calls.delete(item.callId);
     if (call === undefined || !call.name.startsWith('browser_')) continue;
     const callFingerprint = browserCallFingerprint(call.name, call.argumentsJson);
-    const outputFingerprint = canonicalBrowserProgressJson(item.output, false);
-    completed.push({
-      callFingerprint,
-      pairFingerprint: `${callFingerprint}=>${outputFingerprint}`,
-      eligible: readOnlyBrowserToolNames.has(call.name) || browserOutputFailed(item.output),
-    });
+    const currentRun = currentRunCallIds.has(item.callId);
+    // Retain prior write receipts, but let an explicit retry/resume recheck unchanged pages.
+    if (currentRun) {
+      const outputFingerprint = canonicalBrowserProgressJson(item.output, false);
+      completed.push({
+        callFingerprint,
+        pairFingerprint: `${callFingerprint}=>${outputFingerprint}`,
+        eligible: readOnlyBrowserToolNames.has(call.name) || browserOutputFailed(item.output),
+      });
+    }
 
     const output = jsonRecord(item.output);
     if (output?.ok !== true) continue;
@@ -463,7 +468,7 @@ function recentBrowserProgress(
         output,
       };
     }
-    if (immobile !== null) {
+    if (immobile !== null && currentRun) {
       const arguments_ = jsonRecord(call.argumentsJson);
       const deltaX = arguments_?.deltaX;
       const deltaY = arguments_?.deltaY;
@@ -582,6 +587,11 @@ function noProgressBrowserOutput(
       continuationItems: snapshot.checkpoint.continuationItems,
       toolResults: snapshot.toolResults,
     }),
+    new Set(
+      snapshot.toolResults
+        .filter((result) => result.runId === snapshot.checkpoint.runId)
+        .map((result) => result.callId),
+    ),
   );
   const replayedSelection = replayVerifiedSelectionOutput(progress, pending);
   if (replayedSelection !== null) return replayedSelection;

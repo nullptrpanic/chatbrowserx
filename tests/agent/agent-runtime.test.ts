@@ -20,6 +20,7 @@ import { admitSessionMessages, restoreAgentSession } from '../../src/agent/conte
 import { TaskHistoryReader } from '../../src/tasks/task-history-reader';
 import { historyService } from '../../src/tools/history/service';
 import { historyRuntime } from '../../src/tools/history/tool';
+import { browserService } from '../../src/tools/browser/service';
 
 function required<T>(value: T | undefined): T {
   if (value === undefined) throw new Error('Expected fixture value.');
@@ -256,6 +257,107 @@ describe('framework-backed agent runtime', () => {
       expect(f.requests.map((request) => request.modelSettings.toolChoice)).toEqual([
         'auto',
         'inspect_fixture',
+        'auto',
+      ]);
+    } finally {
+      f.db.close();
+    }
+  });
+
+  it('escapes failed forced inspections and rechecks the page when the old task is retried', async () => {
+    const services = new ToolServiceResolver();
+    let connected = false;
+    const execute = vi.fn(async (tool: { operation: string }) => ({
+      output: JSON.stringify(
+        tool.operation === 'scroll'
+          ? {
+              ok: true,
+              data: {
+                action: 'scroll',
+                moved: false,
+                requestedDeltaApplied: false,
+                remainingDeltaX: 0,
+                remainingDeltaY: 600,
+              },
+            }
+          : connected
+            ? { ok: true, data: { mode: 'interactive', elements: [], snapshot: 'reconnected' } }
+            : {
+                ok: false,
+                code: 'DEBUGGER_UNAVAILABLE',
+                message: 'The browser debugger is unavailable for this tab.',
+                retryable: true,
+                needsInspect: false,
+              },
+      ),
+      attachmentIds: [],
+    }));
+    services.bind(browserService, {
+      execute,
+      resetObservationBaselines: vi.fn(),
+      release: vi.fn(async () => {}),
+    });
+    const inspect = (id: string): OutputItem => ({
+      ...call(id),
+      name: 'inspect',
+      namespace: 'browser',
+      arguments: JSON.stringify({
+        tabId: 0,
+        mode: 'interactive',
+        since: '',
+        ref: '',
+        visualReason: '',
+      }),
+    });
+    const f = await fixture(
+      [
+        [
+          {
+            ...call('scroll'),
+            name: 'scroll',
+            namespace: 'browser',
+            arguments: JSON.stringify({
+              tabId: 0,
+              target: 'viewport',
+              deltaX: 0,
+              deltaY: 600,
+              maxSegments: 1,
+              stopText: '',
+            }),
+          },
+        ],
+        [inspect('unavailable_1')],
+        [inspect('unavailable_2')],
+        providerErrorFromCode('INVALID_RESPONSE', { invalidResponseStage: 'request_contract' }),
+        [inspect('reconnected')],
+        [text('The page is available again.')],
+      ],
+      { tools: bindToolRuntime(discoverTools(), services) },
+    );
+    try {
+      const { task } = await f.submit('Inspect the page without submitting.');
+      const failed = await f.executor.run(task.id, new AbortController().signal);
+      expect(failed.task.status).toBe('failed');
+      expect(failed.toolResults.slice(-2).map((result) => JSON.parse(result.output).code)).toEqual([
+        'DEBUGGER_UNAVAILABLE',
+        'DEBUGGER_UNAVAILABLE',
+      ]);
+      expect(f.requests.map((request) => request.modelSettings.toolChoice)).toEqual([
+        'auto',
+        'browser.inspect',
+        'browser.inspect',
+        'auto',
+      ]);
+
+      connected = true;
+      await f.commands.retry(task.id);
+      const completed = await f.executor.run(task.id, new AbortController().signal);
+      expect(completed.task.status).toBe('completed');
+      expect(execute).toHaveBeenCalledTimes(4);
+      expect(JSON.parse(completed.toolResults.at(-1)?.output ?? '{}')).toMatchObject({ ok: true });
+      expect(f.requests).toHaveLength(6);
+      expect(f.requests.slice(4).map((request) => request.modelSettings.toolChoice)).toEqual([
+        'auto',
         'auto',
       ]);
     } finally {
@@ -844,6 +946,151 @@ describe('framework-backed agent runtime', () => {
       f.db.close();
     }
   });
+
+  it.each(['cancelled', 'failed', 'paused'] as const)(
+    'reconsiders an undispatched mutation when new input follows a %s attempt',
+    async (status) => {
+      const controller = new AbortController();
+      let taskId = '';
+      let effectsBeforeCorrection = -1;
+      const correction = 'Stop changing the page. Only inspect the existing values.';
+      const f = await fixture([[call('old_pending_mutation')], [text('I will only inspect.')]], {
+        onAttempt: async (index) => {
+          if (index === 2) effectsBeforeCorrection = vi.mocked(f.tools.execute).mock.calls.length;
+        },
+      });
+      try {
+        taskId = (await f.submit('Change the field value.')).task.id;
+        vi.spyOn(f.tools, 'preflight').mockImplementationOnce(async () => {
+          if (status === 'failed') throw providerErrorFromCode('INVALID_RESPONSE');
+          if (status === 'cancelled') await f.commands.cancel(taskId);
+          else await f.commands.pause(taskId);
+          controller.abort();
+          throw new DOMException('Stopped before dispatch', 'AbortError');
+        });
+        await f.executor.run(taskId, controller.signal).catch((error) => {
+          expect(error.code === 'ABORTED' || error.name === 'AbortError').toBe(true);
+        });
+        const stopped = await f.commands.getSnapshot(taskId);
+        expect(stopped.task.status).toBe(status);
+        expect(stopped.checkpoint?.pendingToolCall?.executionState).toBe('recorded');
+        expect(f.tools.execute).not.toHaveBeenCalled();
+
+        const at = f.clock.now();
+        const message = {
+          id: 'new-correction',
+          taskId,
+          conversationId: 'conversation',
+          role: 'user' as const,
+          status: 'complete' as const,
+          text: correction,
+          attachmentIds: [],
+          createdAt: at,
+          updatedAt: at,
+        };
+        if (status === 'paused') {
+          await f.commands.resume(taskId);
+          await f.commands.appendSupplement({ ...message, kind: 'supplement' });
+        } else {
+          await f.commands.continueSubmission({
+            sourceTaskId: taskId,
+            tabId: 7,
+            conversation: required(await f.conversations.get('conversation')),
+            message: { ...message, kind: 'conversation' },
+          });
+        }
+        const result = await f.executor.run(taskId, new AbortController().signal);
+        expect(result.task.status).toBe('completed');
+        expect(effectsBeforeCorrection).toBe(0);
+        expect(f.tools.execute).not.toHaveBeenCalled();
+        const input = required(f.requests.at(-1)).input;
+        expect(JSON.stringify(input)).toContain(correction);
+        expect(input).toEqual(
+          expect.arrayContaining([
+            expect.objectContaining({ type: 'function_call', callId: 'old_pending_mutation' }),
+            expect.objectContaining({
+              type: 'function_call_result',
+              callId: 'old_pending_mutation',
+              output: expect.stringContaining('SUPERSEDED_BY_USER_INPUT'),
+            }),
+          ]),
+        );
+        expect(await f.tasks.listToolResults(taskId)).toHaveLength(1);
+      } finally {
+        f.db.close();
+      }
+    },
+  );
+
+  it.each(['not_found', 'finished'] as const)(
+    'preserves %s recovery evidence without redispatching a mutation after new input',
+    async (recoveryStatus) => {
+      const controller = new AbortController();
+      const f = await fixture([[call('interrupted_mutation')], [text('Following the new input.')]]);
+      try {
+        vi.spyOn(f.tools, 'policyFor').mockReturnValue({
+          budgetGroup: 'fixture',
+          maxCalls: 10,
+          mutation: true,
+          executionIdPrefix: 'fixture',
+        });
+        const taskId = (await f.submit('Change the field value.')).task.id;
+        vi.mocked(f.tools.execute).mockImplementationOnce(async () => {
+          await f.commands.cancel(taskId);
+          controller.abort();
+          throw new DOMException('Lost execution response', 'AbortError');
+        });
+        vi.spyOn(f.tools, 'canRecover').mockReturnValue(true);
+        const recover = vi
+          .spyOn(f.tools, 'recover')
+          .mockResolvedValue(
+            recoveryStatus === 'not_found'
+              ? { status: 'not_found' }
+              : { status: 'finished', result: { output: '{"ok":true,"confirmed":true}' } },
+          );
+        await f.executor.run(taskId, controller.signal).catch((error) => {
+          expect(error.code === 'ABORTED' || error.name === 'AbortError').toBe(true);
+        });
+        expect(
+          (await f.commands.getSnapshot(taskId)).checkpoint?.pendingToolCall?.executionState,
+        ).toBe('may_have_dispatched');
+        const at = f.clock.now();
+        await f.commands.continueSubmission({
+          sourceTaskId: taskId,
+          tabId: 7,
+          conversation: required(await f.conversations.get('conversation')),
+          message: {
+            id: 'new-correction',
+            conversationId: 'conversation',
+            kind: 'conversation',
+            role: 'user',
+            status: 'complete',
+            text: 'Only inspect the page now.',
+            attachmentIds: [],
+            createdAt: at,
+            updatedAt: at,
+          },
+        });
+        expect((await f.executor.run(taskId, new AbortController().signal)).task.status).toBe(
+          'completed',
+        );
+        expect(recover).toHaveBeenCalledOnce();
+        expect(f.tools.execute).toHaveBeenCalledOnce();
+        const receipts = await f.tasks.listToolResults(taskId);
+        expect(receipts).toHaveLength(1);
+        expect(JSON.parse(required(receipts[0]).output)).toMatchObject(
+          recoveryStatus === 'not_found'
+            ? { ok: false, code: 'SUPERSEDED_BY_USER_INPUT' }
+            : { ok: true, confirmed: true },
+        );
+        expect(JSON.stringify(required(f.requests.at(-1)).input)).toContain(
+          'Only inspect the page now.',
+        );
+      } finally {
+        f.db.close();
+      }
+    },
+  );
 
   it('reconciles a tool receipt after a worker restart without dispatching the effect twice', async () => {
     const f = await fixture([

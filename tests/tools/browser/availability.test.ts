@@ -1033,6 +1033,60 @@ describe('browserToolDefinitionsForCheckpoint', () => {
     );
   });
 
+  it.each(['distance', 'traverse'] as const)(
+    'releases a forced %s inspection after bounded failures so a blocker can be reported',
+    (mode) => {
+      const scroll = pair(
+        'scroll_needs_inspection',
+        'browser_scroll',
+        { tabId: 0, target: 'viewport', deltaX: 0, deltaY: 600, maxSegments: 1, stopText: '' },
+        {
+          ok: true,
+          data: {
+            action: 'scroll',
+            mode,
+            moved: false,
+            requestedDeltaApplied: false,
+            remainingDeltaX: 0,
+            remainingDeltaY: 600,
+            continuationRequired: mode === 'traverse',
+            stopReason: 'observation_unavailable',
+            verificationUnavailable: true,
+          },
+        },
+      );
+      const failedInspection = (id: string, code = 'DEBUGGER_UNAVAILABLE', retryable = true) =>
+        pair(
+          id,
+          'browser_inspect',
+          { tabId: 0, mode: 'interactive', since: '' },
+          {
+            ok: false,
+            code,
+            retryable,
+            needsInspect: false,
+          },
+        );
+      const firstFailure = [...scroll, ...failedInspection('inspect_1')];
+      expect(browserToolContractForCheckpoint(checkpoint(firstFailure)).toolChoice).toEqual({
+        type: 'function',
+        name: 'browser_inspect',
+      });
+
+      for (const history of [
+        [...firstFailure, ...failedInspection('inspect_2')],
+        [...scroll, ...failedInspection('inspect_guard', 'NO_PROGRESS', false)],
+      ]) {
+        const contract = browserToolContractForCheckpoint(checkpoint(history));
+        expect(contract.scrollContinuation).toBeUndefined();
+        expect(contract.toolChoice).toBeUndefined();
+        expect(contract.tools.map(({ name }) => name)).toEqual(
+          expect.arrayContaining(['browser_inspect', 'browser_list_tabs', 'browser_click']),
+        );
+      }
+    },
+  );
+
   it('leaves an objective-level traversal optional after its evidence budget is exhausted', () => {
     const boundedTraversal = pair(
       'scroll_traversal_evidence_budget',

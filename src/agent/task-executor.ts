@@ -613,12 +613,32 @@ export class TaskExecutor {
       }
     }
 
-    if (policy.mutation && pending.executionState === 'recorded') {
-      snapshot = await this.#saveBoundary(snapshot, ownerId, signal, {
-        type: 'tool.execution-started',
-        reason: `${call.name}_execution_started`,
-        pendingToolCall: { ...pending, executionState: 'may_have_dispatched' },
-      });
+    if (policy.mutation) {
+      snapshot = await this.#refreshCurrentAttempt(snapshot);
+      if (!runnableStatuses.has(snapshot.task.status)) return snapshot;
+      // Recover existing effects first; newer instructions must be read before any fresh dispatch.
+      if (await this.#hasNewerUserInput(snapshot, pending)) {
+        return this.#recordToolResult(
+          snapshot,
+          ownerId,
+          signal,
+          pending,
+          JSON.stringify({
+            ok: false,
+            code: 'SUPERSEDED_BY_USER_INPUT',
+            message:
+              'This action was not dispatched because newer user input arrived. Read the latest user instructions before choosing another action.',
+            retryable: false,
+          }),
+        );
+      }
+      if (pending.executionState === 'recorded') {
+        snapshot = await this.#saveBoundary(snapshot, ownerId, signal, {
+          type: 'tool.execution-started',
+          reason: `${call.name}_execution_started`,
+          pendingToolCall: { ...pending, executionState: 'may_have_dispatched' },
+        });
+      }
     }
     try {
       const result = await this.#dependencies.tools.execute(call, executionContext, signal);
@@ -635,6 +655,28 @@ export class TaskExecutor {
         'execute',
       );
     }
+  }
+
+  async #hasNewerUserInput(
+    snapshot: ActiveTaskSnapshot,
+    pending: PendingToolCall,
+  ): Promise<boolean> {
+    if (pendingTaskSupplementIds(snapshot.events, snapshot.task.id).size > 0) return true;
+    const callEvent = snapshot.events.findLast(
+      (event) => event.type === 'tool.call' && event.callId === pending.callId,
+    );
+    if (callEvent === undefined) return false;
+    const messageIds = new Set(
+      snapshot.events.flatMap((event) =>
+        event.sequence > callEvent.sequence &&
+        (event.type === 'message.recorded' || event.type === 'supplement.applied')
+          ? [event.messageId]
+          : [],
+      ),
+    );
+    if (messageIds.size === 0) return false;
+    const messages = await this.#dependencies.conversations.listTaskMessages(snapshot.task.id);
+    return messages.some((message) => message.role === 'user' && messageIds.has(message.id));
   }
 
   async #recordRegisteredToolResult(
