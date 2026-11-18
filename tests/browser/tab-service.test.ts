@@ -8,12 +8,12 @@ import {
 
 type UpdatedListener = (
   tabId: number,
-  changeInfo: Readonly<{ status?: string }>,
+  changeInfo: Readonly<{ status?: string; url?: string }>,
   tab: BrowserTabLike,
 ) => void;
 
 function tabsApi(initial: readonly BrowserTabLike[] = []): ChromeTabsApi & {
-  emitUpdated(tabId: number, status: string): void;
+  emitUpdated(tabId: number, status?: string, url?: string): void;
 } {
   const tabs = new Map(initial.flatMap((tab) => (tab.id === undefined ? [] : [[tab.id, tab]])));
   const listeners = new Set<UpdatedListener>();
@@ -44,10 +44,14 @@ function tabsApi(initial: readonly BrowserTabLike[] = []): ChromeTabsApi & {
       addListener: (listener) => listeners.add(listener),
       removeListener: (listener) => listeners.delete(listener),
     },
-    emitUpdated(tabId, status) {
-      const tab = { ...tabs.get(tabId), id: tabId, status };
+    emitUpdated(tabId, status, url) {
+      const changes = {
+        ...(status === undefined ? {} : { status }),
+        ...(url === undefined ? {} : { url }),
+      };
+      const tab = { ...tabs.get(tabId), id: tabId, ...changes };
       tabs.set(tabId, tab);
-      for (const listener of listeners) listener(tabId, { status }, tab);
+      for (const listener of listeners) listener(tabId, changes, tab);
     },
   };
 }
@@ -146,6 +150,70 @@ describe('TabService', () => {
       tabId: 7,
       url: 'https://example.com/next',
     });
+  });
+
+  it('propagates a rejected navigation even when the previous page finishes first', async () => {
+    const api = tabsApi([{ ...HTTP_TAB, status: 'loading' }]);
+    let rejectUpdate: ((error: Error) => void) | undefined;
+    vi.spyOn(api, 'update').mockImplementation(
+      () =>
+        new Promise((_resolve, reject) => {
+          rejectUpdate = reject;
+        }),
+    );
+    const navigation = new TabService(api).navigate(7, 'https://example.com/next');
+    await vi.waitFor(() => expect(rejectUpdate).toBeDefined());
+    api.emitUpdated(7, 'complete');
+    rejectUpdate?.(new Error('Navigation rejected'));
+    await expect(navigation).rejects.toMatchObject({ code: 'BROWSER_OPERATION_FAILED' });
+  });
+
+  it('waits past a complete old document with a pending URL and accepts a redirect', async () => {
+    const api = tabsApi([HTTP_TAB]);
+    const destination = 'https://example.com/next';
+    const final = 'https://example.com/redirected';
+    vi.spyOn(api, 'update').mockResolvedValue({ ...HTTP_TAB, pendingUrl: destination });
+    const received = vi.fn();
+    const navigation = new TabService(api).navigate(7, destination).then(received);
+    await vi.waitFor(() => expect(api.update).toHaveBeenCalledOnce());
+    api.emitUpdated(7, 'complete');
+    await Promise.resolve();
+    expect(received).not.toHaveBeenCalled();
+    api.emitUpdated(7, 'loading', final);
+    api.emitUpdated(7, 'complete', final);
+    await navigation;
+    expect(received).toHaveBeenCalledWith(expect.objectContaining({ url: final }));
+  });
+
+  it('accepts a same-document navigation that reports only a URL change', async () => {
+    const api = tabsApi([HTTP_TAB]);
+    const destination = `${HTTP_TAB.url}#section`;
+    vi.spyOn(api, 'update').mockResolvedValue({ ...HTTP_TAB, pendingUrl: destination });
+    const navigation = new TabService(api, { loadTimeoutMs: 500 }).navigate(7, destination);
+    await vi.waitFor(() => expect(api.update).toHaveBeenCalledOnce());
+    api.emitUpdated(7, undefined, destination);
+    await expect(navigation).resolves.toMatchObject({ url: destination });
+  });
+
+  it('remembers a fast reload that completes before the command is acknowledged', async () => {
+    const api = tabsApi([HTTP_TAB]);
+    let acknowledge: (() => void) | undefined;
+    vi.spyOn(api, 'reload').mockImplementation(
+      () =>
+        new Promise<void>((resolve) => {
+          acknowledge = resolve;
+        }),
+    );
+    const received = vi.fn();
+    const reload = new TabService(api).reload(7).then(received);
+    await vi.waitFor(() => expect(acknowledge).toBeDefined());
+    api.emitUpdated(7, 'loading');
+    api.emitUpdated(7, 'complete');
+    await new Promise<void>((resolve) => setTimeout(resolve, 0));
+    expect(received).not.toHaveBeenCalled();
+    acknowledge?.();
+    await reload;
+    expect(received).toHaveBeenCalledWith(expect.objectContaining({ url: HTTP_TAB.url }));
   });
 
   it('times out reload without leaking a raw Chrome error', async () => {

@@ -34,7 +34,7 @@ export interface BrowserTabLike {
 
 type TabUpdatedListener = (
   tabId: number,
-  changeInfo: Readonly<{ status?: string }>,
+  changeInfo: Readonly<{ status?: string; url?: string }>,
   tab: BrowserTabLike,
 ) => void;
 
@@ -215,9 +215,12 @@ export class TabService implements BrowserTabPort {
   }
 
   async navigate(tabId: number, url: string): Promise<BrowserTabState> {
-    await this.#getControllable(tabId);
+    const current = await this.#getControllable(tabId);
     this.#requireUrl(url);
-    await this.#waitForLoad(tabId, async () => this.#api.update(tabId, { url }));
+    await this.#waitForLoad(tabId, () => this.#api.update(tabId, { url }), {
+      from: current.url,
+      to: new URL(url).href,
+    });
     return this.#getControllable(tabId, url);
   }
 
@@ -257,9 +260,16 @@ export class TabService implements BrowserTabPort {
     return state;
   }
 
-  #waitForLoad(tabId: number, action: () => Promise<BrowserTabLike | undefined>): Promise<void> {
+  #waitForLoad(
+    tabId: number,
+    action: () => Promise<BrowserTabLike | undefined>,
+    navigation?: { from: string | null; to: string },
+  ): Promise<void> {
     return new Promise((resolve, reject) => {
       let settled = false;
+      let accepted = false;
+      let started = false;
+      let loaded = false;
       const finish = (error?: BrowserTabError) => {
         if (settled) return;
         settled = true;
@@ -268,8 +278,25 @@ export class TabService implements BrowserTabPort {
         if (error) reject(error);
         else resolve();
       };
-      const listener: TabUpdatedListener = (updatedTabId, changeInfo) => {
-        if (updatedTabId === tabId && changeInfo.status === 'complete') finish();
+      const listener: TabUpdatedListener = (updatedTabId, changeInfo, tab) => {
+        if (updatedTabId !== tabId) return;
+        if (changeInfo.status === 'loading') {
+          started =
+            navigation === undefined ||
+            tab.pendingUrl === navigation.to ||
+            tab.url === navigation.to ||
+            (tab.url !== undefined && tab.url !== navigation.from);
+          loaded = false;
+          return;
+        }
+        // A same-document navigation can publish the committed URL without changing status.
+        const completed =
+          changeInfo.status === 'complete' ||
+          (changeInfo.url !== undefined && tab.status === 'complete');
+        if (completed && !tab.pendingUrl) {
+          loaded = started || (navigation !== undefined && tab.url === navigation.to);
+          if (accepted && loaded) finish();
+        }
       };
       const timer = setTimeout(
         () => finish(new BrowserTabError('LOAD_TIMEOUT', 'The page did not become ready in time.')),
@@ -278,7 +305,15 @@ export class TabService implements BrowserTabPort {
       this.#api.onUpdated.addListener(listener);
       void action().then(
         (tab) => {
-          if (tab?.status === 'complete') finish();
+          accepted = true;
+          if (
+            loaded ||
+            (navigation !== undefined &&
+              tab?.status === 'complete' &&
+              !tab.pendingUrl &&
+              tab.url === navigation.to)
+          )
+            finish();
         },
         () =>
           finish(

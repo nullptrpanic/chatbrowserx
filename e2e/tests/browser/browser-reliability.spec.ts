@@ -145,6 +145,79 @@ async function runFixtureTask(session: ExtensionSession, tabId: number, text: st
 }
 
 extensionTest(
+  'reports the loaded document after a redirect, a reload, and a fragment navigation',
+  async ({ extensionSession }) => {
+    let loads = 0;
+    const server = createServer((request, response) => {
+      if (request.url === '/redirect') {
+        response.writeHead(302, { Location: '/ready' }).end();
+        return;
+      }
+      const title = request.url === '/ready' ? `Load ${++loads}` : 'Start';
+      response.writeHead(200, { 'Content-Type': 'text/html', 'Cache-Control': 'no-store' });
+      response.end(`<!doctype html><title>${title}</title>`);
+    });
+    const origin = `http://127.0.0.1:${await listen(server)}`;
+    const { context, sidePanelPage } = extensionSession;
+    const page = await context.newPage();
+    try {
+      await page.goto(`${origin}/start`);
+      const tabId = await sidePanelPage.evaluate(
+        async (url) => (await chrome.tabs.query({ url }))[0]?.id,
+        page.url(),
+      );
+      if (tabId === undefined) throw new Error('Fixture tab missing');
+      const ready = `${origin}/ready`;
+      const replies = [
+        toolResponse('nav', 'nav_item', 'navigate', 'browser.navigate', {
+          tabId: 0,
+          url: `${origin}/redirect`,
+        }),
+        toolResponse('reload', 'reload_item', 'reload', 'browser.reload', { tabId: 0 }),
+        toolResponse('anchor', 'anchor_item', 'fragment', 'browser.navigate', {
+          tabId: 0,
+          url: `${ready}#section`,
+        }),
+      ];
+      const results: unknown[] = [];
+      let turn = 0;
+      await context.route('https://chatgpt.com/backend-api/codex/responses', async (route) => {
+        const lastOutput = functionOutputs(route.request().postDataJSON()).at(-1);
+        if (lastOutput) results.push(JSON.parse(lastOutput));
+        const body = replies[turn++] ?? finalTextResponse('done', 'Reached the section.');
+        await route.fulfill({ status: 200, contentType: 'text/event-stream', body });
+      });
+      await runFixtureTask(
+        extensionSession,
+        tabId,
+        `Navigate to ${origin}/redirect, reload once, then navigate to ${ready}#section.`,
+      );
+      expect(results).toEqual([
+        expect.objectContaining({
+          ok: true,
+          url: ready,
+          data: expect.objectContaining({ title: 'Load 1' }),
+        }),
+        expect.objectContaining({
+          ok: true,
+          url: ready,
+          data: expect.objectContaining({ title: 'Load 2', reloaded: true }),
+        }),
+        expect.objectContaining({
+          ok: true,
+          url: `${ready}#section`,
+          data: expect.objectContaining({ title: 'Load 2' }),
+        }),
+      ]);
+      await expect(page).toHaveTitle('Load 2');
+    } finally {
+      await page.close();
+      await closeHttpFixtureServer(server);
+    }
+  },
+);
+
+extensionTest(
   'continues a premature final through durable progress without injecting instructions',
   async ({ extensionSession }) => {
     const server = createServer((_request, response) => {
