@@ -5,7 +5,13 @@ import type { Task } from '../../tasks/task-types';
 import type { ToolResult } from '../../tasks/tool-result-types';
 import type { TaskRepository } from '../../persistence/task-repository';
 import type { AttachmentRepository } from '../../persistence/attachment-repository';
-import { attachmentDataUrl, modelMessage, resolveReplyProjections } from './agent-context';
+import {
+  attachmentDataUrl,
+  modelMessage,
+  resolveReplyProjection,
+  resolveReplyProjections,
+  type ReplyProjection,
+} from './agent-context';
 import { MAX_MODEL_IMAGE_COUNT, MAX_MODEL_IMAGE_TOTAL_BYTES } from './context-budget';
 import { toolNameParts } from '../../tools/model-tool';
 
@@ -14,16 +20,9 @@ const ATTACHMENT_PREFIX = 'attachment://';
 function messageItem(
   message: MessageRecord,
   task: Task,
-  messages: readonly MessageRecord[],
-  tasks: readonly Task[],
+  reply: ReplyProjection | undefined,
   historical = false,
 ): AgentInputItem | null {
-  const reply = resolveReplyProjections(
-    [message],
-    new Map(messages.map((item) => [item.id, item])),
-    tasks,
-    task,
-  ).get(message.id);
   const projected = modelMessage(
     message,
     historical ? [] : message.attachmentIds.map((id) => `${ATTACHMENT_PREFIX}${id}`),
@@ -69,15 +68,20 @@ export function admitSessionMessages(
   tasks: readonly Task[] = [task],
 ): AgentSession {
   const seen = new Set(session.taskId === task.id ? session.admittedMessageIds : []);
-  const additions: AgentInputItem[] = [];
+  const pending: MessageRecord[] = [];
   for (const message of inputs) {
     if (seen.has(message.id)) continue;
     if (message.taskId !== task.id || message.conversationId !== task.conversationId)
       throw new Error('Session input belongs to another task.');
-    const item = messageItem(message, task, allMessages, tasks);
-    if (item) additions.push(item);
     seen.add(message.id);
+    pending.push(message);
   }
+  const replies = pending.some((message) => message.replyTo !== undefined)
+    ? resolveReplyProjections(pending, new Map(allMessages.map((m) => [m.id, m])), tasks, task)
+    : undefined;
+  const additions = pending.flatMap(
+    (message) => messageItem(message, task, replies?.get(message.id)) ?? [],
+  );
   return {
     ...session,
     taskId: task.id,
@@ -173,8 +177,17 @@ export async function restoreAgentSession(
     );
     return admitSessionMessages(existing, task, interrupted, messages, tasks);
   }
+  const messagesById = new Map(messages.map((message) => [message.id, message]));
+  const tasksById = new Map(tasks.map((entry) => [entry.id, entry]));
+  const restoreMessage = (message: MessageRecord, owner: Task, historical: boolean) =>
+    messageItem(
+      message,
+      owner,
+      resolveReplyProjection(message, messagesById, tasksById, owner),
+      historical,
+    );
   if (existing) {
-    const previous = tasks.find((value) => value.id === existing.taskId);
+    const previous = tasksById.get(existing.taskId);
     if (!previous) throw new Error('Session owner is missing.');
     const admitted = new Set(existing.admittedMessageIds);
     const items = finishInterruptedCalls(existing.items);
@@ -203,14 +216,13 @@ export async function restoreAgentSession(
           message.text &&
           !assistantTexts.has(message.text))
       ) {
-        const item = messageItem(message, previous, messages, tasks, true);
+        const item = restoreMessage(message, previous, true);
         if (item) items.push(item);
       }
     }
     return { ...existing, items: historicalImages(items), admittedMessageIds: [] };
   }
   const items: AgentInputItem[] = [];
-  const messagesById = new Map(messages.map((message) => [message.id, message]));
   const admittedMessageIds: string[] = [];
   for (const previous of tasks
     .filter((value) => value.ordinal <= task.ordinal)
@@ -236,7 +248,7 @@ export async function restoreAgentSession(
       ) {
         const message = messagesById.get(event.messageId);
         if (!message || message.status === 'streaming' || message.status === 'error') continue;
-        const item = messageItem(message, previous, messages, tasks, !active);
+        const item = restoreMessage(message, previous, !active);
         if (item) items.push(item);
         if (active) admittedMessageIds.push(message.id);
       } else if (event.type === 'tool.call') {

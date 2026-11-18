@@ -46,6 +46,38 @@ const empty: AgentSession = {
 };
 
 describe('conversation model window', () => {
+  it('reconstructs legacy messages with a linear number of message ID reads', async () => {
+    let idReads = 0;
+    const messages = Array.from({ length: 100 }, (_, index) => {
+      const id = 'message_' + String(index);
+      return {
+        ...message(id),
+        get id() {
+          idReads++;
+          return id;
+        },
+      };
+    });
+    const events = messages.map((m, index) => ({
+      id: 'event_' + String(index),
+      taskId: task.id,
+      runId: 'run',
+      at: 1,
+      sequence: index + 1,
+      type: 'message.recorded' as const,
+      messageId: m.id,
+      role: 'user' as const,
+    }));
+    idReads = 0;
+    const restored = await restoreAgentSession(task, [task], messages, {
+      getAgentSession: async () => undefined,
+      listEvents: async () => events,
+      listToolResults: async () => [],
+    });
+    expect(restored.items).toHaveLength(messages.length);
+    expect(idReads).toBeLessThan(messages.length * 10);
+  });
+
   it('preserves the exact user text and source tab separately from attachment metadata', () => {
     const input = {
       ...message('user'),

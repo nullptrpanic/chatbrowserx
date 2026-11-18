@@ -28,7 +28,7 @@ export async function attachmentDataUrl(attachment: AttachmentRecord): Promise<s
   return `data:${mimeType};base64,${bytesToBase64(bytes)}`;
 }
 
-interface ReplyProjection {
+export interface ReplyProjection {
   readonly target: MessageRecord;
 }
 
@@ -125,32 +125,42 @@ export function resolveReplyProjections(
   const taskById = new Map(tasks.map((task) => [task.id, task] as const));
   const projections = new Map<string, ReplyProjection>();
   for (const message of activeMessages) {
-    if (message.replyTo === undefined) continue;
-    const target = messagesById.get(message.replyTo.messageId);
-    const targetTask = taskById.get(message.replyTo.taskId);
-    if (
-      message.kind !== 'conversation' ||
-      message.role !== 'user' ||
-      target === undefined ||
-      target.id !== message.replyTo.messageId ||
-      target.taskId !== message.replyTo.taskId ||
-      target.conversationId !== activeTask.conversationId ||
-      target.kind !== 'conversation' ||
-      target.role !== 'assistant' ||
-      target.status === 'streaming' ||
-      message.replyTo.excerpt !== target.text.slice(0, 1_000) ||
-      message.replyTo.attachmentCount !== target.attachmentIds.length ||
-      message.replyTo.createdAt !== target.createdAt ||
-      (target.taskId !== activeTask.id &&
-        (targetTask === undefined ||
-          !isHistoricalTask(targetTask, {
-            conversationId: activeTask.conversationId,
-            currentTaskId: activeTask.id,
-          })))
-    ) {
-      throw new Error('Task reply reference is invalid.');
-    }
-    projections.set(message.id, { target });
+    const reply = resolveReplyProjection(message, messagesById, taskById, activeTask);
+    if (reply) projections.set(message.id, reply);
   }
   return projections;
+}
+
+export function resolveReplyProjection(
+  message: MessageRecord,
+  messagesById: ReadonlyMap<string, MessageRecord>,
+  taskById: ReadonlyMap<string, Task>,
+  activeTask: Task,
+): ReplyProjection | undefined {
+  if (message.replyTo === undefined) return undefined;
+  const target = messagesById.get(message.replyTo.messageId);
+  const targetTask = taskById.get(message.replyTo.taskId);
+  if (
+    message.kind !== 'conversation' ||
+    message.role !== 'user' ||
+    target === undefined ||
+    target.id !== message.replyTo.messageId ||
+    target.taskId !== message.replyTo.taskId ||
+    target.conversationId !== activeTask.conversationId ||
+    target.kind !== 'conversation' ||
+    target.role !== 'assistant' ||
+    target.status === 'streaming' ||
+    message.replyTo.excerpt !== target.text.slice(0, 1_000) ||
+    message.replyTo.attachmentCount !== target.attachmentIds.length ||
+    message.replyTo.createdAt !== target.createdAt ||
+    (target.taskId !== activeTask.id &&
+      (targetTask === undefined ||
+        !isHistoricalTask(targetTask, {
+          conversationId: activeTask.conversationId,
+          currentTaskId: activeTask.id,
+        })))
+  ) {
+    throw new Error('Task reply reference is invalid.');
+  }
+  return { target };
 }
