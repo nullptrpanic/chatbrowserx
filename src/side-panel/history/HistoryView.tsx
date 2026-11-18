@@ -32,6 +32,12 @@ export function HistoryView({
   const [confirmClear, setConfirmClear] = useState(false);
   const [confirmDeleteId, setConfirmDeleteId] = useState<string | null>(null);
   const [actionFailed, setActionFailed] = useState(false);
+  const dateFormat = new Intl.DateTimeFormat(undefined, {
+    month: 'short',
+    day: 'numeric',
+    hour: '2-digit',
+    minute: '2-digit',
+  });
   return (
     <section className="history-view" aria-labelledby="history-title">
       <div className="view-heading">
@@ -72,12 +78,7 @@ export function HistoryView({
                     ) : null}
                   </span>
                   <span className="history-item-meta">
-                    {new Intl.DateTimeFormat(undefined, {
-                      month: 'short',
-                      day: 'numeric',
-                      hour: '2-digit',
-                      minute: '2-digit',
-                    }).format(conversation.updatedAt)}
+                    {dateFormat.format(conversation.updatedAt)}
                     {conversation.taskStatus === null
                       ? ''
                       : ` · ${taskStatusLabel(conversation.taskStatus, t)}`}

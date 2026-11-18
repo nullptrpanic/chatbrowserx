@@ -251,6 +251,20 @@ function panelResult(
 }
 
 describe('PanelService', () => {
+  it('keeps every history entry selectable once there are more than 1,000 conversations', async () => {
+    const { conversation, dependencies } = buildFixture();
+    const history = Array.from({ length: 1_001 }, (_, index) => ({
+      ...conversation,
+      id: 'chat_' + String(index),
+    }));
+    dependencies.conversations.listAll.mockResolvedValue(history);
+    const response = parsePanelSnapshot(
+      await new PanelService(dependencies).getSnapshot(7, 'chat_1000'),
+    );
+    expect(response.conversations).toHaveLength(history.length);
+    expect(response.conversation?.id).toBe('chat_1000');
+  });
+
   it('projects durable supplement batches onto reply segments even without expanded details', async () => {
     const fixture = buildFixture();
     const base = (await fixture.dependencies.conversations.listMessages())[0];

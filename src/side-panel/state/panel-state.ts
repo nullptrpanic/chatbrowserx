@@ -208,7 +208,7 @@ export const panelSnapshotSchema: z.ZodType<PanelSnapshot> = z
       })
       .strict(),
     conversation: conversationSchema.nullable(),
-    conversations: z.array(conversationSchema).max(1_000),
+    conversations: z.array(conversationSchema),
     messages: z
       .array(
         z
