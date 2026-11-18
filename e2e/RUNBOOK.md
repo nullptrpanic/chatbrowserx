@@ -67,9 +67,9 @@ npm run e2e:live:verify -- <sample-id>
 npm run e2e:live:benchmark -- <sample-id>
 ```
 
-Use the tracked [`samples/example/sample.json`](samples/example/sample.json) as the structural
-reference when creating a sample on another machine. Create a new directory with a matching new
-`id`; do not copy the example's synthetic `benchmark/` history into a real sample.
+Use the [tracked example](samples/example/sample.json) as a template. Copy only `sample.json`
+to `e2e/samples/<sample-id>/`, set its `id` to the directory name, and run live evaluations with
+that ID. The runner writes each batch to the selected sample's `benchmark/` directory.
 
 The doctor checks the toolchain and starts the built extension in a disposable Profile. Setup opens
 `e2e/.runtime/profile` for supported UI authentication and the sample's setup instructions. The
@@ -111,6 +111,26 @@ It contains no per-attempt detail. Provider diagnostics are stored separately be
 The tracked synthetic batch under [`samples/example/benchmark/`](samples/example/benchmark/) shows
 the resulting attempt and summary layout. Its numbers are illustrative and are not product
 measurements or a comparison baseline.
+
+### Routine live sample selection
+
+For routine cross-site checks of how the agent reads page structure, use four local translation
+samples. NetEase covers a news portal, React covers technical documentation, W3C covers a data
+table, and Hacker News covers a dense link list. After importing and verifying these samples,
+run one attempt per site on the same build.
+
+```bash
+npm run build && (
+  for sample_id in translation-random-netease translation-random-react \
+    translation-random-w3c-table translation-random-hackernews; do
+    ./node_modules/.bin/tsx e2e/runner/benchmark.ts "$sample_id" || exit 1
+  done
+)
+```
+
+For a site-specific regression, run the affected site's sample directly. For the survey workflow,
+alternate reset and fill, checking the resulting draft after each task and leaving it unsubmitted.
+Use manual-preparation samples only when the corresponding manual test needs its starting state.
 
 ## Concurrent Correctness Runs
 
