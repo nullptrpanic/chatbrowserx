@@ -9,7 +9,8 @@ test-results/
 blob-report/
 /e2e/samples/*
 !/e2e/samples/example/
-!/e2e/samples/example/**
+# Keep the documented example batch and ignore locally generated runs.
+/e2e/samples/example/benchmark/
 /e2e/.runtime/
 .DS_Store
 *.log
