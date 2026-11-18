@@ -1586,6 +1586,29 @@ describe('framework-backed agent runtime', () => {
     }
   });
 
+  it('preserves the original reply creation time when retrying a partial stream', async () => {
+    const f = await fixture([providerErrorFromCode('TRANSIENT'), [text('Recovered')]], {
+      partialError: 'Partial',
+    });
+    try {
+      const { task } = await f.submit('Answer');
+      const result = await f.executor.run(task.id, new AbortController().signal);
+      expect(result.task.status).toBe('completed');
+      const replies = (await f.conversations.listTaskMessages(task.id)).filter(
+        (m) => m.role === 'assistant',
+      );
+      expect(replies).toHaveLength(1);
+      const reply = required(replies[0]);
+      const recorded = required(
+        result.events.find((e) => e.type === 'message.recorded' && e.messageId === reply.id),
+      );
+      expect(reply).toMatchObject({ text: 'Recovered', createdAt: recorded.at });
+      expect(reply.updatedAt).toBeGreaterThan(reply.createdAt);
+    } finally {
+      f.db.close();
+    }
+  });
+
   it.each(['TRANSIENT', 'INVALID_RESPONSE'] as const)(
     'stops after three %s retries, retaining failed-attempt metrics',
     async (code) => {

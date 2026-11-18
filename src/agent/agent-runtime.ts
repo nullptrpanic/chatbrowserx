@@ -385,11 +385,10 @@ export class AgentRuntime implements AgentRuntimePort {
         status: 'streaming',
         text: '',
         attachmentIds: [],
-        createdAt: at,
+        createdAt: previous?.createdAt ?? at,
         updatedAt: at,
       };
-      if (previous)
-        await d.conversations.updateMessage({ ...message, createdAt: previous.createdAt });
+      if (previous) await d.conversations.updateMessage(message);
       else await d.tasks.appendTaskMessage({ message, eventId: d.ids.create('event'), at });
       reply = { message, buffer: new StreamPersistenceBuffer(d.conversations, message, d.clock) };
       return reply.buffer;
