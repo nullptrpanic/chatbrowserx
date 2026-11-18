@@ -819,27 +819,29 @@ export class BrowserToolExecutor implements BrowserExecutionPort {
     this.#dependencies = dependencies;
   }
 
+  #clearObservationCaches(tabId?: number): void {
+    for (const cache of [
+      this.#screenshotScales,
+      this.#visualFallbackByTab,
+      this.#stateMismatchFallbackByTab,
+      this.#interactiveSnapshotByTab,
+      this.#scrollHierarchyByTab,
+      this.#selectableRefsByTab,
+      this.#semanticStructureByTab,
+      this.#failedSelectionsByTab,
+    ]) {
+      if (tabId === undefined) cache.clear();
+      else cache.delete(tabId);
+    }
+  }
+
   resetObservationBaselines(): void {
-    this.#screenshotScales.clear();
-    this.#visualFallbackByTab.clear();
-    this.#stateMismatchFallbackByTab.clear();
-    this.#interactiveSnapshotByTab.clear();
-    this.#scrollHierarchyByTab.clear();
-    this.#selectableRefsByTab.clear();
-    this.#semanticStructureByTab.clear();
-    this.#failedSelectionsByTab.clear();
+    this.#clearObservationCaches();
     this.#dependencies.observer?.invalidateInteractiveSnapshots?.();
   }
 
   async release(sessionOwnerId: string): Promise<void> {
-    this.#screenshotScales.clear();
-    this.#visualFallbackByTab.clear();
-    this.#stateMismatchFallbackByTab.clear();
-    this.#interactiveSnapshotByTab.clear();
-    this.#scrollHierarchyByTab.clear();
-    this.#selectableRefsByTab.clear();
-    this.#semanticStructureByTab.clear();
-    this.#failedSelectionsByTab.clear();
+    this.#clearObservationCaches();
     this.#reloadRecoveryByTab.clear();
     const sessions = this.#dependencies.sessions;
     if (!sessions) return;
@@ -892,14 +894,7 @@ export class BrowserToolExecutor implements BrowserExecutionPort {
         case 'close_tab': {
           const targetTabId = tabId(call.arguments);
           await this.#dependencies.tabs.close(targetTabId);
-          this.#screenshotScales.delete(targetTabId);
-          this.#visualFallbackByTab.delete(targetTabId);
-          this.#stateMismatchFallbackByTab.delete(targetTabId);
-          this.#interactiveSnapshotByTab.delete(targetTabId);
-          this.#scrollHierarchyByTab.delete(targetTabId);
-          this.#selectableRefsByTab.delete(targetTabId);
-          this.#semanticStructureByTab.delete(targetTabId);
-          this.#failedSelectionsByTab.delete(targetTabId);
+          this.#clearObservationCaches(targetTabId);
           this.#reloadRecoveryByTab.delete(targetTabId);
           output = {
             ok: true,
@@ -914,14 +909,7 @@ export class BrowserToolExecutor implements BrowserExecutionPort {
           const input = call.arguments as { readonly url: string };
           const targetTabId = requiredTaskTabId(taskTarget);
           const tab = await this.#dependencies.tabs.navigate(targetTabId, input.url);
-          this.#screenshotScales.delete(targetTabId);
-          this.#visualFallbackByTab.delete(targetTabId);
-          this.#stateMismatchFallbackByTab.delete(targetTabId);
-          this.#interactiveSnapshotByTab.delete(targetTabId);
-          this.#scrollHierarchyByTab.delete(targetTabId);
-          this.#selectableRefsByTab.delete(targetTabId);
-          this.#semanticStructureByTab.delete(targetTabId);
-          this.#failedSelectionsByTab.delete(targetTabId);
+          this.#clearObservationCaches(targetTabId);
           output = success(tab, { title: tab.title, active: tab.active });
           break;
         }
@@ -938,14 +926,7 @@ export class BrowserToolExecutor implements BrowserExecutionPort {
             break;
           }
           const tab = await this.#dependencies.tabs.reload(targetTabId);
-          this.#screenshotScales.delete(targetTabId);
-          this.#visualFallbackByTab.delete(targetTabId);
-          this.#stateMismatchFallbackByTab.delete(targetTabId);
-          this.#interactiveSnapshotByTab.delete(targetTabId);
-          this.#scrollHierarchyByTab.delete(targetTabId);
-          this.#selectableRefsByTab.delete(targetTabId);
-          this.#semanticStructureByTab.delete(targetTabId);
-          this.#failedSelectionsByTab.delete(targetTabId);
+          this.#clearObservationCaches(targetTabId);
           if (recovery) {
             this.#reloadRecoveryByTab.set(targetTabId, {
               ...recovery,
