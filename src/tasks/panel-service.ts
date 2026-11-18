@@ -489,7 +489,7 @@ export class PanelService {
       throw new Error('Message content is invalid.');
     }
     if (
-      attachmentIds.length > 8 ||
+      attachmentIds.length > IMAGE_POLICY.maxCount ||
       attachmentIds.some((id) => id.length === 0 || id.length > 256)
     ) {
       throw new Error('Message attachments are invalid.');
@@ -619,7 +619,7 @@ export class PanelService {
       taskId.length > 256 ||
       text.length > 20_000 ||
       (text.length === 0 && attachmentIds.length === 0) ||
-      attachmentIds.length > 8 ||
+      attachmentIds.length > IMAGE_POLICY.maxCount ||
       attachmentIds.some((id) => id.length === 0 || id.length > 256)
     ) {
       throw new Error('Supplement content is invalid.');

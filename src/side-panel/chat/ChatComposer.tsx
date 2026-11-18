@@ -19,6 +19,7 @@ export interface ChatComposerProps {
   readonly onTextChange: (value: string) => void;
   readonly replyTarget?: PanelMessage | null;
   readonly onCancelReply?: () => void;
+  readonly onDraftSent?: () => void;
   readonly onOpenSettings: () => void;
 }
 
@@ -56,6 +57,10 @@ export function ChatComposer({
   onTextChange,
   replyTarget = null,
   onCancelReply = noop,
+  onDraftSent = () => {
+    onTextChange('');
+    if (!running) onCancelReply();
+  },
   onOpenSettings,
 }: ChatComposerProps) {
   const draft = useImageDraft({ client: attachments });
@@ -96,10 +101,9 @@ export function ChatComposer({
             ? undefined
             : { messageId: replyTarget.id, taskId: replyTarget.taskId },
         );
-        onCancelReply();
       }
-      onTextChange('');
-      draft.clear();
+      onDraftSent();
+      draft.remove(...draft.attachmentIds);
     } catch (cause) {
       setError(
         !running && cause instanceof Error && cause.message === 'TASK_ALREADY_RUNNING'

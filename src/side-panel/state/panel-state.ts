@@ -1,3 +1,4 @@
+import { IMAGE_POLICY } from '../../attachments/attachment-policy';
 import { z } from 'zod';
 import type {
   PanelEditableSettings,
@@ -103,7 +104,7 @@ const toolResultSchema = z
     toolName: z.string().min(1).max(128),
     argumentsJson: z.string().max(20_000),
     output: z.string().max(100_000),
-    attachmentIds: z.array(idSchema).max(8),
+    attachmentIds: z.array(idSchema).max(IMAGE_POLICY.maxCount),
     detailIndex: z.number().int().positive(),
   })
   .strict();
@@ -112,7 +113,7 @@ const taskSupplementSchema = z
     id: idSchema,
     runId: idSchema.optional(),
     text: z.string().max(20_000),
-    attachmentIds: z.array(idSchema).max(8),
+    attachmentIds: z.array(idSchema).max(IMAGE_POLICY.maxCount),
     createdAt: timestampSchema,
     applicationState: z.enum(['applied', 'pending', 'forwarded']),
     detailIndex: z.number().int().positive(),

@@ -25,6 +25,7 @@ export interface PanelClientState {
   readonly snapshot: PanelSnapshot | null;
   readonly error: string | null;
   readonly activeConversationId: string | null | undefined;
+  readonly conversationRevision: number;
   readonly sandboxConsoleUrl: string | null;
   readonly sandboxConsoleStatus: SandboxConsoleConnectionStatus;
   readonly regionTranslationActive: boolean;
@@ -147,6 +148,7 @@ export class PanelClient {
     snapshot: null,
     error: null,
     activeConversationId: undefined,
+    conversationRevision: 0,
     sandboxConsoleUrl: null,
     sandboxConsoleStatus: 'checking',
     regionTranslationActive: false,
@@ -208,25 +210,25 @@ export class PanelClient {
     const generation = ++this.#generation;
     try {
       const activeTab = await this.#environment.getActiveTab();
+      if (this.#disposed || generation !== this.#generation) return;
       if (activeTab === null) throw new Error('No active browser tab is available.');
       if (this.#tabId !== activeTab.id) {
         this.#tabId = activeTab.id;
         this.#translationRevision++;
         this.#setState({ ...this.#state, regionTranslationActive: false });
       }
-      const activeConversationId = this.#state.activeConversationId;
+      const requestedId = this.#state.activeConversationId;
       const data = await this.#send({
         version: PROTOCOL_VERSION,
         requestId: requestId(),
         type: 'panel.getSnapshot',
         payload: {
           tabId: activeTab.id,
-          ...(typeof activeConversationId === 'string'
-            ? { conversationId: activeConversationId }
-            : {}),
+          ...(typeof requestedId === 'string' ? { conversationId: requestedId } : {}),
         },
       });
       if (this.#disposed || generation !== this.#generation) return;
+      const activeConversationId = this.#state.activeConversationId;
       let snapshot = this.#mergeDetailedTasks(parsePanelSnapshot(data));
       if (activeConversationId === null) {
         snapshot = {
@@ -238,10 +240,14 @@ export class PanelClient {
           task: null,
         };
       }
+      const previousId = this.#selectedConversationId();
+      const selectionChanged =
+        typeof previousId === 'string' && previousId !== snapshot.conversation?.id;
       this.#setState({
         status: 'ready',
         snapshot,
         error: null,
+        conversationRevision: this.#state.conversationRevision + (selectionChanged ? 1 : 0),
         sandboxConsoleUrl: this.#state.sandboxConsoleUrl,
         sandboxConsoleStatus: this.#state.sandboxConsoleStatus,
         regionTranslationActive: this.#state.regionTranslationActive,
@@ -271,7 +277,12 @@ export class PanelClient {
 
   /** Switches to an existing global conversation and refreshes its full durable state. */
   async selectConversation(conversationId: string): Promise<void> {
-    this.#setState({ ...this.#state, activeConversationId: conversationId });
+    const selectionChanged = conversationId !== this.#selectedConversationId();
+    this.#setState({
+      ...this.#state,
+      activeConversationId: conversationId,
+      conversationRevision: this.#state.conversationRevision + (selectionChanged ? 1 : 0),
+    });
     await this.refresh();
   }
 
@@ -298,9 +309,12 @@ export class PanelClient {
   newConversation(): void {
     this.#detailedTasks.clear();
     const snapshot = this.#state.snapshot;
+    // The initial read still supplies the tab, settings, and history for an empty draft.
+    if (snapshot !== null) this.#generation++;
     this.#setState({
       ...this.#state,
       activeConversationId: null,
+      conversationRevision: this.#state.conversationRevision + 1,
       snapshot:
         snapshot === null
           ? null
@@ -321,15 +335,12 @@ export class PanelClient {
     attachmentIds: readonly string[],
     replyTo?: { readonly messageId: string; readonly taskId: string },
   ): Promise<void> {
+    const revision = this.#state.conversationRevision;
+    const submissionConversationId = this.#selectedConversationId();
     const activeTab = await this.#environment.getActiveTab();
     if (activeTab === null) throw new Error('No active browser tab is available.');
     const tabId = activeTab.id;
     this.#tabId = tabId;
-    const stateConversationId = this.#state.activeConversationId;
-    const submissionConversationId =
-      stateConversationId === undefined
-        ? this.#state.snapshot?.conversation?.id
-        : stateConversationId;
     const data = await this.#send({
       version: PROTOCOL_VERSION,
       requestId: requestId(),
@@ -345,6 +356,7 @@ export class PanelClient {
       },
     });
     if (
+      revision === this.#state.conversationRevision &&
       typeof data === 'object' &&
       data !== null &&
       'task' in data &&
@@ -492,6 +504,7 @@ export class PanelClient {
 
   /** Deletes any history conversation while preserving a different active selection. */
   async deleteConversation(conversationId: string): Promise<void> {
+    const revision = this.#state.conversationRevision;
     const deletingCurrent = this.#state.snapshot?.conversation?.id === conversationId;
     await this.#send({
       version: PROTOCOL_VERSION,
@@ -499,7 +512,7 @@ export class PanelClient {
       type: 'conversation.clear',
       payload: { conversationId },
     });
-    if (deletingCurrent) this.newConversation();
+    if (deletingCurrent && revision === this.#state.conversationRevision) this.newConversation();
     await this.refresh();
   }
 
@@ -737,6 +750,11 @@ export class PanelClient {
     };
     await this.#send(message);
     await this.refresh();
+  }
+
+  #selectedConversationId(): string | null | undefined {
+    const selected = this.#state.activeConversationId;
+    return selected === undefined ? this.#state.snapshot?.conversation?.id : selected;
   }
 
   /** Sends one runtime message and returns only a successful response data field. */

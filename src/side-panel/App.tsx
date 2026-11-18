@@ -1,5 +1,5 @@
 import { AlertCircle, KeyRound, RotateCcw } from 'lucide-react';
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useLayoutEffect, useMemo, useState } from 'react';
 import { ChromeRuntimePort, type RuntimePort } from '../platform/chrome/runtime-port';
 import { createTranslator, resolveLanguage } from '../shared/i18n/i18n';
 import type { PanelMessage } from '../shared/protocol/panel-types';
@@ -47,7 +47,8 @@ export function App({ runtimePort, environment, panelClient, attachmentClient }:
   );
   const state = usePanelStore(client);
   const [view, setView] = useState<PanelView>('conversation');
-  const [draftText, setDraftText] = useState('');
+  const [textDraft, setTextDraft] = useState({ text: '' });
+  const setDraftText = (text: string) => setTextDraft({ text });
   const [replyTarget, setReplyTarget] = useState<PanelMessage | null>(null);
   const snapshot = state.snapshot;
   const language = resolveLanguage(snapshot?.settings.language ?? 'system', navigator.language);
@@ -76,11 +77,14 @@ export function App({ runtimePort, environment, panelClient, attachmentClient }:
     if (taskLocked) setReplyTarget(null);
   }, [taskLocked]);
 
+  useLayoutEffect(() => {
+    setTextDraft({ text: '' });
+    setReplyTarget(null);
+  }, [state.conversationRevision]);
+
   /** Starts a clean local conversation draft and returns to the main conversation view. */
   function newTask(): void {
     client.newConversation();
-    setDraftText('');
-    setReplyTarget(null);
     setView('conversation');
   }
 
@@ -156,15 +160,21 @@ export function App({ runtimePort, environment, panelClient, attachmentClient }:
             />
           </div>
           <ChatComposer
+            key={state.conversationRevision}
             client={client}
             attachments={attachments}
-            text={draftText}
+            text={textDraft.text}
             running={running}
             taskLocked={taskLocked}
             hasToken={authenticationConfigured}
             regionTranslationActive={state.regionTranslationActive}
             t={t}
             onTextChange={setDraftText}
+            onDraftSent={() => {
+              if (client.getSnapshot().conversationRevision !== state.conversationRevision) return;
+              setTextDraft((current) => (current === textDraft ? { text: '' } : current));
+              setReplyTarget((current) => (current?.id === replyTarget?.id ? null : current));
+            }}
             replyTarget={replyTarget}
             onCancelReply={() => setReplyTarget(null)}
             onOpenSettings={() => setView('settings')}

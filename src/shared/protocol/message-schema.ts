@@ -1,3 +1,4 @@
+import { IMAGE_POLICY } from '../../attachments/attachment-policy';
 import { z } from 'zod';
 import { PROTOCOL_VERSION, type ExtensionMessage, type PageCommand } from './message-types';
 import {
@@ -60,7 +61,7 @@ const chatSubmitSchema = z
         tabId: z.number().int().nonnegative(),
         conversationId: identifierSchema.optional(),
         text: z.string().max(20_000),
-        attachmentIds: z.array(identifierSchema).max(8),
+        attachmentIds: z.array(identifierSchema).max(IMAGE_POLICY.maxCount),
         replyTo: z
           .object({ messageId: identifierSchema, taskId: identifierSchema })
           .strict()
@@ -80,7 +81,7 @@ const chatSupplementSchema = z
       .object({
         taskId: identifierSchema,
         text: z.string().max(20_000),
-        attachmentIds: z.array(identifierSchema).max(8),
+        attachmentIds: z.array(identifierSchema).max(IMAGE_POLICY.maxCount),
       })
       .strict()
       .refine((value) => value.text.trim().length > 0 || value.attachmentIds.length > 0),

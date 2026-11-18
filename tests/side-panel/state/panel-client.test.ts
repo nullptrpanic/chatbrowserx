@@ -1302,6 +1302,127 @@ describe('PanelClient', () => {
     client.dispose();
   });
 
+  it('finishes connecting to a new draft selected during the first snapshot read', async () => {
+    let finishRead: (() => void) | undefined;
+    const firstRead = new Promise<void>((resolve) => {
+      finishRead = resolve;
+    });
+    let reads = 0;
+    const send = vi.fn<RuntimePort['send']>(async (message) => {
+      if (message.type === 'panel.getSnapshot' && ++reads === 1) await firstRead;
+      return {
+        version: 1,
+        requestId: message.requestId,
+        ok: true,
+        data: message.type === 'panel.getSnapshot' ? snapshot() : {},
+      };
+    });
+    const client = new PanelClient({ send }, { getActiveTab: async () => snapshot().tab });
+    try {
+      const connecting = client.connect();
+      await vi.waitFor(() => expect(reads).toBe(1));
+      client.newConversation();
+      finishRead?.();
+      await connecting;
+      await vi.waitFor(() =>
+        expect(client.getSnapshot()).toMatchObject({
+          status: 'ready',
+          activeConversationId: null,
+          snapshot: { conversation: null },
+        }),
+      );
+    } finally {
+      client.dispose();
+    }
+  });
+
+  it('preserves the current draft when reopening the same conversation from history', async () => {
+    const send = vi.fn<RuntimePort['send']>(async (message) => ({
+      version: 1,
+      requestId: message.requestId,
+      ok: true,
+      data: message.type === 'panel.getSnapshot' ? snapshot() : {},
+    }));
+    const client = new PanelClient({ send }, { getActiveTab: async () => snapshot().tab });
+    try {
+      await client.connect();
+      const before = client.getSnapshot();
+      await client.selectConversation('conversation_1');
+      expect(client.getSnapshot().conversationRevision).toBe(before.conversationRevision);
+    } finally {
+      client.dispose();
+    }
+  });
+
+  it('keeps the new draft selected when an older refresh finishes before sending', async () => {
+    let release: (() => void) | undefined;
+    const send = vi.fn<RuntimePort['send']>(async (message) => {
+      if (message.type === 'panel.getSnapshot' && send.mock.calls.length > 1 && !release) {
+        await new Promise<void>((resolve) => {
+          release = resolve;
+        });
+      }
+      return {
+        version: 1,
+        requestId: message.requestId,
+        ok: true,
+        data: message.type === 'panel.getSnapshot' ? snapshot() : {},
+      };
+    });
+    const client = new PanelClient({ send }, { getActiveTab: async () => snapshot().tab });
+    try {
+      await client.selectConversation('conversation_1');
+      const pending = client.refresh();
+      await vi.waitFor(() => expect(release).toBeDefined());
+      client.newConversation();
+      release?.();
+      await pending;
+      await client.submit('Fresh topic', []);
+      expect(send).toHaveBeenCalledWith(
+        expect.objectContaining({
+          type: 'chat.submit',
+          payload: { tabId: 7, text: 'Fresh topic', attachmentIds: [] },
+        }),
+      );
+    } finally {
+      client.dispose();
+    }
+  });
+
+  it('keeps a newer blank draft when an earlier submission assigns a conversation ID', async () => {
+    let release: (() => void) | undefined;
+    const send = vi.fn<RuntimePort['send']>(async (message) => {
+      if (message.type === 'chat.submit')
+        await new Promise<void>((resolve) => {
+          release = resolve;
+        });
+      return {
+        version: 1,
+        requestId: message.requestId,
+        ok: true,
+        data:
+          message.type === 'panel.getSnapshot'
+            ? snapshot()
+            : { task: { conversationId: 'conversation_1' } },
+      };
+    });
+    const client = new PanelClient({ send }, { getActiveTab: async () => snapshot().tab });
+    try {
+      client.newConversation();
+      const submission = client.submit('Previous draft', []);
+      await vi.waitFor(() => expect(release).toBeDefined());
+      client.newConversation();
+      release?.();
+      await submission;
+      expect(client.getSnapshot()).toMatchObject({
+        activeConversationId: null,
+        snapshot: { conversation: null },
+      });
+    } finally {
+      client.dispose();
+    }
+  });
+
   it('reinstalls page features when the same tab navigates to a newly authorized origin', async () => {
     let origin = 'https://first.example';
     const send = vi.fn<RuntimePort['send']>(async (message) => ({

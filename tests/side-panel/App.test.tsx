@@ -1,4 +1,4 @@
-import { render, screen, waitFor } from '@testing-library/react';
+import { act, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { describe, expect, it, vi } from 'vitest';
 import type { RuntimePort } from '../../src/platform/chrome/runtime-port';
@@ -45,6 +45,105 @@ const attachments = {
 };
 
 describe('App background connection', () => {
+  it('sends a fresh text-only draft after starting a new task with an unsent image', async () => {
+    const file = new File(['png'], 'previous.png', { type: 'image/png' });
+    vi.spyOn(URL, 'createObjectURL').mockReturnValue('blob:previous');
+    vi.spyOn(URL, 'revokeObjectURL').mockImplementation(() => undefined);
+    const send = vi.fn<RuntimePort['send']>(async (message) => ({
+      version: 1,
+      requestId: message.requestId,
+      ok: true,
+      data: message.type === 'panel.getSnapshot' ? buildSnapshot() : {},
+    }));
+    const user = userEvent.setup();
+    render(
+      <App
+        runtimePort={{ send }}
+        environment={environment}
+        attachmentClient={{
+          ...attachments,
+          addFiles: async () => [
+            {
+              id: 'previous',
+              blob: file,
+              mimeType: file.type,
+              byteSize: file.size,
+              width: null,
+              height: null,
+              source: 'file',
+              createdAt: 1,
+            },
+          ],
+        }}
+      />,
+    );
+    await user.upload(await screen.findByLabelText('添加图片'), file);
+    expect(await screen.findByRole('img', { name: '待发送图片' })).toBeVisible();
+    await user.click(screen.getByRole('button', { name: '新建任务' }));
+    await user.type(screen.getByRole('textbox'), 'Fresh topic');
+    await user.click(screen.getByRole('button', { name: '发送' }));
+    expect(send).toHaveBeenCalledWith(
+      expect.objectContaining({
+        type: 'chat.submit',
+        payload: { tabId: 7, text: 'Fresh topic', attachmentIds: [] },
+      }),
+    );
+  });
+
+  it('keeps text and images added while a previous send is waiting for a response', async () => {
+    let release: (() => void) | undefined;
+    const send = vi.fn<RuntimePort['send']>(async (message) => {
+      if (message.type === 'chat.submit')
+        await new Promise<void>((resolve) => {
+          release = resolve;
+        });
+      return {
+        version: 1,
+        requestId: message.requestId,
+        ok: true,
+        data: message.type === 'panel.getSnapshot' ? buildSnapshot() : {},
+      };
+    });
+    vi.spyOn(URL, 'createObjectURL').mockReturnValue('blob:next');
+    vi.spyOn(URL, 'revokeObjectURL').mockImplementation(() => undefined);
+    const user = userEvent.setup();
+    render(
+      <App
+        runtimePort={{ send }}
+        environment={environment}
+        attachmentClient={{
+          ...attachments,
+          addFiles: async (files, source) =>
+            files.map((file) => ({
+              id: file.name,
+              blob: file,
+              mimeType: file.type,
+              byteSize: file.size,
+              width: null,
+              height: null,
+              source,
+              createdAt: 1,
+            })),
+        }}
+      />,
+    );
+    const input = await screen.findByRole('textbox');
+    await user.type(input, 'First message');
+    await user.click(screen.getByRole('button', { name: '发送' }));
+    await user.clear(input);
+    await user.type(input, 'Next draft');
+    const file = new File(['png'], 'next.png', { type: 'image/png' });
+    fireEvent.paste(input, {
+      clipboardData: { items: [{ kind: 'file', type: file.type, getAsFile: () => file }] },
+    });
+    expect(await screen.findByRole('img', { name: '待发送图片' })).toBeVisible();
+    expect(release).toBeDefined();
+    await act(async () => release?.());
+    expect(input).toHaveValue('Next draft');
+    expect(screen.getByRole('img', { name: '待发送图片' })).toBeVisible();
+    expect(screen.getByRole('button', { name: '发送' })).toBeEnabled();
+  });
+
   it('submits with Sandbox authentication configured without requiring a stored manual token', async () => {
     const base = buildSnapshot();
     const current: PanelSnapshot = {
